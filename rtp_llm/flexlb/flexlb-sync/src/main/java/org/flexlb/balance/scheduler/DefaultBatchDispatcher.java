@@ -387,7 +387,9 @@ public class DefaultBatchDispatcher {
             int serializedSize = request.getSerializedSize();
             if (serializedSize < 0 || serializedSize > org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE) {
                 throw new IllegalArgumentException(
-                        "EnqueueBatch payload exceeds 256 MiB gRPC limit: " + serializedSize + " bytes");
+                        "EnqueueBatch payload exceeds "
+                                + (org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE / (1024 * 1024))
+                                + " MiB gRPC limit: " + serializedSize + " bytes");
             }
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);

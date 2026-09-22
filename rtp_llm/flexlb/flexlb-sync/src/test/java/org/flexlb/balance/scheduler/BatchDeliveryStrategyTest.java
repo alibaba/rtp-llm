@@ -86,6 +86,7 @@ class BatchDeliveryStrategyTest {
             when(item.batchPayloadSizeUpperBound()).thenCallRealMethod();
             remaining.add(item);
         }
+        int maxImageBatchCount = (GrpcConstants.MAX_MESSAGE_SIZE - 16) / (20 * 1024 * 1024 + 1024);
         List<Integer> rpcCounts = new CopyOnWriteArrayList<>();
         List<Long> rpcBatchIds = new CopyOnWriteArrayList<>();
         List<Long> sentIds = new CopyOnWriteArrayList<>();
@@ -118,7 +119,7 @@ class BatchDeliveryStrategyTest {
                         "payload_budget", 0, OptionalLong.of(9999L)));
                 var batch = fixture.submission.command();
                 int count = batch.exactItems().size();
-                assertEquals(images ? Math.min(12, remaining.size()) : 64, count);
+                assertEquals(images ? Math.min(maxImageBatchCount, remaining.size()) : 64, count);
                 assertNull(fixture.context.committedBoundary(), "size boundary must leave suffix queued");
                 if (count < remaining.size()) {
                     assertEquals(count * 100L, batch.predictedMs(), "repredict the admitted prefix");
@@ -138,7 +139,13 @@ class BatchDeliveryStrategyTest {
                 remaining = new ArrayList<>(remaining.subList(count, remaining.size()));
                 fixture.correlationId++;
             }
-            assertEquals(images ? List.of(12, 12, 12, 12, 12, 4) : List.of(64), rpcCounts);
+            List<Integer> expectedCounts = new ArrayList<>();
+            for (int left = 64; left > 0;) {
+                int count = images ? Math.min(maxImageBatchCount, left) : left;
+                expectedCounts.add(count);
+                left -= count;
+            }
+            assertEquals(expectedCounts, rpcCounts);
             assertEquals(rpcCounts.size(), new HashSet<>(rpcBatchIds).size());
             assertEquals(64, sentIds.size());
             assertEquals(64, new HashSet<>(sentIds).size());

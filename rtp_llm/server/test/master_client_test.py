@@ -1,4 +1,5 @@
 import asyncio
+import os
 import unittest
 import grpc
 from types import SimpleNamespace
@@ -18,7 +19,41 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
 )
-from rtp_llm.server.master_client import MasterClient
+from rtp_llm.server.master_client import MasterClient, _flexlb_max_message_bytes
+
+
+class FlexlbMessageLimitConfigTest(unittest.TestCase):
+    def test_default_and_configured_limits(self):
+        for value, mib in [
+            (None, 512),
+            ("", 512),
+            ("  ", 512),
+            ("256", 256),
+            (" 768 ", 768),
+            ("1", 1),
+            ("2047", 2047),
+        ]:
+            with self.subTest(value=value), patch.dict(os.environ, {}, clear=True):
+                if value is not None:
+                    os.environ["FLEXLB_MAX_MESSAGE_SIZE_MB"] = value
+                self.assertEqual(_flexlb_max_message_bytes(), mib * 1024 * 1024)
+
+    def test_invalid_limits_fail_fast(self):
+        for value in [
+            "0",
+            "-1",
+            "2048",
+            "2147483648",
+            "1.5",
+            "512MiB",
+            "1_024",
+            "+512",
+        ]:
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"FLEXLB_MAX_MESSAGE_SIZE_MB": value}
+            ):
+                with self.assertRaisesRegex(ValueError, "FLEXLB_MAX_MESSAGE_SIZE_MB"):
+                    _flexlb_max_message_bytes()
 
 
 class _FakeMasterConfig:
@@ -131,8 +166,8 @@ class _FakeInputPB:
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
-    async def test_large_image_payload_is_not_limited_to_16_mib(self):
-        payload = b"x" * (20 * 1024 * 1024)
+    async def test_large_image_payload_is_not_limited_to_256_mib(self):
+        payload = b"x" * (300 * 1024 * 1024)
         client = _CaptureMasterClient()
         await client.get_backend_role_addrs(
             [],
@@ -145,7 +180,9 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_oversized_payload_is_rejected_before_rpc(self):
         client = _CaptureMasterClient()
-        with patch("rtp_llm.server.master_client.FLEXLB_MAX_MESSAGE_BYTES", 4):
+        with patch(
+            "rtp_llm.server.master_client.FLEXLB_MAX_MESSAGE_BYTES", 4
+        ), self.assertLogs("route_logger", level="WARNING") as logs:
             with self.assertRaises(FtRuntimeException) as error:
                 await client.get_backend_role_addrs(
                     [],
@@ -155,7 +192,22 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                     input_pb=_FakeInputPB(),
                 )
         self.assertEqual(error.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertNotIn("FlexLB", str(error.exception))
+        self.assertIn("FlexLB", logs.output[0])
+        self.assertIn("request_id=100", logs.output[0])
+        self.assertIn("limit_bytes=4", logs.output[0])
         self.assertEqual(client.calls, [])
+
+    async def test_channel_uses_configured_limit_for_send_and_receive(self):
+        limit = 768 * 1024 * 1024
+        with patch(
+            "rtp_llm.server.master_client.FLEXLB_MAX_MESSAGE_BYTES", limit
+        ), patch("rtp_llm.server.master_client.grpc.aio.insecure_channel") as channel:
+            client = _CaptureMasterClient()
+            client._get_channel("master:1234")
+        options = dict(channel.call_args.kwargs["options"])
+        self.assertEqual(options["grpc.max_send_message_length"], limit)
+        self.assertEqual(options["grpc.max_receive_message_length"], limit)
 
     async def test_message_limit_reserves_actual_follower_forwarding_overhead(self):
         with patch("rtp_llm.server.master_client.time.time", return_value=1234567890):

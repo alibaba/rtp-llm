@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -37,7 +38,19 @@ SUCCESS_CODE = 200
 # gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
 # This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
 FLEXLB_GRPC_PORT_OFFSET = 2
-FLEXLB_MAX_MESSAGE_BYTES = 256 * 1024 * 1024
+
+
+def _flexlb_max_message_bytes() -> int:
+    # Set the same MiB limit on frontend and FlexLB; read once at process startup.
+    value = os.environ.get("FLEXLB_MAX_MESSAGE_SIZE_MB", "").strip() or "512"
+    if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 2047:
+        raise ValueError(
+            "FLEXLB_MAX_MESSAGE_SIZE_MB must be an integer from 1 to 2047 (MiB)"
+        )
+    return int(value) * 1024 * 1024
+
+
+FLEXLB_MAX_MESSAGE_BYTES = _flexlb_max_message_bytes()
 # A follower adds the field tag and value for forward_hop=1.
 FLEXLB_FORWARD_HOP_BYTES = 2
 BEARER_PREFIX = "Bearer "
@@ -321,10 +334,18 @@ class MasterClient:
         if input_pb is not None and not vit_only:
             request_pb.generate_input = input_pb.SerializeToString()
 
-        if request_pb.ByteSize() + FLEXLB_FORWARD_HOP_BYTES > FLEXLB_MAX_MESSAGE_BYTES:
+        request_bytes = request_pb.ByteSize() + FLEXLB_FORWARD_HOP_BYTES
+        if request_bytes > FLEXLB_MAX_MESSAGE_BYTES:
+            route_logger.warning(
+                "FlexLB request exceeds RPC message limit: request_id=%s, "
+                "request_bytes_with_forward_hop=%s, limit_bytes=%s",
+                request_id,
+                request_bytes,
+                FLEXLB_MAX_MESSAGE_BYTES,
+            )
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS,
-                "FlexLB request exceeds the 256 MiB RPC message limit",
+                f"Request exceeds the {FLEXLB_MAX_MESSAGE_BYTES / (1024 * 1024):g} MiB RPC message limit",
             )
 
         response = await self._send_schedule_request(

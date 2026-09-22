@@ -697,7 +697,8 @@ class DefaultBatchDispatcherTest {
                 .setMultimodalTensor(EngineRpcService.TensorPB.newBuilder().setBf16Data(patches))
                 .build();
         java.util.ArrayList<ScheduledRequest> items = new java.util.ArrayList<>();
-        for (int i = 1; i <= 13; i++) {
+        int itemCount = org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE / patches.size() + 1;
+        for (int i = 1; i <= itemCount; i++) {
             ScheduledRequest item = createScheduledRequest(i, 500, 0, prefillEp);
             var input = EngineRpcService.GenerateInputPB.newBuilder()
                     .setRequestId(i).addMultimodalInputs(image).build();
@@ -716,7 +717,8 @@ class DefaultBatchDispatcherTest {
         assertTrue(failed.await(10, TimeUnit.SECONDS));
         assertEquals(items.size(), results.size());
         assertTrue(results.stream().allMatch(result -> result.status() == DeliveryResult.Status.NOT_SENT));
-        assertTrue(results.getFirst().cause().getMessage().contains("exceeds 256 MiB"));
+        assertTrue(results.getFirst().cause().getMessage().contains("exceeds "
+                + (org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE / (1024 * 1024)) + " MiB"));
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
 
