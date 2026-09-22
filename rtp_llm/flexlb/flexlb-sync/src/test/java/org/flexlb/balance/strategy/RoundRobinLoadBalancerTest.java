@@ -72,6 +72,22 @@ class RoundRobinLoadBalancerTest {
     }
 
     @Test
+    void removingThePreviousWorkerContinuesAtTheNextAddress() {
+        publish("10.0.0.1", true);
+        WorkerStatus previous = publish("10.0.0.2", true);
+        publish("10.0.0.3", true);
+        assertEquals(List.of("10.0.0.1", "10.0.0.2"), schedule(2).getServerStatus().stream()
+                .map(BatchScheduleTarget::getServerIp).toList());
+        previous.lock.lock();
+        try {
+            previous.recordSuccessfulPoll(false);
+        } finally {
+            previous.lock.unlock();
+        }
+        assertEquals("10.0.0.3", schedule(1).getServerStatus().getFirst().getServerIp());
+    }
+
+    @Test
     void discoveryAloneDoesNotMakeAnLlmWorkerRoutable() {
         directory.currentOrDiscover(RoleType.PDFUSION, "10.0.0.1:8080",
                 () -> WorkerStatus.createDiscovered(RoleType.PDFUSION, "", "10.0.0.1", 8080, 8081, ""));
@@ -138,10 +154,12 @@ class RoundRobinLoadBalancerTest {
         publish("10.0.0.1", true);
         publish("10.0.0.2", true);
         publish("10.0.0.3", true);
-        List<BatchScheduleTarget> targets = IntStream.range(0, 150).parallel()
+        List<BatchScheduleResponse> batches = IntStream.range(0, 150).parallel()
                 .mapToObj(i -> scheduler.schedule(2).block())
-                .flatMap(response -> response.getServerStatus().stream()).toList();
-        Map<String, Long> counts = targets.stream().collect(Collectors.groupingBy(
+                .toList();
+        batches.forEach(batch -> assertEquals(2L, batch.getServerStatus().stream()
+                .map(BatchScheduleTarget::getServerIp).distinct().count()));
+        Map<String, Long> counts = batches.stream().flatMap(batch -> batch.getServerStatus().stream()).collect(Collectors.groupingBy(
                 BatchScheduleTarget::getServerIp, Collectors.counting()));
         assertEquals(Map.of("10.0.0.1", 100L, "10.0.0.2", 100L, "10.0.0.3", 100L), counts);
     }

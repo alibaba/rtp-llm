@@ -17,20 +17,19 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Map;
 import java.util.stream.Collectors;
 
-/** Stateless batch placement for a single-role deployment; no LLM admission or reservations. */
+/** Batch placement for a single-role deployment; no LLM admission or reservations. */
 @Component
 public final class RoundRobinLoadBalancer {
 
     private final WorkerDirectory workerDirectory;
     private final ModelMetaConfig modelMetaConfig;
     private final FlexlbConfig config;
-    private final AtomicLong cursor = new AtomicLong();
+    private final EndpointRoundRobin rotation = new EndpointRoundRobin();
 
     public RoundRobinLoadBalancer(WorkerDirectory workerDirectory,
                                   ModelMetaConfig modelMetaConfig,
@@ -60,38 +59,32 @@ public final class RoundRobinLoadBalancer {
         }
         RoleType role = roles.getFirst();
         EngineType engineType = config.getWorkerRegistry().getEngineType();
-        List<WorkerHost> candidates = candidates(role, engineType);
+        Map<String, WorkerHost> candidates = candidates(role, engineType);
         if (candidates.isEmpty()) {
             return BatchScheduleResponse.error(role.getErrorType());
         }
-        // Registry iteration order may change between snapshots. A stable order keeps rotation fair.
-        candidates.sort(Comparator.comparing(WorkerHost::getIp)
-                .thenComparingInt(WorkerHost::getHttpPort));
-        long start = cursor.getAndAdd(count);
-        List<BatchScheduleTarget> targets = new ArrayList<>(count);
-        for (int i = 0; i < count; i++) {
-            WorkerHost candidate = candidates.get(Math.floorMod(start + i, candidates.size()));
-            targets.add(BatchScheduleTarget.of(candidate, role, engineType));
-        }
+        List<BatchScheduleTarget> targets = rotation.nextBatch(role, null, candidates, count).stream()
+                .map(candidate -> BatchScheduleTarget.of(candidate, role, engineType)).toList();
         return BatchScheduleResponse.success(targets);
     }
 
-    private List<WorkerHost> candidates(RoleType role, EngineType engineType) {
+    private Map<String, WorkerHost> candidates(RoleType role, EngineType engineType) {
         if (engineType == EngineType.EMBEDDING) {
-            return workerDirectory.statusSnapshot(role).values().stream()
-                    .filter(WorkerStatus::isActiveGeneration)
-                    .map(status -> new WorkerHost(status.getIp(), status.getPort()))
-                    .collect(Collectors.toCollection(ArrayList::new));
+            return workerDirectory.statusSnapshot(role).entrySet().stream()
+                    .filter(entry -> entry.getValue().isActiveGeneration())
+                    .collect(Collectors.toMap(Map.Entry::getKey,
+                            entry -> new WorkerHost(entry.getValue().getIp(), entry.getValue().getPort())));
         }
-        List<WorkerHost> candidates = new ArrayList<>();
-        for (String address : workerDirectory.endpointAddressSnapshot(role)) {
+        List<String> addresses = workerDirectory.endpointAddressSnapshot(role);
+        Map<String, WorkerHost> candidates = HashMap.newHashMap(addresses.size());
+        for (String address : addresses) {
             try (WorkerEndpoint.GenerationPin pin = workerDirectory.captureEndpoint(role, address)) {
                 if (pin == null) {
                     continue;
                 }
                 WorkerStatus status = pin.endpoint().getStatus();
                 if (status.pollHealth().reportedAlive()) {
-                    candidates.add(new WorkerHost(status.getIp(), status.getPort()));
+                    candidates.put(address, new WorkerHost(status.getIp(), status.getPort()));
                 }
             }
         }
