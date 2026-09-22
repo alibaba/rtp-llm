@@ -2,6 +2,7 @@
 import hashlib
 import json
 import lzma
+import math
 from pathlib import Path
 
 from traffic.prefix_lineage import BLOCK, MAX_EVENTS
@@ -46,16 +47,43 @@ def decode(raw):
     return metadata, events
 
 
+def output_sampler(parameters):
+    """Replay lengths are explicit: sample once by original event index, not run ID."""
+    cap = parameters['output_tokens']
+    policy = parameters.get('output_distribution')
+    if policy is None:
+        return lambda index: cap
+    if not isinstance(policy, dict) or set(policy) != {'kind', 'mean_tokens', 'seed'}:
+        raise ValueError('invalid output distribution fields')
+    mean, seed = policy['mean_tokens'], policy['seed']
+    if (policy['kind'] != 'geometric' or type(mean) not in (int, float)
+            or not math.isfinite(mean) or mean < 1
+            or type(seed) is not int or not -(1 << 63) <= seed < (1 << 63)):
+        raise ValueError('invalid output distribution parameters')
+    def sample(index):
+        if mean == 1:
+            return 1
+        mask = (1 << 64) - 1
+        z = (index + seed + 0x9e3779b97f4a7c15) & mask
+        z = ((z ^ (z >> 30)) * 0xbf58476d1ce4e5b9) & mask
+        z = ((z ^ (z >> 27)) * 0x94d049bb133111eb) & mask
+        z ^= z >> 31
+        uniform = (z >> 11) * 2.0 ** -53
+        return min(cap, 1 + math.floor(math.log1p(-uniform) / math.log1p(-1 / mean)))
+    return sample
+
+
 def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
     p = parameters
     required = {'path', 'sha256', 'count', 'output_tokens', 'priority'}
-    if not required <= set(p) or set(p) - required - {'max_input_tokens'}:
+    if not required <= set(p) or set(p) - required - {'max_input_tokens', 'output_distribution'}:
         raise ValueError('lineage v3 requires pinned model and output settings')
     cap = p.get('max_input_tokens', 2147483647)
     if type(cap) is not int or not 1 <= cap <= 2147483647:
         raise ValueError('invalid playback input length filter')
     if type(p['output_tokens']) is not int or not 1 <= p['output_tokens'] <= 2147483647 or type(p['priority']) is not int or not 1 <= p['priority'] <= 100:
         raise ValueError('invalid output length/priority')
+    sample_output = output_sampler(p)
     raw = (Path(base_dir) / p['path']).read_bytes()
     if hashlib.sha256(raw).hexdigest() != p['sha256']:
         raise ValueError('lineage model checksum mismatch')
@@ -77,7 +105,7 @@ def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
                 excluded += 1
                 continue
             out.write(json.dumps(dict(rid=f'{namespace}:{i}', ts=ts, il=length,
-                ol=p['output_tokens'], priority=p['priority'], cache_key_block_size=BLOCK,
+                ol=sample_output(i), priority=p['priority'], cache_key_block_size=BLOCK,
                 input_token_blocks=labels), separators=(',', ':')) + '\n')
             selected += 1
             if max_requests is not None and selected >= max_requests:
@@ -87,4 +115,6 @@ def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
     return dict(realism=metadata['realism'], tail=metadata['tail'], arrival=metadata['arrival'],
                 provenance=metadata['provenance'], model_sha256=p['sha256'],
                 length_filter=dict(max_input_tokens=cap, selected=selected, excluded_before_limit=excluded),
-                output_semantics='INDEPENDENT_FIXED_CAP_NOT_FITTED_FROM_ERROR_OUTPUTS')
+                output_semantics=('EXPLICIT_GEOMETRIC_SPLITMIX64_EVENT_INDEX_V1' if p.get('output_distribution')
+                                  else 'INDEPENDENT_FIXED_CAP_NOT_FITTED_FROM_ERROR_OUTPUTS'),
+                output_distribution=p.get('output_distribution'), output_cap=p['output_tokens'])

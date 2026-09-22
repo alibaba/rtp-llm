@@ -91,6 +91,10 @@ parameters:
         sha256: 9af1904eeec09b264323ccea30d9a9969f6f3336bbecd647ee9fef09476652fb
         count: 976045
         output_tokens: 8192
+        output_distribution:
+          kind: geometric
+          mean_tokens: 400
+          seed: 20260922
         priority: 50
         max_input_tokens: 32768
     client:
