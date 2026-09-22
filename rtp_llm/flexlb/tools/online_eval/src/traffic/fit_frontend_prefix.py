@@ -6,7 +6,7 @@ small-parameter statistical generator. True arrivals are retained; playback
 controls the rate. Output behavior is independently specified.
 """
 
-import argparse, collections, gzip, hashlib, json, math, time
+import argparse, collections, gzip, lzma, hashlib, json, math, time
 from pathlib import Path
 try:
     from traffic.prefix_lineage import encode, write_trace
@@ -20,18 +20,24 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--expected-pods", type=int, required=True)
     p.add_argument("--output-tokens", type=int, required=True)
+    p.add_argument("--model-version", choices=("2", "3"), default="2")
     a = p.parse_args()
+    global encode, write_trace
+    if a.model_version == "3":
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from traffic.prefix_lineage_v3 import encode, write_trace
     a.out.mkdir(parents=True, exist_ok=True)
     rows = []
     sources = {}
-    for path in sorted(a.source.glob("pod-*.jsonl.gz")):
+    for path in sorted(list(a.source.glob("pod-*.jsonl.gz")) + list(a.source.glob("pod-*.jsonl.xz"))):
         summary = json.loads(
-            path.with_name(path.name.replace(".jsonl.gz", ".summary.json")).read_text()
+            path.with_name(path.name.replace(".jsonl.gz", ".summary.json").replace(".jsonl.xz", ".summary.json")).read_text()
         )
         if hashlib.sha256(path.read_bytes()).hexdigest() != summary["sha256"]:
             raise ValueError("capture checksum mismatch: " + str(path))
         sources[path.name] = summary
-        for line in gzip.open(path, "rt"):
+        for line in (lzma.open if path.suffix == ".xz" else gzip.open)(path, "rt"):
             row = json.loads(line)
             row["pod"] = path.name
             row["keys"] = [bytes.fromhex(k) for k in row["keys"]]

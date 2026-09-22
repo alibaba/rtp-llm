@@ -1,5 +1,31 @@
 # Master 性能绝对门禁
 
+## 真实复制流量与线上 TPS 口径
+
+`capture_frontend_prefix.py --format xz` 保存全长度前缀摘要，按
+`request_enter_ts_epoch_ms` 严格筛选 `[start,end)`；缺少到达时间的记录计数后跳过，
+不使用完成时间替代，避免混入切流前请求。原始 token 不落入采集文件。
+
+拟合时选择 `fit_frontend_prefix.py --model-version 3`，保留精确输入长度。
+回放 source 使用 `kind: trace / model: prefix_lineage / version: '3'`，
+参数仍需固定 `path, sha256, count, output_tokens, priority`，可额外指定
+`max_input_tokens: 32768`。该上界是包含边界的输入长度过滤，不截断请求，
+不修改完整模型；被过滤父请求的前缀标签仍参与展开，后续请求共享关系不变。
+v2 保持兼容，但其长度经过块对齐，不能用于精确 32k 边界过滤。
+
+新报告以 `rtp_llm_context_tps`、`rtp_llm_context_tps_with_cache` 为主要
+Prefill TPS 视角：先按引擎/DP 汇总 priority，再提供逐引擎曲线和引擎算术均值。
+这两个 gauge 的分母是相应 batch 执行时间；不能与客户端完成 token/墙钟秒混用，
+也不能将各引擎执行 TPS 相加称为集群吞吐。均值仅用于概览，线上比较须保留
+引擎身份、采样间隔和缺失情况。客户端吞吐保留在独立视角中。
+
+`flash_capture_diagnostic` 仅声明 P=512 / D=64 的块配置，沿用默认耗时模型；
+它不是 Flash 性能校准。生产 TPS 阈值应在同口径校准后另行固定。
+现有完成 TPS/SLO 判定仍是独立诊断合同，不能据此宣告线上容量达标。
+长度过滤不能消除复制流量用户群体的差异；失败的测试前端完成时延和输出长度
+不能用来拟合真实引擎。采集文件、缺失 Pod、时间窗口、SHA 和独立指定的输出行为
+必须随实验保存。
+
 每个 run 独立按固定标准判定：完成 input/output TPS 达标、延迟不超过上限、积压增长受限，且所有已发送请求成功率为 100%。A/B 是可选观察，不要求存在劣化版本，也不会修改单 run 结论。
 
 当前唯一执行画像 `master_performance::flash_online_scale` 使用 62P/192D、1600 QPS、固定输入 3270 / 输出目标 350。已经撤销低规模用例，不能用低规模 PASS 推断线上表现。

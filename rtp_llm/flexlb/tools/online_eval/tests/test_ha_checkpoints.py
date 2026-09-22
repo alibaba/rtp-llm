@@ -57,7 +57,8 @@ class JournalTest(unittest.TestCase):
                 for n in range(start, start + 1000):
                     out.write(json.dumps(row(str(n), "issued", 2 * n + 1)) + "\n")
                     out.write(json.dumps(row(str(n), "terminal", 2 * n + 2)) + "\n")
-            journal.read()
+        self.assertGreater(self.path.stat().st_size, 8_000_000)
+        journal.read()
         self.assertEqual(len(journal.terminal), 26_000)
         with self.path.open("a") as out:
             out.write(json.dumps(row("overflow", "issued", 52_001)) + "\n")

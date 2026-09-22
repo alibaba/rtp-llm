@@ -341,6 +341,12 @@ class PrometheusSession:
                 queries["mock/cache_hit_ratio"] = (
                     f"sum by (role) (rate(mock_hit_tokens_total{sel}[{window_ms}ms])) / sum by (role) (rate(mock_context_tokens_total{sel}[{window_ms}ms]))"
                 )
+                # Online panels sum priority series within each engine/DP.
+                # Keep engines distinct; fleet sums are not execution throughput.
+                for metric in ("rtp_llm_context_tps", "rtp_llm_context_tps_with_cache"):
+                    per_engine = f"sum without (priority) ({metric}{sel})"
+                    queries["mock/" + metric + "_per_engine"] = per_engine
+                    queries["mock/" + metric + "_engine_mean"] = f"avg by (role) ({per_engine})"
                 for label, metric in (
                     ("context_execution_tps_avg", "rtp_llm_context_tps"),
                     (

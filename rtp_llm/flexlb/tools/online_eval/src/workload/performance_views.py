@@ -56,8 +56,8 @@ def panel(directory, evidence, result):
         )
 
     for key, name, group, axis in [
-        ("input_tps", "完成输入 TPS", "TPS", "input"),
-        ("output_tps", "完成输出 TPS", "TPS", "output"),
+        ("input_tps", "完成输入 TPS", "客户端吞吐", "input"),
+        ("output_tps", "完成输出 TPS", "客户端吞吐", "output"),
         ("inflight", "Client inflight", "队列", "count"),
     ]:
         add(
@@ -66,7 +66,7 @@ def panel(directory, evidence, result):
             axis,
             [(w["t"], w[key]) for w in result["windows"]],
             "逐请求终态重建；TPS 按完成时间分桶，inflight 为桶末值",
-            False,
+            True,
         )
     sent, done = defaultdict(list), defaultdict(list)
     records = evidence.get("flow", {}).get("records", [])
@@ -155,7 +155,12 @@ def panel(directory, evidence, result):
             continue
         labels = json.loads(label_json)
         role = {"prefill": "P", "decode": "D"}.get(labels.pop("role", ""), "")
-        if "blocks" in metric:
+        primary = metric in {"rtp_llm_context_tps_engine_mean", "rtp_llm_context_tps_with_cache_engine_mean"}
+        if primary:
+            group, axis = "Prefill TPS", "forward"
+        elif metric in {"rtp_llm_context_tps_per_engine", "rtp_llm_context_tps_with_cache_per_engine"}:
+            group, axis = "Prefill 逐引擎 TPS", "forward"
+        elif "blocks" in metric:
             group, axis = "KV", "blocks"
         elif "ratio" in metric:
             group, axis = "KV", "ratio"
@@ -191,7 +196,7 @@ def panel(directory, evidence, result):
         if any(c["name"] == name for c in curves):
             name += " · epoch " + epoch
         visible = [(t, v) for t, v in points if 0 <= t <= duration]
-        add(name, group, axis, visible, sources[key]["promql"])
+        add(name, group, axis, visible, sources[key]["promql"], not primary)
         audit.append(
             dict(
                 name=name,
@@ -201,7 +206,7 @@ def panel(directory, evidence, result):
         )
     axes["ratio"].update(min=0, max=1)
     presets = {"核心": [c["name"] for c in curves if not c["hidden"]]}
-    for group in ["TPS", "延迟", "流量", "队列", "规模", "KV", "模拟执行"]:
+    for group in ["Prefill TPS", "Prefill 逐引擎 TPS", "客户端吞吐", "延迟", "流量", "队列", "规模", "KV", "模拟执行"]:
         presets[group] = [c["name"] for c in curves if c["group"] == group]
     return dict(
         id="performance",
@@ -210,6 +215,6 @@ def panel(directory, evidence, result):
         axes=axes,
         series=curves,
         presets=presets,
-        caption="时间按测量起点对齐；切换视角或搜索曲线。Client 曲线来自逐请求证据，mock/master 曲线来自归档 Prometheus（具体查询见审计）。"
+        caption="Prefill TPS 按引擎/DP 汇总 priority，与线上 context TPS、with cache TPS 口径对应；不对引擎执行速率求集群总和。时间按测量起点对齐。Client 曲线来自逐请求证据，mock/master 曲线来自归档 Prometheus（具体查询见审计）。"
         + (" 本报告缺少监控归档，只有请求级曲线。" if not series else ""),
     ), dict(queries=audit, gaps=gaps, errors=errors, available=bool(series))

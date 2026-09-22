@@ -113,6 +113,14 @@ class PerformanceGateTest(unittest.TestCase):
                         step=1,
                         targets={},
                         queries={
+                            "mock/rtp_llm_context_tps_engine_mean": dict(
+                                promql="avg by (role) (sum without (priority) (rtp_llm_context_tps))",
+                                result=[dict(metric=dict(role="prefill"), values=[[100, 60000], [101, 61000]])],
+                            ),
+                            "mock/rtp_llm_context_tps_per_engine": dict(
+                                promql="sum without (priority) (rtp_llm_context_tps)",
+                                result=[dict(metric=dict(role="prefill", engine_name="p0"), values=[[100, 60000], [101, 61000]])],
+                            ),
                             "mock/engine_count": dict(
                                 promql="sum by(role)(engines)",
                                 result=[
@@ -130,6 +138,11 @@ class PerformanceGateTest(unittest.TestCase):
             chart, audit = panel(root, e, analyze(e))
             self.assertTrue(audit["available"])
             self.assertEqual(len(chart["presets"]["规模"]), 2)
+            self.assertEqual(len(chart["presets"]["Prefill TPS"]), 1)
+            self.assertEqual(len(chart["presets"]["Prefill 逐引擎 TPS"]), 1)
+            self.assertTrue(set(chart["presets"]["Prefill TPS"]) <= set(chart["presets"]["核心"]))
+            self.assertNotIn("完成输入 TPS", chart["presets"]["核心"])
+            self.assertIn("完成输入 TPS", chart["presets"]["客户端吞吐"])
             by_name = {c["name"]: c for c in chart["series"]}
             self.assertEqual(
                 by_name["mock · D engine count"]["points"][0], dict(x=0, y=4)

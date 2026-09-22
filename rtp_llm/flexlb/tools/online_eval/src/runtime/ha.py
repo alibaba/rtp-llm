@@ -170,20 +170,28 @@ class LiveClientEvents:
         self.terminal = {}
 
     def read(self):
-        import math
-
         if not self.path.exists():
             return
         if self.path.stat().st_size < self.offset:
             raise ValueError("live client journal was truncated")
+        # Read a finite snapshot in bounded chunks; a delayed poll is not data loss.
+        end = self.path.stat().st_size
         with self.path.open("rb") as stream:
             stream.seek(self.offset)
-            chunk = stream.read(8_000_001)
-        if len(chunk) > 8_000_000:
-            raise ValueError("live client journal exceeds read budget")
-        self.offset += len(chunk)
+            while self.offset < end:
+                chunk = stream.read(min(8_000_000, end - self.offset))
+                if not chunk:
+                    raise ValueError("live client journal was truncated")
+                self.offset += len(chunk)
+                self._consume(chunk)
+
+    def _consume(self, chunk):
+        import math
+
         lines = (self.pending + chunk).split(b"\n")
         self.pending = lines.pop()
+        if len(self.pending) > 8_000_000 or any(len(line) > 8_000_000 for line in lines):
+            raise ValueError("live client row exceeds read budget")
         for line in lines:
             row = json.loads(line)
             if not isinstance(row, dict):

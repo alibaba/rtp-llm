@@ -1,9 +1,28 @@
 {
-  "default": {"performance": "data/performance/synthetic_baseline.json"},
-  "fault_env": {"performance": "data/performance/synthetic_prefill_100ms.json"},
+  "default": {
+    "performance": "data/performance/synthetic_baseline.json"
+  },
+  "fault_env": {
+    "performance": "data/performance/synthetic_prefill_100ms.json"
+  },
   "glm_5_3_l20d": {
     "performance": "data/performance/glm_5_3_l20d.json",
     "mock_heap": "32g",
-    "mock_extra_args": ["--prefill-block-size", "512", "--decode-block-size", "64"]
+    "mock_extra_args": [
+      "--prefill-block-size",
+      "512",
+      "--decode-block-size",
+      "64"
+    ]
+  },
+  "flash_capture_diagnostic": {
+    "performance": "data/performance/synthetic_baseline.json",
+    "mock_heap": "32g",
+    "mock_extra_args": [
+      "--prefill-block-size",
+      "512",
+      "--decode-block-size",
+      "64"
+    ]
   }
 }

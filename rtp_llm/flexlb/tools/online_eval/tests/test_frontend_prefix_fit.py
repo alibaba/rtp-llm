@@ -3,6 +3,7 @@
 import gzip
 import hashlib
 import json
+import lzma
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,22 @@ from traffic.prefix_lineage import decode
 
 
 class FrontendPrefixFitTest(unittest.TestCase):
+    def test_xz_capture_uses_arrival_cutoff_and_keeps_long_inputs(self):
+        script = Path(__file__).resolve().parents[1] / 'src/traffic/capture_frontend_prefix.py'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'logs').mkdir()
+            rows = [dict(request_id=str(i), ts_epoch_ms=3000+i, input_ids=[1]*32769,
+                         status='ERROR', **({'request_enter_ts_epoch_ms': arrival} if arrival is not None else {}))
+                    for i, arrival in enumerate([1999, 2000, 2999, 3000, None])]
+            (root/'logs/dash_sc_grpc_access_r0_s0.log').write_text('\n'.join(map(json.dumps, rows))+'\n')
+            subprocess.run([sys.executable, str(script), '--start', '2000', '--end', '3000',
+                            '--out', 'pod-0', '--format', 'xz'], cwd=root, check=True, capture_output=True)
+            with lzma.open(root/'pod-0.jsonl.xz', 'rt') as source:
+                captured = [json.loads(line) for line in source]
+            self.assertEqual([r['ts'] for r in captured], [2000, 2999])
+            self.assertEqual([r['il'] for r in captured], [32769, 32769])
+
     def test_capture_fit_roundtrip_and_checksum_guard(self):
         scripts = Path(__file__).resolve().parents[1] / "src/traffic"
         with tempfile.TemporaryDirectory() as directory:
