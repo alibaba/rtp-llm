@@ -145,7 +145,7 @@ def panel(directory, evidence, result):
             axis,
             points,
             "逐请求证据；1 秒到达 cohort 的终态/延迟，完成与错误 QPS 按完成时间；不替代整窗门禁 p99",
-            name not in {"TTFT p99", "到达 cohort 成功率"},
+            True,
         )
 
     series, sources, gaps, errors = archived_series(directory, lo / 1000)
