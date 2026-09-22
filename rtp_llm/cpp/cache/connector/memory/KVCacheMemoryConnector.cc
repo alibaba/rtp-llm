@@ -22,7 +22,9 @@
 namespace rtp_llm {
 namespace {
 
-constexpr size_t kMemoryCacheWaitDoneThreads          = 8;
+constexpr size_t kMemoryCacheH2DWaitDoneThreads       = 16;
+constexpr size_t kMemoryCacheD2HWaitDoneThreads       = 24;
+constexpr size_t kMemoryCacheWaitDoneThreadsMax       = 64;
 constexpr size_t kMemoryCacheWaitDoneQueueSizeDefault = 1000;
 
 std::string normalizedH2DCopyMode(std::string mode) {
@@ -48,6 +50,26 @@ size_t memoryCacheWaitDoneQueueSize() {
                             value,
                             kMemoryCacheWaitDoneQueueSizeDefault);
         return kMemoryCacheWaitDoneQueueSizeDefault;
+    }
+    return static_cast<size_t>(parsed);
+}
+
+size_t memoryCacheWaitDoneThreads(const char* direction_env, size_t default_value) {
+    const char* value      = std::getenv(direction_env);
+    const char* source_env = direction_env;
+    if (value == nullptr || value[0] == '\0') {
+        value      = std::getenv("RTP_LLM_MEMORY_CACHE_WAIT_DONE_THREADS");
+        source_env = "RTP_LLM_MEMORY_CACHE_WAIT_DONE_THREADS";
+    }
+    if (value == nullptr || value[0] == '\0') {
+        return default_value;
+    }
+
+    char* end    = nullptr;
+    long  parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed <= 0 || static_cast<size_t>(parsed) > kMemoryCacheWaitDoneThreadsMax) {
+        RTP_LLM_LOG_WARNING("invalid %s=%s, fallback to %zu", source_env, value, default_value);
+        return default_value;
     }
     return static_cast<size_t>(parsed);
 }
@@ -161,9 +183,13 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
         metrics_reporter_thread_->join();
         metrics_reporter_thread_.reset();
     }
-    if (wait_done_thread_pool_) {
-        wait_done_thread_pool_->stop();
-        wait_done_thread_pool_.reset();
+    if (h2d_wait_done_thread_pool_) {
+        h2d_wait_done_thread_pool_->stop();
+        h2d_wait_done_thread_pool_.reset();
+    }
+    if (d2h_wait_done_thread_pool_) {
+        d2h_wait_done_thread_pool_->stop();
+        d2h_wait_done_thread_pool_.reset();
     }
     broadcast_manager_.reset();
     block_pool_.reset();
@@ -226,13 +252,21 @@ bool KVCacheMemoryConnector::init() {
     broadcast_manager_ = std::make_shared<BroadcastManager>(tp_addrs_);
     RTP_LLM_CHECK_WITH_INFO(broadcast_manager_->init(), "init failed, broadcast manager init failed");
 
+    const auto h2d_wait_done_threads =
+        memoryCacheWaitDoneThreads("RTP_LLM_MEMORY_CACHE_H2D_WAIT_DONE_THREADS", kMemoryCacheH2DWaitDoneThreads);
+    const auto d2h_wait_done_threads =
+        memoryCacheWaitDoneThreads("RTP_LLM_MEMORY_CACHE_D2H_WAIT_DONE_THREADS", kMemoryCacheD2HWaitDoneThreads);
     const auto wait_done_queue_size = memoryCacheWaitDoneQueueSize();
-    RTP_LLM_LOG_INFO("init memory cache wait done thread pool, threads=%zu queue_size=%zu",
-                     kMemoryCacheWaitDoneThreads,
+    RTP_LLM_LOG_INFO("init memory cache wait done thread pools, h2d_threads=%zu d2h_threads=%zu queue_size=%zu",
+                     h2d_wait_done_threads,
+                     d2h_wait_done_threads,
                      wait_done_queue_size);
-    wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
-        kMemoryCacheWaitDoneThreads, wait_done_queue_size, nullptr, "WaitDoneThreadPool");
-    RTP_LLM_CHECK_WITH_INFO(wait_done_thread_pool_->start(), "init failed, wait done thread pool start failed");
+    h2d_wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
+        h2d_wait_done_threads, wait_done_queue_size, nullptr, "H2DWaitDonePool");
+    d2h_wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
+        d2h_wait_done_threads, wait_done_queue_size, nullptr, "D2HWaitDonePool");
+    RTP_LLM_CHECK_WITH_INFO(h2d_wait_done_thread_pool_->start(), "init failed, H2D wait done thread pool start failed");
+    RTP_LLM_CHECK_WITH_INFO(d2h_wait_done_thread_pool_->start(), "init failed, D2H wait done thread pool start failed");
 
     if (metrics_reporter_) {
         metrics_reporter_thread_ = std::make_shared<std::thread>([this]() { reportMetricsLoop(); });
@@ -1568,17 +1602,19 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
     if (stop_.load()) {
         return false;
     }
+    auto& wait_done_thread_pool =
+        copy_plan->direction == CopyDirection::H2D ? h2d_wait_done_thread_pool_ : d2h_wait_done_thread_pool_;
     auto       task_copy_plan = copy_plan;
     const auto enqueue_time   = std::chrono::steady_clock::now();
-    auto       code = wait_done_thread_pool_->pushTask([this, context, task_copy_plan, enqueue_time]() mutable {
-        reportCopyPoolMetrics(false);
+    auto       code = wait_done_thread_pool->pushTask([this, context, task_copy_plan, enqueue_time]() mutable {
+        reportCopyPoolMetrics(task_copy_plan->direction, false);
         const auto queue_wait_us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - enqueue_time)
                 .count();
         const auto task_start_us   = currentTimeUs();
         const auto plan_id         = task_copy_plan->plan_id;
         const auto estimated_bytes = estimateCopyPlanBytes(task_copy_plan);
-        reportCopyTaskMetrics(queue_wait_us, task_copy_plan->direction, static_cast<int64_t>(estimated_bytes));
+        reportCopyTaskMetrics(queue_wait_us, task_copy_plan->direction);
         RTP_LLM_LOG_INFO("memory cache copy plan begin, plan_id=%lu direction=%s queue_wait_us=%ld items=%zu "
                                "estimated_bytes=%zu timeout_ms=%ld",
                          plan_id,
@@ -1597,12 +1633,12 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
                          context->success());
     });
     if (code != autil::ThreadPoolBase::ERROR_NONE) {
-        reportCopyPoolMetrics(true);
+        reportCopyPoolMetrics(copy_plan->direction, true);
         RTP_LLM_LOG_WARNING(
             "start copy plan async failed, thread pool rejected task, plan_id=%lu code=%d", copy_plan->plan_id, code);
         return false;
     }
-    reportCopyPoolMetrics(false);
+    reportCopyPoolMetrics(copy_plan->direction, false);
     return true;
 }
 
@@ -1691,6 +1727,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         copy_direction = CopyDirection::H2D;
     }
     const auto slots            = layerRegionSlots();
+    size_t     copy_bytes       = 0;
     const bool has_typed_slots  = hasTypedLayerRegionSlots(slots);
     bool       has_disk_items   = false;
     bool       has_memory_items = false;
@@ -1699,7 +1736,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     if (request.copy_items_size() == 0) {
         RTP_LLM_LOG_WARNING("copy cache failed, copy_items is empty");
         response.set_success(false);
-        reportCopyMetrics(false, timer.done_us(), copy_direction);
+        reportCopyMetrics(false, timer.done_us(), copy_direction, copy_bytes);
         return false;
     }
 
@@ -1710,7 +1747,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
                                && item.cache_block_kind() != MemoryOperationRequestPB::LEGACY_INCOMPLETE);
         if (!validateCopyItemBacking(item)) {
             response.set_success(false);
-            reportCopyMetrics(false, timer.done_us(), copy_direction);
+            reportCopyMetrics(false, timer.done_us(), copy_direction, copy_bytes);
             return false;
         }
         if (item.backing_type() == MemoryOperationRequestPB::DISK) {
@@ -1719,11 +1756,14 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
             has_memory_items = true;
         }
     }
+    if (metrics_reporter_) {
+        copy_bytes = estimateRequestCopyBytes(request, slots);
+    }
 
     if (has_prefix_items) {
         const bool success = copyPrefixMemoryItems(request, copy_direction, slots);
         response.set_success(success);
-        reportCopyMetrics(success, timer.done_us(), copy_direction);
+        reportCopyMetrics(success, timer.done_us(), copy_direction, copy_bytes);
         if (has_disk_items) {
             reportDiskCopyMetrics(success, timer.done_us(), copy_direction);
         }
@@ -1740,7 +1780,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
             success = copyDiskItems(request, copy_direction, slots);
         }
         response.set_success(success);
-        reportCopyMetrics(success, timer.done_us(), copy_direction);
+        reportCopyMetrics(success, timer.done_us(), copy_direction, copy_bytes);
         reportDiskCopyMetrics(success, timer.done_us(), copy_direction);
         return success;
     }
@@ -1843,7 +1883,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
                          cache_config_.groupNums(),
                          has_typed_slots);
         response.set_success(success);
-        reportCopyMetrics(success, elapsed_us, copy_direction);
+        reportCopyMetrics(success, elapsed_us, copy_direction, copy_bytes);
         return success;
     }
 
@@ -1938,7 +1978,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
                      cache_config_.groupNums(),
                      has_typed_slots);
     response.set_success(success);
-    reportCopyMetrics(success, elapsed_us, copy_direction);
+    reportCopyMetrics(success, elapsed_us, copy_direction, copy_bytes);
     return success;
 }
 
@@ -3555,6 +3595,41 @@ size_t KVCacheMemoryConnector::estimateCopyPlanBytes(const std::shared_ptr<CopyP
     return bytes;
 }
 
+size_t KVCacheMemoryConnector::estimateRequestCopyBytes(const MemoryOperationRequestPB&     request,
+                                                        const std::vector<LayerRegionSlot>& slots) const {
+    size_t bytes = 0;
+    for (const auto& item : request.copy_items()) {
+        if (item.gpu_blocks_size() != static_cast<int>(slots.size())) {
+            continue;
+        }
+        const bool is_prefix = item.cache_block_kind() == MemoryOperationRequestPB::COMPRESSED_KV
+                               || item.cache_block_kind() == MemoryOperationRequestPB::STATE_SWA_KV;
+        CacheBlockKind prefix_kind = CacheBlockKind::COMPLETE;
+        if (item.cache_block_kind() == MemoryOperationRequestPB::COMPRESSED_KV) {
+            prefix_kind = CacheBlockKind::COMPRESSED_KV;
+        } else if (item.cache_block_kind() == MemoryOperationRequestPB::STATE_SWA_KV) {
+            prefix_kind = CacheBlockKind::STATE_SWA_KV;
+        }
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            const auto& slot = slots[slot_idx];
+            if (is_prefix && kindForSlot(slot) != prefix_kind) {
+                continue;
+            }
+            if (!is_prefix && !item.is_complete() && !isFullOnlySlot(slot)) {
+                continue;
+            }
+            const auto gpu_block = static_cast<BlockIdxType>(item.gpu_blocks(static_cast<int>(slot_idx)));
+            if (!isUsableBlockIdx(gpu_block)) {
+                continue;
+            }
+            for (const auto& buffer : allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block)) {
+                bytes += buffer.size_bytes;
+            }
+        }
+    }
+    return bytes;
+}
+
 size_t KVCacheMemoryConnector::totalMemoryBlocks() const {
     return block_pool_ ? block_pool_->totalBlocksNum() : 0;
 }
@@ -3695,7 +3770,10 @@ void KVCacheMemoryConnector::reportWriteMetrics(bool    success,
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheWriteMetricsCollector>(nullptr, &collector);
 }
 
-void KVCacheMemoryConnector::reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction) {
+void KVCacheMemoryConnector::reportCopyMetrics(bool          success,
+                                               int64_t       latency_us,
+                                               CopyDirection direction,
+                                               size_t        bytes) {
     if (!metrics_reporter_) {
         return;
     }
@@ -3704,11 +3782,14 @@ void KVCacheMemoryConnector::reportCopyMetrics(bool success, int64_t latency_us,
     collector.failed     = !success;
     collector.latency_us = latency_us;
     collector.from_gpu   = direction == CopyDirection::D2H;
+    if (success && latency_us > 0) {
+        collector.bytes_per_second = static_cast<int64_t>(static_cast<long double>(bytes) * 1'000'000 / latency_us);
+    }
 
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyMetricsCollector>(nullptr, &collector);
 }
 
-void KVCacheMemoryConnector::reportCopyTaskMetrics(int64_t queue_wait_us, CopyDirection direction, int64_t bytes) {
+void KVCacheMemoryConnector::reportCopyTaskMetrics(int64_t queue_wait_us, CopyDirection direction) {
     if (!metrics_reporter_) {
         return;
     }
@@ -3716,19 +3797,20 @@ void KVCacheMemoryConnector::reportCopyTaskMetrics(int64_t queue_wait_us, CopyDi
     RtpLLMMemoryCacheCopyTaskMetricsCollector collector;
     collector.from_gpu      = direction == CopyDirection::D2H;
     collector.queue_wait_us = queue_wait_us;
-    collector.bytes         = bytes;
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyTaskMetricsCollector>(nullptr, &collector);
 }
 
-void KVCacheMemoryConnector::reportCopyPoolMetrics(bool submit_failed) {
-    if (!metrics_reporter_ || !wait_done_thread_pool_) {
+void KVCacheMemoryConnector::reportCopyPoolMetrics(CopyDirection direction, bool submit_failed) {
+    const auto& pool = direction == CopyDirection::H2D ? h2d_wait_done_thread_pool_ : d2h_wait_done_thread_pool_;
+    if (!metrics_reporter_ || !pool) {
         return;
     }
 
     RtpLLMMemoryCacheCopyPoolMetricsCollector collector;
-    collector.active_threads = static_cast<int64_t>(wait_done_thread_pool_->getActiveThreadNum());
-    collector.pending_tasks  = static_cast<int64_t>(wait_done_thread_pool_->getItemCount());
+    collector.active_threads = static_cast<int64_t>(pool->getActiveThreadNum());
+    collector.pending_tasks  = static_cast<int64_t>(pool->getItemCount());
     collector.submit_failed  = submit_failed;
+    collector.from_gpu       = direction == CopyDirection::D2H;
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyPoolMetricsCollector>(nullptr, &collector);
 }
 

@@ -118,7 +118,6 @@ private:
         CopyDirection               direction;
         uint64_t                    plan_id{0};
     };
-
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&                cache_keys,
                                                    const LayerAttnBlockIds&            layer_attn_block_ids,
                                                    const std::vector<LayerRegionSlot>& slots,
@@ -272,6 +271,8 @@ private:
     bool                       diskCacheEnabled() const;
     int64_t                    copyPlanTimeoutMs(const std::shared_ptr<CopyPlan>& copy_plan) const;
     size_t                     estimateCopyPlanBytes(const std::shared_ptr<CopyPlan>& copy_plan) const;
+    size_t                     estimateRequestCopyBytes(const MemoryOperationRequestPB&     request,
+                                                        const std::vector<LayerRegionSlot>& slots) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
     std::string                blockPoolDebugString() const;
     size_t                     memoryCacheBlockSizeBytes() const;
@@ -282,9 +283,9 @@ private:
     void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
-    void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
-    void reportCopyTaskMetrics(int64_t queue_wait_us, CopyDirection direction, int64_t bytes);
-    void reportCopyPoolMetrics(bool submit_failed);
+    void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction, size_t bytes);
+    void reportCopyTaskMetrics(int64_t queue_wait_us, CopyDirection direction);
+    void reportCopyPoolMetrics(CopyDirection direction, bool submit_failed);
     void report3DCopyMetrics(bool          success,
                              int64_t       latency_us,
                              CopyDirection direction,
@@ -319,7 +320,8 @@ private:
     std::shared_ptr<DiskBlockPool>                          complete_disk_pool_;
     std::shared_ptr<DiskBlockPool>                          incomplete_disk_pool_;
     std::shared_ptr<BroadcastManager>                       broadcast_manager_;
-    std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
+    std::shared_ptr<autil::LockFreeThreadPool>              h2d_wait_done_thread_pool_;
+    std::shared_ptr<autil::LockFreeThreadPool>              d2h_wait_done_thread_pool_;
     std::atomic<uint64_t>                                   next_copy_plan_id_{1};
 
     std::shared_ptr<BlockPool> complete_pool_;

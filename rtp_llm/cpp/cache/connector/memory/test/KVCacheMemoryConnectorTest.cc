@@ -7,6 +7,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <execinfo.h>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -100,6 +101,38 @@ public:
 
 private:
     std::string path_;
+};
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        if (const char* old = std::getenv(name); old != nullptr) {
+            old_value_ = old;
+            had_old_   = true;
+        }
+        if (value != nullptr) {
+            if (::setenv(name, value, 1) != 0) {
+                throw std::runtime_error(std::string("setenv failed for ") + name);
+            }
+        } else {
+            if (::unsetenv(name) != 0) {
+                throw std::runtime_error(std::string("unsetenv failed for ") + name);
+            }
+        }
+    }
+
+    ~ScopedEnvVar() {
+        if (had_old_) {
+            (void)::setenv(name_.c_str(), old_value_.c_str(), 1);
+        } else {
+            (void)::unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::string old_value_;
+    bool        had_old_{false};
 };
 
 std::string joinPaths(const std::vector<std::string>& paths) {
@@ -686,7 +719,8 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
     EXPECT_EQ(conn->broadcast_manager_, nullptr);
-    EXPECT_EQ(conn->wait_done_thread_pool_, nullptr);
+    EXPECT_EQ(conn->h2d_wait_done_thread_pool_, nullptr);
+    EXPECT_EQ(conn->d2h_wait_done_thread_pool_, nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMsZero) {
@@ -699,7 +733,8 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
     // Init fails early, nothing should be created.
     EXPECT_EQ(conn->block_cache_, nullptr);
     EXPECT_EQ(conn->broadcast_manager_, nullptr);
-    EXPECT_EQ(conn->wait_done_thread_pool_, nullptr);
+    EXPECT_EQ(conn->h2d_wait_done_thread_pool_, nullptr);
+    EXPECT_EQ(conn->d2h_wait_done_thread_pool_, nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
@@ -742,6 +777,49 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     ASSERT_NE(conn->block_cache_, nullptr);
     ASSERT_NE(conn->broadcast_manager_, nullptr);
     EXPECT_EQ(conn->broadcast_manager_->workerNum(), server_addrs_.size());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, init_UsesConfiguredWaitDoneThreadCount) {
+    ScopedEnvVar common_threads("RTP_LLM_MEMORY_CACHE_WAIT_DONE_THREADS", nullptr);
+    ScopedEnvVar h2d_threads("RTP_LLM_MEMORY_CACHE_H2D_WAIT_DONE_THREADS", "12");
+    ScopedEnvVar d2h_threads("RTP_LLM_MEMORY_CACHE_D2H_WAIT_DONE_THREADS", "6");
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+    ASSERT_TRUE(conn->init());
+    EXPECT_EQ(conn->h2d_wait_done_thread_pool_->getThreadNum(), 12u);
+    EXPECT_EQ(conn->d2h_wait_done_thread_pool_->getThreadNum(), 6u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, init_UsesDefaultWaitDoneThreadCount) {
+    ScopedEnvVar common_threads("RTP_LLM_MEMORY_CACHE_WAIT_DONE_THREADS", nullptr);
+    ScopedEnvVar h2d_threads("RTP_LLM_MEMORY_CACHE_H2D_WAIT_DONE_THREADS", nullptr);
+    ScopedEnvVar d2h_threads("RTP_LLM_MEMORY_CACHE_D2H_WAIT_DONE_THREADS", nullptr);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+    ASSERT_TRUE(conn->init());
+    EXPECT_EQ(conn->h2d_wait_done_thread_pool_->getThreadNum(), 16u);
+    EXPECT_EQ(conn->d2h_wait_done_thread_pool_->getThreadNum(), 24u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, init_FallsBackForInvalidWaitDoneThreadCount) {
+    ScopedEnvVar common_threads("RTP_LLM_MEMORY_CACHE_WAIT_DONE_THREADS", nullptr);
+    for (const char* value : {"0", "not-a-number", "65"}) {
+        ScopedEnvVar h2d_threads("RTP_LLM_MEMORY_CACHE_H2D_WAIT_DONE_THREADS", value);
+        ScopedEnvVar d2h_threads("RTP_LLM_MEMORY_CACHE_D2H_WAIT_DONE_THREADS", value);
+        auto         conn =
+            std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+        ASSERT_TRUE(conn->init());
+        EXPECT_EQ(conn->h2d_wait_done_thread_pool_->getThreadNum(), 16u) << "value=" << value;
+        EXPECT_EQ(conn->d2h_wait_done_thread_pool_->getThreadNum(), 24u) << "value=" << value;
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, init_CommonWaitDoneThreadCountConfiguresBothPools) {
+    ScopedEnvVar common_threads("RTP_LLM_MEMORY_CACHE_WAIT_DONE_THREADS", "10");
+    ScopedEnvVar h2d_threads("RTP_LLM_MEMORY_CACHE_H2D_WAIT_DONE_THREADS", nullptr);
+    ScopedEnvVar d2h_threads("RTP_LLM_MEMORY_CACHE_D2H_WAIT_DONE_THREADS", nullptr);
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+    ASSERT_TRUE(conn->init());
+    EXPECT_EQ(conn->h2d_wait_done_thread_pool_->getThreadNum(), 10u);
+    EXPECT_EQ(conn->d2h_wait_done_thread_pool_->getThreadNum(), 10u);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_UsesLocalRankPathAndPreallocatesFile) {
@@ -2383,14 +2461,15 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
     // 在单测里稳定模拟 startCopyAsync() 失败：把线程池替换成“未启动”的线程池，
     // 这样 pushTask 会返回非 ERROR_NONE，从而 asyncRead 返回 nullptr。
-    auto old_pool = connector_->wait_done_thread_pool_;
+    auto old_pool = connector_->h2d_wait_done_thread_pool_;
 
-    connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
-                                                                                     /*queue_size=*/1,
-                                                                                     /*thread_init_func=*/nullptr,
-                                                                                     /*name=*/"AsyncReadNotStartedTP");
+    connector_->h2d_wait_done_thread_pool_ =
+        std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
+                                                    /*queue_size=*/1,
+                                                    /*thread_init_func=*/nullptr,
+                                                    /*name=*/"AsyncReadNotStartedTP");
     // 验证线程池未启动时 pushTask 会失败（避免平台/实现差异导致用例不稳定）。
-    EXPECT_NE(connector_->wait_done_thread_pool_->pushTask([]() {}), autil::ThreadPoolBase::ERROR_NONE);
+    EXPECT_NE(connector_->h2d_wait_done_thread_pool_->pushTask([]() {}), autil::ThreadPoolBase::ERROR_NONE);
 
     CacheKeysType cache_keys{70001, 70002};
     const size_t  mem_size = memoryCacheBlockBytes();
@@ -2406,8 +2485,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
     auto ctx = connector_->asyncRead(res, meta, match_ctx, start_read_block_index, read_block_num);
     EXPECT_EQ(ctx, nullptr);
 
-    connector_->wait_done_thread_pool_.reset();
-    connector_->wait_done_thread_pool_ = old_pool;
+    connector_->h2d_wait_done_thread_pool_.reset();
+    connector_->h2d_wait_done_thread_pool_ = old_pool;
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
@@ -2719,14 +2798,15 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
     // 在单测里稳定模拟 startCopyAsync() 失败：把线程池替换成“未启动”的线程池，
     // 这样 pushTask 会返回非 ERROR_NONE，从而 asyncWrite 返回 nullptr。
-    auto old_pool = connector_->wait_done_thread_pool_;
+    auto old_pool = connector_->d2h_wait_done_thread_pool_;
 
-    connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
-                                                                                     /*queue_size=*/1,
-                                                                                     /*thread_init_func=*/nullptr,
-                                                                                     /*name=*/"AsyncWriteNotStartedTP");
+    connector_->d2h_wait_done_thread_pool_ =
+        std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
+                                                    /*queue_size=*/1,
+                                                    /*thread_init_func=*/nullptr,
+                                                    /*name=*/"AsyncWriteNotStartedTP");
     // 验证线程池未启动时 pushTask 会失败（避免平台/实现差异导致用例不稳定）。
-    EXPECT_NE(connector_->wait_done_thread_pool_->pushTask([]() {}), autil::ThreadPoolBase::ERROR_NONE);
+    EXPECT_NE(connector_->d2h_wait_done_thread_pool_->pushTask([]() {}), autil::ThreadPoolBase::ERROR_NONE);
 
     const int                              layer0 = 0;
     CacheKeysType                          cache_keys{71001, 71002, 71003};
@@ -2744,8 +2824,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
     auto ctx  = connector_->asyncWrite(res, meta);
     EXPECT_EQ(ctx, nullptr);
 
-    connector_->wait_done_thread_pool_.reset();
-    connector_->wait_done_thread_pool_ = old_pool;
+    connector_->d2h_wait_done_thread_pool_.reset();
+    connector_->d2h_wait_done_thread_pool_ = old_pool;
 }
 
 TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_WhenNoWorkers_NoOp) {
