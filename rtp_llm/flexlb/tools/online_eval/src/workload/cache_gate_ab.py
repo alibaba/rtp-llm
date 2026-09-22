@@ -147,7 +147,6 @@ def compare(old_path, new_path, output, *, mode="strong"):
         timeOriginLabel=(f"按缩容事件对齐，X={origin:.2f}s" if event_aligned else "缩容事件不完整，时间轴未对齐"),
         events=([dict(name="withdraw_start", t=origin)] if event_aligned else []),
         timeAxis=dict(min=0, max=end), kpis=[],
-        meta=dict(params=dict(mode=mode, controls=alignment["status"])),
         panels=[overlay, *panels],
         sections=[
             details("Master 版本证据", summary["versions"]),
@@ -160,6 +159,19 @@ def compare(old_path, new_path, output, *, mode="strong"):
         meta=run_meta(
             dict(id="cache-scale-in-ab"), evidence=[str(p) for p in paths],
             configuration=dict(mode=mode, controls=controls),
+            runs={label: run_meta(
+                dict(id=label, verdict=result["verdict"]),
+                implementation=dict(master=identity, files=e["provenance"].get("files")),
+                workload=e["provenance"].get("trace"),
+                configuration={k: e["provenance"].get(k) for k in (
+                    "topology", "capacity", "performance", "master_config",
+                    "actual_master_config", "configuration_sha256",
+                )},
+                environment=e["provenance"].get("client_environment"),
+                evidence=dict(path=str(path)),
+            ) for label, path, e, result, identity in zip(
+                ("old", "new"), paths, evidence, results, identities
+            )},
         ),
         producer="cache-gate-ab",
     )

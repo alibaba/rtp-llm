@@ -20,12 +20,8 @@ outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 pa
   * KPI 结果行（头部第二行 chip）：请求数量 / 成功数量 / 失败·cancel /
     成功率 / 持续时间（summary 结果类字段；cancel 为 error_count 的
     具名子桶 err_cancelled，chip 上注记子集数）；
-  * detail（<details> 折叠，默认收起）：代码版本（branch/commit）、测试
-    数据集（trace 路径/行数/sha256）、实验参数（run_meta.params 全量）、
-    环境变量（client_env / flexlb_env FINAL ENV 快照）、数据源（绝对
-    路径）。旧 meta 三分区中的数据源从可见面板移入 detail；规模信息由
-    subtitle 实验条件行承担，不设分区（信息重复）；时间轴口径 + 采样
-    说明保留在可见 meta 面板（口径标注纪律）。
+  * 运行信息由公共渲染器读取 spec.meta 的非空字段，使用限高代码块展示；
+    数据源、版本、流量、参数及环境变量均保持原始结构。
 
 报告级统一时间轴：全部时序面板（x = 压测时间）共享同一 x 轴 [0, T_END]。
 T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；min 固定 0
@@ -3459,10 +3455,7 @@ def main():
         time_axis = {"min": 0, "max": t_end}
 
     # ---- 元数据区 spec（三层规范化，20260902）----
-    # 可见 meta 面板：时间轴口径 + 采样说明（口径标注纪律，报告头必须
-    # 直观可读）。detail 层（<details> 折叠，默认收起）：代码版本 /
-    # 数据集 / 实验参数 / 环境变量 / 数据源——旧三分区中的数据源从可见
-    # 面板移入 detail；规模不设分区（与 subtitle 实验条件重复，已删）。
+    # 公共渲染器读取这些元信息的非空字段；规模由 subtitle 承担。
     # detail 取数链：aggregate meta（analysis/aggregate.py 20260902+
     # 写入）> 同目录 run_meta.json；均缺则对应分区显示 —（未提供）。
     ed_embedded = (
@@ -3578,12 +3571,9 @@ def main():
                 )
 
     # ---- 元数据区 / leak KPI 自检（fail-closed）----
-    # 1) 元数据区存在性：spec.meta 齐全（sources/version/dataset/
-    #    params/env），渲染输出含数据源绝对路径与 T_END 时间轴口径字样
-    #    （有时间轴时）；
+    # 1) 公共运行信息：旧直出 spec.meta 的非空字段被渲染，包含数据源；
     # 2) leak chip 负向：头部 KPI 无「泄漏判定」且渲染 HTML 全文无该字样
-    # 3) 三层规范化（20260902）：detail 折叠块存在且默认收起；replay 模式
-    #    且倍率可得时 subtitle 必含 replay@<speed>x（倍率取自动校准值，
+    # 3) replay 模式且倍率可得时 subtitle 必含 replay@<speed>x（倍率取自动校准值，
     #    非 CLI 缺省）；KPI 含结果行五连。
     _meta_chk = spec.get("meta") or {}
     _meta_src = _meta_chk.get("sources") or {}
@@ -3594,27 +3584,16 @@ def main():
         TAG + " meta sources.aggregate must be the input aggregate absolute path"
     )
     assert _meta_src.get("runDir"), TAG + " meta sources.runDir missing"
-    assert 'id="meta"' in html_out, TAG + " rendered HTML missing metadata panel"
+    assert 'class="report-context"' in html_out, TAG + " rendered HTML missing run context"
     assert os.path.abspath(args.aggregate) in html_out, (
-        TAG + " rendered HTML missing data-source path (detail panel)"
+        TAG + " rendered HTML missing data-source path"
     )
-    if time_axis:
-        assert "T_END" in html_out, (
-            TAG + " rendered HTML missing T_END time-axis semantics in metadata panel"
-        )
     assert all(k.get("label") != "泄漏判定" for k in spec.get("kpis", [])), (
         TAG + " leak KPI chip must not appear in header kpis"
     )
     assert "泄漏判定" not in html_out, (
         TAG + " rendered HTML must not contain leak verdict text "
         "(header KPI chip removed by design)"
-    )
-    # detail 折叠块：默认收起（无 open 属性）+ 汇总行存在
-    assert '<details id="detail"' in html_out, (
-        TAG + ' rendered HTML missing detail panel (<details id="detail">)'
-    )
-    assert '<details id="detail" open' not in html_out, (
-        TAG + " detail panel must be collapsed by default (no open attr)"
     )
     # 规模分区已删（与 subtitle 实验条件重复），渲染输出不得再含该字样
     assert "规模" not in html_out, (

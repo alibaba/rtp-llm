@@ -27,10 +27,11 @@ def run_meta(
     configuration=None,
     environment=None,
     clock=None,
-    evidence=None
+    evidence=None,
+    runs=None,
 ):
     """None means unknown, never proof of matching experiment conditions."""
-    return dict(
+    metadata = dict(
         schema_version=1,
         identity=identity,
         implementation=implementation,
@@ -40,6 +41,9 @@ def run_meta(
         clock=clock,
         evidence=evidence,
     )
+    if runs is not None:
+        metadata["runs"] = runs
+    return metadata
 
 
 def compare_controls(left, right, *, required=(), allowed=()):

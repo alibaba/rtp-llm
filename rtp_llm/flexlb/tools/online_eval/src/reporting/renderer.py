@@ -11,23 +11,13 @@ Spec schema（core.py 产）：
   {
     'run_id':   str,
     'title':    str,              # 页首 H1
-    'subtitle': Optional[str],    # 副标（实验条件行：拓扑 / 发送模式倍率 /
-                                   # ramp / duration / shards，三层第一层）
+    'subtitle': Optional[str|dict], # 自由文本或任意 key-value 摘要
     'kpis':     [{'label': str, 'value': str, 'tone': Optional[str]}],
                                    # 两行×最多 5 chip：指标五连 + 结果五连
                                    # （请求数量 / 成功 / 失败·cancel / 成功率 /
                                    # 持续时间），三层第二层
-    'meta':     Optional[{        # 可见口径面板 + detail 折叠层（三层第三层）
-        'timeAxis': Optional[{'tEnd': num}],   # T_END 动态填入口径文案（可见）
-        'sampling': Optional[str],             # 采样说明（可见）
-        'version':  {'branch': Opt[str], 'commit': Opt[str]},      # detail
-        'dataset':  {'traceFile': Opt[str], 'traceLines': Opt[num],
-                     'traceSha256': Opt[str]},                      # detail
-        'params':   Optional[dict],  # run_meta.params 全量（detail）
-        'env':      {'clientEnv': Opt[dict], 'flexlbEnv': Opt[dict]},# detail
-        'sources': {'runDir': str, 'aggregate': str,
-                    'engineDist': Optional[str]},                    # detail
-    }],
+    'meta':     Optional[dict],    # 旧直出报告的元信息，自动过滤空字段
+    'run_meta': Optional[dict],    # 标准 run provenance；runs 可含多侧信息
     'timeAxis': Optional[{'min': number, 'max': number}],  # 报告级统一时间轴
     'panels':   [panel],
   }
@@ -44,13 +34,9 @@ Spec schema（core.py 产）：
     'series':  [{'name': str, 'data': [num], 'color': str}],
   }
 
-头部三层（2026-09 规范化）：subtitle = 实验条件行（拓扑/倍率/ramp/
-duration/shards 等全部规模信息在此承担）；KPI 两行 = 指标五连 +
-结果五连；可见 meta 面板只留时间轴口径 + 采样说明（口径标注纪律），
-其余（代码版本 / 数据集 / 实验参数 / FINAL ENV / 数据源）收进
-<details id="detail"> 折叠块默认收起；规模不设分区（与 subtitle 重复，
-已删）。路径用等宽字体、overflow-wrap:anywhere 保留完整可复制。
-旧 spec 无 meta 键时两个面板均不渲染（向后兼容）。
+标题与副标题完全由 spec 提供。运行信息优先读取 run_meta，旧直出报告
+读取 meta；空字段不渲染。多 run 的每一侧独立展示。附件中的结构化证据
+保留为可折叠、限高滚动的代码块。
 
 时间轴语义：timeAxis.min = 0（t=0 = 压测正式开始，warmup 后）；
 timeAxis.max = T_END（全部时序面板最后采样点，ceil 整秒，含收尾排空）。
@@ -111,6 +97,41 @@ def series_color(tone, idx):
     return PALETTE[idx % len(PALETTE)]
 
 
+def _present(value):
+    """Remove absent metadata without treating zero or false as missing."""
+    if isinstance(value, dict):
+        cleaned = {k: item for k, v in value.items()
+                   if (item := _present(v)) is not None and k != "schema_version"}
+        return cleaned or None
+    if isinstance(value, list):
+        cleaned = [item for v in value if (item := _present(v)) is not None]
+        return cleaned or None
+    return None if value is None or value == "" else value
+
+
+def render_context(spec):
+    """Show actual run metadata, including every side of a comparison."""
+    meta = spec.get("run_meta")
+    if meta:
+        runs = meta.get("runs") if isinstance(meta, dict) else None
+        cards = runs.items() if isinstance(runs, dict) and runs else [("本次运行", meta)]
+    else:
+        legacy = dict(spec.get("meta") or {})
+        legacy.pop("timeAxis", None)
+        cards = [("本次运行", legacy)]
+    rendered = []
+    for label, value in cards:
+        value = _present(value)
+        if not value:
+            continue
+        title = html.escape(str(label), quote=True)
+        data = html.escape(json.dumps(value, ensure_ascii=False, indent=2), quote=True)
+        rendered.append(f'<article class="context-card"><h3>{title}</h3><pre>{data}</pre></article>')
+    if not rendered:
+        return ""
+    return '<section class="report-context"><h2>运行信息</h2><div class="context-grid">' + "".join(rendered) + "</div></section>"
+
+
 def render_sections(sections):
     """The only HTML construction boundary for report tables and evidence blocks."""
 
@@ -125,7 +146,7 @@ def render_sections(sections):
         kind = section["type"]
         if kind == "details":
             out.append(
-                f'<details><summary>{title}</summary><pre>{text(section["value"])}</pre></details>'
+                f'<details class="attachment"><summary>{title}</summary><pre>{text(section["value"])}</pre></details>'
             )
         elif kind == "table":
             heads = "".join("<th>" + text(c) + "</th>" for c in section["columns"])
@@ -160,6 +181,10 @@ def render(spec):
     run_id = spec.get("run_id", "")
     title = spec.get("title") or ("FlexLB 压测报告 · run " + run_id)
     subtitle = spec.get("subtitle") or ""
+    if isinstance(subtitle, dict):
+        subtitle = {str(k): str(v) for k, v in subtitle.items() if v is not None}
+    elif not isinstance(subtitle, str):
+        raise TypeError("report subtitle must be a string or key-value mapping")
     kpis = spec.get("kpis") or []
     panels = spec.get("panels") or []
 
@@ -229,6 +254,7 @@ def render(spec):
     interaction = (resource_dir / "legend_interaction.js").read_text(encoding="utf-8")
     return (
         _TEMPLATE.replace("__SECTIONS__", render_sections(sections))
+        .replace("__CONTEXT__", render_context(spec))
         .replace("__PAGE_TITLE__", page_title)
         .replace(
             "__SPEC_JSON__",
@@ -288,63 +314,33 @@ h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .kpi .v{font-size:22px;font-weight:600}
 .kpi .l{color:var(--sub);font-size:12px;margin-top:4px}
 .kpi.success .v{color:var(--success)} .kpi.danger .v{color:var(--danger)} .kpi.warn .v{color:var(--warn)}
-/* 可见口径面板（三层第三层之可见部分）：时间轴口径 + 采样说明。 */
-.meta-panel{background:var(--card);border:1px solid var(--border);border-radius:8px;
-  margin:0 0 12px;font-size:12px;line-height:1.7;color:var(--sub)}
-.meta-sec{padding:12px 16px;min-width:0}
-.meta-sec h4{margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:.6px;
-  text-transform:uppercase;color:rgba(0,0,0,.38)}
-.meta-row{display:flex;gap:8px;align-items:baseline;margin:1px 0}
-.meta-row .k{flex:none;white-space:nowrap;color:rgba(0,0,0,.45)}
-.meta-row .v{min-width:0;overflow-wrap:anywhere;word-break:break-word;
-  color:rgba(0,0,0,.72);
-  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
-  font-size:11.5px}
-.meta-ta p{margin:0;color:rgba(0,0,0,.6)}
-.meta-ta b{font-weight:600;color:#1677ff;
-  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
-/* detail 折叠层（三层第三层）：代码版本 / 数据集 / 参数 / FINAL ENV /
-   数据源，默认收起；长表（params / env）限高滚动防长屏。 */
-.detail-panel{background:var(--card);border:1px solid var(--border);border-radius:8px;
-  margin:0 0 24px;font-size:12px;color:var(--sub)}
-.detail-panel>summary{cursor:pointer;padding:10px 16px;font-size:12px;
-  font-weight:600;letter-spacing:.4px;color:rgba(0,0,0,.55);
-  user-select:none;list-style:none}
-.detail-panel>summary::-webkit-details-marker{display:none}
-.detail-panel>summary::before{content:'▸';display:inline-block;margin-right:8px;
-  transition:transform .15s;color:rgba(0,0,0,.35)}
-.detail-panel[open]>summary::before{transform:rotate(90deg)}
-.detail-body{border-top:1px solid var(--border);padding:12px 16px 16px;
-  display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
-  gap:14px 28px}
-.detail-sec{min-width:0}
-.detail-wide{grid-column:1/-1}
-.detail-sec h4{margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:.6px;
-  text-transform:uppercase;color:rgba(0,0,0,.38)}
-.detail-env{max-height:280px;overflow:auto;border:1px solid var(--border);
-  border-radius:6px;padding:6px 10px;background:rgba(0,0,0,.015)}
+.report-context{margin:0 0 16px}
+.report-context h2{font-size:15px;margin:0 0 8px}
+.context-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.context-card{min-width:0;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px}
+.context-card h3{font-size:13px;margin:0 0 8px}
+.context-card pre,.report-sections .attachment pre{max-height:280px;overflow:auto;margin:0;padding:10px 12px;background:#f7f8fa;border:1px solid var(--border);border-radius:6px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
+.report-sections .attachment{margin:10px 0;border:1px solid var(--border);border-radius:8px;background:var(--card)}
+.report-sections .attachment summary{cursor:pointer;padding:10px 14px;font-weight:600}
+.report-sections .attachment pre{margin:0 12px 12px}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}
 .panel h3{margin:0 0 4px;font-size:15px;overflow-wrap:anywhere}
 .panel .cap{color:var(--sub);font-size:12px;margin-bottom:8px}
 .panel .box{height:280px;position:relative}
-.hint{margin-top:24px;color:var(--sub);font-size:12px}
 </style></head><body>
 <header>
   <h1 id="title"></h1><div class="sub" id="subtitle"></div>
 </header>
 <div class="kpi-stack" id="kpis"></div>
-<div class="meta-panel" id="meta"></div>
-<details id="detail" class="detail-panel">
-  <summary>实验详情 · 代码版本 / 数据集 / 参数 / 环境变量 / 数据源</summary>
-  <div class="detail-body" id="detail-body"></div>
-</details>
+__CONTEXT__
 <div class="grid" id="grid"></div>
-<div class="hint" id="hint">图例单击切换曲线；双击隔离曲线，只剩一条时双击恢复全显。每张图也有“全选”按钮。</div>
 <script>
 const SPEC = __SPEC_JSON__;
 document.getElementById('title').textContent = SPEC.summary.title;
-document.getElementById('subtitle').textContent = SPEC.summary.subtitle;
+const subtitle = SPEC.summary.subtitle;
+document.getElementById('subtitle').textContent = typeof subtitle === 'string'
+  ? subtitle : Object.entries(subtitle).map(([key,value])=>key+': '+value).join(' · ');
 const kb = document.getElementById('kpis');
 // KPI 两行（三层第二层）：每行最多 5 chip——第一行指标五连（发送 QPS /
 // 成功调度 / 错误率 / Gini / pacing），第二行结果五连（请求数量 / 成功 /
@@ -363,113 +359,6 @@ if (SPEC.summary.kpis.length)
     });
     kb.appendChild(row);
   }
-// 可见口径面板：时间轴口径 + 采样说明（口径标注纪律：必须直观可读；
-// 数据源/版本等溯源性质信息下沉 detail 折叠层，scale 由 subtitle 承担）。
-(function renderMeta(){
-  const meta = SPEC.meta;
-  const host = document.getElementById('meta');
-  if (!meta){ host.remove(); return; }
-  const div = (cls)=>{ const el=document.createElement('div'); el.className=cls; return el; };
-  const h4 = (t)=>{ const el=document.createElement('h4'); el.textContent=t; return el; };
-  const sec = div('meta-sec');
-  sec.appendChild(h4('时间轴口径'));
-  const box = div('meta-ta');
-  const t = meta.timeAxis;
-  if (t && typeof t.tEnd==='number' && t.tEnd>0){
-    const line=(html)=>{ const p=document.createElement('p'); p.innerHTML=html; box.appendChild(p); };
-    line(SPEC.timeOriginLabel || 't=0 = 压测正式开始（warmup 后）');
-    line('T_END=<b>'+t.tEnd+'s</b> 含收尾排空');
-    line('全部时序面板统一 <b>[0, '+t.tEnd+']</b>');
-    line('负值区间不显示，原始数据保留');
-  } else {
-    box.textContent='无统一时间轴（报告不含时序面板）';
-  }
-  if (meta.sampling){
-    const p=document.createElement('p'); p.textContent=meta.sampling; box.appendChild(p);
-  }
-  sec.appendChild(box); host.appendChild(sec);
-})();
-// detail 折叠层（三层第三层，默认收起）：代码版本 / 测试数据集 / 数据源 /
-// 实验参数全量 / FINAL ENV（client_env + flexlb_env）；scale 分区已删——
-// 与 subtitle 实验条件重复（20260902）。
-(function renderDetail(){
-  const meta = SPEC.meta;
-  const host = document.getElementById('detail');
-  const body = document.getElementById('detail-body');
-  if (!meta || !body){ if(host) host.remove(); return; }
-  const div = (cls)=>{ const el=document.createElement('div'); el.className=cls; return el; };
-  const h4 = (t)=>{ const el=document.createElement('h4'); el.textContent=t; return el; };
-  const addRow = (sec,k,v)=>{
-    const r=div('meta-row');
-    const kk=document.createElement('span'); kk.className='k'; kk.textContent=k; r.appendChild(kk);
-    const vv=document.createElement('span'); vv.className='v';
-    vv.textContent=(v==null||v==='')?'—（未提供）':String(v); r.appendChild(vv);
-    sec.appendChild(r);
-  };
-  // —— 分区一：代码版本（branch / commit；远端 rsync 树无 .git，由重聚合
-  //    命令经 FLEXLB_GIT_BRANCH/FLEXLB_GIT_COMMIT 注入 aggregate meta）——
-  const ver = meta.version||{};
-  const s1 = div('detail-sec'); s1.appendChild(h4('代码版本'));
-  addRow(s1,'branch',ver.branch); addRow(s1,'commit',ver.commit);
-  body.appendChild(s1);
-  // —— 分区二：测试数据集（trace 路径 / 行数 / sha256）——
-  const ds = meta.dataset||{};
-  const s2 = div('detail-sec'); s2.appendChild(h4('测试数据集'));
-  addRow(s2,'trace',ds.traceFile);
-  addRow(s2,'行数',ds.traceLines);
-  addRow(s2,'sha256',ds.traceSha256);
-  body.appendChild(s2);
-  // —— 分区三：数据源（绝对路径；engine_dist 内嵌于 aggregate 时标注）——
-  const so = meta.sources||{};
-  const s3 = div('detail-sec'); s3.appendChild(h4('数据源'));
-  addRow(s3,'aggregate',so.aggregate);
-  addRow(s3,'engine_dist',so.engineDist);
-  addRow(s3,'run 目录',so.runDir);
-  body.appendChild(s3);
-  // —— 分区四：实验参数全量（run_meta.params：拓扑/端口/容量/JVM/配置
-  //    文件路径等；键排序 + 限高滚动，flexlb_config 长值完整保留）——
-  const s4 = div('detail-sec detail-wide'); s4.appendChild(h4('实验参数（run_meta.params）'));
-  const params = meta.params;
-  if (params && Object.keys(params).length){
-    const envBox = div('detail-env');
-    Object.keys(params).sort().forEach(k=>{
-      const r=div('meta-row');
-      const kk=document.createElement('span'); kk.className='k'; kk.textContent=k;
-      const vv=document.createElement('span'); vv.className='v';
-      vv.textContent=String(params[k]);
-      r.appendChild(kk); r.appendChild(vv); envBox.appendChild(r);
-    });
-    s4.appendChild(envBox);
-  } else {
-    const r=div('meta-row'); r.textContent='—（未提供）'; s4.appendChild(r);
-  }
-  body.appendChild(s4);
-  // —— 分区五：环境变量 FINAL ENV（JavaLoadClient client_env + FlexLB
-  //    flexlb_env 快照，consolidate 阶段嵌入 run_meta.json）——
-  const env = meta.env||{};
-  const s5 = div('detail-sec detail-wide'); s5.appendChild(h4('环境变量（FINAL ENV）'));
-  const envRender=(title,data)=>{
-    if (!data || !Object.keys(data).length) return;
-    const sub=div('detail-env');
-    const st=document.createElement('div'); st.className='meta-row';
-    const sk=document.createElement('span'); sk.className='k'; sk.textContent=title;
-    st.appendChild(sk); sub.appendChild(st);
-    Object.keys(data).sort().forEach(k=>{
-      const r=div('meta-row');
-      const kk=document.createElement('span'); kk.className='k'; kk.textContent=k;
-      const vv=document.createElement('span'); vv.className='v';
-      vv.textContent=String(data[k]);
-      r.appendChild(kk); r.appendChild(vv); sub.appendChild(r);
-    });
-    s5.appendChild(sub);
-  };
-  envRender('JavaLoadClient（client_env.json）', env.clientEnv);
-  envRender('FlexLB（flexlb_env.txt）', env.flexlbEnv);
-  if (!s5.querySelector('.detail-env')){
-    const r=div('meta-row'); r.textContent='—（未提供）'; s5.appendChild(r);
-  }
-  body.appendChild(s5);
-})();
 // y 轴自适应：只按 legend 可见系列重算 max（beginAtZero），legend/双击后 update()。
 // 时间轴面板数据点为 {x, y}（linear x 轴），此处兼容两种形态。
 // 图例手势由 legend_interaction.js 统一处理；本层只负责曲线和 y 轴。
@@ -591,11 +480,5 @@ SPEC.panels.forEach(p=>{
     wrap.appendChild(btn);
   }
 });
-if (TIME_AXIS){
-  // 页脚时间轴口径声明（与头部元数据面板标注一致，防止报告被断章取义）
-  const note=document.createElement('div');
-  note.textContent='时间轴口径：'+(SPEC.timeOriginLabel || 't=0 = 压测正式开始（warmup 后）')+'；T_END='+TA_MAX+'s = 全部时序面板最后采样点（含收尾排空）；全部时序面板 x 轴统一 ['+TA_MIN+', '+TA_MAX+']，轴范围外不显示，原始数据保留。';
-  document.getElementById('hint').appendChild(note);
-}
 </script>__SECTIONS__</body></html>
 """

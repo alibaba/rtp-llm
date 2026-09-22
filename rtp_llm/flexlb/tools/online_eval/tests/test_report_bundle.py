@@ -17,10 +17,38 @@ from reporting import (
     table,
 )
 from reporting.statistics import select_window, counter_delta
+from reporting.renderer import render_context, render_sections
 from workload.report import write_report
 
 
 class ReportBundleTest(unittest.TestCase):
+    def test_common_context_uses_actual_runs_and_omits_missing_fields(self):
+        spec = {"run_meta": run_meta(
+            {"id": "comparison"},
+            runs={
+                "old": run_meta({"id": "old"}, implementation={"master": {"source_commit": "abc"}}, workload=None),
+                "new": run_meta({"id": "new"}, implementation={"master": {"source_commit": "def"}}, workload={"sha256": "trace"}),
+            },
+        )}
+        rendered = render_context(spec)
+        self.assertIn('>old</h3>', rendered)
+        self.assertIn('>new</h3>', rendered)
+        self.assertIn('&quot;source_commit&quot;: &quot;abc&quot;', rendered)
+        self.assertIn('&quot;source_commit&quot;: &quot;def&quot;', rendered)
+        self.assertNotIn('null', rendered)
+        self.assertNotIn('未提供', rendered)
+        self.assertNotIn('schema_version', rendered)
+        self.assertEqual(render_context({"meta": {"version": {"branch": None}}}), "")
+
+    def test_freeform_subtitle_and_scrollable_evidence(self):
+        page = render({"title": "实验 A", "subtitle": {"流量": "240 QPS", "结论": "PASS"}})
+        self.assertIn('"流量": "240 QPS"', page)
+        self.assertIn('"结论": "PASS"', page)
+        self.assertNotIn('id="hint"', page)
+        self.assertNotIn('id="meta"', page)
+        self.assertIn('class="attachment"', render_sections([details("证据", {"a": 1})]))
+        self.assertIn('max-height:280px;overflow:auto', page)
+
     def test_overlay_preserves_old_new_line_styles(self):
         html = render({
             "title": "A/B",

@@ -222,6 +222,10 @@ class CacheGateTest(unittest.TestCase):
             report_spec = json.loads((Path(d) / "from-dirs/reports/comparison/cache-scale-in-ab/report-spec.json").read_text())
             self.assertEqual(report_spec["panels"][0]["id"], "ab-overlay")
             self.assertEqual(len(report_spec["panels"]), 3)
+            runs = report_spec["run_meta"]["runs"]
+            self.assertEqual(set(runs), {"old", "new"})
+            self.assertEqual(runs["old"]["implementation"]["master"]["source_commit"], "0" * 40)
+            self.assertEqual(runs["new"]["implementation"]["master"]["source_commit"], "1" * 40)
             overlay = report_spec["panels"][0]
             expected_core = {
                 f"{side} · {metric}"
