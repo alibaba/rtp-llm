@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 class CudaFp8DeepGEMMLinear(LinearBase):
     """CUDA FP8 DeepGEMM quantized Linear"""
 
+    supports_deferred_bias = True
+    supports_fused_bias_gelu_quant = True
+    supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
+
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
 
@@ -70,7 +75,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check if DeepGEMM is available
         if not has_deep_gemm():
-            error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+            error_msg = (
+                "DeepGEMM is not available. Please install the `deep_gemm` "
+                "package to enable DeepGEMM kernels."
+            )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         # Check weight and weight scale dimensions
@@ -262,6 +270,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         input_fp8: torch.Tensor,
         input_scales: torch.Tensor,
         out: Optional[torch.Tensor] = None,
+        apply_bias: bool = True,
     ) -> torch.Tensor:
         """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
         if input_fp8.dtype != torch.float8_e4m3fn:
@@ -277,8 +286,13 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             c=None,
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
-        if self.bias is not None:
-            output.add_(self.bias.to(output.dtype))
+        if apply_bias and self.bias is not None:
+            if output.is_cuda:
+                from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+                rtp_llm_ops.fused_bias_add(output, self.bias.to(output.dtype))
+            else:
+                output.add_(self.bias.to(output.dtype))
         return output
 
     def forward(
@@ -289,3 +303,51 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Prepare output tensor
         return self.forward_quantized(input_fp8, input_scales, out=out)
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        input_fp8, input_scales = self.quantize_input(input)
+        return self.forward_quantized(input_fp8, input_scales, apply_bias=False)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        output = self.forward_without_bias(input)
+        if self.bias is None:
+            return torch.nn.functional.gelu(output)
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        rtp_llm_ops.fused_bias_gelu(output, self.bias.to(output.dtype))
+        return output
+
+    def forward_with_bias_gelu_quantized(
+        self, input: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
+            return None
+        output = self.forward_without_bias(input)
+        return self._bias_gelu_quantize_output(output)
+
+    def _bias_gelu_quantize_output(
+        self, output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        output_fp8 = torch.empty_like(output, dtype=torch.float8_e4m3fn)
+        output_scales = create_per_token_group_quant_fp8_output_scale(
+            x_shape=output.shape,
+            device=output.device,
+            group_size=128,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        rtp_llm_ops.fused_bias_gelu_quant_fp8(
+            output, self.bias.to(output.dtype), output_fp8, output_scales
+        )
+        return output_fp8, output_scales
+
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
+            return None
+        output = self.forward_quantized(input, input_scales, apply_bias=False)
+        return self._bias_gelu_quantize_output(output)
