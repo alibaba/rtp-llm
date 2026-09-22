@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.discovery.LocalServiceDiscovery;
+import org.flexlb.enums.EngineType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
@@ -173,7 +174,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 statusCheckExecutor,
                 healthReporter,
                 engineGrpcService,
-                RoleType.PREFILL,
+                RoleType.PREFILL, EngineType.LLM,
                 cacheAwareService,
                 cacheIntervalService,
                 5_000L,
@@ -184,7 +185,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
 
         EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(
                 MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor,
-                healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
+                healthReporter, engineGrpcService, RoleType.DECODE, EngineType.LLM, cacheAwareService,
                 cacheIntervalService, 5_000L, new LongAdder(), 1L, false, STATUS_STALE_AFTER_US);
 
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {

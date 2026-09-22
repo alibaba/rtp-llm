@@ -63,10 +63,11 @@ class DispatchConfigTest {
     @Test
     void nativePropertiesAndEnvironmentCredentialUseOneValidatedConfiguration() {
         assertTrue(assertThrows(IllegalArgumentException.class,
-                () -> load(Map.of("dispatch.fe-pool-service-id", "fe")))
+                () -> load(Map.of()))
                 .getMessage().contains("DISPATCH_ROUTING_TOKEN"));
         credentials.set("DISPATCH_ROUTING_TOKEN", "secret");
-        DispatchConfig defaults = load(Map.of("dispatch.fe-pool-service-id", "fe"));
+        DispatchConfig defaults = load(Map.of());
+        assertEquals("", defaults.getFePoolServiceId());
         assertEquals("count:5", defaults.getSubBatch());
         assertTrue(defaults.isPreAssignBe());
         assertEquals("/frontend_health", defaults.getProbePath());

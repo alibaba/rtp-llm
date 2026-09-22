@@ -1,21 +1,28 @@
 package org.flexlb.dispatcher;
 
 import io.netty.channel.ChannelOption;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.util.Assert;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import reactor.netty.http.client.HttpClient;
@@ -23,10 +30,12 @@ import reactor.netty.resources.ConnectionProvider;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.Callable;
 
-/** Dispatcher configuration and isolated HTTP connection pools; enabled by the FE discovery name. */
+/** Lazy HTTP ingress resources, enabled only through FLEXLB_CONFIG.httpDispatcher.enabled. */
 @Configuration
-@ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
+@Lazy
 public class DispatcherConfiguration {
 
     static final int FE_CONNECT_TIMEOUT_MS = 1000;
@@ -58,7 +67,6 @@ public class DispatcherConfiguration {
     }
 
     private static void validate(DispatchConfig c) {
-        Assert.hasText(c.getFePoolServiceId(), "dispatch.fe-pool-service-id must name the FE discovery service");
         Assert.hasText(c.getProbePath(), "dispatch.probe-path must not be blank");
         URI probe = URI.create(c.getProbePath());
         Assert.isTrue(c.getProbePath().startsWith("/") && probe.getRawAuthority() == null && probe.getRawFragment() == null,
@@ -108,12 +116,28 @@ public class DispatcherConfiguration {
     }
 
     @Bean
-    public RouterFunction<ServerResponse> dispatcherRoutes(DispatchRouter router) {
-        return router.routes();
+    public RouterFunction<ServerResponse> dispatcherRoutes(ConfigService configService,
+                                                           ObjectProvider<DispatchRouter> router) {
+        // Inspect the typed config before creating HTTP clients, discovery tasks or validating credentials.
+        return configService.loadBalanceConfig().getHttpDispatcher().isEnabled()
+                ? router.getObject().routes() : request -> Mono.empty();
     }
 
     @Bean
-    SmartInitializingSingleton dispatcherBootLog(DispatchConfig cfg) {
-        return () -> Logger.info("dispatcher enabled: {}", JsonUtils.toString(cfg));
+    public FePool fePool(DispatchConfig cfg, ServiceDiscovery discovery,
+                         WorkerAddressService workerAddresses, ModelMetaConfig model,
+                         @Qualifier("dispatcherProbeWebClient") WebClient probeClient,
+                         DispatcherMetricsReporter metrics) {
+        Callable<List<WorkerHost>> lookup = () -> discovery.getHosts(cfg.getFePoolServiceId());
+        if (cfg.getFePoolServiceId().isBlank()) {
+            List<RoleType> roles = model.requiredRoles().stream().filter(role -> role != RoleType.VIT).toList();
+            Assert.isTrue(roles.size() == 1,
+                    "set DISPATCH_FE_POOL_SERVICE_ID when the worker HTTP ingress is ambiguous");
+            RoleType role = roles.getFirst();
+            lookup = () -> workerAddresses.getEngineWorkerList(model.modelName(), role);
+            Logger.info("dispatcher FE discovery reuses worker HTTP endpoints: model={}, role={}", model.modelName(), role);
+        }
+        Logger.info("dispatcher enabled: {}", JsonUtils.toString(cfg));
+        return new FePool(discovery, probeClient, cfg, metrics, lookup);
     }
 }

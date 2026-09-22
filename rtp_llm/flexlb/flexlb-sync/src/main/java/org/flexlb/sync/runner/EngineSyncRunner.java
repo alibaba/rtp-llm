@@ -8,6 +8,7 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.enums.EngineType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -46,6 +47,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final RoleType roleType;
 
+    private final EngineType engineType;
+
     private final CacheAwareService cacheAwareService;
 
     private final DynamicCacheIntervalService cacheIntervalService;
@@ -67,6 +70,7 @@ public class EngineSyncRunner implements Runnable {
                             EngineHealthReporter engineHealthReporter,
                             EngineGrpcService engineGrpcService,
                             RoleType roleType,
+                            EngineType engineType,
                             CacheAwareService cacheAwareService,
                             DynamicCacheIntervalService cacheIntervalService,
                             long syncRequestTimeoutMs,
@@ -83,6 +87,7 @@ public class EngineSyncRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
+        this.engineType = engineType;
         this.cacheAwareService = Objects.requireNonNull(
                 cacheAwareService, "cacheAwareService");
         this.cacheIntervalService = Objects.requireNonNull(
@@ -144,6 +149,11 @@ public class EngineSyncRunner implements Runnable {
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(
                         workerIpPort, site, host.getGroup());
+
+                // ARPC workers share discovery generations, but cannot publish LLM gRPC status or capacity.
+                if (engineType == EngineType.EMBEDDING) {
+                    continue;
+                }
 
                 if (!workerStatus.isActiveGeneration()) {
                     logger.debug(
@@ -224,7 +234,7 @@ public class EngineSyncRunner implements Runnable {
                     : currentStatuses.entrySet()) {
                 String workerIpPort = entry.getKey();
                 WorkerStatus workerStatus = entry.getValue();
-                if (!workerStatus.isActiveGeneration()) {
+                if (engineType == EngineType.EMBEDDING || !workerStatus.isActiveGeneration()) {
                     continue;
                 }
                 WorkerStatus.EngineObservation statusSnapshot =
@@ -389,7 +399,7 @@ public class EngineSyncRunner implements Runnable {
                 return;
             }
             WorkerStatus.PollHealth health = workerStatus.pollHealth();
-            if (System.nanoTime() / 1000
+            if (engineType == EngineType.LLM && System.nanoTime() / 1000
                     - health.lastSuccessfulPollUs()
                     <= statusStaleAfterUs) {
                 return;

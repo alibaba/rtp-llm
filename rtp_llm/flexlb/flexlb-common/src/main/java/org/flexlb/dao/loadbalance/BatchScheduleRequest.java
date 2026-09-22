@@ -19,7 +19,18 @@ public class BatchScheduleRequest {
     /** Number of master forwards; omitted by existing callers and therefore initially zero. */
     private int forwardHop;
 
-    private boolean assignBe = true;
+    /** Existing RTP callers request workers only; Dispatcher explicitly requests FEs. */
+    private AllocationType allocationType = AllocationType.BE;
 
-    private boolean assignFe = true;
+    public enum AllocationType {
+        BE, FE, FE_AND_BE;
+
+        public boolean includesBe() {
+            return this == BE || this == FE_AND_BE;
+        }
+
+        public boolean includesFe() {
+            return this == FE || this == FE_AND_BE;
+        }
+    }
 }

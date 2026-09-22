@@ -1,7 +1,7 @@
 package org.flexlb.dispatcher;
 
 import lombok.RequiredArgsConstructor;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RequestPredicates;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -10,7 +10,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 
 @Component
 @RequiredArgsConstructor
-@ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
+@Lazy
 public class DispatchRouter {
 
     private final BatchHandler batchHandler;

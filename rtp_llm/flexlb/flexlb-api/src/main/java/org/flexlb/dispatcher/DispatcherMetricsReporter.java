@@ -5,7 +5,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -22,7 +22,7 @@ import static org.flexlb.constant.MetricConstant.DISPATCHER_FEPOOL_SIZE;
 /** Dispatcher KMonitor metrics with cached, bounded tag sets. Hosts and raw errors belong in logs. */
 @Component
 @RequiredArgsConstructor
-@ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
+@Lazy
 public class DispatcherMetricsReporter {
 
     public static final String CHUNK_OK = "ok";

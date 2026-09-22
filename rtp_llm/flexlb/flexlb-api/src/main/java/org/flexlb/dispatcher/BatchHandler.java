@@ -7,6 +7,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest.AllocationType;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -15,7 +16,7 @@ import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.ServerRequest;
@@ -30,7 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.flexlb.dispatcher.FanoutService.MAX_AGGREGATE_BYTES;
 
 @Component
-@ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
+@Lazy
 public class BatchHandler {
 
     private final DispatchConfig cfg;
@@ -154,10 +155,9 @@ public class BatchHandler {
                     }
                     List<BatchScheduleTarget> targets = allocation.getServerStatus();
                     List<JSONObject> chunkBodies = batch.chunks(assignBe ? targets : List.of());
-                    List<String> preAssignedFeUrls = targets.stream().map(BatchScheduleTarget::getFeUrl).toList();
                     return fanoutService.dispatchChunks(
                                     spec == BatchEndpointSpec.ROOT ? BatchEndpointSpec.BATCH_INFER.getPath() : spec.getPath(), chunkBodies,
-                                    preAssignedFeUrls, spec,
+                                    allocation.getFrontendUrls(), spec,
                                     request.headers().asHttpHeaders(),
                                     request.uri().getRawQuery())
                             .publishOn(cpuScheduler)
@@ -187,8 +187,8 @@ public class BatchHandler {
             int chunkCount, boolean assignBe) {
         BatchScheduleRequest request = new BatchScheduleRequest();
         request.setBatchCount(chunkCount);
-        request.setAssignBe(assignBe);
-        request.setAssignFe(true);
+        // Every chunk goes to an FE; optional BE placement does not change its HTTP destination.
+        request.setAllocationType(assignBe ? AllocationType.FE_AND_BE : AllocationType.FE);
         return batchScheduleCoordinator.schedule(request);
     }
 }

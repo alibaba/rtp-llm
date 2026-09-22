@@ -2,6 +2,8 @@ package org.flexlb.service;
 
 import com.google.common.util.concurrent.RateLimiter;
 import org.flexlb.balance.strategy.RoundRobinLoadBalancer;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -36,6 +38,7 @@ public class BatchScheduleCoordinator {
     private final LBStatusConsistencyService consistency;
     private final WebClient webClient;
     private final EngineHealthReporter engineHealthReporter;
+    private final FlexlbConfig config;
     /** A dead/unknown master fails every forwarded batch request; cap the ERROR stream at 1/s. */
     private final RateLimiter masterUnreachableWarn = RateLimiter.create(1);
 
@@ -43,7 +46,8 @@ public class BatchScheduleCoordinator {
                                     LBStatusConsistencyService consistency,
                                     WebClient.Builder webClientBuilder,
                                     EngineHealthReporter engineHealthReporter,
-                                    ObjectProvider<FePool> fePoolProvider) {
+                                    ObjectProvider<FePool> fePoolProvider,
+                                    ConfigService configService) {
         this.fePoolProvider = fePoolProvider;
         this.batchScheduler = batchScheduler;
         this.consistency = consistency;
@@ -51,10 +55,20 @@ public class BatchScheduleCoordinator {
                 .codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
                 .build();
         this.engineHealthReporter = engineHealthReporter;
+        this.config = configService.loadBalanceConfig();
     }
 
     public Mono<BatchScheduleResponse> schedule(BatchScheduleRequest request) {
         return Mono.defer(() -> {
+            int maxCount = config.getRouter().getBatchScheduleMaxCount();
+            if (request == null || request.getBatchCount() < 1 || request.getBatchCount() > maxCount) {
+                return Mono.just(BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                        "batch_count must be in [1, " + maxCount + "]"));
+            }
+            if (request.getAllocationType() == null) {
+                return Mono.just(BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                        "allocation_type must be BE, FE or FE_AND_BE"));
+            }
             if (consistency.isNeedConsistency() && !consistency.isMaster()) {
                 return forwardToMaster(request);
             }
@@ -73,17 +87,21 @@ public class BatchScheduleCoordinator {
         if (!response.isSuccess()) {
             return response;
         }
+        List<String> urls = response.getFrontendUrls();
+        boolean valid = !request.getAllocationType().includesFe() || (urls != null && urls.size() == request.getBatchCount()
+                && urls.stream().allMatch(url -> url != null && !url.isBlank()));
         List<BatchScheduleTarget> targets = response.getServerStatus();
-        boolean valid = targets != null && targets.size() == request.getBatchCount();
-        if (valid) {
+        if (request.getAllocationType().includesBe()) {
+            valid &= targets != null && targets.size() == request.getBatchCount();
+        }
+        if (valid && request.getAllocationType().includesBe()) {
             for (BatchScheduleTarget target : targets) {
                 if (target == null
-                        || (request.isAssignFe() && (target.getFeUrl() == null || target.getFeUrl().isBlank()))
-                        || (request.isAssignBe() && (target.getRole() == null
-                            || target.getServerIp() == null || target.getServerIp().isBlank()
-                            || target.getHttpPort() <= 0
-                            || !((target.getGrpcPort() != null && target.getGrpcPort() > 0)
-                                ^ (target.getArpcPort() != null && target.getArpcPort() > 0))))) {
+                        || target.getRole() == null
+                        || target.getServerIp() == null || target.getServerIp().isBlank()
+                        || target.getHttpPort() <= 0
+                        || !((target.getGrpcPort() != null && target.getGrpcPort() > 0)
+                            ^ (target.getArpcPort() != null && target.getArpcPort() > 0))) {
                     valid = false;
                     break;
                 }
@@ -123,8 +141,7 @@ public class BatchScheduleCoordinator {
 
         BatchScheduleRequest forwarded = new BatchScheduleRequest();
         forwarded.setBatchCount(request.getBatchCount());
-        forwarded.setAssignBe(request.isAssignBe());
-        forwarded.setAssignFe(request.isAssignFe());
+        forwarded.setAllocationType(request.getAllocationType());
         forwarded.setForwardHop(Math.toIntExact(incomingHop + 1));
         Logger.debug("[BatchSchedule] Forwarding to master {}: batchCount={}", master, request.getBatchCount());
         return webClient.post().uri(uri.resolve("/rtp_llm/batch_schedule"))
@@ -158,33 +175,32 @@ public class BatchScheduleCoordinator {
 
     private Mono<BatchScheduleResponse> resolveLocally(BatchScheduleRequest request,
                                                        String electedMaster) {
-        return batchScheduler.schedule(request)
+        // FE-only dispatch never enters worker placement or depends on BE topology/readiness.
+        Mono<BatchScheduleResponse> workers = request.getAllocationType().includesBe()
+                ? batchScheduler.schedule(request.getBatchCount())
+                : Mono.just(BatchScheduleResponse.success(List.of()));
+        return workers
                 .map(response -> {
                     BatchScheduleResponse completed = response;
-                    if (response.isSuccess() && request.isAssignFe()) {
-                        completed = assignFrontends(response);
+                    if (response.isSuccess() && request.getAllocationType().includesFe()) {
+                        completed = assignFrontends(response, request.getBatchCount());
                     }
                     completed.setRealMasterHost(electedMaster);
                     return completed;
                 });
     }
 
-    private BatchScheduleResponse assignFrontends(BatchScheduleResponse response) {
-        FePool pool = fePoolProvider.getIfAvailable();
+    private BatchScheduleResponse assignFrontends(BatchScheduleResponse response, int count) {
+        FePool pool = config.getHttpDispatcher().isEnabled() ? fePoolProvider.getIfAvailable() : null;
         if (pool == null) {
             return BatchScheduleResponse.error(StrategyErrorType.NO_AVAILABLE_WORKER,
                     "no FE pool configured");
         }
-        List<BatchScheduleTarget> targets = response.getServerStatus();
-        final List<String> urls;
         try {
-            urls = pool.nextBatch(targets.size());
+            response.setFrontendUrls(pool.nextBatch(count));
         } catch (IllegalStateException emptyPool) {
             return BatchScheduleResponse.error(StrategyErrorType.NO_AVAILABLE_WORKER,
                     "no FE endpoints available");
-        }
-        for (int i = 0; i < targets.size(); i++) {
-            targets.get(i).setFeUrl(urls.get(i));
         }
         return response;
     }

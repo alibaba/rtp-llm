@@ -4,11 +4,7 @@ import com.google.common.util.concurrent.RateLimiter;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
@@ -20,6 +16,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -33,8 +30,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 
 /** Owns FE membership, HTTP health and round-robin selection over immutable snapshots. */
-@Component
-@ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class FePool {
     /** Retain the last nonempty discovery snapshot for five minutes; health probes continue. */
     private static final long DISCOVERY_FAILURE_GRACE_NANOS = TimeUnit.MINUTES.toNanos(5);
@@ -45,6 +40,7 @@ public class FePool {
     private final DispatcherMetricsReporter metrics;
     private final LongSupplier clock;
     private final long lookupTimeoutMs;
+    private final Callable<List<WorkerHost>> hostLookup;
     private final AtomicReference<List<String>> urls = new AtomicReference<>(List.of());
     private final ConcurrentHashMap<String, AtomicInteger> failures = new ConcurrentHashMap<>();
     private final AtomicLong cursor = new AtomicLong();
@@ -56,25 +52,28 @@ public class FePool {
     private final ExecutorService lookups = new ThreadPoolExecutor(0, 2, 60, TimeUnit.SECONDS,
             new SynchronousQueue<>(), Thread.ofPlatform().daemon().name("dispatcher-fe-discovery-", 0).factory());
 
-    @Autowired
-    public FePool(ServiceDiscovery discovery, @Qualifier("dispatcherProbeWebClient") WebClient probeClient,
-                  DispatchConfig cfg, DispatcherMetricsReporter metrics) {
-        this(discovery, probeClient, cfg, metrics, System::nanoTime, 3000);
+    public FePool(ServiceDiscovery discovery, WebClient probeClient,
+                  DispatchConfig cfg, DispatcherMetricsReporter metrics, Callable<List<WorkerHost>> hostLookup) {
+        this(discovery, probeClient, cfg, metrics, hostLookup, System::nanoTime, 3000);
     }
 
     FePool(ServiceDiscovery discovery, WebClient probeClient, DispatchConfig cfg,
-           DispatcherMetricsReporter metrics, LongSupplier clock, long lookupTimeoutMs) {
+           DispatcherMetricsReporter metrics, Callable<List<WorkerHost>> hostLookup, LongSupplier clock, long lookupTimeoutMs) {
         this.discovery = discovery;
         this.probeClient = probeClient;
         this.cfg = cfg;
         this.metrics = metrics;
         this.clock = clock;
         this.lookupTimeoutMs = lookupTimeoutMs;
+        this.hostLookup = hostLookup;
     }
 
     @PostConstruct
     public void start() {
         refresh();
+        if (cfg.getFePoolServiceId().isBlank()) {
+            return;
+        }
         try {
             discovery.listen(cfg.getFePoolServiceId(), this::update);
         } catch (Exception error) {
@@ -86,7 +85,7 @@ public class FePool {
     public void refresh() {
         Future<List<WorkerHost>> lookup = null;
         try {
-            lookup = lookups.submit(() -> discovery.getHosts(cfg.getFePoolServiceId()));
+            lookup = lookups.submit(hostLookup);
             update(lookup.get(lookupTimeoutMs, TimeUnit.MILLISECONDS));
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();

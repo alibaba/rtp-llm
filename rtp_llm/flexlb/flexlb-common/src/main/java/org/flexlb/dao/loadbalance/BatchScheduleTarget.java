@@ -12,7 +12,10 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
 import org.flexlb.util.CommonUtils;
 
-/** Scheduled worker target: EMBEDDING exposes ARPC, LLM exposes gRPC. */
+/**
+ * Worker placement in server_status: EMBEDDING exposes ARPC, LLM exposes gRPC.
+ * FE HTTP destinations are returned separately in BatchScheduleResponse.frontendUrls.
+ */
 @Getter
 @Setter
 @ToString
@@ -31,8 +34,6 @@ public class BatchScheduleTarget {
     private Integer arpcPort;
 
     private RoleType role;
-
-    private String feUrl;
 
     public static BatchScheduleTarget of(WorkerHost worker, RoleType role, EngineType engineType) {
         BatchScheduleTarget target = new BatchScheduleTarget();

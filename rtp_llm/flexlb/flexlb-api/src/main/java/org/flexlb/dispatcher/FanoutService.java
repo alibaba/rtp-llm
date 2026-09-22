@@ -4,7 +4,7 @@ import com.alibaba.fastjson2.JSONObject;
 import com.google.common.util.concurrent.RateLimiter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -16,7 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Component
-@ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
+@Lazy
 public class FanoutService {
 
     /** Independent per-batch ceilings for outbound requests and retained FE responses. */

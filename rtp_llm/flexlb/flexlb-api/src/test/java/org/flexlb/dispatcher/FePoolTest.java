@@ -1,8 +1,11 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
+import org.flexlb.service.address.WorkerAddressService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -29,6 +32,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @Timeout(10)
@@ -46,8 +50,26 @@ class FePoolTest {
     }
 
     private FePool create(WebClient client) {
-        pool = new FePool(discovery, client, cfg, DispatcherTestSupport.noopMetrics(), clock::get, 50);
+        cfg.setFePoolServiceId("fe");
+        pool = new FePool(discovery, client, cfg, DispatcherTestSupport.noopMetrics(),
+                () -> discovery.getHosts(cfg.getFePoolServiceId()), clock::get, 50);
         return pool;
+    }
+
+    @Test
+    void ambiguousWorkerIngressRequiresAnExplicitFrontendService() {
+        ModelMetaConfig model = mock(ModelMetaConfig.class);
+        WorkerAddressService workers = mock(WorkerAddressService.class);
+        when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
+        DispatcherConfiguration configuration = new DispatcherConfiguration();
+        assertThrows(IllegalArgumentException.class, () -> configuration.fePool(cfg, discovery, workers, model,
+                WebClient.create(), DispatcherTestSupport.noopMetrics()));
+        cfg.setFePoolServiceId("fe");
+        when(discovery.getHosts("fe")).thenReturn(List.of(WorkerHost.of("independent-fe", 8088)));
+        pool = configuration.fePool(cfg, discovery, workers, model, WebClient.create(), DispatcherTestSupport.noopMetrics());
+        pool.start();
+        assertEquals("http://independent-fe:8088", pool.next());
+        verifyNoInteractions(workers);
     }
 
     @ParameterizedTest

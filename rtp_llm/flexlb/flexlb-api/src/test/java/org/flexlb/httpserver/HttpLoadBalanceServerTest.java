@@ -8,10 +8,14 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
+import org.flexlb.enums.EngineType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
@@ -23,8 +27,9 @@ import static org.mockito.Mockito.when;
 
 class HttpLoadBalanceServerTest {
 
-    @Test
-    void masterInfoUsesCanonicalSchedulerQueueDepth() {
+    @ParameterizedTest
+    @EnumSource(EngineType.class)
+    void masterInfoUsesCanonicalSchedulerQueueDepth(EngineType engineType) {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         ConfigService configService = mock(ConfigService.class);
         RequestScheduler scheduler = mock(RequestScheduler.class);
@@ -33,13 +38,19 @@ class HttpLoadBalanceServerTest {
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
         when(scheduler.getQueuedRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
+        FlexlbConfig config = new FlexlbConfig();
+        config.getWorkerRegistry().setEngineType(engineType);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        WorkerDirectory directory = new WorkerDirectory(endpointRegistry);
+        directory.currentOrDiscover(RoleType.PDFUSION, "10.0.0.1:8000",
+                () -> WorkerStatus.createDiscovered(RoleType.PDFUSION, "", "10.0.0.1", 8000, 8001, ""));
 
         HttpLoadBalanceServer server = new HttpLoadBalanceServer(
                 consistency,
                 configService,
                 scheduler,
                 endpointRegistry,
-                mock(WorkerDirectory.class),
+                directory,
                 synchronizer,
                 new ServerScheduleLatencyRecorder(),
                 mock(org.flexlb.service.BatchScheduleCoordinator.class),
@@ -58,7 +69,10 @@ class HttpLoadBalanceServerTest {
                 .expectBody()
                 .jsonPath("$.queue_length").isEqualTo(7)
                 .jsonPath("$.real_master_host").isEqualTo("127.0.0.1:7001")
-                .jsonPath("$.ready").isEqualTo(true);
+                .jsonPath("$.ready").isEqualTo(true)
+                .jsonPath("$.worker_summary." + RoleType.PDFUSION.getCode() + ".discovered").isEqualTo(1)
+                .jsonPath("$.worker_summary." + RoleType.PDFUSION.getCode() + ".alive")
+                    .isEqualTo(engineType == EngineType.EMBEDDING ? 1 : 0);
 
         verify(scheduler).getQueuedRequestCount();
     }

@@ -6,6 +6,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +41,7 @@ public class ExpirationCleaner {
     private final long workerTimeoutUs;
     private final CacheAwareService cacheAwareService;
     private final WorkerDirectory workerDirectory;
+    private final EngineType engineType;
 
     @Autowired
     public ExpirationCleaner(
@@ -51,6 +53,7 @@ public class ExpirationCleaner {
         this.workerDirectory = Objects.requireNonNull(
                 workerDirectory, "workerDirectory");
         this.workerTimeoutUs = resolveWorkerTimeoutUs(configService);
+        this.engineType = configService.loadBalanceConfig().getWorkerRegistry().getEngineType();
     }
 
     /**
@@ -69,6 +72,10 @@ public class ExpirationCleaner {
 
     @Scheduled(fixedRateString = "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
     public void cleanExpiredWorkers() {
+        // ARPC membership expires through discovery reconciliation, not LLM status polling.
+        if (engineType == EngineType.EMBEDDING) {
+            return;
+        }
         List<PendingRetirement> retirements = new ArrayList<>();
         for (RoleType role : RoleType.values()) {
             retirements.addAll(beginExpiredRetirements(

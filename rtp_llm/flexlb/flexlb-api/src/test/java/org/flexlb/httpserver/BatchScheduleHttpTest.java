@@ -4,9 +4,13 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest.AllocationType;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -44,18 +48,33 @@ class BatchScheduleHttpTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"false,true", "true,false", "true,true", ",true"})
-    void completedAllocationIsSerializedWithoutRestamping(Boolean assignBe, boolean assignFe) {
-        BatchScheduleTarget target = new BatchScheduleTarget();
-        target.setFeUrl("http://master-selected-fe");
-        when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target))));
-        client.post().uri("/rtp_llm/batch_schedule").contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(assignBe == null ? "{\"batch_count\":1}" : String.format(
-                        "{\"batch_count\":1,\"assign_be\":%s,\"assign_fe\":%s}", assignBe, assignFe))
-                .exchange().expectStatus().isOk().expectBody()
-                .jsonPath("$.server_status[0].fe_url").isEqualTo("http://master-selected-fe");
+    @CsvSource({"FE,false,true", "BE,true,false", "FE_AND_BE,true,true", ",true,false"})
+    void completedAllocationIsSerializedWithoutRestamping(AllocationType type, boolean be, boolean fe) {
+        BatchScheduleTarget target = BatchScheduleTarget.of(new WorkerHost("10.0.0.9", 8000), RoleType.PDFUSION, EngineType.LLM);
+        BatchScheduleResponse allocation = BatchScheduleResponse.success(be ? List.of(target) : List.of());
+        if (fe) {
+            allocation.setFrontendUrls(List.of("http://master-selected-fe"));
+        }
+        when(coordinator.schedule(any())).thenReturn(Mono.just(allocation));
+        var response = client.post().uri("/rtp_llm/batch_schedule").contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(type == null ? "{\"batch_count\":1}" : String.format(
+                        "{\"batch_count\":1,\"allocation_type\":\"%s\"}", type))
+                .exchange().expectStatus().isOk().expectBody();
+        if (be) {
+            response.jsonPath("$.server_status[0].server_ip").isEqualTo("10.0.0.9")
+                    .jsonPath("$.server_status[0].http_port").isEqualTo(8000)
+                    .jsonPath("$.server_status[0].grpc_port").isEqualTo(8001)
+                    .jsonPath("$.server_status[0].fe_url").doesNotExist();
+        } else {
+            response.jsonPath("$.server_status").isEmpty();
+        }
+        if (fe) {
+            response.jsonPath("$.frontend_urls[0]").isEqualTo("http://master-selected-fe");
+        } else {
+            response.jsonPath("$.frontend_urls").doesNotExist();
+        }
         verify(coordinator).schedule(argThat(r -> r.getBatchCount() == 1
-                && r.isAssignBe() == (assignBe == null || assignBe) && r.isAssignFe() == assignFe));
+                && r.getAllocationType() == (type == null ? AllocationType.BE : type)));
     }
 
     @ParameterizedTest
@@ -71,7 +90,8 @@ class BatchScheduleHttpTest {
     }
 
     @ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"", "{bad-json", "{\"batch_count\":\"bad\"}"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"", "{bad-json", "{\"batch_count\":\"bad\"}",
+            "{\"batch_count\":1,\"allocation_type\":\"UNKNOWN\"}"})
     void malformedBodiesFailBeforeAllocation(String body) {
         client.post().uri("/rtp_llm/batch_schedule").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body).exchange().expectStatus().isBadRequest();

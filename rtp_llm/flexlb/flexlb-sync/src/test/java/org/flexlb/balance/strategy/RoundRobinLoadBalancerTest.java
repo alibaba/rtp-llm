@@ -6,16 +6,13 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.TrafficPolicyConfig;
-import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,7 +33,6 @@ import static org.mockito.Mockito.when;
 class RoundRobinLoadBalancerTest {
     private final FlexlbConfig config = new FlexlbConfig();
     private final ModelMetaConfig model = mock(ModelMetaConfig.class);
-    private final MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
     private EndpointRegistry endpoints;
     private WorkerDirectory directory;
     private RoundRobinLoadBalancer scheduler;
@@ -48,7 +44,7 @@ class RoundRobinLoadBalancerTest {
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         endpoints = StrategyTestSupport.endpointRegistry(service);
         directory = new WorkerDirectory(endpoints);
-        scheduler = new RoundRobinLoadBalancer(directory, synchronizer, model, service);
+        scheduler = new RoundRobinLoadBalancer(directory, model, service);
     }
 
     @AfterEach
@@ -71,8 +67,8 @@ class RoundRobinLoadBalancerTest {
             assertEquals(RoleType.PDFUSION, target.getRole());
         }
         assertNotSame(targets.get(0), targets.get(2));
-        targets.get(0).setFeUrl("http://fe-a");
-        assertNull(targets.get(2).getFeUrl());
+        targets.get(0).setHttpPort(9000);
+        assertEquals(8080, targets.get(2).getHttpPort());
     }
 
     @Test
@@ -100,39 +96,27 @@ class RoundRobinLoadBalancerTest {
     @Test
     void embeddingUsesDiscoveryAndOnlyAdvertisesArpc() {
         config.getWorkerRegistry().setEngineType(EngineType.EMBEDDING);
-        when(synchronizer.embeddingWorkerSnapshot(RoleType.PDFUSION))
-                .thenReturn(List.of(new WorkerHost("10.0.0.4", 8000)));
+        WorkerStatus status = directory.currentOrDiscover(RoleType.PDFUSION, "10.0.0.4:8000",
+                () -> WorkerStatus.createDiscovered(RoleType.PDFUSION, "", "10.0.0.4", 8000, 8001, ""));
         BatchScheduleTarget target = schedule(1).getServerStatus().getFirst();
         assertEquals("10.0.0.4", target.getServerIp());
         assertEquals(8001, target.getArpcPort());
         assertNull(target.getGrpcPort());
-        when(synchronizer.embeddingWorkerSnapshot(RoleType.PDFUSION)).thenReturn(List.of());
+        assertFalse(status.pollHealth().reportedAlive());
+        assertEquals(0, directory.routingCapacity(RoleType.PDFUSION));
+        status.lock.lock();
+        try {
+            directory.beginRetirement(RoleType.PDFUSION, status.getIpPort(), status);
+        } finally {
+            status.lock.unlock();
+        }
         assertFalse(schedule(1).isSuccess());
     }
 
     @Test
-    void validatesCountAndAssignmentFlags() {
-        config.getRouter().setBatchScheduleMaxCount(2);
-        for (int count : new int[]{-1, 0, 3, Integer.MAX_VALUE}) {
-            assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), schedule(count).getCode());
-        }
-        BatchScheduleRequest request = request(1);
-        request.setAssignBe(false);
-        request.setAssignFe(false);
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), scheduler.schedule(request).block().getCode());
-    }
-
-    @Test
-    void multiRoleTopologyRequiresPerRequestBackendPlacementButAllowsFeOnly() {
+    void multiRoleTopologyRequiresPerRequestBackendPlacement() {
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), schedule(1).getCode());
-        BatchScheduleRequest request = request(2);
-        request.setAssignBe(false);
-        request.setAssignFe(true);
-        BatchScheduleResponse response = scheduler.schedule(request).block();
-        assertTrue(response.isSuccess());
-        assertEquals(2, response.getServerStatus().size());
-        assertNull(response.getServerStatus().getFirst().getServerIp());
     }
 
     @Test
@@ -155,7 +139,7 @@ class RoundRobinLoadBalancerTest {
         publish("10.0.0.2", true);
         publish("10.0.0.3", true);
         List<BatchScheduleTarget> targets = IntStream.range(0, 150).parallel()
-                .mapToObj(i -> scheduler.schedule(request(2)).block())
+                .mapToObj(i -> scheduler.schedule(2).block())
                 .flatMap(response -> response.getServerStatus().stream()).toList();
         Map<String, Long> counts = targets.stream().collect(Collectors.groupingBy(
                 BatchScheduleTarget::getServerIp, Collectors.counting()));
@@ -178,12 +162,6 @@ class RoundRobinLoadBalancerTest {
     }
 
     private BatchScheduleResponse schedule(int count) {
-        return scheduler.schedule(request(count)).block();
-    }
-
-    private static BatchScheduleRequest request(int count) {
-        BatchScheduleRequest request = new BatchScheduleRequest();
-        request.setBatchCount(count);
-        return request;
+        return scheduler.schedule(count).block();
     }
 }

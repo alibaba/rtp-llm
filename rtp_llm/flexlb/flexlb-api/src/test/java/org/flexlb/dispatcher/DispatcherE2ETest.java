@@ -7,16 +7,18 @@ import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
 import okhttp3.mockwebserver.SocketPolicy;
+import org.flexlb.balance.strategy.RoundRobinLoadBalancer;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
-import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest.AllocationType;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
 import org.flexlb.service.BatchScheduleCoordinator;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,6 +26,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -48,6 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -62,8 +66,10 @@ class DispatcherE2ETest {
     private final List<MockWebServer> frontends = List.of(new MockWebServer(), new MockWebServer(), new MockWebServer());
     private final DispatchConfig cfg = new DispatchConfig();
     private final FlexlbConfig lb = new FlexlbConfig();
-    private final BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
+    private final RoundRobinLoadBalancer workers = mock(RoundRobinLoadBalancer.class);
+    private BatchScheduleCoordinator coordinator;
     private boolean allocationFails;
+    private FePool pool;
     private FeClient feClient;
     private WebTestClient client;
     private DisposableServer server;
@@ -83,6 +89,9 @@ class DispatcherE2ETest {
         }
         if (connections != null) {
             connections.disposeLater().block(Duration.ofSeconds(5));
+        }
+        if (pool != null) {
+            pool.close();
         }
         for (MockWebServer frontend : frontends) {
             frontend.shutdown();
@@ -189,7 +198,12 @@ class DispatcherE2ETest {
             JSONObject config = chunk.getJSONObject(configKey);
             assertEquals(expected, config == null ? null : config.get("role_addrs"));
         }
-        verify(coordinator).schedule(argThat(r -> r.isAssignBe() == expectBeAssignment && r.isAssignFe()));
+        verify(coordinator).schedule(argThat(r -> r.getAllocationType() == (expectBeAssignment ? AllocationType.FE_AND_BE : AllocationType.FE)));
+        if (expectBeAssignment) {
+            verify(workers).schedule(3);
+        } else {
+            verifyNoInteractions(workers);
+        }
     }
 
     @ParameterizedTest
@@ -287,8 +301,9 @@ class DispatcherE2ETest {
     }
 
     private void startDispatcher(int chunkSize) {
+        lb.getHttpDispatcher().setEnabled(true);
         List<String> urls = frontends.stream().map(fe -> fe.url("/").toString().replaceAll("/$", "")).toList();
-        FePool pool = DispatcherTestSupport.fePool(urls, cfg);
+        pool = DispatcherTestSupport.fePool(allocationFails ? List.of() : urls, cfg);
         cfg.setBatchTimeoutMs(5000);
         cfg.setFePoolServiceId("e2e.fe.publish");
         cfg.setSubBatch("size:" + chunkSize);
@@ -297,19 +312,21 @@ class DispatcherE2ETest {
         DispatcherMetricsReporter metrics = DispatcherTestSupport.noopMetrics();
         feClient = spy(new FeClient(WebClient.builder(), connections, cfg));
         FanoutService fanout = new FanoutService(feClient, metrics, Schedulers.parallel());
-        when(coordinator.schedule(any())).thenAnswer(call -> {
-            if (allocationFails) {
-                return Mono.just(BatchScheduleResponse.error(StrategyErrorType.NO_AVAILABLE_WORKER, "no FE endpoints available"));
-            }
-            int count = ((BatchScheduleRequest) call.getArgument(0)).getBatchCount();
+        when(workers.schedule(anyInt())).thenAnswer(call -> {
+            int count = call.getArgument(0);
             List<BatchScheduleTarget> targets = new ArrayList<>();
             for (int i = 0; i < count; i++) {
+                // Independent FE and BE hosts: HTTP must use the FE pool, never the worker HTTP port.
                 BatchScheduleTarget target = BatchScheduleTarget.of(new WorkerHost("10.0.0." + (i + 1), 23840), RoleType.PDFUSION, lb.getWorkerRegistry().getEngineType());
-                target.setFeUrl(((BatchScheduleRequest) call.getArgument(0)).isAssignFe() ? urls.get(i % urls.size()) : "http://must-not-use");
                 targets.add(target);
             }
             return Mono.just(BatchScheduleResponse.success(targets));
         });
+        StaticListableBeanFactory beans = new StaticListableBeanFactory();
+        beans.addBean("fePool", pool);
+        coordinator = spy(new BatchScheduleCoordinator(workers, mock(LBStatusConsistencyService.class),
+                WebClient.builder(), mock(EngineHealthReporter.class), beans.getBeanProvider(FePool.class),
+                DispatcherTestSupport.configService(lb)));
         PassthroughClient passthrough = new PassthroughClient(WebClient.create(), pool, metrics, cfg);
         BatchHandler handler = new BatchHandler(fanout, cfg, coordinator, passthrough, metrics, DispatcherTestSupport.configService(lb), Schedulers.immediate());
         DispatchRouter router = new DispatchRouter(handler, passthrough);

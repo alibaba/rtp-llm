@@ -5,7 +5,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.TrafficPolicyConfig;
-import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -14,7 +13,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -23,54 +21,35 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /** Stateless batch placement for a single-role deployment; no LLM admission or reservations. */
 @Component
 public final class RoundRobinLoadBalancer {
 
     private final WorkerDirectory workerDirectory;
-    private final MasterEngineSynchronizer synchronizer;
     private final ModelMetaConfig modelMetaConfig;
     private final FlexlbConfig config;
     private final AtomicLong cursor = new AtomicLong();
 
     public RoundRobinLoadBalancer(WorkerDirectory workerDirectory,
-                                  MasterEngineSynchronizer synchronizer,
                                   ModelMetaConfig modelMetaConfig,
                                   ConfigService configService) {
         this.workerDirectory = workerDirectory;
-        this.synchronizer = synchronizer;
         this.modelMetaConfig = modelMetaConfig;
         this.config = configService.loadBalanceConfig();
     }
 
-    public Mono<BatchScheduleResponse> schedule(BatchScheduleRequest request) {
-        return Mono.fromCallable(() -> scheduleBatch(request))
+    public Mono<BatchScheduleResponse> schedule(int count) {
+        return Mono.fromCallable(() -> scheduleBatch(count))
                 .subscribeOn(Schedulers.parallel());
     }
 
-    private BatchScheduleResponse scheduleBatch(BatchScheduleRequest request) {
-        int maxCount = config.getRouter().getBatchScheduleMaxCount();
-        if (request == null || request.getBatchCount() < 1 || request.getBatchCount() > maxCount) {
-            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                    "batch_count must be in [1, " + maxCount + "]");
-        }
-        if (!request.isAssignBe() && !request.isAssignFe()) {
-            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                    "batch_schedule must request at least one of assign_be or assign_fe");
-        }
-        int count = request.getBatchCount();
-        if (!request.isAssignBe()) {
-            List<BatchScheduleTarget> targets = new ArrayList<>(count);
-            for (int i = 0; i < count; i++) {
-                targets.add(new BatchScheduleTarget());
-            }
-            return BatchScheduleResponse.success(targets);
-        }
+    private BatchScheduleResponse scheduleBatch(int count) {
         TrafficPolicyConfig policy = config.getRouter().getGroupSelector();
         if (policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty())) {
             return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                    "batch_schedule assign_be is unavailable while traffic policy routing is "
+                    "batch_schedule BE allocation is unavailable while traffic policy routing is "
                             + "active; defer backend placement to request-aware /schedule");
         }
         List<RoleType> roles = modelMetaConfig.requiredRoles();
@@ -99,7 +78,10 @@ public final class RoundRobinLoadBalancer {
 
     private List<WorkerHost> candidates(RoleType role, EngineType engineType) {
         if (engineType == EngineType.EMBEDDING) {
-            return new ArrayList<>(synchronizer.embeddingWorkerSnapshot(role));
+            return workerDirectory.statusSnapshot(role).values().stream()
+                    .filter(WorkerStatus::isActiveGeneration)
+                    .map(status -> new WorkerHost(status.getIp(), status.getPort()))
+                    .collect(Collectors.toCollection(ArrayList::new));
         }
         List<WorkerHost> candidates = new ArrayList<>();
         for (String address : workerDirectory.endpointAddressSnapshot(role)) {

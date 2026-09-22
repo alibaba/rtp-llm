@@ -22,6 +22,7 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.enums.EngineType;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -173,16 +174,14 @@ public class HttpLoadBalanceServer {
         Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
         for (RoleType role : RoleType.values()) {
             Map<String, WorkerStatus> statusMap = workerDirectory.statusSnapshot(role);
-            int embeddingCount = masterEngineSynchronizer == null ? 0
-                    : masterEngineSynchronizer.embeddingWorkerSnapshot(role).size();
-            if (statusMap.isEmpty() && embeddingCount == 0) {
+            if (statusMap.isEmpty()) {
                 continue;
             }
             Response.WorkerRoleSummary rs = new Response.WorkerRoleSummary();
-            rs.setDiscovered(statusMap.size() + embeddingCount);
-            rs.setAlive(embeddingCount);
+            rs.setDiscovered(statusMap.size());
+            boolean embedding = configService.loadBalanceConfig().getWorkerRegistry().getEngineType() == EngineType.EMBEDDING;
             for (WorkerStatus ws : statusMap.values()) {
-                if (ws.pollHealth().reportedAlive()) {
+                if (embedding ? ws.isActiveGeneration() : ws.pollHealth().reportedAlive()) {
                     rs.setAlive(rs.getAlive() + 1);
                 }
             }

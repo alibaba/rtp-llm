@@ -455,7 +455,7 @@ public class EngineHealthReporter {
 
     public void reportBatchSchedule(BatchScheduleRequest request, BatchScheduleResponse response, long start) {
         FlexMetricTags tags = FlexMetricTags.of("code", String.valueOf(response.getCode()),
-                "assign_be", String.valueOf(request.isAssignBe()), "assign_fe", String.valueOf(request.isAssignFe()));
+                "allocation_type", String.valueOf(request.getAllocationType()));
         monitor.report(ENGINE_BALANCING_MASTER_BATCH_QPS, tags, 1.0);
         monitor.report(ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT, tags, System.currentTimeMillis() - start);
     }

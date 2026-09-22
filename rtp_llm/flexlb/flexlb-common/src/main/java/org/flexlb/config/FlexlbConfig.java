@@ -18,6 +18,7 @@ public final class FlexlbConfig {
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
+    private HttpDispatcherConfig httpDispatcher = new HttpDispatcherConfig();
     private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
     private RoutingConfig router = new RoutingConfig();
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
@@ -93,6 +94,13 @@ public final class FlexlbConfig {
             return ordering;
         }
         throw new IllegalStateException("priority ordering configuration is not active");
+    }
+
+    @Getter
+    @Setter
+    public static final class HttpDispatcherConfig {
+        /** HTTP batch ingress; independent of Master-to-BE dispatcher.type. */
+        private boolean enabled;
     }
 
     @Getter

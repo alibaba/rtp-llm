@@ -26,6 +26,9 @@ public class BatchScheduleResponse {
 
     private List<BatchScheduleTarget> serverStatus;
 
+    /** HTTP destinations in chunk order; independent of optional worker placement. */
+    private List<String> frontendUrls;
+
     private String realMasterHost;
 
     public static BatchScheduleResponse success(List<BatchScheduleTarget> targets) {

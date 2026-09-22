@@ -2,7 +2,7 @@ package org.flexlb.dispatcher;
 
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.client.reactive.ClientHttpRequest;
 import org.springframework.stereotype.Component;
@@ -17,7 +17,7 @@ import java.net.URI;
 import java.time.Duration;
 
 @Component
-@ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
+@Lazy
 public class PassthroughClient {
     private static final Duration STREAM_IDLE_TIMEOUT = Duration.ofMinutes(10);
     private final WebClient webClient;
