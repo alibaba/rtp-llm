@@ -16,7 +16,7 @@ GptModelOutputs ModelBase::forwardPP(const GptModelInputs&, const PPIntermediate
     RTP_LLM_FAIL("PP forward is not implemented by this model");
 }
 
-PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&) {
+PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&, bool) {
     RTP_LLM_FAIL("PP warmup input construction is not implemented by this model");
 }
 

@@ -60,12 +60,12 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
-    /* Transport adapter: unpacks upstream intermediates into PyModelInputs.pp_intermediates,
-       delegates to forward() (the only compute path), and packs the model-emitted ones. */
+    /* PP adapter: preserves global request inputs, passes rank-local upstream intermediates
+       through forward(), and packs the model-emitted stage outputs. */
     GptModelOutputs       forwardPP(const GptModelInputs&        inputs,
                                     const PPIntermediateTensors* input_tensors,
                                     PPIntermediateTensors*       output_tensors) override;
-    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs) override;
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
     GptModelOutputs       forwardMicroBatched(const GptModelInputs& inputs);
     void                  releaseBuffers() override;
     torch::Tensor         getMtpTargetHiddenStates(int64_t num_tokens) override;

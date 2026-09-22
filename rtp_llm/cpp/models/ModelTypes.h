@@ -152,8 +152,8 @@ public:
     virtual GptModelOutputs forwardPP(const GptModelInputs&        inputs,
                                       const PPIntermediateTensors* input_tensors,
                                       PPIntermediateTensors*       output_tensors);
-    /* Builds model-defined inputs for stage-local PP warmup without upstream activations. */
-    virtual PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs);
+    /* Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
+    virtual PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
     virtual void                  releaseBuffers() {}
     virtual void                  prepareAttentionInputs(const GptModelInputs& inputs) {}
 

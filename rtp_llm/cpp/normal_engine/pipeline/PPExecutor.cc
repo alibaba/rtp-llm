@@ -226,6 +226,11 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     RTP_LLM_CHECK_WITH_INFO(role_type_ == RoleType::PDFUSION || role_type_ == RoleType::PREFILL
                                 || role_type_ == RoleType::DECODE,
                             "pipeline parallelism requires the PDFUSION, PREFILL, or DECODE role");
+    // Active CP is a P-side execution mode. D-side PREFILL_CP only describes
+    // imported KV; PDFUSION would also send verify/decode through this model.
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config_.prefill_cp_config.is_enabled() || role_type_ == RoleType::PREFILL,
+                            "PP context parallel execution requires the PREFILL role; "
+                            "DECODE imports CP KV with cp_rotate_method=PREFILL_CP");
     RTP_LLM_CHECK_WITH_INFO(!params.runtime_config.use_batch_decode_scheduler,
                             "pipeline parallelism does not support BatchDecodeScheduler");
     RTP_LLM_CHECK_WITH_INFO(params.kv_cache_config.multi_task_prompt.empty()
@@ -246,8 +251,10 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     RTP_LLM_CHECK_WITH_INFO(!is_dspark_ || dspark_mask_token_id_ >= 0,
                             "PP DSpARK requires sp_dspark_mask_token_id, got %d",
                             dspark_mask_token_id_);
-    RTP_LLM_CHECK_WITH_INFO(!is_dspark_ || params.device_resource_config.enable_layer_micro_batch == 0,
-                            "PP DSpARK does not support layer micro-batching");
+    // forwardMicroBatched bypasses the CP input/output processing in forward().
+    RTP_LLM_CHECK_WITH_INFO((!is_dspark_ && !parallelism_config_.prefill_cp_config.is_enabled())
+                                || params.device_resource_config.enable_layer_micro_batch == 0,
+                            "PP CP and DSpARK do not support layer micro-batching");
 
     if (!warm_up_) {
         transport_ = std::make_unique<TorchDistributedPPTransport>(pp_layout_.prevRank(), pp_layout_.nextRank());
@@ -322,7 +329,8 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_ = std::make_unique<PyWrappedModel>(model_init_params, params.py_model);
+        model_ = std::make_unique<PyWrappedModel>(
+            model_init_params, params.py_model, false, sp_enabled_ && isLastStage() && !warm_up_);
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);
@@ -453,7 +461,8 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
     PPIntermediateTensors input_tensors;
     PPIntermediateTensors output_tensors;
     if (!isFirstStage()) {
-        input_tensors = model_->makePPWarmUpInputTensors(model_input);
+        input_tensors =
+            model_->makePPWarmUpInputTensors(model_input, parallelism_config_.prefill_cp_config.is_enabled());
     }
 
     (void)model_->forwardPP(
@@ -692,10 +701,15 @@ GptModelInputs PPExecutor::prepareDraftInputForPrefill(const GptModelInputs&  ta
                                                        const GptModelOutputs& target_output,
                                                        const torch::Tensor&   sampled_token_ids,
                                                        const torch::Tensor&   next_position_ids) {
-    auto draft_input          = target_input;
-    auto target_hidden_states = model_->getMtpTargetHiddenStates(target_input.combo_tokens.numel());
-    if (!target_hidden_states.defined() || target_hidden_states.numel() == 0) {
-        target_hidden_states = target_output.all_hidden_states;
+    auto draft_input = target_input;
+    torch::Tensor target_hidden_states;
+    // Under CP, each rank binds its own target hidden after the draft input
+    // broadcast. The root only constructs the full shifted tokens here.
+    if (!parallelism_config_.prefill_cp_config.is_enabled()) {
+        target_hidden_states = model_->getMtpTargetHiddenStates(target_input.combo_tokens.numel());
+        if (!target_hidden_states.defined() || target_hidden_states.numel() == 0) {
+            target_hidden_states = target_output.all_hidden_states;
+        }
     }
     mtp::prepareDraftInputForPrefill(draft_input,
                                      target_hidden_states,
@@ -730,13 +744,15 @@ void PPExecutor::runDSparkCommit(const GptModelInputs& target_input, const GptMo
     RTP_LLM_PROFILE_SCOPE("executor.pp.dspark_commit");
     RTP_LLM_CHECK_WITH_INFO(draft_model_ != nullptr, "PP DSpARK draft model is not initialized");
 
-    auto target_features = model_->getMtpTargetHiddenStates(target_input.combo_tokens.numel());
+    const bool cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    auto target_features = model_->getMtpTargetHiddenStates(cp_enabled ? -1 : target_input.combo_tokens.numel());
     if (!target_features.defined() || target_features.numel() == 0) {
         target_features = target_output.all_hidden_states;
     }
     RTP_LLM_CHECK_WITH_INFO(target_features.defined() && target_features.dim() == 2,
                             "PP DSpARK commit requires 2-D target features");
-    RTP_LLM_CHECK_WITH_INFO(target_features.size(0) == target_input.combo_tokens.numel(),
+    // CP validates feature rows against the padded local token count in handleInputs.
+    RTP_LLM_CHECK_WITH_INFO(cp_enabled || target_features.size(0) == target_input.combo_tokens.numel(),
                             "PP DSpARK commit feature rows %ld do not match input rows %ld",
                             target_features.size(0),
                             target_input.combo_tokens.numel());
@@ -793,7 +809,17 @@ torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs draft_input, size_t 
 
     torch::Tensor proposed_tokens;
     for (size_t step = 0; step < num_draft_tokens; ++step) {
+        torch::Tensor cp_target_hidden;
+        if (step == 0 && parallelism_config_.prefill_cp_config.is_enabled()) {
+            cp_target_hidden = model_->getMtpTargetHiddenStates(-1);
+            RTP_LLM_CHECK_WITH_INFO(cp_target_hidden.defined() && cp_target_hidden.numel() > 0,
+                                    "PP CP draft prefill requires this rank's target hidden states");
+            draft_input.last_hidden_states = torch::Tensor();
+        }
         tpSyncModelInputs(draft_input, parallelism_config_);
+        if (cp_target_hidden.defined()) {
+            draft_input.last_hidden_states = cp_target_hidden;
+        }
         if (cache_manager_) {
             const auto& draft_cache_config    = cache_manager_->getMTPModuleCacheConfig(0);
             draft_input.kv_block_stride_bytes = draft_cache_config.kv_block_stride_bytes;

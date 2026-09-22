@@ -5,6 +5,7 @@
 
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -29,6 +30,11 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                       metrics_reporter),
     max_batch_tokens_without_cache_(
         static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
+                             && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
+    prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
+                         static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
+                         1),
     sp_config_(sp_config) {}
 
 PPScheduler::~PPScheduler() {
@@ -222,6 +228,10 @@ bool PPScheduler::fitsCurrentBatch(const ScheduleRuntime& schedule_runtime, cons
         return true;
     }
 
+    if (cp_force_single_prefill_ && schedule_runtime.scheduled_stream_count > 0) {
+        return false;
+    }
+
     if (max_batch_tokens_without_cache_ > 0
         && schedule_runtime.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_) {
         return false;
@@ -261,7 +271,11 @@ size_t PPScheduler::prefillTokenCostWithCache(const GenerateStreamPtr& stream) c
 }
 
 size_t PPScheduler::prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const {
-    return static_cast<size_t>(std::max(stream->contextLength(), 0)) * static_cast<size_t>(stream->currentBatchSize());
+    auto token_count = static_cast<size_t>(std::max(stream->contextLength(), 0));
+    if (prefill_cp_size_ > 1) {
+        token_count = makeZigzagTokenLayout(token_count, prefill_cp_size_).padded_token_count;
+    }
+    return token_count * static_cast<size_t>(stream->currentBatchSize());
 }
 
 bool PPScheduler::waitPredicate() {

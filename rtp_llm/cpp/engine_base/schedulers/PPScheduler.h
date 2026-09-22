@@ -71,6 +71,8 @@ private:
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
 
     const size_t                     max_batch_tokens_without_cache_ = 0;
+    const bool                       cp_force_single_prefill_;
+    const size_t                     prefill_cp_size_;
     const SpeculativeExecutionConfig sp_config_;
     std::vector<int64_t>              finished_request_ids_;
 };

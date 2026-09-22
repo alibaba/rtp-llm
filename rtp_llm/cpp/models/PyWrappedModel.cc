@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -777,8 +778,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         PyContextParallelParams cp_params;
         const bool              has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (device_props_.enable_prefill_cp && has_context_request) {
-            // CP accepts pure-prefill batches without MTP/speculative hidden states;
-            // handleInputs enforces both constraints before mutating the batch.
+            // Build rank-local inputs and CP metadata. The processor also handles
+            // MTP hidden states according to its configured global/local layout.
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
@@ -837,9 +838,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // PP: stage-boundary tensors populated by forwardPP.
         py_model_inputs.pp_intermediates = inputs.pp_intermediates;
         PyModelOutputs py_model_outputs;
-        torch::Tensor  hidden_states;
 
-        // Cast the Python object to PyModelOutputs and extract hidden states
+        // Obtain the model outputs before choosing stage transport or final output processing.
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
@@ -852,7 +852,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-            hidden_states = py_model_outputs.hidden_states.clone();
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -864,7 +863,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             auto py_model_forward = py_model_.attr("forward");
             auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
             py_model_outputs      = outputs.cast<PyModelOutputs>();
-            hidden_states         = py_model_outputs.hidden_states.clone();
         }
 
         cache_store_write_cycle.finish();
@@ -876,6 +874,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             outputs.pp_intermediates = py_model_outputs.pp_intermediates;
             return outputs;
         };
+        if (!py_model_outputs.pp_intermediates.empty()) {
+            // The model emitted a stage boundary. Forward its tensors directly;
+            // final hidden cloning, CP output collectives and lm_head are unused.
+            return attach_model_side_outputs(GptModelOutputs{});
+        }
+        auto hidden_states = py_model_outputs.hidden_states.clone();
         if (is_dspark_draft_) {
             // DSpARK already applies its full-vocabulary lm_head and Markov
             // head in Python. Running the generic C++ post-layers path would
@@ -1134,13 +1138,21 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
-/* Transport adapter around the single compute path: unpacks upstream intermediates
-   into inputs.pp_intermediates and packs the model-emitted ones for the downstream stage. */
+/* PP adapter: preserves the caller's global inputs for subsequent draft construction,
+   passes rank-local upstream intermediates to forward(), and packs the stage outputs. */
 GptModelOutputs PyWrappedModel::forwardPP(const GptModelInputs&        inputs,
                                           const PPIntermediateTensors* input_tensors,
                                           PPIntermediateTensors*       output_tensors) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardPP");
     GptModelInputs local_inputs = inputs;
+    const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+    if (device_props_.enable_prefill_cp && has_context_request) {
+        // The struct copy shares tensor storage. CP rewrites CPU lengths in place,
+        // so give this forward a private copy; the other CP input fields are replaced.
+        local_inputs.input_lengths =
+            torch::empty(inputs.input_lengths.sizes(), torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        local_inputs.input_lengths.copy_(inputs.input_lengths);
+    }
     if (pp_size_ > 1 && input_tensors != nullptr && !input_tensors->tensors.empty()) {
         local_inputs.pp_intermediates = input_tensors->tensors;
     }
@@ -1151,10 +1163,22 @@ GptModelOutputs PyWrappedModel::forwardPP(const GptModelInputs&        inputs,
     return outputs;
 }
 
-PPIntermediateTensors PyWrappedModel::makePPWarmUpInputTensors(const GptModelInputs& inputs) {
-    const auto token_num = inputs.combo_tokens.numel();
-    auto       hidden_template =
-        torch::zeros({token_num, hidden_size_},
+PPIntermediateTensors PyWrappedModel::makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) {
+    // Keep request inputs global; only the fabricated upstream activations use the local token count.
+    int64_t    local_token_num   = inputs.combo_tokens.numel();
+    const auto decode_batch_size = inputs.sequence_lengths.size(0);
+    const auto batch_size        = inputs.input_lengths.size(0);
+    if (enable_cp && batch_size != decode_batch_size) {
+        // Match CP handleInputs: pad each prefill sequence independently before splitting.
+        const auto* input_lengths = inputs.input_lengths.data_ptr<int32_t>();
+        local_token_num          = decode_batch_size;
+        for (int64_t i = decode_batch_size; i < batch_size; ++i) {
+            local_token_num += makeZigzagTokenLayout(input_lengths[i], device_props_.tp_size).token_count_per_rank;
+        }
+    }
+
+    auto hidden_template =
+        torch::zeros({local_token_num, hidden_size_},
                      torch::TensorOptions().dtype(dataTypeToTorchType(description_.data_type)).device(torch::kCUDA));
 
     py::gil_scoped_acquire gil;
