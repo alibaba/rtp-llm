@@ -7,7 +7,6 @@ from dataclasses import asdict
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
@@ -28,6 +27,7 @@ from rtp_llm.ops import (
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
+    BatchedTerminalOutputs,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
@@ -337,9 +337,14 @@ class Pipeline(object):
         tokens_lists_for_decode_input = []
         output_lens = []
         token_lists_to_decode = []
+        outputs = generate_outputs.generate_outputs
+        batched = isinstance(outputs, BatchedTerminalOutputs)
+        terminal_output = GenerateOutput(finished=True) if batched else None
         if generate_config.has_num_beams():
-            all_output_ids = torch.cat(
-                [go.output_ids for go in generate_outputs.generate_outputs], dim=0
+            all_output_ids = (
+                outputs.output_ids[:, 0, :]
+                if batched
+                else torch.cat([go.output_ids for go in outputs], dim=0)
             )
             all_output_ids_np = all_output_ids.cpu().numpy()
             if not generate_config.ignore_eos:
@@ -373,7 +378,8 @@ class Pipeline(object):
                 else:
                     tokens = tokens.reshape(-1)
                 tokens_lists_for_decode_input.append(tokens.tolist())
-        for i, generate_output in enumerate(generate_outputs.generate_outputs):
+        for i in range(len(outputs)):
+            generate_output = terminal_output if batched else outputs[i]
             tokens_list = tokens_lists_for_decode_input[i]
             output_lens.append(len(tokens_list))
             processed_tokens = Pipeline.process_stop_id(
@@ -397,7 +403,7 @@ class Pipeline(object):
         for i in range(len(all_texts)):
             processed_text, _ = Pipeline.process_stop_str(
                 generate_config,
-                generate_outputs.generate_outputs[i],
+                terminal_output if batched else outputs[i],
                 newly_decoded_texts[i],
                 all_texts[i],
                 stop_word_str_list,
@@ -631,12 +637,8 @@ class Pipeline(object):
             yield GenerateResponse(
                 generate_outputs=generate_outputs_cache, generate_texts=generate_texts
             )
-            if (
-                all(
-                    output.finished
-                    for output in generate_outputs_cache.generate_outputs
-                )
-                and generate_config.aux_info
+            if generate_config.aux_info and all(
+                output.finished for output in generate_outputs_cache.generate_outputs
             ):
                 kmonitor.report(
                     GaugeMetrics.FT_ITERATE_COUNT_METRIC,
