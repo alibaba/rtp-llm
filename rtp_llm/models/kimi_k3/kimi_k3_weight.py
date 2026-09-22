@@ -186,6 +186,19 @@ class _KimiExpertByteWeight(MoeAtomicWeight):
         return sp_id
 
 
+class _KimiK3MlaKVWeight(CompositeWeight):
+    """Load KV-B and both absorbed views from one streamed source tensor."""
+
+    @classmethod
+    def support(cls, quant_config, src_weight_info):
+        return False
+
+    def get_components(self):
+        # The streaming loader assigns each checkpoint key to one collector.
+        # Splitting these consumers would discard two of the three mappings.
+        return [self]
+
+
 class KimiK3Weight(ModelDeployWeightInfo):
     """Describe every text-model tensor in the Kimi K3 checkpoint."""
 
@@ -566,7 +579,6 @@ class KimiK3Weight(ModelDeployWeightInfo):
                     rope_head_dim=0,
                 ),
             ),
-            _mla(W.mla_kv_b_w, "self_attn.kv_b_proj.weight", transpose),
             _mla(W.mla_kv_a_ln_gamma, "self_attn.kv_a_layernorm.weight", identity),
             _mla(
                 W.mla_q_b_w,
@@ -600,11 +612,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
 
         # Absorbed decode weights: slice kv_b into the compressed-cache
         # bmm operands the FlashInfer decode kernel expects.
+        kv_weights = [_mla(W.mla_kv_b_w, "self_attn.kv_b_proj.weight", transpose)]
         if (
             self.model_config.attn_config.use_mla
             and self.model_config.mla_ops_type != MlaOpsType.MHA
         ):
-            weights.append(
+            kv_weights.append(
                 _mla(
                     W.mla_kc,
                     "self_attn.kv_b_proj.weight",
@@ -617,7 +630,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                     ),
                 )
             )
-            weights.append(
+            kv_weights.append(
                 _mla(
                     W.mla_vc,
                     "self_attn.kv_b_proj.weight",
@@ -630,6 +643,9 @@ class KimiK3Weight(ModelDeployWeightInfo):
                     ),
                 )
             )
+        weights.append(
+            _KimiK3MlaKVWeight(sub_weights=kv_weights, name=W.mla_kv_b_w)
+        )
         return weights
 
     def _create_rope_w(self) -> Optional[AtomicWeight]:

@@ -682,6 +682,46 @@ TEST_F(MemoryLayoutStrategyTest, DeviceBlockPoolConfigPropagatesKernelBlockSplit
               layout_config.kv_block_stride_bytes);
 }
 
+TEST_F(MemoryLayoutStrategyTest, HybridMlaFlagDoesNotReshapeLinearStateAsTokens) {
+    for (bool linear : {true, false}) {
+        auto spec = std::make_shared<TestKVCacheSpec>();
+        spec->tag = "default";
+        spec->type = linear ? KVCacheSpecType::LinearAttention : KVCacheSpecType::MultiHeadLatentAttention;
+        spec->dtype = DataType::TYPE_BF16;
+        spec->seq_size_per_block = 4096;
+        // K3's packed conv/recurrent state is not divisible by the token block size.
+        spec->k_block_bytes = linear ? 407040 * 2 : 4096 * 576 * 2;
+
+        CacheConfig cache_config;
+        cache_config.layer_num = cache_config.layer_all_num = 2;
+        cache_config.block_num = 2;
+        cache_config.dtype = spec->dtype;
+        cache_config.seq_size_per_block = 4096;
+        cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+        cache_config.use_mla = true;
+        cache_config.fromGroupedSpecs({spec}, {{0, 1}},
+                                     {linear ? CacheGroupType::LINEAR : CacheGroupType::FULL}, {"default"});
+
+        auto pool_config = DeviceBlockPoolConfigHelper::createConfig(cache_config);
+        ASSERT_EQ(pool_config.memory_layouts.size(), 1u);
+        const auto& layout = pool_config.memory_layouts[0];
+        EXPECT_EQ(layout.use_mla, !linear);
+        EXPECT_EQ(layout.is_mla, !linear);
+
+        auto ctx = createTestContext(layout, torch::kCPU, BufferInitMode::Arange);
+        MemoryLayoutStrategy strategy;
+        torch::Tensor empty_scale;
+        ASSERT_TRUE(strategy.init(layout, ctx.kv_cache_buffer, empty_scale, ctx.cache_ptr));
+        const auto layers = strategy.getLayerCacheTensors();
+        ASSERT_EQ(layers.size(), 2u);
+        EXPECT_EQ(layers[0].dim(), linear ? 2 : 3);
+        EXPECT_EQ(layers[0].size(0), 2);
+        EXPECT_EQ(static_cast<size_t>(layers[0].stride(0) * layers[0].element_size()),
+                  spec->block_size_bytes());
+        EXPECT_EQ(layers[0].size(1), linear ? 407040 : 4096);
+    }
+}
+
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferUsesPhysicalStrideWithKernelSplitConfigured) {
     auto config                       = createTestConfig(/*layer_num=*/2, /*block_num=*/4, 64, 64);
     config.kernel_blocks_per_kv_block = 4;

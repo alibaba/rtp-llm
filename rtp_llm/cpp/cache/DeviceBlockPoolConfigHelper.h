@@ -176,8 +176,11 @@ private:
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla                    = cache_config.use_mla;
+        // Hybrid models share the model-level MLA flag with their state pools.
+        // Linear state has no token axis and must retain its physical block view.
+        const bool is_linear_state = spec->type == KVCacheSpecType::LinearAttention;
+        cfg.is_mla                     = !is_linear_state && (cache_config.use_mla || cache_config.is_sparse);
+        cfg.use_mla                    = !is_linear_state && cache_config.use_mla;
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
 
