@@ -44,6 +44,17 @@ void invokeAddBiasGeluQuantFp8(const T*     input,
                                size_t       hidden_size,
                                size_t       scale_stride,
                                cudaStream_t stream);
+
+template<typename T>
+void invokeAddBiasGeluQuantFp8FloatScale(const T*     input,
+                                         const T*     bias,
+                                         void*        output,
+                                         float*       scales,
+                                         size_t       rows,
+                                         size_t       hidden_size,
+                                         size_t       scale_stride,
+                                         bool         add_bias,
+                                         cudaStream_t stream);
 #endif
 
 template<typename T>
