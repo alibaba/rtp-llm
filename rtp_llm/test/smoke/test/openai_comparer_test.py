@@ -116,5 +116,55 @@ class OpenaiComparerGraphStatusTest(unittest.TestCase):
         )
 
 
+class OpenaiComparerMinimumAuxInfoTest(unittest.TestCase):
+    def setUp(self):
+        self.golden = {
+            "id": "chat-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "test",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "OK"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        self.qr_info = {
+            "grammar_constraint_only": True,
+            "query": {
+                "messages": [{"role": "user", "content": "test"}],
+                "response_format": {"type": "regex", "pattern": "OK"},
+                "stream": False,
+            },
+            "result": self.golden,
+            "compare_config": {"minimum_aux_info": {"input_len": 8}},
+        }
+        self.comparer = OpenaiComparer(None, "", self.qr_info, Tracer(), False)
+        self.query = self.comparer.format_query(self.qr_info["query"])
+
+    def _parse(self, aux_info):
+        payload = copy.deepcopy(self.golden)
+        payload["aux_info"] = aux_info
+        return self.comparer.format_result(
+            self.comparer.curl_response_to_json(self.query, json.dumps(payload))
+        )
+
+    def test_grammar_only_honors_minimum_aux_info(self):
+        expected = self._parse(None)
+        self.comparer.compare_result(expected, self._parse({"input_len": 8}))
+
+        for aux_info in (None, {}, {"input_len": 7}):
+            with self.subTest(aux_info=aux_info):
+                with self.assertRaises(SmokeException) as raised:
+                    self.comparer.compare_result(expected, self._parse(aux_info))
+                self.assertEqual(
+                    raised.exception.error_status, QueryStatus.COMPARE_FAILED
+                )
+                self.assertIn("minimum aux_info", raised.exception.message)
+
+
 if __name__ == "__main__":
     unittest.main()
