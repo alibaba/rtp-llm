@@ -59,6 +59,16 @@ custom_smoke_test(
     gpu_type = ["H20"],
 )
 
+# PP multi-task system prompt: startup builds resident KV through the pipeline and
+# requests reuse it via task_id. Compared against a PP=1 baseline of the same config.
+custom_smoke_test(
+    name = "qwen3_multi_task_prompt_pp_test",
+    main = "pp_test.py",
+    args = ["--cases=multi_task_prompt_pp2"],
+    smoke_args = "--tp_size 1 --dp_size 1 --world_size 2 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
+
 # The same entry supports model overrides and --cases / PP_TEST_CASES.
 # Keep the original target available for existing PD smoke commands.
 test_suite(

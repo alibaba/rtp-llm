@@ -233,10 +233,15 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                             "DECODE imports CP KV with cp_rotate_method=PREFILL_CP");
     RTP_LLM_CHECK_WITH_INFO(!params.runtime_config.use_batch_decode_scheduler,
                             "pipeline parallelism does not support BatchDecodeScheduler");
-    RTP_LLM_CHECK_WITH_INFO(params.kv_cache_config.multi_task_prompt.empty()
-                                && params.kv_cache_config.multi_task_prompt_tokens.empty()
-                                && params.kv_cache_config.multi_task_prompt_str.empty(),
-                            "pipeline parallelism does not support multi-task system prompts");
+    const bool has_multi_task_prompt = !params.kv_cache_config.multi_task_prompt.empty()
+                                       || !params.kv_cache_config.multi_task_prompt_tokens.empty()
+                                       || !params.kv_cache_config.multi_task_prompt_str.empty();
+    RTP_LLM_CHECK_WITH_INFO(!has_multi_task_prompt
+                                || (params.sp_config.type == SP_TYPE_NONE
+                                    && !parallelism_config_.prefill_cp_config.is_enabled()
+                                    && parallelism_config_.dp_size <= 1),
+                            "pipeline parallelism multi-task system prompts currently require "
+                            "SP_NONE speculative decoding, no prefill context parallelism, and dp_size==1");
     const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
     RTP_LLM_CHECK_WITH_INFO(device_input == nullptr || std::strcmp(device_input, "1") != 0,
                             "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
@@ -701,7 +706,7 @@ GptModelInputs PPExecutor::prepareDraftInputForPrefill(const GptModelInputs&  ta
                                                        const GptModelOutputs& target_output,
                                                        const torch::Tensor&   sampled_token_ids,
                                                        const torch::Tensor&   next_position_ids) {
-    auto draft_input = target_input;
+    auto          draft_input = target_input;
     torch::Tensor target_hidden_states;
     // Under CP, each rank binds its own target hidden after the draft input
     // broadcast. The root only constructs the full shifted tokens here.
@@ -744,8 +749,8 @@ void PPExecutor::runDSparkCommit(const GptModelInputs& target_input, const GptMo
     RTP_LLM_PROFILE_SCOPE("executor.pp.dspark_commit");
     RTP_LLM_CHECK_WITH_INFO(draft_model_ != nullptr, "PP DSpARK draft model is not initialized");
 
-    const bool cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
-    auto target_features = model_->getMtpTargetHiddenStates(cp_enabled ? -1 : target_input.combo_tokens.numel());
+    const bool cp_enabled      = parallelism_config_.prefill_cp_config.is_enabled();
+    auto       target_features = model_->getMtpTargetHiddenStates(cp_enabled ? -1 : target_input.combo_tokens.numel());
     if (!target_features.defined() || target_features.numel() == 0) {
         target_features = target_output.all_hidden_states;
     }

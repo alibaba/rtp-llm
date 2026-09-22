@@ -26,6 +26,13 @@ public:
                                                                 const std::shared_ptr<GenerateInput>& generate_input,
                                                                 const std::vector<int>&               tokens_id,
                                                                 bool                                  insert_kv_cache);
+
+    // Commits an already-executed build stream's blocks as resident KV. Shared by the non-PP
+    // preRun path and the PP direct-build driver, which differ only in how the stream is run.
+    static absl::StatusOr<SystemPromptParams> commitResident(const GenerateStreamPtr& stream,
+                                                             KVCacheManager*          cache_manager,
+                                                             const std::vector<int>&  tokens_id,
+                                                             bool                     insert_kv_cache);
 };
 
 }  // namespace rtp_llm

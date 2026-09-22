@@ -289,7 +289,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
     ScheduleOutput schedule_output{{stream}};
-    THROW_IF_STATUS_ERROR(executor_->process(schedule_output));
+    THROW_IF_STATUS_ERROR(executeOneRound(schedule_output));
 #if USING_CUDA
     if (mode == preRunMode::build_system_prompt) {
         // Keep the stream and its execution buffers alive until the resident KV writes finish.
@@ -551,21 +551,148 @@ absl::Status NormalEngine::initSystemPrompt() {
     return buildAndInstallSystemPrompt();
 }
 
+bool NormalEngine::isFirstStageRoot() const {
+    // pp_rank is materialized by the Python-side RankLayout at startup.
+    return parallelism_config.pp_rank == 0 && parallelism_config.tp_rank == 0;
+}
+
+bool NormalEngine::buildsSystemPromptsOnLoopThread() const {
+    // True only for the PP first-stage root when there is something to build: that rank runs the
+    // resident build on the loop thread (not synchronously in startLoop), so it also publishes
+    // startup READY there after the build settles. Non-PP builds synchronously in startLoop.
+    return parallelism_config.pp_size > 1 && isFirstStageRoot() && !kv_cache_config.multi_task_prompt_tokens.empty();
+}
+
+absl::StatusOr<NormalEngine::BuildRunResult> NormalEngine::driveSystemPromptBuild(const GenerateStreamPtr& stream) {
+    // Submit the build stream, then pump empty rounds until its result is dispatched. PPExecutor
+    // advances one slot per round and the sampled result returns pp_size+1 slots later, where
+    // dispatch clears the inflight flag.
+    const int64_t schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    RETURN_IF_STATUS_ERROR(executeOneRound(ScheduleOutput{{stream}}, schedule_time_us));
+    while (stream->isPPInflight() && should_loop_()) {
+        RETURN_IF_STATUS_ERROR(executeOneRound(ScheduleOutput{}));
+    }
+    if (stream->isPPInflight()) {
+        // should_loop_ went false: shutdown is tearing the channel down, so do not force more
+        // rounds; the supervised process exits.
+        return BuildRunResult{BuildRunOutcome::kInterrupted, absl::OkStatus()};
+    }
+    // SP_NONE: the inflight flag is cleared only by dispatch, so reaching here means the result
+    // was dispatched. MTP support must additionally detect the rejected-before-submit path,
+    // where prepareStreams clears the flag without ever carrying the stream in a plan.
+    absl::Status request_status = stream->hasError() ? absl::InternalError(stream->stopReason()) : absl::OkStatus();
+    return BuildRunResult{BuildRunOutcome::kDispatched, request_status};
+}
+
+absl::Status NormalEngine::buildSystemPromptsDirect() {
+    resource_context_.reuse_cache                                     = true;
+    auto*                                               cache_manager = resource_context_.cache_manager.get();
+    std::unordered_map<std::string, SystemPromptParams> multi_task_prompt_args;
+    // Startup-only request ids, unique per task: the last stage keys its sampling state by
+    // streamId (== request_id), and serial builds must not collide before the cleanup plan
+    // for a finished task has propagated downstream.
+    int64_t next_request_id = 1;
+    for (const auto& item : kv_cache_config.multi_task_prompt_tokens) {
+        const auto& task_id   = item.first;
+        const auto& tokens_id = item.second;
+
+        auto generate_input = SystemPromptConstructor::makeBuildInput(tokens_id, next_request_id++);
+        auto stream         = std::make_shared<NormalGenerateStream>(
+            generate_input, model_config_, runtime_config, resource_context_, nullptr, 0, false);
+        stream->setReserveStep(reserve_step_);
+        // Fail fast: at startup there is no traffic to evict, so a retryable exhaustion can
+        // never make progress and must abort startup rather than spin.
+        RETURN_IF_STATUS_ERROR(stream->initKVBlock());
+
+        stream->setPPInflight();
+        CHECK_AND_RETURN_REF(run, driveSystemPromptBuild(stream));
+        switch (run.outcome) {
+            case BuildRunOutcome::kInterrupted:
+                return absl::InternalError("system prompt build interrupted before completion");
+            case BuildRunOutcome::kRejectedBeforeSubmit:
+                // Never carried by a plan, so the tail stage holds no sampling state to clean.
+                return absl::InternalError("system prompt build rejected before submit: "
+                                           + std::string(run.status.message()));
+            case BuildRunOutcome::kDispatched:
+                break;
+        }
+        // A dispatched build went through the tail stage, so release its sampling state before
+        // inspecting the result; the ordered plan channel guarantees this erase precedes any
+        // later request that reuses the same numeric id.
+        RETURN_IF_STATUS_ERROR(executeOneRound(ScheduleOutput{{}, {stream->streamId()}}));
+        RETURN_IF_STATUS_ERROR(run.status);
+
+        CHECK_AND_RETURN_REF(
+            params,
+            SystemPromptConstructor::commitResident(stream, cache_manager, tokens_id, /*insert_kv_cache=*/true));
+        multi_task_prompt_args[task_id] = params;
+    }
+    resource_context_.system_prompt.reset(new SystemPrompt(multi_task_prompt_args));
+    return absl::OkStatus();
+}
+
 KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
 absl::Status NormalEngine::startLoop() {
     if (parallelism_config.tp_rank == 0) {
-        RTP_LLM_LOG_INFO("start init system prompt");
-        THROW_IF_STATUS_ERROR(initSystemPrompt());
-        RTP_LLM_LOG_INFO("init system prompt done");
+        if (parallelism_config.pp_size > 1) {
+            // PP builds resident system-prompt KV on the loop thread (first-stage root only),
+            // because the build must flow through the real pipeline. Cache config still runs here.
+            initCacheConfigForSystemPrompt();
+        } else {
+            RTP_LLM_LOG_INFO("start init system prompt");
+            THROW_IF_STATUS_ERROR(initSystemPrompt());
+            RTP_LLM_LOG_INFO("init system prompt done");
+        }
     }
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_ = true;
 
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
 
+    // If this rank builds system prompts on the loop thread, READY is published there after the
+    // build settles; otherwise the engine is ready once the loop thread has been launched.
+    if (!buildsSystemPromptsOnLoopThread()) {
+        publishStartupReady();
+    }
+    return absl::OkStatus();
+}
+
+void NormalEngine::publishStartupReady() {
+    {
+        std::lock_guard<std::mutex> lock(startup_mu_);
+        if (startup_state_ != StartupState::kPending) {
+            return;
+        }
+        startup_state_ = StartupState::kReady;
+    }
+    startup_cv_.notify_all();
+}
+
+void NormalEngine::publishStartupFailed(absl::Status error) {
+    {
+        std::lock_guard<std::mutex> lock(startup_mu_);
+        if (startup_state_ != StartupState::kPending) {
+            return;
+        }
+        startup_state_ = StartupState::kFailed;
+        startup_error_ = std::move(error);
+    }
+    startup_cv_.notify_all();
+}
+
+absl::Status NormalEngine::waitStartupResult(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(startup_mu_);
+    const bool                   settled =
+        startup_cv_.wait_for(lock, timeout, [this] { return startup_state_ != StartupState::kPending; });
+    if (!settled) {
+        return absl::DeadlineExceededError("engine startup did not settle within the deadline");
+    }
+    if (startup_state_ == StartupState::kFailed) {
+        return startup_error_;
+    }
     return absl::OkStatus();
 }
 
@@ -583,6 +710,20 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
+    if (buildsSystemPromptsOnLoopThread()) {
+        RTP_LLM_LOG_INFO("start direct system prompt build (PP)");
+        absl::Status build_status = buildSystemPromptsDirect();
+        if (!build_status.ok()) {
+            RTP_LLM_LOG_ERROR("PP system prompt build failed: %s", build_status.ToString().c_str());
+            // Only this rank exits cleanly here, via the init thread's startup wait. Peer ranks
+            // already published READY and block in receivePlan; an in-engine cross-rank failure
+            // signal is not implemented, so they are torn down by the process launcher.
+            publishStartupFailed(build_status);
+            return;
+        }
+        RTP_LLM_LOG_INFO("PP system prompt build done");
+        publishStartupReady();
+    }
     while (should_loop_()) {
         absl::Status status;
         try {
@@ -632,6 +773,10 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         streams.push_back(stream);
     }
     return scheduler_->enqueueGroup(streams);
+}
+
+absl::Status NormalEngine::executeOneRound(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    return executor_->process(schedule_output, schedule_time_us);
 }
 
 absl::Status NormalEngine::step() {
@@ -688,7 +833,7 @@ absl::Status NormalEngine::step() {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         const bool refresh_cache_status_snapshot =
             resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
-        status = executor_->process(schedule_output, tps_schedule_time_us);
+        status = executeOneRound(schedule_output, tps_schedule_time_us);
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
@@ -714,8 +859,7 @@ absl::Status NormalEngine::step() {
 absl::Status NormalEngine::pp_step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.pp_step_work");
 
-    // pp_rank is materialized by the Python-side RankLayout at startup.
-    const bool is_first_stage_scheduler = parallelism_config.pp_rank == 0 && parallelism_config.tp_rank == 0;
+    const bool is_first_stage_scheduler = isFirstStageRoot();
 
     // Pauses only new admission so other ranks keep draining in-flight batches.
     if (is_first_stage_scheduler) {
@@ -762,7 +906,7 @@ absl::Status NormalEngine::pp_step() {
         const bool refresh_cache_status_snapshot =
             is_first_stage_scheduler && resource_context_.cache_manager
             && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
-        status = executor_->process(schedule_output, schedule_time_us);
+        status = executeOneRound(schedule_output, schedule_time_us);
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();

@@ -163,6 +163,7 @@ VARIANTS.update(
         "pdfusion_pp2_tp2_mtp": {"pp": 2, "tp": 2, "dp": 1, "ep": 1, "sp": 3},
         "fake_pp2_tp2_dp2": {"pp": 2, "tp": 2, "dp": 2, "ep": 4, "sp": 0},
         "fake_pp2_tp2_dp2_mtp": {"pp": 2, "tp": 2, "dp": 2, "ep": 4, "sp": 3},
+        "multi_task_prompt_pp2": {"pp": 2, "tp": 1, "dp": 1, "ep": 1, "sp": 0},
     }
 )
 
@@ -522,7 +523,9 @@ class PPTopologyTest(unittest.TestCase):
                     pass
             if pending:
                 time.sleep(0.1)
-        self.assertFalse(pending, f"DP frontends failed to become ready: ports={pending}")
+        self.assertFalse(
+            pending, f"DP frontends failed to become ready: ports={pending}"
+        )
 
     def generate_on_dp(self, port, progress, variant, busy_dp, tokens, label):
         # A frontend knows every DP backend; its HTTP port does not pin routing.
@@ -759,7 +762,9 @@ class PPTopologyTest(unittest.TestCase):
             "case": self.case_name,
             "model_type": MODEL_TYPE,
             "checkpoint": checkpoint,
-            "sp_type": os.environ.get("SP_TYPE", "mtp") if variant.get("sp") else "none",
+            "sp_type": (
+                os.environ.get("SP_TYPE", "mtp") if variant.get("sp") else "none"
+            ),
             "sp_model_type": SP_MODEL_TYPE if variant.get("sp") else None,
             "topology": variant,
             "outputs": self.outputs,
@@ -774,7 +779,7 @@ class PPTopologyTest(unittest.TestCase):
             else:
                 self.assertGreaterEqual(len(gpu_ids), variant["pp"] * variant["tp"])
                 baseline = self.run_baseline(
-                    checkpoint, ",".join(gpu_ids[:variant["tp"]]), variant["tp"]
+                    checkpoint, ",".join(gpu_ids[: variant["tp"]]), variant["tp"]
                 )
                 actual = self.run_pdfusion(checkpoint, gpu_ids, variant)
                 self.assertEqual(
@@ -929,12 +934,188 @@ class MtpPPTest(unittest.TestCase):
                     )
                 self.assertTrue(
                     any(
-                        result["aux_info"]["iter_count"]
-                        < len(result["output_ids"][0])
+                        result["aux_info"]["iter_count"] < len(result["output_ids"][0])
                         for result in actual["serial"][1:]
                     ),
                     f"MTP {propose_step} did not accept any draft tokens",
                 )
+
+
+# System prompts long enough to span multiple KV blocks at the smoke block size
+# (seq_size_per_block=16), so the resident prefix yields reusable whole blocks.
+MULTI_TASK_PROMPTS = [
+    {
+        "task_id": "translator",
+        "prompt": (
+            "You are a professional translator. Translate the user's text into French. "
+            "Preserve the original meaning, tone, and punctuation as faithfully as possible. "
+            "Output only the translation, without any explanation or extra commentary.\n"
+        ),
+    },
+    {
+        "task_id": "counter",
+        "prompt": (
+            "You are a precise sequence assistant. Continue the given numeric or patterned "
+            "sequence exactly, without skipping, repeating, or reordering any element. "
+            "Output only the continuation, with no surrounding words or explanation.\n"
+        ),
+    },
+]
+
+# Each case sends a user prompt under a task_id; updatePrefix prepends the resident
+# system-prompt tokens, which must be reused from the startup-built KV.
+MULTI_TASK_CASES = [
+    ("translator", "The capital of France is", 8),
+    ("counter", "Count the positive integers in order: 1, 2, 3,", 16),
+]
+
+
+class MultiTaskPromptPPTest(unittest.TestCase):
+    """PP multi-task system prompt: build resident KV at startup, reuse it per request.
+
+    PP>1 exercises the direct pipeline build (buildSystemPromptsDirect); the PP=1
+    baseline exercises the proven non-PP preRun build. Both servers share the same
+    multi_task_prompt config and the same task_id requests, so both prepend identical
+    prefix tokens. Matching greedy output plus reuse_len>0 verifies the PP startup build
+    produced correct, reusable resident KV on every stage.
+    """
+
+    case_name = "multi_task_prompt_pp2"
+
+    def id(self):
+        return f"{super().id()}[{self.case_name}]"
+
+    def shortDescription(self):
+        return self.case_name
+
+    def start_server(self, checkpoint, gpu_ids, pp, tp, role_name):
+        world_size = pp * tp
+        self.assertGreaterEqual(
+            len(gpu_ids), world_size, f"need {world_size} GPUs, got {gpu_ids}"
+        )
+        output_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prompt_file = output_dir / f"{role_name}_multi_task_prompt.json"
+        prompt_file.write_text(
+            json.dumps(MULTI_TASK_PROMPTS, ensure_ascii=False), encoding="utf-8"
+        )
+        args = (
+            base_smoke_args()
+            + [
+                "--pp_size",
+                str(pp),
+                "--tp_size",
+                str(tp),
+                "--dp_size",
+                "1",
+                "--ep_size",
+                "1",
+                "--world_size",
+                str(world_size),
+                "--role_type",
+                "PDFUSION",
+                "--reuse_cache",
+                "1",
+                "--multi_task_prompt",
+                str(prompt_file.resolve()),
+            ]
+            + speculative_args(checkpoint, 0)
+        )
+        server = MagaServerManager(
+            env_args={
+                "CUDA_VISIBLE_DEVICES": ",".join(gpu_ids[:world_size]),
+                "WORLD_SIZE": str(world_size),
+                "LOCAL_WORLD_SIZE": str(world_size),
+                "RTP_LLM_STREAM_ASYNC": "0",
+                "RTP_LLM_DEVICE_INPUT": "0",
+            },
+            role_name=role_name,
+            smoke_args_str=shlex.join(args),
+        )
+        self.assertTrue(
+            server.start_server(
+                model_path=checkpoint,
+                model_type=MODEL_TYPE,
+                tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+            ),
+            f"{role_name} failed to start: {server.log_file_path}",
+        )
+        return server
+
+    def generate_with_task(self, server, task_id, prompt, max_new_tokens):
+        generate_config = {
+            "is_streaming": False,
+            "max_new_tokens": max_new_tokens,
+            "min_new_tokens": max_new_tokens,
+            "top_k": 1,
+            "top_p": 1.0,
+            "random_seed": 1234,
+            "return_output_ids": True,
+            "aux_info": True,
+            "task_id": task_id,
+        }
+        response = requests.post(
+            f"http://127.0.0.1:{server.port}/",
+            json={"prompt": prompt, "generate_config": generate_config},
+            timeout=REQUEST_TIMEOUT,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertTrue(result["finished"], result)
+        self.assertEqual(len(result["output_ids"][0]), max_new_tokens, result)
+        return result
+
+    def run_with_prompt(self, checkpoint, gpu_ids, pp, tp, role_name):
+        server = self.start_server(checkpoint, gpu_ids, pp, tp, role_name)
+        try:
+            return [
+                self.generate_with_task(server, task_id, prompt, tokens)
+                for task_id, prompt, tokens in MULTI_TASK_CASES
+            ]
+        finally:
+            server.stop_server()
+
+    def test_pp_multi_task_prompt_matches_pp1(self):
+        checkpoint = os.environ.get("CHECKPOINT_PATH")
+        self.assertTrue(checkpoint, "Pass --test_env=CHECKPOINT_PATH=<checkpoint>")
+        variant = VARIANTS[self.case_name]
+        pp, tp = variant["pp"], variant["tp"]
+        gpu_ids = [str(x) for x in get_gpu_ids()]
+        baseline = self.run_with_prompt(
+            checkpoint, gpu_ids, 1, tp, f"{self.case_name}_pp1_baseline"
+        )
+        actual = self.run_with_prompt(checkpoint, gpu_ids, pp, tp, self.case_name)
+        report = {
+            "case": self.case_name,
+            "model_type": MODEL_TYPE,
+            "checkpoint": checkpoint,
+            "topology": variant,
+            "baseline": baseline,
+            "actual": actual,
+            "passed": False,
+        }
+        try:
+            for (task_id, prompt, _), base, got in zip(
+                MULTI_TASK_CASES, baseline, actual
+            ):
+                self.assertGreater(
+                    got["aux_info"]["reuse_len"],
+                    0,
+                    f"task {task_id!r} did not reuse the resident system-prompt prefix",
+                )
+                self.assertEqual(
+                    got["output_ids"],
+                    base["output_ids"],
+                    f"PP={pp} multi_task_prompt diverges from PP=1 baseline on task "
+                    f"{task_id!r} ({prompt[:40]!r})",
+                )
+            report["passed"] = True
+        finally:
+            output_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / f"{self.case_name}.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
 
 def load_tests(loader, tests, pattern):
@@ -942,6 +1123,9 @@ def load_tests(loader, tests, pattern):
     for name in selected_cases():
         if name == "pdfusion_mtp_regression":
             case = MtpPPTest("test_pdfusion_mtp_matches_target_generation")
+        elif name == "multi_task_prompt_pp2":
+            case = MultiTaskPromptPPTest("test_pp_multi_task_prompt_matches_pp1")
+            case.case_name = name
         else:
             case = PPTopologyTest("test_selected_topology")
             case.case_name = name

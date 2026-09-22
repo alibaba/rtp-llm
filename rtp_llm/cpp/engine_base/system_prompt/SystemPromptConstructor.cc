@@ -33,7 +33,13 @@ SystemPromptConstructor::buildAndCommitOne(EngineBase*                          
                                            const std::vector<int>&               tokens_id,
                                            bool                                  insert_kv_cache) {
     CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
+    return commitResident(stream, cache_manager, tokens_id, insert_kv_cache);
+}
 
+absl::StatusOr<SystemPromptParams> SystemPromptConstructor::commitResident(const GenerateStreamPtr& stream,
+                                                                           KVCacheManager*          cache_manager,
+                                                                           const std::vector<int>&  tokens_id,
+                                                                           bool                     insert_kv_cache) {
     if (!insert_kv_cache) {
         return SystemPromptParams();
     }

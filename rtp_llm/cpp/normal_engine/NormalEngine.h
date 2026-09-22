@@ -1,8 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -38,6 +41,7 @@ public:
     absl::Status step();
     absl::Status pp_step();
     absl::Status startLoop();
+    absl::Status waitStartupResult(std::chrono::milliseconds timeout) override;
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
@@ -60,9 +64,33 @@ private:
     absl::Status                    initSystemPrompt();
     void                            initCacheConfigForSystemPrompt();
     absl::Status                    buildAndInstallSystemPrompt();
-    std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
-    size_t                          getWarmUpInputLength() const;
-    void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+
+    // Single per-round execution step shared by PP serving (pp_step) and the system-prompt
+    // bootstrap (driveSystemPromptBuild), so both drive the executor identically. Future PP
+    // DP/CP lane coordination (e.g. fake participation for empty lanes) belongs here, added once.
+    absl::Status executeOneRound(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0);
+
+    // Completion contract for running one system-prompt build stream through the engine.
+    // Wrapping the inflight pump behind this handle keeps the raw loop out of the build driver
+    // and gives MTP support a single seam to add the rejected-before-submit path.
+    enum class BuildRunOutcome {
+        kDispatched,
+        kRejectedBeforeSubmit,
+        kInterrupted
+    };
+    struct BuildRunResult {
+        BuildRunOutcome outcome;
+        absl::Status    status;
+    };
+    absl::StatusOr<BuildRunResult> driveSystemPromptBuild(const GenerateStreamPtr& stream);
+    absl::Status                   buildSystemPromptsDirect();
+    bool                           isFirstStageRoot() const;
+    bool                           buildsSystemPromptsOnLoopThread() const;
+    void                           publishStartupReady();
+    void                           publishStartupFailed(absl::Status error);
+    std::shared_ptr<GenerateInput> makeFakeInput(size_t seq_len);
+    size_t                         getWarmUpInputLength() const;
+    void                           mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params);
 
@@ -90,6 +118,16 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
     int                                           reserve_step_ = 0;
+
+    enum class StartupState {
+        kPending,
+        kReady,
+        kFailed
+    };
+    std::mutex              startup_mu_;
+    std::condition_variable startup_cv_;
+    StartupState            startup_state_{StartupState::kPending};
+    absl::Status            startup_error_;
 };
 
 }  // namespace rtp_llm

@@ -18,6 +18,8 @@ namespace rtp_llm {
 
 namespace {
 constexpr int64_t kRpcOutputWaitTimeoutMs = 500;
+// Safety backstop for the engine startup wait; a deferred startup phase settles well within this.
+constexpr int64_t kEngineStartupWaitTimeoutMs = 3600 * 1000;
 
 std::string formatRequestLogTag(const std::string& request_key, const RequestInfo& request_info) {
     std::string tag = "request [" + request_key + "]";
@@ -64,6 +66,13 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+        // Wait for the deferred startup phase to settle before the service comes up; engines that
+        // are ready on construction return immediately.
+        auto startup_status = engine_->waitStartupResult(std::chrono::milliseconds(kEngineStartupWaitTimeoutMs));
+        if (!startup_status.ok()) {
+            RTP_LLM_LOG_ERROR("engine startup failed: %s", std::string(startup_status.message()).c_str());
+            return grpc::Status(grpc::StatusCode::INTERNAL, std::string(startup_status.message()));
+        }
     }
     if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
         if (mm_process_engine.is_none()) {
