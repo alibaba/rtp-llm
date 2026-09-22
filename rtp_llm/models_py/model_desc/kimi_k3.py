@@ -48,7 +48,10 @@ class KimiK3DenseMLP(nn.Module):
     def forward(self, hidden, valid_mask=None):
         full = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
         out = self.down(
-            situ(self.gate(full), self.up(full), self.beta, self.linear_beta)
+            situ(
+                self.gate(full), self.up(full), self.beta, self.linear_beta,
+                inplace=True,
+            )
         )
         return reduce_scatter(out, Group.TP) if self.tp_size > 1 else out
 
