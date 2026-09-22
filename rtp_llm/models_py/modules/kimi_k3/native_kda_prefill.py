@@ -1,0 +1,67 @@
+"""K3's native KDA core behind RTP's convolution and CacheStore lifecycle."""
+
+import torch
+
+from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearKDAPrefill
+from rtp_llm.models_py.modules.kimi_k3.native_kda import flash_kda_paged_prefill
+
+
+class KimiK3FlashKDAPrefill(KimiLinearKDAPrefill):
+    def __init__(self, config, parallelism, weights):
+        super().__init__(config, parallelism, weights)
+        # FlashKDA consumes the gate parameters in FP32, independently of the
+        # ordinary projection precision. Conversion happens once, at creation.
+        self.alog = self.alog.float().contiguous()
+        self.dt_bias = self.dt_bias.float().contiguous()
+
+    def _fla(
+        self,
+        mixed_qkv,
+        forget_gate,
+        beta,
+        kv_cache_tensor,
+        seq_size_per_block,
+        attn_inputs,
+    ):
+        cu = attn_inputs.cu_seqlens
+        prefixes = attn_inputs.prefix_lengths
+        if cu.device.type != "cpu" or prefixes.device.type != "cpu":
+            raise ValueError("K3 FlashKDA prefill requires RTP host metadata mirrors")
+        cu, prefixes = cu.tolist(), prefixes.tolist()
+        if len(prefixes) != len(cu) - 1:
+            raise ValueError("K3 FlashKDA prefix metadata does not match the batch")
+        shape = (-1, self.local_num_v_heads, self.head_k_dim)
+        q, k, v = (x.reshape(shape) for x in mixed_qkv.chunk(3, dim=-1))
+        if kv_cache_tensor is None:
+            if any(prefixes):
+                raise ValueError("A cached KDA prefix requires recurrent cache storage")
+            count = len(prefixes)
+            logical = attn_inputs.logical_request_count or count
+            block_table = [[i + 1] if i < logical else [0] for i in range(count)]
+            seq_size_per_block = max([1] + [b - a for a, b in zip(cu, cu[1:])])
+            states = torch.zeros(
+                (count + 1, self.local_num_v_heads, self.head_k_dim, self.head_v_dim),
+                dtype=torch.float32,
+                device=mixed_qkv.device,
+            )
+        else:
+            table = attn_inputs.kv_cache_kernel_block_id
+            if table.device.type != "cpu":
+                raise ValueError("K3 FlashKDA block planning requires host block IDs")
+            block_table = table.tolist()
+            states = self._get_ssm_states(kv_cache_tensor)
+        return flash_kda_paged_prefill(
+            q,
+            k,
+            v,
+            forget_gate.reshape(shape),
+            beta,
+            self.alog,
+            self.dt_bias,
+            self.gate_lower_bound,
+            states,
+            cu,
+            prefixes,
+            block_table,
+            seq_size_per_block,
+        ).reshape(mixed_qkv.shape[0], -1)

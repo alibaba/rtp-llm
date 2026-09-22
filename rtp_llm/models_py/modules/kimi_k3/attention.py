@@ -10,8 +10,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
     reduce_scatter,
 )
 from rtp_llm.models_py.model_desc.kimi_linear import (
-    KimiLinearKDAPrefill,
     KimiLinearKDADecode,
+    KimiLinearKDAPrefill,
 )
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
@@ -45,7 +45,17 @@ class KimiK3KDA(nn.Module):
             group_size=self.dim,
             activation="sigmoid",
         )
-        self.prefill = KimiLinearKDAPrefill(cfg, parallelism, weights)
+        backend = getattr(runtime, "kda_prefill_backend", "rtp")
+        if backend == "flashkda":
+            from rtp_llm.models_py.modules.kimi_k3.native_kda_prefill import (
+                KimiK3FlashKDAPrefill,
+            )
+
+            self.prefill = KimiK3FlashKDAPrefill(cfg, parallelism, weights)
+        elif backend == "rtp":
+            self.prefill = KimiLinearKDAPrefill(cfg, parallelism, weights)
+        else:
+            raise ValueError(f"Unsupported K3 KDA prefill backend: {backend}")
         self.decode = KimiLinearKDADecode(cfg, parallelism, weights)
         # Preserve FP32 recurrence in block checkpoints instead of widening BF16 snapshots.
         self.prefill.intermediate_states_in_fp32 = True

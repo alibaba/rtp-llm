@@ -10,19 +10,16 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
-from rtp_llm.models.kimi_k3.kimi_k3_weight import (
-    KimiK3MtpWeight,
-    KimiK3Weight,
+from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight, KimiK3Weight
+from rtp_llm.ops import (
+    DataType,
+    HybridAttentionType,
+    KvCacheDataType,
+    KVCacheSpecType,
+    QuantAlgo,
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
-from rtp_llm.ops import (
-    HybridAttentionType,
-    KvCacheDataType,
-    QuantAlgo,
-    KVCacheSpecType,
-    DataType,
-)
 
 
 @dataclass(frozen=True)
@@ -41,6 +38,7 @@ class KimiK3RuntimeConfig:
     kda_gate_lower_bound: Optional[float]
     kda_use_full_rank_gate: bool
     mtp_source_layer: Optional[int] = None
+    kda_prefill_backend: str = "rtp"
 
 
 class KimiK3ModelConfig(ModelConfig):
@@ -405,7 +403,28 @@ class KimiK3(BaseModel):
             raise ValueError("SiTU gate beta must be positive")
         if linear_beta is not None and float(linear_beta) <= 0:
             raise ValueError("SiTU linear beta must be positive or null")
+        kda_backend = os.environ.get("KIMI_K3_KDA_PREFILL_BACKEND", "rtp")
+        if kda_backend not in {"rtp", "flashkda"}:
+            raise ValueError(f"Unsupported K3 KDA prefill backend: {kda_backend}")
+        if kda_backend == "flashkda":
+            try:
+                import flash_kda
+            except ImportError as exc:
+                raise RuntimeError(
+                    "K3 FlashKDA backend must be installed before loading weights"
+                ) from exc
+            import torch
+
+            capability = getattr(torch.ops.flash_kda, "supports_fp32_recurrence", None)
+            if capability is None or not capability():
+                raise RuntimeError(
+                    "K3 FlashKDA requires the FP32 recurrence patch; FP32 cache storage alone is insufficient"
+                )
+            logging.info(
+                "K3 KDA prefill backend=flashkda module=%s", flash_kda.__file__
+            )
         config.k3_runtime_config = KimiK3RuntimeConfig(
+            kda_prefill_backend=kda_backend,
             dense_intermediate_size=int(
                 cls._required(text_config, "intermediate_size")
             ),
