@@ -1,4 +1,4 @@
-"""K3 rectangular target verification through RTP's paged MLA planner."""
+"""K3 target verification and draft updates through RTP's paged MLA planner."""
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     MlaFlashInferDecodeOp,
@@ -25,7 +25,12 @@ class KimiK3MlaVerifyImpl(MlaFlashInferImplBase):
         attention = config.getAttentionConfigs(parallelism.get_attn_tp_size())
         batch = inputs.input_lengths.numel()
         tokens = inputs.physical_token_count
-        if batch <= 0 or tokens <= 0 or tokens % batch:
+        if batch <= 0 or tokens <= 0:
+            raise ValueError("K3 paged MLA requires nonempty physical rows")
+        # Target verification has a fixed query width per request. Draft
+        # prefill instead packs accepted prefixes, including zero-length slots
+        # in smaller graph buckets; fill_params builds its ragged qo_indptr.
+        if inputs.is_target_verify and tokens % batch:
             raise ValueError("K3 MLA verification requires rectangular physical rows")
         op = MlaFlashInferDecodeOp(
             attention.head_num,
