@@ -68,9 +68,6 @@ public class ConfigService {
                     SYNC_STATUS_INTERVAL SYNC_REQUEST_TIMEOUT_MS WHALE_CACHE_DEBUG_MODE
                     VIT_SYNC_REQUEST_TIMEOUT_MS VIT_WORKER_TIMEOUT_US VIT_RETAIN_ALIVE_ON_TIMEOUT
                     FLEXLB_MONITOR_MODE FLEXLB_MONITOR_METRIC_WHITELIST
-                    ENGINE_TYPE FLEXLB_ENGINE_TYPE
-                    BATCH_SCHEDULE_MAX_COUNT FLEXLB_BATCH_SCHEDULE_MAX_COUNT
-                    BATCH_LOAD_BALANCE_STRATEGY FLEXLB_BATCH_LOAD_BALANCE_STRATEGY
                     """.trim().split("\\s+")));
 
     private static final ObjectMapper STRICT_MAPPER = JsonMapper.builder()

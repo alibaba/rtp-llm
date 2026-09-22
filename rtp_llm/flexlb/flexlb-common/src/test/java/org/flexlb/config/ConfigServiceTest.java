@@ -37,18 +37,6 @@ class ConfigServiceTest {
     }
 
     @Test
-    void legacyBatchPlacementVariablesAreRejectedEvenWhenEmpty() {
-        for (String name : new String[]{"ENGINE_TYPE", "FLEXLB_ENGINE_TYPE",
-                "BATCH_SCHEDULE_MAX_COUNT", "FLEXLB_BATCH_SCHEDULE_MAX_COUNT",
-                "BATCH_LOAD_BALANCE_STRATEGY", "FLEXLB_BATCH_LOAD_BALANCE_STRATEGY"}) {
-            ConfigValidationException error = assertThrows(ConfigValidationException.class,
-                    () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV,
-                            ConfigTestFixtures.REQUIRED, name, "")));
-            assertTrue(error.getMessage().contains(name), error.getMessage());
-        }
-    }
-
-    @Test
     void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
         assertEquals(5000L, ConfigTestFixtures.parse("{}").getGrpcServer().getShutdownQuietPeriodMs());
         assertEquals(7000L, ConfigTestFixtures.parse("""
