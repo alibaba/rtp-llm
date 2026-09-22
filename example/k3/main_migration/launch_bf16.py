@@ -140,6 +140,40 @@ def require_rdma_device(run):
         raise RuntimeError("No active RDMA port in this runtime container")
 
 
+def validate_rdma_hcas(value, devices, links):
+    names = value.split(",")
+    if not names or len(set(names)) != len(names) or any(
+        not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in names
+    ):
+        raise ValueError("RDMA HCAs must be unique, non-empty device names")
+    available = {line.split()[0] for line in devices.splitlines() if line.split()}
+    for name in names:
+        if name not in available:
+            raise ValueError(f"RDMA HCA absent from ibv_devices: {name}")
+        pattern = rf"(?<![A-Za-z0-9_.-]){re.escape(name)}/"
+        if not any(
+            re.search(pattern, line)
+            and re.search(r"\bstate\s+ACTIVE\b", line)
+            and re.search(r"\bphysical_state\s+LINK_UP\b", line)
+            for line in links.splitlines()
+        ):
+            raise ValueError(f"RDMA HCA is not ACTIVE/LINK_UP: {name}")
+    return ",".join(names)
+
+
+def rdma_hca_environment(run, value):
+    if value is None:
+        return {}
+    devices = subprocess.check_output(["ibv_devices"], text=True, timeout=30)
+    links = subprocess.check_output(["rdma", "link", "show"], text=True, timeout=30)
+    selected = validate_rdma_hcas(value, devices, links)
+    (Path(run) / "rdma-hcas.json").write_text(json.dumps({
+        "devices": devices, "links": links, "ACCL_USE_NICS": selected,
+        "note": "Local HCA validation only; real RDMA transfer must still pass."
+    }, indent=2))
+    return {"ACCL_USE_NICS": selected}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
@@ -150,6 +184,7 @@ def main():
     parser.add_argument("--peer-port", required=True, type=int)
     parser.add_argument("--server", required=True)
     parser.add_argument("--guard", required=True, help="weight_loader_guard.py")
+    parser.add_argument("--rdma-hcas", help="Explicit comma-separated Barex HCA allowlist")
     parser.add_argument(
         "--run-dir", required=True, help="New directory on a local data disk"
     )
@@ -167,6 +202,7 @@ def main():
     run.mkdir(exist_ok=False)
     (run / "uds").mkdir(mode=0o700)
     require_rdma_device(run)
+    environment.update(rdma_hca_environment(run, args.rdma_hcas))
     # Reject potentially inherited experimental settings instead of trusting
     # a shell left over from a DCP/FP8/synthetic-acceptance experiment.
     forbidden = ("CP_ROTATE_METHOD", "QUANTIZATION", "SP_QUANTIZATION")

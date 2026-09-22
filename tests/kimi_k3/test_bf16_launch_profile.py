@@ -125,3 +125,15 @@ def test_rdma_probe_records_active_port(monkeypatch, tmp_path):
                         SimpleNamespace(stdout=output, returncode=0))
     launcher.require_rdma_device(tmp_path)
     assert (tmp_path / "rdma-preflight.txt").read_text() == output
+
+
+def test_explicit_bond_hcas_exclude_other_visible_devices():
+    devices = 'mlx5_2 guid\nmlx5_bond_0 guid\nmlx5_bond_1 guid\n'
+    links = ('link mlx5_bond_0/1 state ACTIVE physical_state LINK_UP netdev rdma0\n'
+             'link mlx5_bond_1/1 state ACTIVE physical_state LINK_UP netdev rdma1\n')
+    assert launcher.validate_rdma_hcas('mlx5_bond_0,mlx5_bond_1', devices, links) == 'mlx5_bond_0,mlx5_bond_1'
+    for invalid in ('', 'mlx5_bond_0,mlx5_bond_0', 'missing', 'mlx5_2'):
+        with pytest.raises(ValueError):
+            launcher.validate_rdma_hcas(invalid, devices, links)
+    with pytest.raises(ValueError):
+        launcher.validate_rdma_hcas('mlx5_bond_0', devices, links.replace('ACTIVE', 'DOWN'))
