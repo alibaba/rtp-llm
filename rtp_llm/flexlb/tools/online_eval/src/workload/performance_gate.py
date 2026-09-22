@@ -275,7 +275,8 @@ def analyze(evidence):
                 for x, y in zip(stamps, stamps[1:])
             )
         ):
-            raise ValueError("observer coverage gap")
+            # Coverage invalidates the run, not the independently validated request ledger.
+            errors.append("observer coverage gap")
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         errors.append(str(exc))
         return result

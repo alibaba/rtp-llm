@@ -157,6 +157,16 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertTrue((Path(d)/"ab/left/reports/run/master-performance/report.html").is_file())
             self.assertTrue((Path(d)/"ab/right/reports/run/master-performance/report.html").is_file())
 
+    def test_observer_gap_retains_request_metrics_without_promoting_verdict(self):
+        e = self.engine_evidence()
+        e["samples"] = [dict(epoch_ms=100000), dict(epoch_ms=110000)]
+        result = analyze(e)
+        self.assertEqual(result["verdict"], "INVALID")
+        self.assertIn("observer coverage gap", result["errors"])
+        self.assertEqual(result["metrics"]["error_rate"], 0)
+        self.assertEqual(result["metrics"]["rtp_llm_generate_tps"], 120)
+        self.assertEqual(len(result["windows"]), 10)
+
     def test_engine_tps_floors_are_independent_of_client_tps(self):
         e = self.engine_evidence()
         self.assertEqual(analyze(e)["verdict"], "PASS")
