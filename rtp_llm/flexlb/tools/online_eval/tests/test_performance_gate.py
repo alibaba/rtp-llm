@@ -360,7 +360,7 @@ class PerformanceGateTest(unittest.TestCase):
             validate(c)
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)):
             plans = compile_scenarios(
-                load_scenarios(ROOT / "config/scenarios/master_performance.yaml"),
+                load_scenarios(ROOT / "config/experiments/master_performance_frozen.yaml"),
                 handlers=handlers(),
             )
         self.assertEqual(len(plans), 2)

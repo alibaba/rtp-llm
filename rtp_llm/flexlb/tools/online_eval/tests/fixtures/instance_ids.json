@@ -82,8 +82,6 @@
   "master_lifecycle::kill_single::single-batch",
   "master_lifecycle::kill_single::single-nonbatch",
   "master_lifecycle::kill_single::window-nonbatch",
-  "master_performance::flash_online_scale::batch-window",
-  "master_performance::flash_online_scale::single-nonbatch",
   "request_completion::immediate::batch-window",
   "request_completion::immediate::single-batch",
   "request_completion::immediate::single-nonbatch",

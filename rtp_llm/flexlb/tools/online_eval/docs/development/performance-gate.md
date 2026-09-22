@@ -1,5 +1,8 @@
 # Master 性能绝对门禁
 
+性能门禁仅保留 frozen 实验入口。固定长度、全冷输入、未校准耗时的合成规模探针已删除，
+不作为快速回归的替代性能场景。判定器和播放层单测仍验证代码契约，不据此作性能结论。
+
 ## 冻结 Whale Mock 后做回归
 
 2026-09-22 暂停继续追齐真实集群 TPS，保留当前已知差异，不调整门槛来制造通过。
@@ -32,8 +35,7 @@ predicted execution=550ms。它们是本轮显式比较对象，不能称为线�
 旧场景未声明此字段时保留客户端合同，不能称为引擎 TPS 门禁。
 
 暂不生成 HTML 时，离线门禁及 A/B 命令均支持 `--json-only`，保存 evidence、analysis.json 和指标差值。
-运行流程仍复用下文 runner，将 case-dir 改为 `master_performance_frozen.yaml`，
-实例改为 `master_performance::flash_frozen_mock::<profile>`。
+运行流程见下文，统一使用 frozen 配置。
 
 ## 真实复制流量与线上 TPS 口径
 
@@ -63,31 +65,27 @@ Prefill TPS 视角：先按引擎/DP 汇总 priority，再提供逐引擎曲线�
 
 每个 run 独立按固定标准判定：完成 input/output TPS 达标、延迟不超过上限、积压增长受限，且所有已发送请求成功率为 100%。A/B 是可选观察，不要求存在劣化版本，也不会修改单 run 结论。
 
-旧合成执行画像 `master_performance::flash_online_scale` 使用 48P/192D、1600 QPS、固定输入 3270 / 输出目标 350。已经撤销低规模用例，不能用低规模 PASS 推断线上表现。
-
-它只对齐所选线上部署的 P/D 和负载量级；执行耗时、KV 容量、缓存复用、请求长度分布仍为 synthetic，单 Master 承接全量流量，也不同于线上双 Master 拓扑。生产容量和正式生产门禁阈值仍需校准。
-
 ## 运行
 
 按 [编译与运行底座](build-and-runtime.md)构建 Master、mock 并设置 Prometheus。下面命令从 `rtp_llm/flexlb` 执行，各自使用新的输出目录。
 
 ```bash
 python3 tools/online_eval/scripts/commands/run_cases.py \
-  --case-dir tools/online_eval/config/scenarios/master_performance.yaml \
+  --case-dir tools/online_eval/config/experiments/master_performance_frozen.yaml \
   --suite workload --profile single-nonbatch --parallel 1 \
-  --instances 'master_performance::flash_online_scale::single-nonbatch' \
+  --instances 'master_performance::flash_frozen_mock::single-nonbatch' \
   --out-dir /path/to/nonbatch
 
 python3 tools/online_eval/scripts/commands/run_cases.py \
-  --case-dir tools/online_eval/config/scenarios/master_performance.yaml \
+  --case-dir tools/online_eval/config/experiments/master_performance_frozen.yaml \
   --suite workload --profile batch-window --parallel 1 \
-  --instances 'master_performance::flash_online_scale::batch-window' \
+  --instances 'master_performance::flash_frozen_mock::batch-window' \
   --out-dir /path/to/batch
 ```
 
 运行前设置 `FLEXLB_FT_WORKER_PORT_CAPACITY=300`、`FLEXLB_FT_MOCK_HEAP=32g`，并显式配置自己的租约端口基址（见后文）。
 
-所有标准在 `config/scenarios/master_performance.yaml`，必填，不从一次测量反推。`max_error_rate` 必须为 0。`test.collection: request` 保证逐请求证据。场景作为 workload 可显式选取；尚未加入默认 core CI 清单。
+所有标准在 `config/experiments/master_performance_frozen.yaml`，必填，不从一次测量反推。`max_error_rate` 必须为 0。`test.collection: request` 保证逐请求证据。场景作为 workload 显式选取，保留在 experiments 目录，不加入默认 CI 枚举。
 
 场景显式开启所需 Master 指标白名单。公共监控使用 `auto_tpm.schedule.latency_ms` 的 timer count 统计调度响应 QPS；它不代表推理完成。推理完成率与 TPS 从完整 Fetch 的请求终态计算。
 
@@ -128,16 +126,8 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.performan
 
 当前实现使用开发机 Java flow。Whale 不复用开发机 runner；后续适配需提供同样的逐请求证据、实际制品和配置身份，才能调用同一离线分析。只有聚合 TPS 或 schedule ACK 时不能给出本门禁的 PASS。暂不自动发布、采集生产请求或修改生产配置。
 
-## 线上量级探针与图表
+## 运行资源与图表
 
-`config/scenarios/master_performance.yaml` 是显式选择的 workload 规模探针，不加入默认 core 套件：
-48P/192D、1600 QPS、固定输入 3270 / 输出目标 350，预热 30 秒、测量 60 秒。
-这些拓扑和负载量级参考 2026-09-22 的线上只读观测；固定长度、全冷输入、100ms synthetic prefill 和默认 decode 模型尚未完成 V4 校准。
-它验证 Master 在这一合成规模下的行为，不能代表生产容量或生产门禁 SLO。
-其中 90% TPS/goodput 下界、TTFT 2s / E2E 15s / TPOT 50ms 和 100% 成功均是实验前声明的 synthetic 合同，不根据结果调低。
-
-沿用上面的 runner，将 `--case-dir` 改为此配置，实例改为
-`master_performance::flash_online_scale::<profile>`。
 运行前设置 `FLEXLB_FT_WORKER_PORT_CAPACITY=300`、`FLEXLB_FT_MOCK_HEAP=32g`，
 并将 `FLEXLB_FT_PARALLEL_MASTER_BASE` 和 `FLEXLB_FT_PARALLEL_MOCK_BASE` 显式绑定到自己的租约区间
 （本例至少预留 320 个端口，Master 与 mock 区间不得重叠）。
