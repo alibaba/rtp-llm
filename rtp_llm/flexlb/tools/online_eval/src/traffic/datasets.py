@@ -9,7 +9,15 @@ import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from traffic.prefix_lineage import BLOCK, decode
+from traffic.prefix_lineage import BLOCK, decode as decode_v2
+from traffic.prefix_lineage_v3 import decode as decode_v3
+
+
+def decode(raw):
+    try:
+        return decode_v2(raw)
+    except ValueError:
+        return decode_v3(raw)
 
 DATA = Path(__file__).resolve().parents[2] / "data"
 DEFAULT_TRACE = "glm-5.3_20260921_1400_15m"
@@ -44,13 +52,14 @@ def distribution(values):
                    for p in (50, 90, 95, 99)})
 
 
-def statistics(events):
+def statistics(events, *, version=2):
     """Nearest-rank percentiles; sharing describes the DAG, not cache hits."""
     duration = (events[-1][0] - events[0][0]) / 1000
     counts = [0] * (int(duration) + 1)
     for event in events:
         counts[(event[0] - events[0][0]) // 1000] += 1
-    inputs = [event[1] * BLOCK for event in events]
+    resolution = 1 if version == 3 else BLOCK
+    inputs = [event[1] * resolution for event in events]
     shared = [event[3] * BLOCK for event in events]
     return dict(
         scope="captured_requests_only_no_missing_pod_extrapolation",
@@ -60,7 +69,7 @@ def statistics(events):
                      requests_per_second=distribution(counts),
                      bucket_origin="first_event", bucket_ms=1000,
                      final_bucket="included_even_if_partial", idle_buckets_included=True),
-        input_tokens=dict(**distribution(inputs), total=sum(inputs), resolution_tokens=BLOCK),
+        input_tokens=dict(**distribution(inputs), total=sum(inputs), resolution_tokens=resolution),
         prefix_structure=dict(shared_tokens=distribution(shared),
                               token_weighted_shared_fraction=sum(shared) / sum(inputs),
                               requests_with_shared_prefix=sum(value > 0 for value in shared),
@@ -87,8 +96,10 @@ def build_manifest(path, source=None):
                     model=dict(name=None, status="unconfirmed", evidence=None),
                     enrichment="manual_spectrum_lookup_not_automated"),
                 capture_window=dict(window, timezone="Asia/Shanghai"),
-                statistics=statistics(events),
-                limitations=["Input lengths are block aligned; original text and tokens are absent.",
+                statistics=statistics(events, version=metadata["version"]),
+                limitations=[("Input lengths are exact; original text and tokens are absent."
+                              if metadata["version"] == 3 else
+                              "Input lengths are block aligned; original text and tokens are absent."),
                              "Output lengths and outcomes are not retained in this codec.",
                              "Prefix sharing is theoretical structure, not measured cache reuse.",
                              "Spectrum origin and model need independently confirmed manual metadata."])

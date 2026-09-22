@@ -1,6 +1,6 @@
 """Bounded pod-local anonymized access-log extraction; no service changes."""
 
-import argparse, array, collections, glob, gzip, hashlib, json, os, socket, time
+import argparse, array, collections, glob, gzip, hashlib, json, lzma, os, socket, time
 
 
 def main():
@@ -8,6 +8,7 @@ def main():
     p.add_argument("--start", type=int, required=True)
     p.add_argument("--end", type=int, required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--format", choices=("gzip", "xz"), default="gzip")
     a = p.parse_args()
     if a.start >= a.end:
         raise ValueError("capture start must precede end")
@@ -15,7 +16,8 @@ def main():
     coverage = []
     seen = set()
     started = time.time()
-    out = gzip.open(a.out + ".jsonl.gz", "wt", compresslevel=1)
+    output_path = a.out + (".jsonl.xz" if a.format == "xz" else ".jsonl.gz")
+    out = lzma.open(output_path, "wt", preset=3) if a.format == "xz" else gzip.open(output_path, "wt", compresslevel=1)
     try:
         for path in sorted(glob.glob("logs/dash_sc_grpc_access_r0_s*.log*")):
             if time.time() - started > 900:
@@ -68,9 +70,10 @@ def main():
                     except Exception:
                         stats["invalid_json"] += 1
                         continue
-                    ts = int(
-                        r.get("request_enter_ts_epoch_ms") or r.get("ts_epoch_ms") or 0
-                    )
+                    if not r.get("request_enter_ts_epoch_ms"):
+                        stats["missing_arrival_timestamp"] += 1
+                        continue
+                    ts = int(r["request_enter_ts_epoch_ms"])
                     if not a.start <= ts < a.end:
                         continue
                     rid = str(r.get("upstream_request_id") or r.get("request_id") or "")
@@ -124,8 +127,8 @@ def main():
         "stats": dict(stats),
         "files": coverage,
         "elapsed_s": time.time() - started,
-        "output_bytes": os.path.getsize(a.out + ".jsonl.gz"),
-        "sha256": hashlib.sha256(open(a.out + ".jsonl.gz", "rb").read()).hexdigest(),
+        "output_bytes": os.path.getsize(output_path),
+        "sha256": hashlib.sha256(open(output_path, "rb").read()).hexdigest(),
         "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
     }
     with open(a.out + ".summary.json", "w") as f:

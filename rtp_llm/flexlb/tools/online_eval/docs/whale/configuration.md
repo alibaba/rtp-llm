@@ -53,4 +53,6 @@ Whale 启动命令应为 `sh /opt/flexlb/start.sh`。配置 JSON 放在环境变
 
 Mock 指标使用引擎兼容的 `rtp_llm_*` 名称，并保留 `hippo_app`、`hippo_role`、`host_ip`、`container_ip`、`engine`、`engine_port`、`role`、`generation` 和 `backend=mock`。寄生 bundle 的多个逻辑实例必须按 `engine` 或 `engine_port` 拆分，不能把 Pod 总和当作单引擎值。
 
-Mock TPS 是模拟器在实际墙钟窗口内的 token 增量，用于验证配置与调度，不代表 GPU kernel 性能。
+Prefill `context_tps` 按有效计算 token / 对应 batch execution 时间统计；`context_tps_with_cache` 用包含复用的输入 token 及其对应执行时间。它们不是墙钟吞吐；墙钟指标是 `context_wall_tps` / `context_wall_tps_with_cache`。Mock 数值用于验证配置与调度，不代表实际 GPU kernel 性能。
+
+真实规模的部署校准必须执行 [生产配置与监控对齐](production-alignment.md)，不能只修改 P/D 数量或复制一段性能公式。

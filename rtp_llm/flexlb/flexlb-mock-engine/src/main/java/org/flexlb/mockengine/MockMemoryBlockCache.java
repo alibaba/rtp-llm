@@ -7,15 +7,20 @@ import java.util.function.LongSupplier;
 /** Metadata host pool mirroring production's optional prefix-tree memory cache. */
 final class MockMemoryBlockCache {
     private static final class Entry {
+        final long key;
         long born;
         long accessSequence;
         boolean resident;
         int pins;
-        Entry(long born, boolean resident) { this.born = born; this.resident = resident; }
+        Entry(long key, long born, boolean resident) {
+            this.key = key; this.born = born; this.resident = resident;
+        }
     }
     private static final class Node {
         Long parent;
         final Set<Long> children = new HashSet<>();
+        Entry entry;
+        int committedSubtree;
     }
     private record Pending(Entry entry, Long parent) {}
     private final int capacity;
@@ -24,6 +29,8 @@ final class MockMemoryBlockCache {
     private final LinkedHashMap<Long, Entry> entries = new LinkedHashMap<>(16, .75f, true);
     private final Map<Long, Node> tree = new HashMap<>();
     private final Set<Entry> pending = new HashSet<>();
+    private final NavigableSet<Entry> victims = new TreeSet<>(Comparator
+            .comparingLong((Entry e) -> e.accessSequence).thenComparingLong(e -> e.key));
     private final DoubleConsumer onEviction;
     private long evictions, writeRejected, generation, accessSequence;
     private int pinned;
@@ -93,7 +100,10 @@ final class MockMemoryBlockCache {
         }
         private void releasePin(Entry entry) {
             entry.pins--;
-            if (epoch == generation && entry.pins == 0) pinned--;
+            if (epoch == generation && entry.pins == 0) {
+                pinned--;
+                refreshVictim(tree.get(entry.key));
+            }
         }
     }
     synchronized ReadLease pinRead(List<Long> keys, int start) {
@@ -103,7 +113,7 @@ final class MockMemoryBlockCache {
             Entry e = entries.get(key);
             if (e == null) break;
             touch(e);
-            if (e.pins++ == 0) pinned++;
+            if (e.pins++ == 0) { pinned++; victims.remove(e); }
             held.put(key, e);
         }
         return new ReadLease(held);
@@ -132,6 +142,8 @@ final class MockMemoryBlockCache {
                             entry.accessSequence = ++accessSequence;
                             entries.put(r.getKey(), entry);
                             indexNode(r.getKey(), item.parent());
+                            tree.get(r.getKey()).entry = entry;
+                            updateSubtree(r.getKey(), 1);
                             changed = true;
                         }
                     }
@@ -170,7 +182,7 @@ final class MockMemoryBlockCache {
                     return null;
                 }
             }
-            Entry e = new Entry(0, resident);
+            Entry e = new Entry(key, 0, resident);
             pending.add(e);
             reserved.put(key, new Pending(e, i == 0 ? null : keys.get(i - 1)));
         }
@@ -178,50 +190,54 @@ final class MockMemoryBlockCache {
     }
 
     private boolean evictOne() {
-        Long victim = null;
-        Entry selected = null;
-        for (var item : entries.entrySet()) {
-            Entry candidate = item.getValue();
-            if (candidate.pins > 0 || candidate.resident
-                    || prefixTreeEnabled && hasResidentDescendant(item.getKey())) continue;
-            if (selected == null || candidate.accessSequence < selected.accessSequence
-                    || candidate.accessSequence == selected.accessSequence && item.getKey() < victim) {
-                victim = item.getKey();
-                selected = candidate;
-            }
-        }
+        Entry selected = victims.pollFirst();
         if (selected == null) return false;
-        removeEntry(victim, selected);
+        removeEntry(selected.key, selected);
         evictions++;
         onEviction.accept(Math.max(0L, clock.getAsLong() - selected.born) / 1_000_000.0);
         return true;
     }
 
-    private void touch(Entry entry) { entry.accessSequence = ++accessSequence; }
+    private void touch(Entry entry) {
+        victims.remove(entry);
+        entry.accessSequence = ++accessSequence;
+        refreshVictim(tree.get(entry.key));
+    }
+
+    private void refreshVictim(Node node) {
+        if (node == null || node.entry == null) return;
+        Entry entry = node.entry;
+        victims.remove(entry);
+        if (entry.pins == 0 && !entry.resident
+                && (!prefixTreeEnabled || node.committedSubtree == 1)) victims.add(entry);
+    }
+
+    // Update only the prefix path. Eviction must not scan the entire host pool
+    // or traverse each candidate's descendants for every newly allocated block.
+    private void updateSubtree(Long key, int delta) {
+        for (Long current = key; current != null;) {
+            Node node = tree.get(current);
+            if (node == null) break;
+            node.committedSubtree += delta;
+            refreshVictim(node);
+            current = node.parent;
+        }
+    }
 
     private void indexNode(Long key, Long parent) {
         Node node = tree.computeIfAbsent(key, ignored -> new Node());
         if (!prefixTreeEnabled || node.parent != null || parent == null) return;
         node.parent = parent;
         tree.computeIfAbsent(parent, ignored -> new Node()).children.add(key);
-    }
-
-    private boolean hasResidentDescendant(Long key) {
-        Node node = tree.get(key);
-        if (node == null) return false;
-        var todo = new ArrayDeque<>(node.children);
-        while (!todo.isEmpty()) {
-            Long child = todo.removeFirst();
-            if (entries.containsKey(child)) return true;
-            Node childNode = tree.get(child);
-            if (childNode != null) todo.addAll(childNode.children);
-        }
-        return false;
+        if (node.committedSubtree != 0) updateSubtree(parent, node.committedSubtree);
     }
 
     private void removeEntry(Long key, Entry expected) {
         if (entries.get(key) != expected) return;
+        victims.remove(expected);
         entries.remove(key);
+        tree.get(key).entry = null;
+        updateSubtree(key, -1);
         pruneNode(key);
     }
 
@@ -258,5 +274,7 @@ final class MockMemoryBlockCache {
     int capacity() { return capacity; }
     synchronized long evictions() { return evictions; }
     boolean prefixTreeEnabled() { return prefixTreeEnabled; }
-    synchronized void clear() { generation++; pinned = 0; entries.clear(); tree.clear(); pending.clear(); }
+    synchronized void clear() {
+        generation++; pinned = 0; entries.clear(); tree.clear(); pending.clear(); victims.clear();
+    }
 }

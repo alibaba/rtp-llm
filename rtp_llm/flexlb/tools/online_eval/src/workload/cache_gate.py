@@ -270,7 +270,8 @@ def build_spec(directory, evidence, result):
         ("client", "total_p99_seconds"): ("Total latency p99", "延迟", "seconds", "s", "#faad14", True),
         ("client", "schedule_p99_seconds"): ("Schedule latency p99", "延迟", "seconds", "s", "#d4b106", True),
         ("master", "arrivals_qps"): ("Master arrival QPS", "流量", "qps", "req/s", "#1d39c4", True),
-        ("master", "completions_qps"): ("Master completion QPS", "流量", "qps", "req/s", "#237804", True),
+        ("master", "completions_qps"): ("Master legacy schedule response QPS", "流量", "qps", "req/s", "#237804", True),
+        ("master", "schedule_responses_qps"): ("Master schedule response QPS", "流量", "qps", "req/s", "#237804", True),
         ("master", "flexlb_app_flexlb_batcher_queue_size"): ("Master batcher queue", "Master", "count", "requests", "#c41d7f", True),
         ("master", "flexlb_app_flexlb_scheduler_inflight_size"): ("Master scheduler inflight", "Master", "count", "requests", "#eb2f96", True),
         ("master", "flexlb_app_flexlb_inflight_request_count"): ("Master inflight requests", "Master", "count", "requests", "#9e1068", False),
@@ -317,8 +318,11 @@ def build_spec(directory, evidence, result):
         )
         audit.append([name, f"{coverage:.0%}", "OK" if coverage >= 0.8 else "SPARSE", sources[key]["promql"]])
     for identity, definition in metric_defs.items():
+        if identity == ("master", "schedule_responses_qps") and ("master", "completions_qps") in found:
+            continue
         if identity not in found and identity in {
-            ("mock", "context_completed_qps"), ("master", "completions_qps")
+            ("mock", "context_completed_qps"),
+            ("master", "schedule_responses_qps")
         }:
             audit.append([definition[0], "0%", "MISSING", "本次归档没有该监控序列"])
 

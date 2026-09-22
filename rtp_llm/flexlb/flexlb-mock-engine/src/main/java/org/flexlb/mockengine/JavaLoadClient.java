@@ -1044,6 +1044,14 @@ public final class JavaLoadClient implements AutoCloseable {
             for (boolean finished : output.getFlattenOutput().getFinishedList()) {
                 if (finished) terminal = now;
             }
+            // Single-request/single-output client: the terminal AuxInfo carries
+            // cumulative generated length, unlike the requested outputLen or
+            // incremental tensor payloads. Missing evidence stays absent.
+            var flat = output.getFlattenOutput();
+            if (flat.getFinishedCount() == 1 && flat.getFinished(0)
+                    && flat.getAuxInfoCount() == 1) {
+                result.observedOutputTokens = flat.getAuxInfo(0).getOutputLen();
+            }
         }
         result.ttftMs = first == null ? 0 : (first - startedNanos) / 1_000_000.0;
         result.totalMs = ((terminal == null ? System.nanoTime() : terminal) - startedNanos) / 1_000_000.0;
@@ -1570,6 +1578,9 @@ public final class JavaLoadClient implements AutoCloseable {
         node.put("ts", result.ts);
         node.put("input_len", result.inputLen);
         node.put("output_len", result.outputLen);
+        if (result.observedOutputTokens != null) {
+            node.put("observed_output_tokens", result.observedOutputTokens);
+        }
         node.put("status", result.status);
         node.put("schedule_ms", result.scheduleMs);
         node.put("sched_done_epoch_ms", result.schedDoneEpochMs);
@@ -2468,6 +2479,7 @@ public final class JavaLoadClient implements AutoCloseable {
         long ts;
         int inputLen;
         int outputLen;
+        Integer observedOutputTokens;
         String status = "unknown";
         double scheduleMs;
         /** Absolute epoch-ms when the schedule RPC returned (send_start + schedule_ms); 0 on the direct fallback path (no master schedule hop). */

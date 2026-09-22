@@ -73,3 +73,7 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.cache_gat
 ```
 
 报告核对流量、拓扑、容量、性能和 Master 配置，缺字段会显示 UNKNOWN；曲线按缩容事件对齐。默认强判定观察 old FAIL / new PASS；`--mode weak` 只核对控制变量，`--mode none` 只出报告。A/B 不修改单 run 的 PASS / FAIL / INVALID 结论。
+
+## Master 性能绝对门禁
+
+见 [性能门禁](performance-gate.md)。单 run 以 TPS、延迟和 100% 成功率判定；版本或 batch/non-batch A/B 仅辅助观察。

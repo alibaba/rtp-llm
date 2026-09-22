@@ -6,6 +6,7 @@ from pathlib import Path
 
 from traffic.realistic import write_trace as write_realistic
 from traffic.prefix_lineage import write_trace as write_lineage
+from traffic.prefix_lineage_v3 import write_trace as write_lineage_v3
 
 
 def sha256_file(path):
@@ -20,6 +21,7 @@ def sha256_file(path):
 SOURCES = {
     ("synthetic", "realistic", "1"): write_realistic,
     ("trace", "prefix_lineage", "2"): write_lineage,
+    ("trace", "prefix_lineage", "3"): write_lineage_v3,
 }
 
 

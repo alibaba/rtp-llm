@@ -100,11 +100,17 @@ class JavaFlowGroup:
             "flow did not acknowledge startup",
         )
 
-    def status(self):
+    def control_status(self):
+        """Cheap process/control observation; request accounting remains in status()."""
         path = self.control / "status.json"
         state = json.loads(path.read_text()) if path.exists() else {}
         if state and any(state.get(k) != v for k, v in self.identity.items()):
             raise ValueError("flow control identity mismatch")
+        state["process_returncode"] = None if self.proc is None else self.proc.proc.poll()
+        return state
+
+    def status(self):
+        state = self.control_status()
         if self.collection_profile == "aggregate":
             state["observed_started"] = state.get("started", 0)
             state["observed_terminal"] = state.get("terminal", 0)

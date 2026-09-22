@@ -183,7 +183,7 @@ class CacheGateTest(unittest.TestCase):
             self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
             self.assertEqual(spec["kpis"][1]["value"], "INVALID")
             audit = spec["sections"][0]["rows"]
-            self.assertIn(["Master completion QPS", "0%", "MISSING", "本次归档没有该监控序列"], audit)
+            self.assertIn(["Master schedule response QPS", "0%", "MISSING", "本次归档没有该监控序列"], audit)
 
     def test_ab_requires_aligned_controls(self):
         from workload.cache_gate_ab import compare

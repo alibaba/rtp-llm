@@ -22,7 +22,7 @@ def spec(raw):
 
 class StartupOptionsTest(unittest.TestCase):
     def test_preset_registry_is_total_and_rejects_typos_before_launch(self):
-        self.assertEqual(("default", "fault_env", "glm_5_3_l20d"), preset_names())
+        self.assertEqual(("default", "fault_env", "glm_5_3_l20d", "flash_capture_diagnostic", "flash_whale_20260922"), preset_names())
         for name in preset_names():
             self.assertIsInstance(load_preset(name)[0], dict)
             self.assertEqual(spec({"perf_preset": name}).perf, load_preset(name)[0])
