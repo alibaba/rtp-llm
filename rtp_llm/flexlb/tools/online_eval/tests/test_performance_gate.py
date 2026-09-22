@@ -3,8 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-import yaml
 from workload.performance_gate import analyze, report, validate, trace_workload_sha
 from workload.performance_compare import compare
 from scenario import compile_scenarios, load_scenarios
@@ -14,9 +14,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def evidence():
-    c = yaml.safe_load((ROOT / "config/scenarios/master_performance.yaml").read_text())[
-        "parameters"
-    ]["criteria"]
+    # Small arithmetic fixture only; never a runnable benchmark.
+    c = {
+        "benchmark_id": "synthetic-100ms-10qps-v1",
+        "warmup_s": 5,
+        "measure_s": 30,
+        "sample_s": 1,
+        "max_gap_s": 3,
+        "qps": 10,
+        "qps_tolerance": 0.1,
+        "min_requests": 250,
+        "max_pacing_lag_ms": 100,
+        "min_input_tps": 9000,
+        "min_output_tps": 70,
+        "min_goodput_rps": 9,
+        "min_slo_fraction": 0.95,
+        "max_error_rate": 0,
+        "max_ttft_p99_ms": 1000,
+        "max_e2e_p99_ms": 2000,
+        "max_tpot_p99_ms": 150,
+        "slo_ttft_ms": 1000,
+        "slo_e2e_ms": 2000,
+        "slo_tpot_ms": 150,
+        "max_inflight_growth_rps": 0.2,
+    }
     c.update(measure_s=10, min_requests=80, warmup_s=0)
     issued = []
     records = []
@@ -64,7 +85,7 @@ class PerformanceGateTest(unittest.TestCase):
             path = report(d, e)
             self.assertTrue((path / "report.html").is_file())
             spec = json.loads((path / "report-spec.json").read_text())
-            self.assertEqual(len(spec["panels"]), 3)
+            self.assertEqual(len(spec["panels"]), 1)
             for panel in spec["panels"]:
                 self.assertTrue(panel["overlay"])
                 self.assertTrue(panel["series"][0]["points"])
@@ -75,6 +96,60 @@ class PerformanceGateTest(unittest.TestCase):
                 ),
                 r,
             )
+
+    def test_multiview_ab_preserves_decode_monitoring_and_request_buckets(self):
+        from workload.performance_views import panel
+
+        e = evidence()
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            archive = root / "telemetry/1/queries.json"
+            archive.parent.mkdir(parents=True)
+            archive.write_text(
+                json.dumps(
+                    dict(
+                        start=100,
+                        end=110,
+                        step=1,
+                        targets={},
+                        queries={
+                            "mock/engine_count": dict(
+                                promql="sum by(role)(engines)",
+                                result=[
+                                    dict(
+                                        metric=dict(role=role),
+                                        values=[[100, count], [101, count]],
+                                    )
+                                    for role, count in [("prefill", 2), ("decode", 4)]
+                                ],
+                            )
+                        },
+                    )
+                )
+            )
+            chart, audit = panel(root, e, analyze(e))
+            self.assertTrue(audit["available"])
+            self.assertEqual(len(chart["presets"]["规模"]), 2)
+            by_name = {c["name"]: c for c in chart["series"]}
+            self.assertEqual(
+                by_name["mock · D engine count"]["points"][0], dict(x=0, y=4)
+            )
+            self.assertEqual(by_name["TTFT p99"]["points"][0]["y"], 50)
+            self.assertEqual(by_name["到达 cohort 成功率"]["points"][0]["y"], 1)
+            self.assertEqual(
+                sum(p["y"] for p in by_name["完成输出 TPS"]["points"]), 792
+            )
+            compare(e, e, root / "ab", left_directory=root, right_directory=root)
+            spec = json.loads(
+                (
+                    root / "ab/reports/comparison/master-performance/report-spec.json"
+                ).read_text()
+            )
+            self.assertEqual([p["id"] for p in spec["panels"]], ["ab", "A", "B"])
+            overlay = spec["panels"][0]
+            self.assertEqual(len(overlay["presets"]["规模"]), 4)
+            self.assertEqual(overlay["series"][0]["dash"], [6, 4])
+            self.assertTrue((root / "ab/left/telemetry/1/queries.json").is_file())
 
     def test_tail_cohort_and_actual_tokens_not_requested_budget(self):
         e = evidence()
@@ -187,10 +262,11 @@ class PerformanceGateTest(unittest.TestCase):
         c["max_error_rate"] = 0.01
         with self.assertRaises(ValueError):
             validate(c)
-        plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/master_performance.yaml"),
-            handlers=handlers(),
-        )
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)):
+            plans = compile_scenarios(
+                load_scenarios(ROOT / "config/scenarios/master_performance.yaml"),
+                handlers=handlers(),
+            )
         self.assertEqual(len(plans), 2)
         for p in plans:
             self.assertIn("performance_finish", [s["action"] for s in p["stages"]])

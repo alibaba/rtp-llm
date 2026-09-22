@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import shutil
 from pathlib import Path
 
 from reporting import compare_controls, write_bundle, run_meta, details, table
@@ -36,7 +37,7 @@ def controls(e):
     )
 
 
-def compare(left, right, output, allowed=()):
+def compare(left, right, output, allowed=(), left_directory=None, right_directory=None):
     # Explicit Master configuration fields only. Never exempt load, model or criteria.
     if any(
         not p.startswith("/actual_master_config/") or p.endswith("/") for p in allowed
@@ -63,22 +64,57 @@ def compare(left, right, output, allowed=()):
         verdicts=dict(left=a["verdict"], right=b["verdict"]),
     )
     output = Path(output)
-    panels = []
+    individual = []
     runs = {}
-    for label, e, r in [("left", left, a), ("right", right, b)]:
-        path = report(output / label, e, r)
+    run_sections = []
+    for label, e, r, directory in [
+        ("A", left, a, left_directory),
+        ("B", right, b, right_directory),
+    ]:
+        destination = output / ("left" if label == "A" else "right")
+        if directory:
+            for source in Path(directory).glob("telemetry/*/queries.json"):
+                target = destination / source.relative_to(directory)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if source.resolve() != target.resolve():
+                    shutil.copy2(source, target)
+        path = report(destination, e, r)
         spec = json.loads((path / "report-spec.json").read_text())
-        for index, source_panel in enumerate(spec["panels"]):
-            panel = copy.deepcopy(source_panel)
-            for series in panel["series"]:
-                series["name"] = label + " · " + series["name"]
-                series["dash"] = [6, 4] if label == "left" else []
-            if label == "left":
-                panel["caption"] = "left 虚线 / right 实线；时间按各自测量起点对齐"
-                panels.append(panel)
-            else:
-                panels[index]["series"].extend(panel["series"])
+        chart = copy.deepcopy(spec["panels"][0])
+        config = e.get("provenance", {}).get("actual_master_config", {})
+        mode = (
+            config.get("scheduler", {}).get("decision", {}).get("type", "?")
+            + " / "
+            + config.get("dispatcher", {}).get("type", "?")
+        )
+        chart.update(id=label, title=label + " · " + mode + " · " + r["verdict"])
+        individual.append(chart)
         runs[label] = spec["run_meta"]
+        run_sections.append(details(label + " 曲线来源与门禁", spec["sections"]))
+    overlay = copy.deepcopy(individual[0])
+    overlay.update(
+        id="ab",
+        title="A/B 合图",
+        series=[],
+        presets={},
+        caption="A 虚线 / B 实线；同一指标同色，各自测量起点对齐。比较仅供观察，绝对门禁分别判定。",
+    )
+    colors = {}
+    for label, chart in zip(("A", "B"), individual):
+        for source in chart["series"]:
+            curve = copy.deepcopy(source)
+            colors.setdefault(curve["name"], curve["color"])
+            curve.update(
+                color=colors[curve["name"]],
+                name=label + " · " + curve["name"],
+                dash=[6, 4] if label == "A" else [],
+            )
+            overlay["series"].append(curve)
+        for name, selection in chart["presets"].items():
+            overlay["presets"].setdefault(name, []).extend(
+                label + " · " + s for s in selection
+            )
+    panels = [overlay, *individual]
     rows = []
     for key in sorted(a["metrics"].keys() | b["metrics"].keys()):
         av, bv = a["metrics"].get(key), b["metrics"].get(key)
@@ -92,7 +128,19 @@ def compare(left, right, output, allowed=()):
         result,
         dict(
             title="Master 性能 A/B 观察",
-            subtitle=f"left {a['verdict']} / right {b['verdict']} · controls {aligned['status']}",
+            subtitle=f"A {a['verdict']} / B {b['verdict']} · controls {aligned['status']} · "
+            + f"{left.get('provenance', {}).get('topology')} · {left['criteria']['qps']} QPS · {left['criteria']['benchmark_id']}",
+            kpis=[
+                dict(
+                    label=label + " 整轮成功率（含预热/排空）",
+                    value=(
+                        f"{100 * (1 - r['metrics']['error_rate']):.6f}%"
+                        if r["metrics"].get("error_rate") is not None
+                        else "N/A"
+                    ),
+                )
+                for label, r in [("A", a), ("B", b)]
+            ],
             panels=panels,
             timeAxis=dict(
                 min=0,
@@ -106,6 +154,7 @@ def compare(left, right, output, allowed=()):
                 ),
                 details("控制变量核对", aligned),
                 details("声明配置变化", declared),
+                *run_sections,
             ],
         ),
         meta=run_meta(dict(id="master-performance-ab"), runs=runs),
@@ -135,6 +184,8 @@ def main():
         json.loads(a.right.read_text()),
         a.output,
         a.allow_master_change,
+        a.left.parent,
+        a.right.parent,
     )
     print(
         json.dumps(

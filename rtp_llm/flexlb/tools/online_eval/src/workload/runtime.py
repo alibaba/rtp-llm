@@ -291,6 +291,13 @@ class WorkloadPolicy:
         analysis = analyze_report(ctx.artifact_dir, result, payload)
         bundle = write_report(ctx.artifact_dir, analysis)
         result["workload"]["report"] = str(bundle / "report.html")
+        # Dedicated gate is evaluated before teardown. Refresh only its presentation
+        # once Prometheus export is complete; the original checks remain authoritative.
+        gate_evidence = ctx.artifact_dir / "performance-gate-evidence.json"
+        if gate_evidence.is_file():
+            from workload.performance_gate import report as performance_report
+
+            performance_report(ctx.artifact_dir, json.loads(gate_evidence.read_text()))
 
 
 def execute_workload(instance, backend, handlers=None, artifact_dir=".", **kwargs):

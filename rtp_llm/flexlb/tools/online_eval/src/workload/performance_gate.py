@@ -330,7 +330,7 @@ def analyze(evidence):
     return result
 
 
-def report(directory, evidence, result=None):
+def report(directory, evidence, result=None, telemetry_directory=None):
     result = analyze(evidence) if result is None else result
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -338,34 +338,14 @@ def report(directory, evidence, result=None):
         json.dumps(evidence, indent=2, allow_nan=False)
     )
     p = evidence.get("provenance", {})
-    curves = [
-        dict(
-            name=k,
-            axis="count" if k == "inflight" else "tps",
-            unit="requests" if k == "inflight" else "tok/s",
-            color=color,
-            points=[dict(x=w["t"], y=w[k]) for w in result["windows"]],
-        )
-        for k, color in [
-            ("input_tps", "#1677ff"),
-            ("output_tps", "#13c2c2"),
-            ("inflight", "#fa541c"),
-        ]
-    ]
+    from workload.performance_views import panel
+
+    chart, monitoring = panel(telemetry_directory or directory, evidence, result)
     spec = dict(
         title="Master 性能绝对门禁",
         subtitle=result["verdict"],
         timeAxis=dict(min=0, max=evidence.get("criteria", {}).get("measure_s", 1)),
-        panels=[
-            dict(
-                id=curve["name"],
-                title=title,
-                overlay=True,
-                axes={curve["axis"]: dict(title=curve["unit"])},
-                series=[curve],
-            )
-            for curve, title in zip(curves, ["输入 TPS", "输出 TPS", "未完成请求数"])
-        ],
+        panels=[chart],
         sections=[
             table(
                 "绝对标准",
@@ -380,6 +360,7 @@ def report(directory, evidence, result=None):
                     for x in result["checks"]
                 ],
             ),
+            details("监控曲线来源与缺采", monitoring),
             details("有效性", result["errors"]),
             details("指标", result["metrics"]),
         ],
@@ -408,7 +389,7 @@ def main():
     args = parser.parse_args()
     e = json.loads(args.evidence.read_text())
     r = analyze(e)
-    report(args.output, e, r)
+    report(args.output, e, r, args.evidence.parent)
     print(json.dumps(r, allow_nan=False))
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[r["verdict"]]
 
