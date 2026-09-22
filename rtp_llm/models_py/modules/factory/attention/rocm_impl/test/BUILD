@@ -50,3 +50,26 @@ py_test(
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
+
+py_library(
+    name = "bert_uqi_test_utils",
+    srcs = ["bert_uqi_test_utils.py"],
+    data = ["//rtp_llm/models_py:bert_uqi_numerical_sources"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
+    name = "test_bert_uqi_two_pass_cpu",
+    srcs = ["test_bert_uqi_two_pass_cpu.py"],
+    deps = [":bert_uqi_test_utils"],
+    tags = ["cpu"],
+)
+
+py_test(
+    name = "test_bert_uqi_two_pass_aiter",
+    srcs = ["test_bert_uqi_two_pass_aiter.py"],
+    deps = [":bert_uqi_test_utils", "//rtp_llm:aiter", "//rtp_llm:triton"],
+    tags = ["rocm"],
+    timeout = "long",
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)

@@ -149,3 +149,13 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+# Torch-only UQI numerical modules for CPU and real AITER parity tests.
+filegroup(
+    name = "bert_uqi_numerical_sources",
+    srcs = [
+        "modules/factory/attention/bert_uqi_schedule.py",
+        "modules/factory/attention/rocm_impl/bert_uqi_two_pass_core.py",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -188,8 +188,7 @@ class BertModel(GptModelBase):
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> FMHAImplBase:
-        # Use FlashInfer native ragged attention for both masked and unmasked
-        # requests when the BERT user-profile path is enabled.
+        # Use device-specific two-pass attention for the user-profile block mask.
         if self.use_user_profile_mask and is_cuda_graph:
             raise ValueError("BERT user-profile attention does not support CUDA graphs")
         if self.use_user_profile_mask:
@@ -197,6 +196,11 @@ class BertModel(GptModelBase):
             if attn_inputs.is_prefill:
                 if self.use_uqi_two_pass:
                     return self._prepare_uqi_two_pass_impl(inputs, attn_inputs)
+                if torch.version.hip is not None:
+                    raise ValueError(
+                        "ROCm BERT user-profile attention requires VISION_BERT_UQI_TWO_PASS=1; "
+                        "the FlashInfer dense-mask implementation is CUDA-only"
+                    )
                 # Build logical masks on device; variable-size planning uses host scalars.
                 token_ids = inputs.input_ids
                 text_mask = inputs.embedding_inputs.text_tokens_mask
@@ -237,10 +241,16 @@ class BertModel(GptModelBase):
         self, inputs: PyModelInputs, attn_inputs: Any
     ) -> Any:
         """Plan native two-pass attention from host metadata, reusing wrappers."""
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
-            BertUqiTwoPassAttnOp,
-            BertUqiTwoPassImpl,
-        )
+        if torch.version.hip is not None:
+            from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_two_pass import (
+                BertUqiTwoPassAttnOp,
+                BertUqiTwoPassImpl,
+            )
+        else:
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
+                BertUqiTwoPassAttnOp,
+                BertUqiTwoPassImpl,
+            )
 
         batch_size = attn_inputs.input_lengths.size(0)
         cu_host = attn_inputs.cu_seqlens[: batch_size + 1]
