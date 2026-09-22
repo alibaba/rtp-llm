@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules import (
     EmbeddingBert,
     FMHAImplBase,
     LayerNorm,
+    MultimodalEmbeddingInjector,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -149,6 +150,7 @@ class BertModel(GptModelBase):
             beta=weights.get_global_weight(W.pre_decoder_ln_beta),
             eps=config.layernorm_eps,
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
@@ -167,6 +169,18 @@ class BertModel(GptModelBase):
     ) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
+        # Image slots contain cache hashes, not word-table IDs. Validate the
+        # producer contract before the lookup, then skip those word-table rows.
+        multimodal_features = inputs.multimodal_inputs.multimodal_features
+        multimodal_locs = inputs.multimodal_inputs.mm_features_locs
+        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
+        has_mask = text_tokens_mask is not None and text_tokens_mask.numel() != 0
+        has_locs = multimodal_locs is not None and multimodal_locs.numel() != 0
+        if not (bool(multimodal_features) == has_locs == has_mask):
+            raise ValueError(
+                "multimodal features, locations, and text_tokens_mask must be "
+                "provided together"
+            )
         inputs_embeds = self.embed_tokens(
             input_ids,
             bert_embedding_inputs.combo_position_ids,
@@ -174,8 +188,14 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.combo_tokens_type_ids,
             bert_embedding_inputs.token_type_embedding,
             bert_embedding_inputs.input_embedding_scalar,
+            text_tokens_mask if has_mask else None,
         )
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
+        # Projected image features are already normalized in decoder input
+        # space; never add text position/type embeddings or normalize them twice.
+        hidden_states = self.multimodal_embedding_injector(
+            hidden_states, multimodal_features, multimodal_locs
+        )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         quantized_hidden_states = None
