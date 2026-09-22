@@ -37,7 +37,7 @@ def controls(e):
     )
 
 
-def compare(left, right, output, allowed=(), left_directory=None, right_directory=None):
+def compare(left, right, output, allowed=(), left_directory=None, right_directory=None, json_only=False):
     # Explicit Master configuration fields only. Never exempt load, model or criteria.
     if any(
         not p.startswith("/actual_master_config/") or p.endswith("/") for p in allowed
@@ -64,6 +64,18 @@ def compare(left, right, output, allowed=(), left_directory=None, right_director
         verdicts=dict(left=a["verdict"], right=b["verdict"]),
     )
     output = Path(output)
+    result["metric_deltas"] = {
+        key: dict(left=a["metrics"].get(key), right=b["metrics"].get(key),
+                  delta=b["metrics"][key] - a["metrics"][key])
+        for key in a["metrics"].keys() & b["metrics"].keys()
+        if a["metrics"][key] is not None and b["metrics"][key] is not None
+    }
+    if json_only:
+        output.mkdir(parents=True, exist_ok=True)
+        for label, evidence in (("left", left), ("right", right)):
+            (output / (label + "-evidence.json")).write_text(json.dumps(evidence, allow_nan=False))
+        (output / "analysis.json").write_text(json.dumps(result, indent=2, allow_nan=False))
+        return result
     individual = []
     runs = {}
     run_sections = []
@@ -178,6 +190,7 @@ def main():
     p.add_argument("right", type=Path)
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--allow-master-change", action="append", default=[])
+    p.add_argument("--json-only", action="store_true", help="compare controls and absolute gates without HTML")
     a = p.parse_args()
     r = compare(
         json.loads(a.left.read_text()),
@@ -186,6 +199,7 @@ def main():
         a.allow_master_change,
         a.left.parent,
         a.right.parent,
+        json_only=a.json_only,
     )
     print(
         json.dumps(

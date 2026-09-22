@@ -24,5 +24,15 @@
       "--decode-block-size",
       "64"
     ]
+  },
+  "flash_whale_20260922": {
+    "performance": "data/performance/flash_whale_20260922.json",
+    "mock_heap": "32g",
+    "mock_extra_args": [
+      "--prefill-block-size",
+      "512",
+      "--decode-block-size",
+      "128"
+    ]
   }
 }

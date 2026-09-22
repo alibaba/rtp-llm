@@ -1,5 +1,32 @@
 # Master 性能绝对门禁
 
+## 冻结 Whale Mock 后做回归
+
+2026-09-22 暂停继续追齐真实集群 TPS，保留当前已知差异，不调整门槛来制造通过。
+`config/flash_whale_reference_20260922.json` 固定观察来源、48P/192D、Device/Memory 容量、
+P 公式及 1.23 scale、D step 模型、EOS400 和差异范围。
+`config/scenarios/master_performance_frozen.yaml` 用此画像做单请求 / batch 配置 A/B；
+两个 profile 的独立绝对结论不受比较结果影响。
+
+该场景使用较早采集的 Flash 前缀轨迹，在播放时过滤 0–32k；不能说它来自用户最后一次复制源调整。
+数据不提交仓库；运行前须提供该 YAML 指定 SHA256 的 `data/traffic_models/local_flash_20260922_v3.xz`。
+输出上限为 8192，正常终止由固定 seed 的 EOS400 模型控制，不能再用旧350上限截短长度分布。
+预热300秒、测量180秒；是否进入满缓存阶段须另外看驱逐证据，固定预热时长不保证满缓存。
+
+首次合同预先声明：P context >=50000、with-cache >=100000、D generate >=2500 tok/s
+（逐引擎算术均值），以及 YAML 中客户端吞吐、积压、TTFT p99<=2s、E2E p99<=30s、
+请求平均 TPOT p99<=50ms 和全流程100%成功。这些是暂定的 **Mock 回归标准**，
+不是生产容量/SLO认证；本次A/B结果不得回写这些阈值。
+
+`criteria.engine_tps` 声明三项完整下界后，finish阶段直接归档 Prometheus 原始抓取时间点。
+先按同一引擎、同一时间点求 priority 之和，再计算引擎均值；不相加成集群 TPS。
+缺引擎、缺 priority 点、超过 max_gap_s 的断档、引擎 incarnation 改变都判 INVALID；零TPS保留并判 FAIL。
+旧场景未声明此字段时保留客户端合同，不能称为引擎 TPS 门禁。
+
+暂不生成 HTML 时，离线门禁及 A/B 命令均支持 `--json-only`，保存 evidence、analysis.json 和指标差值。
+运行流程仍复用下文 runner，将 case-dir 改为 `master_performance_frozen.yaml`，
+实例改为 `master_performance::flash_frozen_mock::<profile>`。
+
 ## 真实复制流量与线上 TPS 口径
 
 `capture_frontend_prefix.py --format xz` 保存全长度前缀摘要，按
@@ -28,7 +55,7 @@ Prefill TPS 视角：先按引擎/DP 汇总 priority，再提供逐引擎曲线�
 
 每个 run 独立按固定标准判定：完成 input/output TPS 达标、延迟不超过上限、积压增长受限，且所有已发送请求成功率为 100%。A/B 是可选观察，不要求存在劣化版本，也不会修改单 run 结论。
 
-当前唯一执行画像 `master_performance::flash_online_scale` 使用 62P/192D、1600 QPS、固定输入 3270 / 输出目标 350。已经撤销低规模用例，不能用低规模 PASS 推断线上表现。
+当前唯一执行画像 `master_performance::flash_online_scale` 使用 48P/192D、1600 QPS、固定输入 3270 / 输出目标 350。已经撤销低规模用例，不能用低规模 PASS 推断线上表现。
 
 它只对齐所选线上部署的 P/D 和负载量级；执行耗时、KV 容量、缓存复用、请求长度分布仍为 synthetic，单 Master 承接全量流量，也不同于线上双 Master 拓扑。生产容量和正式生产门禁阈值仍需校准。
 
@@ -96,7 +123,7 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.performan
 ## 线上量级探针与图表
 
 `config/scenarios/master_performance.yaml` 是显式选择的 workload 规模探针，不加入默认 core 套件：
-62P/192D、1600 QPS、固定输入 3270 / 输出目标 350，预热 30 秒、测量 60 秒。
+48P/192D、1600 QPS、固定输入 3270 / 输出目标 350，预热 30 秒、测量 60 秒。
 这些拓扑和负载量级参考 2026-09-22 的线上只读观测；固定长度、全冷输入、100ms synthetic prefill 和默认 decode 模型尚未完成 V4 校准。
 它验证 Master 在这一合成规模下的行为，不能代表生产容量或生产门禁 SLO。
 其中 90% TPS/goodput 下界、TTFT 2s / E2E 15s / TPOT 50ms 和 100% 成功均是实验前声明的 synthetic 合同，不根据结果调低。

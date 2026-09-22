@@ -43,13 +43,19 @@ REQUIRED_PROVENANCE = (
     "client_environment",
 )
 
+ENGINE_TPS = {
+    "rtp_llm_context_tps": "prefill",
+    "rtp_llm_context_tps_with_cache": "prefill",
+    "rtp_llm_generate_tps": "decode",
+}
+
 
 def finite(v):
     return type(v) in (int, float) and math.isfinite(v)
 
 
 def validate(criteria):
-    if not isinstance(criteria, dict) or set(criteria) != NUMERIC | {"benchmark_id"}:
+    if not isinstance(criteria, dict) or set(criteria) - {"engine_tps"} != NUMERIC | {"benchmark_id"}:
         raise ValueError(
             "performance criteria must explicitly supply every contract field"
         )
@@ -86,7 +92,67 @@ def validate(criteria):
         raise ValueError("invalid sample coverage budget")
     if criteria["max_error_rate"] != 0:
         raise ValueError("performance gate requires 100% request success")
+    if "engine_tps" in criteria:
+        bounds = criteria["engine_tps"]
+        if (not isinstance(bounds, dict) or set(bounds) != set(ENGINE_TPS)
+                or any(not finite(v) or v <= 0 for v in bounds.values())):
+            raise ValueError("engine_tps requires all three positive absolute floors")
     return criteria
+
+
+def engine_tps_checks(evidence):
+    """Scrape-time samples; sum priorities per engine, then equally weight engines.
+
+    No Prometheus lookback filling, idle filtering, or cluster TPS summation.
+    An engine restart changes incarnation and therefore invalidates coverage.
+    """
+    bounds = evidence["criteria"].get("engine_tps")
+    if bounds is None:
+        return {}, []
+    lo = evidence["window"]["start_epoch_ms"] / 1000
+    hi = evidence["window"]["end_epoch_ms"] / 1000
+    gap = evidence["criteria"]["max_gap_s"]
+    groups = {name: {} for name in ENGINE_TPS}
+    for row in evidence.get("engine_tps_samples", []):
+        labels = row["metric"]
+        name = labels.get("__name__")
+        if name not in groups:
+            continue
+        role = ENGINE_TPS[name]
+        if labels.get("role") != role or not labels.get("engine_name"):
+            raise ValueError("engine TPS lacks role/engine identity")
+        key = (labels["engine_name"], labels.get("engine_incarnation", ""))
+        priorities = groups[name].setdefault(key, {})
+        samples = priorities.setdefault(labels.get("priority", "aggregate"), {})
+        for stamp, raw in row["values"]:
+            value = float(raw)
+            if not finite(stamp) or not math.isfinite(value) or value < 0:
+                raise ValueError("invalid engine TPS sample")
+            if lo <= stamp <= hi:
+                if stamp in samples and samples[stamp] != value:
+                    raise ValueError("conflicting engine TPS samples")
+                samples[stamp] = value
+    metrics, checks = {}, []
+    for name, engines in groups.items():
+        expected = evidence["provenance"]["topology"][ENGINE_TPS[name]]
+        if type(expected) is not int or expected <= 0 or len(engines) != expected:
+            raise ValueError("engine TPS coverage/epoch mismatch: " + name)
+        means = []
+        for priorities in engines.values():
+            stamp_sets = [set(s) for s in priorities.values()]
+            if not stamp_sets or not stamp_sets[0] or any(s != stamp_sets[0] for s in stamp_sets):
+                raise ValueError("missing engine TPS priority samples: " + name)
+            stamps = sorted(stamp_sets[0])
+            if (stamps[0] - lo > gap or hi - stamps[-1] > gap
+                    or any(b - a > gap for a, b in zip(stamps, stamps[1:]))):
+                raise ValueError("engine TPS scrape gap: " + name)
+            means.append(sum(sum(s[t] for s in priorities.values()) for t in stamps) / len(stamps))
+        value = sum(means) / expected
+        metrics[name] = value
+        metrics[name + "_engine_count"] = expected
+        checks.append(dict(metric=name, actual=value, bound=bounds[name], direction="min",
+                           status="PASS" if value >= bounds[name] else "FAIL"))
+    return metrics, checks
 
 
 def trace_workload_sha(path):
@@ -306,6 +372,12 @@ def analyze(evidence):
             )
         )
     # Curves use disjoint completion buckets; cohort goodput above includes delayed terminals.
+    try:
+        engine_metrics, engine_checks = engine_tps_checks(evidence)
+        m.update(engine_metrics)
+        checks.extend(engine_checks)
+    except (KeyError, TypeError, ValueError) as exc:
+        errors.append("engine TPS: " + str(exc))
     for i in range(math.ceil(duration)):
         start, end = lo + i * 1000, min(hi, lo + (i + 1) * 1000)
         rows = completions(start, end)
@@ -386,10 +458,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--json-only", action="store_true", help="write evidence and verdict without HTML")
     args = parser.parse_args()
     e = json.loads(args.evidence.read_text())
     r = analyze(e)
-    report(args.output, e, r, args.evidence.parent)
+    if args.json_only:
+        args.output.mkdir(parents=True, exist_ok=True)
+        (args.output / "performance-gate-evidence.json").write_text(json.dumps(e, allow_nan=False))
+        (args.output / "analysis.json").write_text(json.dumps(r, indent=2, allow_nan=False))
+    else:
+        report(args.output, e, r, args.evidence.parent)
     print(json.dumps(r, allow_nan=False))
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[r["verdict"]]
 

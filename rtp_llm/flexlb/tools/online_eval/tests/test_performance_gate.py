@@ -76,6 +76,51 @@ def evidence():
 
 
 class PerformanceGateTest(unittest.TestCase):
+    def engine_evidence(self):
+        from workload.performance_gate import ENGINE_TPS
+        e = evidence()
+        e["criteria"]["engine_tps"] = {name: 100 for name in ENGINE_TPS}
+        e["engine_tps_samples"] = [
+            dict(metric=dict(__name__=name, role=role, engine_name=f"{role}-{i}", priority=str(priority)),
+                 values=[[t, "60"] for t in range(100, 111)])
+            for name, role in ENGINE_TPS.items()
+            for i in range(e["provenance"]["topology"][role])
+            for priority in (0, 50)
+        ]
+        return e
+
+    def test_engine_tps_floors_are_independent_of_client_tps(self):
+        e = self.engine_evidence()
+        self.assertEqual(analyze(e)["verdict"], "PASS")
+        self.assertEqual(analyze(e)["metrics"]["rtp_llm_context_tps"], 120)
+        for row in e["engine_tps_samples"]:
+            row["values"] = [[t, "0"] for t in range(100, 111)]
+        self.assertEqual(analyze(e)["verdict"], "FAIL")
+
+    def test_engine_tps_missing_engine_gap_and_restart_are_invalid(self):
+        e = self.engine_evidence()
+        e["engine_tps_samples"] = e["engine_tps_samples"][2:]
+        self.assertEqual(analyze(e)["verdict"], "INVALID")
+        e = self.engine_evidence()
+        for row in e["engine_tps_samples"]:
+            row["values"] = [[100, "60"], [110, "60"]]
+        self.assertEqual(analyze(e)["verdict"], "INVALID")
+        e = self.engine_evidence()
+        extra = copy.deepcopy(e["engine_tps_samples"][0])
+        extra["metric"]["engine_incarnation"] = "restarted"
+        e["engine_tps_samples"].append(extra)
+        self.assertEqual(analyze(e)["verdict"], "INVALID")
+
+    def test_json_only_ab_preserves_failed_candidate_and_controls(self):
+        a, b = self.engine_evidence(), self.engine_evidence()
+        b["flow"]["records"][0]["status"] = "error"
+        with tempfile.TemporaryDirectory() as d:
+            r = compare(a, b, d, json_only=True)
+            self.assertTrue(r["controls"]["aligned"])
+            self.assertEqual(r["verdicts"], dict(left="PASS", right="FAIL"))
+            self.assertFalse(list(Path(d).rglob("*.html")))
+            self.assertTrue((Path(d) / "analysis.json").is_file())
+
     def test_absolute_success_and_renderer(self):
         e = evidence()
         r = analyze(e)

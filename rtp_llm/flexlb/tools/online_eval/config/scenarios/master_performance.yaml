@@ -5,7 +5,7 @@ profiles:
 - batch-window
 environment:
   backend: java_mock
-  n_prefill: 62
+  n_prefill: 48
   n_decode: 192
   perf_preset: fault_env
   metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.actions.elastic import _validate
-from workload.performance_gate import validate, report, analyze, trace_workload_sha
+from workload.performance_gate import validate, report, analyze, trace_workload_sha, ENGINE_TPS
 from traffic.traffic_source import sha256_file
 
 
@@ -119,6 +119,16 @@ def finish(ctx, p, deadline):
     except Exception as exc:
         e["errors"].append("drain: " + str(exc))
     e["flow"] = flow.evidence_snapshot()
+    if "engine_tps" in e["criteria"]:
+        try:
+            e["engine_tps_samples"] = [
+                row
+                for chunk in ctx.monitor.raw("mock", e["window"]["start_epoch_ms"] / 1000,
+                                             e["window"]["end_epoch_ms"] / 1000)
+                for row in chunk if row["metric"].get("__name__") in ENGINE_TPS
+            ]
+        except Exception as exc:
+            e["errors"].append("engine TPS collection: " + str(exc))
     result = analyze(e)
     bundle = report(ctx.artifact_dir, e, result)
     return StageOutput(
