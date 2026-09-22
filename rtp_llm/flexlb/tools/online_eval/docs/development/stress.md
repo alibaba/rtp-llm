@@ -15,19 +15,19 @@ python3 tools/online_eval/scripts/commands/run_stress.py \
   --warmup-s 10 --fetch-output-stream 1
 ```
 
-默认源是 `data/traffic_models/prefix_lineage_v2_ac2f8aad.xz`：匿名 prefix DAG 模型，
+默认源是 `data/traffic_models/glm-5.3_20260921_1400_15m.xz`：匿名 prefix DAG 模型，
 不是原始访问日志。脚本先核验模型 SHA，再在运行目录生成 `traffic-plan.jsonl`
 及其 manifest，Java 只读取这份临时计划。模型有 141113 个事件、原始跨度约
 900 秒；`--replay-speed 4` 对应全量模型平均约 627 名义 QPS。改变目标 QPS 时按下式重算：
 
-要选用其他已登记的采集模型，在同一命令中加入 `--traffic-model prefix_lineage_v2_0fcf5c31`
-（白天）或 `--traffic-model prefix_lineage_v2_241ac71c`（夜间）。无需增加 case；
-`--traffic-model` 与 `--traffic-source-spec` 互斥。默认仍使用 0921 固定模型。
-新采集源尚未标定门禁，切换数据后应记录模型 SHA 和发送节奏，不直接沿用旧基线结论。
-
 ```text
 speed = round(target_qps × (max(valid_ts)-min(valid_ts)) / valid_request_count)
 ```
+
+要选用其他采集文件，在同一命令中加入 `--traffic-model glm-5.3_20260922_0610_3h30m`
+（06:10 开始，3.5 小时）或 `--traffic-model glm-5.3_20260921_2126_3h`（21:26 开始，约 3 小时）。无需增加 case；
+`--traffic-model` 与 `--traffic-source-spec` 互斥。默认仍使用 0921 固定模型。
+新采集源尚未标定门禁，切换数据后应记录模型 SHA 和发送节奏，不直接沿用旧基线结论。
 
 `valid_request_count` 是模型事件数；实际 `--limit`、时长和发送拥塞会改变实发
 QPS，报告中的实发 QPS 才是结果口径。要使用参数化合成源，设置

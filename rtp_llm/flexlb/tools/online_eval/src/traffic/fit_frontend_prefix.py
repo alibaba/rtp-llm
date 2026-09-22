@@ -6,12 +6,12 @@ small-parameter statistical generator. True arrivals are retained; playback
 controls the rate. Output behavior is independently specified.
 """
 
-import argparse, collections, gzip, hashlib, json, math, time
+import argparse, collections, gzip, hashlib, json, math, time, sys
 from pathlib import Path
-try:
-    from traffic.prefix_lineage import encode, write_trace
-except ImportError:
-    from prefix_lineage import encode, write_trace
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from traffic.prefix_lineage import encode, write_trace
+from traffic.datasets import build_manifest
 
 
 def main():
@@ -20,6 +20,7 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--expected-pods", type=int, required=True)
     p.add_argument("--output-tokens", type=int, required=True)
+    p.add_argument("--source-info", type=Path, help="manual Spectrum/model source metadata JSON")
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -117,6 +118,9 @@ def main():
         source_end=rows[-1]['ts'],capture_start=capture_start,capture_end=capture_end,
         source_pods=len(sources),expected_pods=a.expected_pods))
     model_path.write_bytes(raw)
+    source = json.loads(a.source_info.read_text()) if a.source_info else None
+    model_path.with_suffix('.manifest.json').write_text(
+        json.dumps(build_manifest(model_path, source), indent=2) + '\n')
     write_trace(plan, dict(path=str(model_path.resolve()),sha256=hashlib.sha256(raw).hexdigest(),
         count=len(model),output_tokens=a.output_tokens,priority=50),'frontend-fit:scale_in',a.out)
     digest = hashlib.sha256()

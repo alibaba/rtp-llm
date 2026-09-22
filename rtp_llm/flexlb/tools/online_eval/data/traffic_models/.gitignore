@@ -1,5 +1,0 @@
-# New binary captures require a catalog entry and an executable selector.
-*.xz
-!prefix_lineage_v2_ac2f8aad.xz
-!prefix_lineage_v2_0fcf5c31.xz
-!prefix_lineage_v2_241ac71c.xz

@@ -7,6 +7,7 @@ import argparse
 import collections
 import hashlib
 import json
+import os
 from pathlib import Path
 from traffic.prefix_lineage import decode, expand
 
@@ -34,7 +35,8 @@ def calibrate(raw, report, report_sha):
     depth=sorted(prefix_depths)[len(prefix_depths)//2] if prefix_depths else 1
     # Family concentration is defined at 4K in the empirical report.
     depth=max(8,depth)
-    return dict(parameters=dict(block_size=512,families=families,shared_blocks=0,
+    return dict(data_kind='synthetic', generator=dict(kind='synthetic',model='realistic',version='1'),
+        parameters=dict(block_size=512,families=families,shared_blocks=0,
         prefix_blocks=depth,suffix_blocks=1,zipf_alpha=(lo+hi)/2,cold_fraction=cold,
         session_requests=1,session_growth_blocks=0,
         input_distribution=dict(values=values,weights=[1]*len(values))),
@@ -57,6 +59,7 @@ def main():
     parser.add_argument('--out',type=Path,required=True)
     a=parser.parse_args();raw=a.fit_report.read_bytes()
     result=calibrate(a.model.read_bytes(),json.loads(raw),hashlib.sha256(raw).hexdigest())
+    result['source_capture']=os.path.relpath(a.model.resolve(), a.out.resolve().parent)
     a.out.write_text(json.dumps(result,indent=2)+'\n')
 
 

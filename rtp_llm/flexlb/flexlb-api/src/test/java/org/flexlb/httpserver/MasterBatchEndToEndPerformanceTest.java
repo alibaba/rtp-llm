@@ -248,13 +248,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         suppressRequestPathLogs();
         Path dataRoot = findTrafficDataDirectory();
         ObjectMapper mapper = new ObjectMapper();
-        JsonNode catalog = mapper.readTree(dataRoot.resolve("catalog.json").toFile());
-        JsonNode entry = catalog.path("models").path(catalog.path("default_trace").asText());
-        Path modelPath = dataRoot.resolve(entry.path("model").asText());
-        Path manifestPath = dataRoot.resolve(entry.path("manifest").asText());
-        Path fixturePath = dataRoot.resolve(entry.path("java_fixture").asText());
+        String capture = "traffic_models/glm-5.3_20260921_1400_15m";
+        Path modelPath = dataRoot.resolve(capture + ".xz");
+        Path manifestPath = dataRoot.resolve(capture + ".manifest.json");
+        Path fixturePath = dataRoot.resolve(capture + ".templates.json");
         assertTrue(Files.isRegularFile(modelPath) && Files.isRegularFile(manifestPath)
-                && Files.isRegularFile(fixturePath), "catalog companion files are missing");
+                && Files.isRegularFile(fixturePath), "capture companion files are missing");
         JsonNode manifest = mapper.readTree(manifestPath.toFile());
         JsonNode fixture = mapper.readTree(fixturePath.toFile());
         String pinnedSha = manifest.path("sha256").asText();
@@ -266,7 +265,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             throw new IOException("SHA-256 unavailable", failure);
         }
         assertEquals(pinnedSha, fixture.path("source_sha256").asText(),
-                "regenerate the catalog Java fixture from the pinned model");
+                "regenerate the Java fixture from the pinned model");
         assertEquals(512, fixture.path("block_size").asInt());
         List<TraceShape> shapes = readTemplateShapes(fixture.path("templates"));
         requestTemplates = buildRequestTemplates(shapes);
@@ -1431,12 +1430,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         Path current = Path.of("").toAbsolutePath();
         for (int depth = 0; depth < 6 && current != null; depth++) {
             Path candidate = current.resolve("tools/online_eval/data");
-            if (Files.isRegularFile(candidate.resolve("catalog.json"))) {
+            if (Files.isDirectory(candidate.resolve("traffic_models"))) {
                 return candidate;
             }
             current = current.getParent();
         }
-        throw new IOException("Cannot locate tools/online_eval/data/catalog.json from "
+        throw new IOException("Cannot locate tools/online_eval/data/traffic_models from "
                 + Path.of("").toAbsolutePath());
     }
 

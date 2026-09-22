@@ -2143,5 +2143,12 @@
       "0.9": 116983,
       "0.99": 466504
     }
-  }
+  },
+  "data_kind": "synthetic",
+  "generator": {
+    "kind": "synthetic",
+    "model": "realistic",
+    "version": "1"
+  },
+  "source_capture": "../traffic_models/glm-5.3_20260921_1400_15m.xz"
 }

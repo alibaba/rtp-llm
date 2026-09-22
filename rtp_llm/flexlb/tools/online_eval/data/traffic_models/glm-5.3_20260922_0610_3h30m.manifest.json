@@ -1,0 +1,120 @@
+{
+  "version": 2,
+  "block_size": 512,
+  "count": 538208,
+  "realism": "EMPIRICAL_PREFIX_STRUCTURE",
+  "tail": "BLOCK_ALIGNED_LOSSY_TOKENS",
+  "arrival": "TRUE_TIMESTAMPS_PACED_BY_CLIENT",
+  "provenance": {
+    "missing_pod_indices": [
+      7,
+      13,
+      15
+    ],
+    "source_start": 1790028600547,
+    "source_end": 1790041199998,
+    "expected_pods": 20,
+    "source_pods": 17,
+    "v1_sha256": "046cfa6403eb8bf1a9b6af608a1b6c7eb5827b3d4b4c15d0ac6c0152aa285cb0",
+    "fit_report_sha256": "605ecd21f81765f7fc0175052c8d7b108284c92840c410a32df15785e639989a"
+  },
+  "token_adjustment": {
+    "original_tokens": 38187313078,
+    "aligned_tokens": 38065092096,
+    "removed_tokens": 128943709,
+    "added_tokens": 6722727,
+    "short_requests": 31958,
+    "relative_change": -0.003200565113087583
+  },
+  "allocation_bitmap": "reserve discarded v1 partial-block labels; no tail lengths retained",
+  "manifest_schema_version": 2,
+  "bytes": 2328840,
+  "sha256": "0fcf5c3129c118e0aac2488fb702795ccd9f56c2baba79b8d43891f6fc9833e0",
+  "codec": {
+    "name": "prefix_lineage",
+    "version": 2
+  },
+  "data_kind": "real",
+  "source": {
+    "capture": {
+      "layer": "frontend",
+      "deployment": "na130_L20C_4TP",
+      "evidence": "prior_capture_manifest"
+    },
+    "spectrum": {
+      "identity": null,
+      "status": "unconfirmed",
+      "evidence": null
+    },
+    "model": {
+      "name": "glm-5.3-model",
+      "status": "confirmed",
+      "evidence": "user confirmation on 2026-09-22"
+    },
+    "enrichment": "manual_spectrum_lookup_not_automated"
+  },
+  "capture_window": {
+    "start": "2026-09-22T06:10:00.547000+08:00",
+    "end": "2026-09-22T09:39:59.998000+08:00",
+    "timezone": "Asia/Shanghai"
+  },
+  "statistics": {
+    "scope": "captured_requests_only_no_missing_pod_extrapolation",
+    "request_count": 538208,
+    "percentile_method": "nearest_rank",
+    "arrival": {
+      "event_span_s": 12599.451,
+      "mean_qps": 42.71678186613052,
+      "requests_per_second": {
+        "count": 12600,
+        "min": 0,
+        "max": 136,
+        "mean": 42.71492063492064,
+        "p50": 36,
+        "p90": 86,
+        "p95": 92,
+        "p99": 101
+      },
+      "bucket_origin": "first_event",
+      "bucket_ms": 1000,
+      "final_bucket": "included_even_if_partial",
+      "idle_buckets_included": true
+    },
+    "input_tokens": {
+      "count": 538208,
+      "min": 512,
+      "max": 1046016,
+      "mean": 70725.61555383792,
+      "p50": 51200,
+      "p90": 155136,
+      "p95": 209920,
+      "p99": 387584,
+      "total": 38065092096,
+      "resolution_tokens": 512
+    },
+    "prefix_structure": {
+      "shared_tokens": {
+        "count": 538208,
+        "min": 0,
+        "max": 1046016,
+        "mean": 61009.73422914561,
+        "p50": 38912,
+        "p90": 144384,
+        "p95": 194560,
+        "p99": 363520
+      },
+      "token_weighted_shared_fraction": 0.8626257085412518,
+      "requests_with_shared_prefix": 468023,
+      "parentless_requests": 70185,
+      "interpretation": "structural_sharing_not_observed_cache_hit_rate"
+    },
+    "output_tokens": null,
+    "outcomes": null
+  },
+  "limitations": [
+    "Input lengths are block aligned; original text and tokens are absent.",
+    "Output lengths and outcomes are not retained in this codec.",
+    "Prefix sharing is theoretical structure, not measured cache reuse.",
+    "Spectrum origin and model need independently confirmed manual metadata."
+  ]
+}

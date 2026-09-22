@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from traffic.prefix_lineage import BLOCK, decode, expand
 from traffic.traffic_source import sha256_file
-from traffic.catalog import model_entry
+from traffic.datasets import model_path
 
 
 def derive(model, count=128, max_tokens=32768, output_tokens=420):
@@ -34,9 +34,9 @@ def derive(model, count=128, max_tokens=32768, output_tokens=420):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    default_paths = model_entry()[1]
-    parser.add_argument("--model", type=Path, default=default_paths["model"])
-    parser.add_argument("--out", type=Path, default=default_paths["java_fixture"])
+    default_model = model_path()
+    parser.add_argument("--model", type=Path, default=default_model)
+    parser.add_argument("--out", type=Path, default=default_model.with_suffix(".templates.json"))
     args = parser.parse_args(argv)
     args.out.write_text(json.dumps(derive(args.model), separators=(",", ":")) + "\n")
 

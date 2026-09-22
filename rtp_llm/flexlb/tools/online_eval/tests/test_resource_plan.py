@@ -31,7 +31,7 @@ plans=compile_scenarios(load_scenarios(root/'config/scenarios/cache_scale_in.yam
 assert plans[0]['environment']['n_prefill']==125
 assert plans[0]['environment']['n_decode']==536
 source=plans[0]['stages'][1]['params']['source']['parameters']
-assert source['path'].endswith('prefix_lineage_v2_ac2f8aad.xz')
+assert source['path'].endswith('glm-5.3_20260921_1400_15m.xz')
 assert plans[0]['stages'][1]['params']['client']['playback']['qps']==240
 budget = JavaMockBudget(661, 0)
 lease = plan_lane_leases([[budget]], master_base=61000, mock_base=61010, mock_stride=704)[0]

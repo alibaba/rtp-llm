@@ -19,7 +19,7 @@ from runtime.harness import (API_JAR, FLEXLB_DIR, MOCK_JAR, TOOL_DIR, ClientOps,
                              http_get_json, http_post_json, port_in_use,
                              resolve_java21, wait_for)
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
-from traffic.catalog import catalog, verify_model
+from traffic.datasets import DEFAULT_TRACE, model_path, read_manifest, trace_models
 from traffic.traffic_source import materialize
 
 # Producer-side whitelist from the retired stress launcher. Prometheus stores
@@ -77,8 +77,8 @@ def parse_args(argv=None):
                    else TOOL_DIR / "data/performance/deepseek_v4_flash_decode_table.json")
     traffic = p.add_mutually_exclusive_group()
     traffic.add_argument("--traffic-source-spec", type=Path)
-    traffic.add_argument("--traffic-model", choices=tuple(catalog()["models"]),
-                         help="versioned trace model registered in data/catalog.json")
+    traffic.add_argument("--traffic-model", choices=tuple(trace_models()),
+                         help="real capture filename stem under data/traffic_models")
     p.add_argument("--traffic-output-tokens", type=int, default=420)
     p.add_argument("--limit", type=int, default=1000)
     p.add_argument("--send-mode", choices=("replay", "uniform"))
@@ -165,10 +165,9 @@ def _traffic(a, output: Path):
         spec = json.loads(a.traffic_source_spec.read_text())
         base = a.traffic_source_spec.resolve().parent
     else:
-        selected = a.traffic_model or catalog()["default_trace"]
-        entry, paths, manifest, _ = verify_model(selected)
-        model = paths["model"]
-        spec = dict(kind="trace", model=entry["codec"], version=str(entry["codec_version"]), parameters=dict(
+        model = model_path(a.traffic_model or DEFAULT_TRACE)
+        manifest = read_manifest(model)
+        spec = dict(kind="trace", model=manifest["codec"]["name"], version=str(manifest["codec"]["version"]), parameters=dict(
             path=model.name, sha256=manifest["sha256"], count=manifest["count"],
             output_tokens=a.traffic_output_tokens, priority=50))
         base = model.parent

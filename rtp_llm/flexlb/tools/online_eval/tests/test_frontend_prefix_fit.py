@@ -75,6 +75,11 @@ class FrontendPrefixFitTest(unittest.TestCase):
             self.assertEqual(report["missing_pod_indices"], [1])
             self.assertAlmostEqual(report["source_qps"], 3 / 9)
             model = root / "fit/lineage-model.xz"
+            from traffic.datasets import read_manifest
+            manifest = read_manifest(model)
+            self.assertEqual(3, manifest['statistics']['request_count'])
+            self.assertEqual('real', manifest['data_kind'])
+            self.assertEqual('unconfirmed', manifest['source']['spectrum']['status'])
             _, fitted = decode(model.read_bytes())
             self.assertEqual(
                 [list(e[2:4]) for e in fitted], [[-1, 0], [0, 1], [0, 2]]

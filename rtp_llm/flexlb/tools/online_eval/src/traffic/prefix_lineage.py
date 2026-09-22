@@ -166,6 +166,7 @@ def main():
     parser.add_argument('v1_model', type=Path)
     parser.add_argument('--fit-report', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--source-info', type=Path, help='manual Spectrum/model source metadata JSON')
     args = parser.parse_args()
     model = json.loads(gzip.decompress(args.v1_model.read_bytes()))
     if model.get('version') != 1 or model.get('block_size') != BLOCK:
@@ -176,7 +177,11 @@ def main():
     provenance['fit_report_sha256'] = hashlib.sha256(args.fit_report.read_bytes()).hexdigest()
     raw = encode(model['events'], provenance)
     args.out.write_bytes(raw)
-    print(json.dumps(dict(path=str(args.out), bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(), **decode(raw)[0]), indent=2))
+    from traffic.datasets import build_manifest
+    source = json.loads(args.source_info.read_text()) if args.source_info else None
+    manifest = build_manifest(args.out, source)
+    args.out.with_suffix('.manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print(json.dumps(dict(path=str(args.out), **manifest), indent=2))
 
 
 if __name__ == '__main__':
