@@ -12,6 +12,7 @@ from .ffn_weight import (
     MoeConfig,
 )
 from .group_wise_quant_weight import GroupWiseWeight
+from .load_quant_w8a8_int8_weight import LoadQuantW8A8Int8PerChannelWeight
 from .mixed_fp4_quant_weight import MixedFp4Weight
 from .omni_quant_weight import OmniQuantWeightInfo
 from .online_modelopt_fp4_quant_weight import OnlineModelOptFp4MoeWeight
