@@ -153,6 +153,67 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             set(layouts),
         )
 
+    def test_dense_and_sparse_warmup_use_required_metadata_without_toggle_helpers(self):
+        import torch
+
+        attn = attention(20, ratio=1, producer=True)
+        attn.v41_config = {"candidate_topk_blocks": 2048, "candidate_block_size": 8}
+        selected = torch.zeros((1, 512), dtype=torch.int32)
+        meta = SimpleNamespace(
+            try_score_bounds=Mock(return_value=(torch.zeros(1), torch.ones(1)))
+        )
+        plan = SimpleNamespace(end=torch.ones(1, dtype=torch.int32))
+        sparse = SimpleNamespace(
+            prepare_plan=Mock(return_value=plan),
+            score=Mock(return_value=torch.zeros(1, 16392, dtype=torch.bfloat16)),
+            remap=Mock(return_value=selected),
+        )
+        indexer = SimpleNamespace(
+            is_supported=lambda *args: True,
+            quantize_indexer_q=Mock(
+                return_value=(torch.zeros(1, 32, 64), torch.ones(1, 32))
+            ),
+            PrefillIndexerKeys=lambda quant, scale: SimpleNamespace(
+                quant=quant, scale=scale
+            ),
+            score_indexer_chunk=Mock(return_value=torch.zeros(1, 1024)),
+        )
+        package = SimpleNamespace(
+            _v41_deepselect=SimpleNamespace(
+                is_available=lambda device: True,
+                try_select_sparse_tokens=Mock(return_value=selected),
+            ),
+            _v41_indexer_q_triton=SimpleNamespace(
+                is_supported=lambda *args: True,
+                try_fused_indexer_q=lambda *args: (
+                    torch.zeros(1, 1, 32, 64),
+                    torch.ones(1, 1, 32),
+                    torch.ones(1, 1, 32),
+                ),
+            ),
+            _v41_prefill_candidates=SimpleNamespace(),
+            _v41_prefill_indexer=indexer,
+            _v41_prefill_metadata=meta,
+            _v41_prefill_topk=SimpleNamespace(
+                is_supported=lambda *args: True,
+                try_select_tokens=Mock(return_value=selected),
+            ),
+            _v41_sparse_prefill_indexer=sparse,
+        )
+        with patch.dict(sys.modules, {"rtp_llm.models_py.modules.dsv4.fp8": package}):
+            warmup._warm_indexer_layout(
+                attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
+            )
+            meta.try_score_bounds.assert_called_once()
+            self.assertEqual(sparse.prepare_plan.call_count, 2)
+            self.assertEqual(sparse.remap.call_count, 2)
+            # Supported warmup work must fail loudly if a helper stops launching.
+            meta.try_score_bounds.return_value = None
+            with self.assertRaisesRegex(RuntimeError, "score bounds"):
+                warmup._warm_indexer_layout(
+                    attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
+                )
+
     def test_slot_table_alignment_is_independent_of_position_alignment(self):
         self.assertEqual(
             set(warmup._slot_metadata_layouts()),

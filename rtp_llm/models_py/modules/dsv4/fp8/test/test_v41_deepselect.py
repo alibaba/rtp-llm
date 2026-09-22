@@ -18,13 +18,15 @@ class DeepSelectGateTest(unittest.TestCase):
             self.assertIsNone(selector.try_select_sparse_tokens(logits, ends))
         device_query.assert_not_called()
 
-    def test_planning_availability_and_explicit_disable(self):
+    def test_planning_availability_and_missing_native_binding(self):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
             rtp_llm_ops, "deepselect_bf16_available", return_value=True, create=True
         ), mock.patch.object(selector, "_device_supported", return_value=True):
             self.assertTrue(selector.is_available(torch.device("cuda:0")))
             self.assertFalse(selector.is_available(torch.device("cpu")))
-            with mock.patch.dict(os.environ, {"DSV41_PREFILL_DEEPSELECT": "0"}):
+            with mock.patch.object(
+                rtp_llm_ops, "deepselect_bf16_available", return_value=False
+            ):
                 self.assertFalse(selector.is_available(torch.device("cuda:0")))
         with mock.patch.object(
             rtp_llm_ops, "deepselect_bf16_available", return_value=False, create=True
@@ -42,11 +44,6 @@ class DeepSelectCudaTest(unittest.TestCase):
         available = getattr(rtp_llm_ops, "deepselect_bf16_available", None)
         if available is None or not available():
             raise unittest.SkipTest("DeepSelect native binding is not built")
-
-    def setUp(self):
-        self.env_patch = mock.patch.dict(os.environ, {"DSV41_PREFILL_DEEPSELECT": "1"})
-        self.env_patch.start()
-        self.addCleanup(self.env_patch.stop)
 
     def assert_valid_selection(self, logits, ends, actual):
         """Compare score multisets, allowing legal BF16 cutoff ties/order."""
@@ -181,7 +178,7 @@ class DeepSelectCudaTest(unittest.TestCase):
         )
         bad_out = torch.empty((2, 513), device="cuda", dtype=torch.int32)[:, :512]
         self.assertIsNone(selector.try_select_sparse_tokens(logits, ends, bad_out))
-        with mock.patch.dict(os.environ, {"DSV41_PREFILL_DEEPSELECT": "0"}):
+        with mock.patch.object(selector, "is_available", return_value=False):
             self.assertIsNone(selector.try_select_sparse_tokens(logits, ends))
         with mock.patch.object(
             rtp_llm_ops, "deepselect_bf16", side_effect=RuntimeError("native failure")

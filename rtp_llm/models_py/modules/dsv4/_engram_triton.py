@@ -1,15 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Graph-safe Engram hashing and reads from CUDA-registered host tables."""
 
-import os
-
 import torch
 import triton
 import triton.language as tl
-
-
-def is_supported(tensor: torch.Tensor) -> bool:
-    return tensor.is_cuda and os.environ.get("DSV41_ENGRAM_UVA", "1") != "0"
 
 
 @triton.jit

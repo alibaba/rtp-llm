@@ -112,7 +112,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     release_v41_prefill_shared,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
-from rtp_llm.models_py.modules.dsv4.prefill.ced import CEDTail
+from rtp_llm.models_py.modules.dsv4.prefill.ced import CEDPlan, permits_ced
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
     PrefillWorkspace,
     prefill_q_workspace_rows,
@@ -311,6 +311,7 @@ def forward_layers(
     block_tables_by_type: Optional[Dict[int, torch.Tensor]],
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
+    allow_ced: bool = False,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -342,12 +343,10 @@ def forward_layers(
     # Allocate before CP metadata or embedding can split a reusable cached block.
     # V4.1 streams padded query rows through one Q chunk. Ordinary V4 retains
     # its fixed maximum Q and compressor CP capacities for allocator reuse.
-    shared_prefill = None
-    if os.environ.get("DSV41_PREFILL_RELEASE_SHARED", "1") != "0":
-        first_attn = getattr(next(iter(v4.layers), None), "attn", None)
-        shared_prefill = getattr(first_attn, "_shared_attention", None)
-        if shared_prefill is not None:
-            release_v41_prefill_shared(shared_prefill)
+    first_attn = getattr(next(iter(v4.layers), None), "attn", None)
+    shared_prefill = getattr(first_attn, "_shared_attention", None)
+    if shared_prefill is not None:
+        release_v41_prefill_shared(shared_prefill)
 
     ws: Optional[PrefillWorkspace] = None
     if v4.fp8_kv_cache:
@@ -543,30 +542,14 @@ def forward_layers(
     ced_tail = None
     original_cp_ctx = cp_ctx
     try:
-        if _env_flag("DSV41_EXPERIMENTAL_CED"):
-            # Python currently cannot observe the engine's all-logits/all-hidden
-            # request flags. This experiment requires a dedicated generation-only
-            # endpoint and disabled historical prefix reuse.
-            if (
-                os.environ.get("DSV41_CED_GENERATION_ONLY") != "1"
-                or os.environ.get("DSV41_CED_LOCAL_ONLY") != "1"
-                or os.environ.get("REUSE_CACHE") != "0"
-                or _env_flag("ENABLE_MEMORY_CACHE")
-                or _env_flag("ENABLE_GPU_PREFIX_TREE")
-            ):
-                raise RuntimeError(
-                    "Experimental CED requires DSV41_CED_GENERATION_ONLY=1, "
-                    "DSV41_CED_LOCAL_ONLY=1, "
-                    "REUSE_CACHE=0, and disabled memory/prefix-tree caches"
-                )
+        if allow_ced and _env_flag("DSV41_CED"):
             if shared_prefill is not None and not _rt_on and not _fwd_dbg.enabled():
-                ced_tail = CEDTail.create(
+                ced_tail = CEDPlan.create(
                     v4,
                     cp_ctx,
                     attn_inputs,
+                    kv_cache,
                     prepare_hidden_fn=prepare_hidden_fn,
-                    cache_store_active=write_cache_store_impl is not None,
-                    allow_local_cache_store=True,
                 )
         with record_range_ctx():
             # Two callable chains intentionally coexist:
@@ -589,7 +572,6 @@ def forward_layers(
                         positions = cp_ctx.global_positions
                         cu_seqlens = ced_tail.cu_seqlens
                         v4._propagate_cp_ctx(cp_ctx)
-                        shared_prefill["ced_swa_start"] = cp_ctx.prefix_length
                         clear_prefill_meta_shared_fp8(v4)
                         build_and_propagate_prefill_meta_fp8(
                             v4,
@@ -849,5 +831,6 @@ def forward_prefill(
         block_tables_by_type,
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
+        allow_ced=permits_ced(inputs),
     )  # [T_total, dim]
     return PyModelOutputs(hidden)

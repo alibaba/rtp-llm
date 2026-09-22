@@ -6,7 +6,6 @@ existing TF32 weight rounding and leave delayed mixing to the caller.
 """
 
 import importlib
-import os
 from functools import lru_cache
 
 import torch
@@ -27,8 +26,6 @@ def _has_prenorm_gemm() -> bool:
 
 def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
     """Static inference gate; large prefills retain the existing implementation."""
-    if os.environ.get("DSV41_FUSED_MHC_PRENORM", "1") == "0":
-        return False
     if (
         residual.device.type != "cuda"
         or residual.dtype != torch.bfloat16

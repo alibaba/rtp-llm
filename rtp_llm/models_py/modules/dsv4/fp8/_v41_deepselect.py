@@ -10,7 +10,6 @@ the remap to filter. The NaN exception contract differs from torch.topk.
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 
 import torch
@@ -25,11 +24,7 @@ def _device_supported(device: torch.device) -> bool:
 
 def is_available(device: torch.device) -> bool:
     """Gate chunk planning before allocating sparse scores; no GPU data reads."""
-    if (
-        os.environ.get("DSV41_PREFILL_DEEPSELECT", "1") == "0"
-        or torch.version.hip is not None
-        or device.type != "cuda"
-    ):
+    if torch.version.hip is not None or device.type != "cuda":
         return False
     available = getattr(rtp_llm_ops, "deepselect_bf16_available", None)
     return available is not None and available() and _device_supported(device)
@@ -40,8 +35,7 @@ def is_supported(
 ) -> bool:
     """Metadata-only gate; it does not read GPU bounds or scores on the host."""
     if not (
-        os.environ.get("DSV41_PREFILL_DEEPSELECT", "1") != "0"
-        and torch.version.hip is None
+        torch.version.hip is None
         and logits.is_cuda
         and logits.dtype == torch.bfloat16
         and logits.ndim == 2

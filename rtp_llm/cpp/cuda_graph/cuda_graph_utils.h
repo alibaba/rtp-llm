@@ -26,6 +26,9 @@ public:
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
         decoder_layer_hidden_states_(hidden_states) {
+        py_model_inputs_.need_all_logits        = inputs.need_all_logits;
+        py_model_inputs_.need_all_hidden_states = inputs.need_all_hidden_states;
+
         py_model_inputs_.attention_inputs.input_lengths    = inputs.attention_inputs.input_lengths;
         py_model_inputs_.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device =

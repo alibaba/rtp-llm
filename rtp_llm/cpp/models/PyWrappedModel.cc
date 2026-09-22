@@ -523,6 +523,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
         input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
+        // Split inputs retain the parent batch's conservative output requirements.
+        input_list.back().need_all_logits        = micro_inputs.need_all_logits;
+        input_list.back().need_all_hidden_states = micro_inputs.need_all_hidden_states;
         if (micro_inputs.engram_token_windows.defined()) {
             input_list.back().engram_token_windows = tensorHoldHostAndToCuda(micro_inputs.engram_token_windows);
         }
@@ -639,6 +642,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     graph_state_         = CudaGraphState();
     auto empty_tensor    = torch::Tensor();
     auto py_model_inputs = PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{});
+    py_model_inputs.need_all_logits        = inputs.need_all_logits;
+    py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
 
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
@@ -675,6 +680,8 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     if (enable_cuda_graph_) {
         auto empty_tensor    = torch::Tensor();
         auto py_model_inputs = PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{});
+        py_model_inputs.need_all_logits        = inputs.need_all_logits;
+        py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
@@ -741,6 +748,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // the current stream and will be ordered correctly with the kernels below.
 
         auto py_model_inputs = PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs);
+        py_model_inputs.need_all_logits        = inputs.need_all_logits;
+        py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
+
         py_model_inputs.engram_token_windows = inputs.engram_token_windows;
         py_model_inputs.multimodal_features  = inputs.multimodal_features;
         // CP may replace the mask after holdInputsHostBuffers ran.

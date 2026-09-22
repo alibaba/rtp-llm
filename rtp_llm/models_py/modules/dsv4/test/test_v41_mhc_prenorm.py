@@ -119,9 +119,6 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
             raise unittest.SkipTest("V4.1 prenorm fast path requires SM100")
 
     def setUp(self):
-        self.env = patch.dict(os.environ, {"DSV41_FUSED_MHC_PRENORM": "1"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
         torch.manual_seed(41)
 
     @staticmethod
@@ -185,7 +182,10 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
         residual = residual.reshape(1, 6, 4, 5120)
         observations = []
         for enabled in ("0", "1"):
-            with patch.dict(os.environ, {"DSV41_FUSED_MHC_PRENORM": enabled}):
+            with patch(
+                "rtp_llm.models_py.modules.dsv4.hc.v41_prenorm._has_prenorm_gemm",
+                return_value=enabled == "1",
+            ):
                 first = _make_unit(fn, base, scale)
                 second = _make_unit(fn * -0.7, base + 0.4, scale)
                 second.set_previous(first)
@@ -286,7 +286,10 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
             ):
                 self.assertFalse(is_supported(source, weight))
                 self.assertIsNone(prenorm(source, weight, _EPS))
-        with patch.dict(os.environ, {"DSV41_FUSED_MHC_PRENORM": "0"}):
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.hc.v41_prenorm._has_prenorm_gemm",
+            return_value=False,
+        ):
             self.assertFalse(is_supported(residual, fn))
             self.assertIsNone(prenorm(residual, fn, _EPS))
         with patch(

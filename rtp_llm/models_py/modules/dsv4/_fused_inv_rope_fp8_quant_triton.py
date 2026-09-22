@@ -126,8 +126,14 @@ def _fused_inv_rope_fp8_quant_per_head(
     # imag (b).  At an even lane we output (a·cos + partner·sin); at an
     # odd lane (b·cos − partner·sin).  Matches ``apply_rotary_emb_batched(…,
     # inverse=True)`` in rope.py.
-    x_add = x * cos_v + x_partner * sin_v
-    x_sub = x * cos_v - x_partner * sin_v
+    if ROUND_ROPE_TO_INPUT_DTYPE:
+        # Match eager complex multiplication before its BF16 rounding.
+        # Negate sine before multiplying to preserve signed zero.
+        x_add = tl.fma(x, cos_v, x_partner * sin_v)
+        x_sub = tl.fma(x, cos_v, x_partner * (-sin_v))
+    else:
+        x_add = x * cos_v + x_partner * sin_v
+        x_sub = x * cos_v - x_partner * sin_v
     is_even = (rope_local & 1) == 0
     rotated = tl.where(is_even, x_add, x_sub)
     x = tl.where(is_rope, rotated, x)
@@ -262,8 +268,13 @@ def _fused_inv_rope_fp8_quant_group_heads(
             cos_v = tl.load(freq_base, mask=is_rope, other=1.0)
             sin_v = tl.load(freq_base + 1, mask=is_rope, other=0.0)
 
-            x_add = x * cos_v + x_partner * sin_v
-            x_sub = x * cos_v - x_partner * sin_v
+            if ROUND_ROPE_TO_INPUT_DTYPE:
+                # Match eager FMA order, including the sign of zero.
+                x_add = tl.fma(x, cos_v, x_partner * sin_v)
+                x_sub = tl.fma(x, cos_v, x_partner * (-sin_v))
+            else:
+                x_add = x * cos_v + x_partner * sin_v
+                x_sub = x * cos_v - x_partner * sin_v
             is_even = (rope_local & 1) == 0
             rotated = tl.where(is_even, x_add, x_sub)
             x = tl.where(is_rope, rotated, x)

@@ -12,8 +12,6 @@ All metadata stays on the device.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import torch.nn.functional as F
 import triton
@@ -281,8 +279,6 @@ def _index_norm_store_state_kernel(
 
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     """Static decode gate; unsupported layouts retain the unmodified path."""
-    if os.environ.get("DSV41_FUSED_DECODE_GLOBAL", "1") == "0":
-        return False
     if (
         x.device.type != "cuda"
         or x.dtype != torch.bfloat16

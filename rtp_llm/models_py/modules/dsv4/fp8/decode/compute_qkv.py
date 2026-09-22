@@ -11,7 +11,6 @@ keeps ``attention.py`` thin.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
@@ -43,8 +42,7 @@ class DecodeQKV(NamedTuple):
 def _fused_v41_q_rope_supported(q, freqs_cis, rope_dim: int) -> bool:
     """Shape-only gate: replay keeps positions/frequencies on the device."""
     return (
-        os.environ.get("DSV41_FUSED_DECODE_Q_ROPE", "1") == "1"
-        and q.is_cuda
+        q.is_cuda
         and q.dtype == torch.bfloat16
         and q.ndim == 4
         and q.shape[-1] == 512

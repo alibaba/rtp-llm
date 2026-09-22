@@ -9,7 +9,6 @@ reads the fused bytes directly.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 import torch
@@ -104,8 +103,7 @@ def is_supported(
 ) -> bool:
     """Gate known unsupported paths; execution failures must still propagate."""
     if (
-        os.environ.get("DSV41_FUSED_DECODE_INDEXER", "1") == "0"
-        or torch.device(device).type != "cuda"
+        torch.device(device).type != "cuda"
         or num_heads != 32
         or head_dim != 128
         or block_size not in (64, 128)
@@ -167,8 +165,8 @@ def prepare_indexer_q_and_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Prepare Q from raw head weights and a complete frequency lookup table.
 
-    DSV41_FUSED_INDEXER_Q=0 retains the original gather/cast/scale/clone/
-    RoPE/quant chain. Unsupported layouts take that same path automatically.
+    Unsupported query layouts retain the gather/cast/scale/clone/RoPE/quant
+    chain; CUDA/JIT errors in the supported fused path still propagate.
     """
     from ._v41_indexer_q_triton import try_fused_indexer_q
 

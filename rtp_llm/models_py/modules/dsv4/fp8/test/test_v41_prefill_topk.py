@@ -1,6 +1,5 @@
 """The prefill K512 boundary, including finite filtering on short rows."""
 
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,6 +17,27 @@ def reference(logits, visible, k=512):
     )
     values, indices = masked.topk(k, dim=-1)
     return torch.where(values.isfinite(), indices, -1).int()
+
+
+def select_row_prefill_candidate(logits, visible, backend, k=512):
+    """Legacy benchmark candidates stay in tests, outside serving dispatch."""
+    rows, width = logits.shape
+    ends = visible.clamp(0, width).to(torch.int32).contiguous()
+    starts = torch.zeros_like(ends)
+    output = torch.empty((rows, k), dtype=torch.int32, device=logits.device)
+    rtp_llm_ops.dsv4_top_k_per_row_prefill(
+        logits,
+        starts,
+        ends,
+        output,
+        rows,
+        logits.stride(0),
+        logits.stride(1),
+        k,
+        backend == "radix",
+    )
+    topk._prefill_topk_finite_kernel[(rows,)](logits, ends, output, logits.stride(0), k)
+    return output
 
 
 def assert_equivalent(case, got, expected, logits, visible):
@@ -62,17 +82,15 @@ class V41PrefillTopKCPU(unittest.TestCase):
         )
         return logits, visible
 
-    def test_default_enabled_and_explicit_disable(self):
+    def test_native_availability_and_test_only_reference_hook(self):
         logits, visible = self.fixture()
-        with patch.dict(os.environ, {}, clear=True), patch.object(
-            topk, "_topk_v3_enabled", return_value=True
-        ):
+        with patch.object(topk, "_TOPK_V3_OK", True):
             self.assertTrue(topk.is_supported(logits, visible))
-            with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_TOPK": "0"}):
-                self.assertIsNone(topk.try_select_tokens(logits, visible))
+        with patch.object(topk, "_TOPK_V3_OK", False):
+            self.assertIsNone(topk.try_select_tokens(logits, visible))
 
     def test_support_fallbacks(self):
-        with patch.object(topk, "_topk_v3_enabled", return_value=True):
+        with patch.object(topk, "_TOPK_V3_OK", True):
             for change in (
                 {"is_cuda": False},
                 {"dtype": torch.bfloat16},
@@ -101,13 +119,6 @@ class V41PrefillTopKCPU(unittest.TestCase):
     "CUDA topk_v3 required",
 )
 class V41PrefillTopKCUDA(unittest.TestCase):
-    def setUp(self):
-        self.env = patch.dict(
-            os.environ, {"DSV41_FUSED_PREFILL_TOPK": "1", "DSV4_TOPK_V3": "1"}
-        )
-        self.env.start()
-        self.addCleanup(self.env.stop)
-
     def test_strided_short_long_and_clamped_bounds(self):
         for width in (512, 769, 4099, 16384, 32768, 65536):
             with self.subTest(width=width):
@@ -177,7 +188,7 @@ class V41PrefillTopKCUDA(unittest.TestCase):
         expected = reference(logits, visible)
         for backend in ("insertion", "radix"):
             with self.subTest(backend=backend):
-                got = topk._select_tokens(logits, visible, backend=backend)
+                got = select_row_prefill_candidate(logits, visible, backend)
                 assert_equivalent(self, got, expected, logits, visible)
 
     def test_real_cp_shapes(self):

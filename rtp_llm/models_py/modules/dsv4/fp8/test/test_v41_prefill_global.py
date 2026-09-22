@@ -187,12 +187,11 @@ def _rope_probe(X, FREQ, O, D: tl.constexpr):
 
 
 class PrefillGlobalGateTest(unittest.TestCase):
-    def test_cpu_and_disabled_fallback(self):
+    def test_cpu_fallback(self):
         c = _case(8, 2, device="cpu")
         self.assertIsNone(_compress(c))
         self.assertFalse(fused.store_states(c.values, c.scores, c.state_slots, c.state))
-        with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_GLOBAL": "0"}):
-            self.assertFalse(fused._enabled(c.values))
+        self.assertFalse(fused._enabled(c.values))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")

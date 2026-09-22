@@ -245,20 +245,31 @@ class EngramTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "other inputs"):
                     engram.gated_engram_residual(hidden, **args, eps=1e-20, out=hidden)
 
-    def test_inplace_option_is_fixed_at_construction(self):
+    def test_cpu_forward_preserves_input_with_inplace_inference_default(self):
         q = k = torch.ones(4, 32).bfloat16()
-
-        def create():
-            return engram.Engram(self.layout, 0, None, torch.nn.Identity(), q, k, 1e-20)
-
-        with patch.dict(os.environ, {}):
-            os.environ.pop("DSV41_ENGRAM_INPLACE", None)
-            enabled = create()
-            os.environ["DSV41_ENGRAM_INPLACE"] = "0"
-            disabled = create()
-            os.environ["DSV41_ENGRAM_INPLACE"] = "1"
-            self.assertTrue(enabled.inplace)
-            self.assertFalse(disabled.inplace)
+        hidden = torch.randn(3, 4, 32).bfloat16()
+        original = hidden.clone()
+        kv = torch.randn(3, 5 * 32).bfloat16()
+        model = engram.Engram(
+            self.layout,
+            0,
+            lambda ids, device: kv[:, None, :],
+            torch.nn.Identity(),
+            q,
+            k,
+            1e-20,
+        )
+        hashes = torch.zeros(3, self.layout.n_hash_cols, dtype=torch.int64)
+        with torch.inference_mode():
+            output = model(hidden, hashes)
+        self.assertNotEqual(output.data_ptr(), hidden.data_ptr())
+        torch.testing.assert_close(hidden, original, rtol=0, atol=0)
+        torch.testing.assert_close(
+            output,
+            engram.gated_engram_residual(original, kv, q, k, 1e-20),
+            rtol=0,
+            atol=0,
+        )
 
     def test_mxfp8_reference_matches_independent_numpy_rounding(self):
         torch.manual_seed(7)

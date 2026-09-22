@@ -206,6 +206,10 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows, "Engram token history windows")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
+        .def_readwrite("need_all_logits", &PyModelInputs::need_all_logits, "Whether all input rows need logits")
+        .def_readwrite("need_all_hidden_states",
+                       &PyModelInputs::need_all_hidden_states,
+                       "Whether all input hidden-state rows are required")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")

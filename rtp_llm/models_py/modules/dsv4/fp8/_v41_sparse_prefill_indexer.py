@@ -23,7 +23,6 @@ No automatic cache keyed only by shape or device pointers is used here.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -84,14 +83,9 @@ def _get_deep_gemm():
     return deep_gemm
 
 
-def _enabled() -> bool:
-    return os.environ.get("DSV41_SPARSE_PREFILL_INDEXER", "1") != "0"
-
-
 def _plan_supported(candidates, visible, key_count, block_size):
     if not (
-        _enabled()
-        and torch.version.hip is None
+        torch.version.hip is None
         and candidates.is_cuda
         and candidates.ndim == 2
         and candidates.dtype == torch.int32
@@ -300,8 +294,7 @@ def score(
     precision change follows vLLM's sparse contract and is intentional.
     """
     if not (
-        _enabled()
-        and isinstance(plan, SparsePrefillPlan)
+        isinstance(plan, SparsePrefillPlan)
         and q_payload.is_cuda
         and _score_supported(
             q_payload,
@@ -376,8 +369,7 @@ def remap(
     caller can supply a chunk slice of its int32 final output buffer.
     """
     if not (
-        _enabled()
-        and isinstance(plan, SparsePrefillPlan)
+        isinstance(plan, SparsePrefillPlan)
         and columns.is_cuda
         and columns.device == plan.sparse_indices.device
         and columns.dtype == torch.int32

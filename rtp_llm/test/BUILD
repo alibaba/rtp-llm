@@ -1,4 +1,12 @@
 py_test(
+    name = "py_model_inputs_contract_test",
+    srcs = ["py_model_inputs_contract_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    data = ["//rtp_llm:sdk"],
+    timeout = "short",
+)
+
+py_test(
     name = "vit_rpc_stress_test",
     srcs = ["vit_rpc_stress_test.py"],
     deps = [

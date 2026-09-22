@@ -1,6 +1,5 @@
 """Prefill slots preserve CP ownership, physical pages, and STATE tail writes."""
 
-import os
 import unittest
 from unittest.mock import patch
 
@@ -16,11 +15,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillMetadataTest(unittest.TestCase):
-    def setUp(self):
-        env = patch.dict(os.environ, {"DSV41_FUSED_PREFILL_METADATA": "1"})
-        env.start()
-        self.addCleanup(env.stop)
-
     def _inputs(self, dtype):
         # Strided vectors and tables, ragged prefixes, unallocated pages,
         # and positions beyond the final allocated physical page.
@@ -120,9 +114,8 @@ class PrefillMetadataTest(unittest.TestCase):
         graph.replay()
         expected = cp_kv_slot_mapping(pos, table, req, 32, 16, 2, 4, 1)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_METADATA": "0"}):
-            self.assertIsNone(fused.try_slot_mapping(pos, req, table, 16, 32, 2))
-            self.assertIsNone(fused.try_score_bounds(pos, 1024, 2))
+        self.assertIsNone(fused.try_slot_mapping(pos.float(), req, table, 16, 32, 2))
+        self.assertIsNone(fused.try_score_bounds(pos.float(), 1024, 2))
 
     def test_shared_bounds_and_direct_topk_output(self):
         rows, width = 19, 2049
@@ -134,10 +127,7 @@ class PrefillMetadataTest(unittest.TestCase):
         )
         backing = torch.full((rows + 2, 512), 999, device="cuda", dtype=torch.int32)
         out = backing[1:-1]
-        with patch.dict(
-            os.environ, {"DSV41_FUSED_PREFILL_TOPK": "1", "DSV4_TOPK_V3": "1"}
-        ):
-            actual = topk.try_select_tokens(logits, bounds[1], bounds=bounds, out=out)
+        actual = topk.try_select_tokens(logits, bounds[1], bounds=bounds, out=out)
         self.assertIs(actual, out)
         values = logits.gather(1, actual.long().clamp_min(0)).masked_fill(
             actual < 0, -torch.inf

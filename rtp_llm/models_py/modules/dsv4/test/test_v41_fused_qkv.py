@@ -186,7 +186,6 @@ class V41FusedQKVCPUTest(unittest.TestCase):
 
         # All tensors and operations are CPU; only bypass the device gate.
         with (
-            patch.dict(os.environ, {"DSV41_FUSED_QKV": "1"}),
             patch.object(
                 torch.Tensor, "is_cuda", new_callable=PropertyMock, return_value=True
             ),
@@ -199,11 +198,12 @@ class V41FusedQKVCPUTest(unittest.TestCase):
         self.assertEqual(allocations, ["cat", "cat", "linear_and_packed_scales"])
         self.assertEqual(merged.weight.device.type, "cpu")
 
-    def test_disabled_merge_does_not_read_or_mutate_weights(self):
-        weights = {}
-        with patch.dict(os.environ, {"DSV41_FUSED_QKV": "0"}):
-            self.assertIsNone(merge_v41_qkv_weights(weights, *_KEYS))
-        self.assertEqual(weights, {})
+    def test_unsupported_merge_does_not_mutate_weights(self):
+        weights = {key: torch.ones(32, 32) for key in _KEYS}
+        original = weights.copy()
+        self.assertIsNone(merge_v41_qkv_weights(weights, *_KEYS))
+        for key in _KEYS:
+            self.assertIs(weights[key], original[key])
 
     def test_unsupported_linear_falls_back_without_backend(self):
         self.assertFalse(is_supported(None, None, None, _Q))
@@ -253,9 +253,6 @@ class V41FusedQKVCudaTest(unittest.TestCase):
             raise unittest.SkipTest("V4.1 MXFP8 GEMM requires Blackwell")
 
     def setUp(self):
-        env = patch.dict(os.environ, {"DSV41_FUSED_QKV": "1"})
-        env.start()
-        self.addCleanup(env.stop)
         torch.manual_seed(4106)
 
     @torch.no_grad()
@@ -295,12 +292,16 @@ class V41FusedQKVCudaTest(unittest.TestCase):
                 case = make_case(leading, weights)
                 expected = unfused(case)
                 assert_outputs_close(fused(case), expected)
-                with patch.dict(os.environ, {"DSV41_FUSED_QKV": "0"}):
-                    self.assertIsNone(
-                        try_project_qr_kv(
-                            case["merged"], case["x"], case["weights"]["qn"], _Q, _EPS
-                        )
+                # Unsupported dtype still uses the independent projections.
+                self.assertIsNone(
+                    try_project_qr_kv(
+                        case["merged"],
+                        case["x"].float(),
+                        case["weights"]["qn"],
+                        _Q,
+                        _EPS,
                     )
+                )
                 # The original projection modules still use shared weights.
                 assert_outputs_close(unfused(case), expected)
 

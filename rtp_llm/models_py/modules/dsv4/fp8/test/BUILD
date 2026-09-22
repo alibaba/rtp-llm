@@ -61,6 +61,7 @@ _DSV4_FP8_TESTS = [
 ]
 
 _DSV4_FP8_CPU_TESTS = [
+    "test_v41_selection_oracle",
     "test_attention_v41",
     "test_attention_v41_request_rows",
     "test_attention_v41_sparse_selection",

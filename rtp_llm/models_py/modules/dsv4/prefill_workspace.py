@@ -31,18 +31,14 @@ layers, never recycled by the allocator) and relies on the
 ``cp._CP_ROLE_*``.
 """
 
-import os
-
 import torch
 
 
 def prefill_q_workspace_rows(rows: int) -> int:
-    """V4.1 Q capacity: one attention chunk, or all rows for the fallback."""
-    if os.environ.get("DSV41_PREFILL_Q_CHUNKED", "1") != "0":
-        from rtp_llm.models_py.modules.dsv4.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
+    """V4.1 Q capacity matches its always-streamed attention projection."""
+    from rtp_llm.models_py.modules.dsv4.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
 
-        return min(int(rows), FLASH_MLA_SPARSE_Q_CHUNK)
-    return int(rows)
+    return min(int(rows), FLASH_MLA_SPARSE_Q_CHUNK)
 
 
 # Default union-buffer alignment. Rounding every per-forward union block up to a

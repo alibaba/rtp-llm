@@ -53,8 +53,7 @@ def is_supported(
     topk_blocks: int,
 ) -> bool:
     return (
-        os.environ.get("DSV41_FUSED_PREFILL_CANDIDATES", "1") != "0"
-        and logits.is_cuda
+        logits.is_cuda
         and logits.dtype == torch.float32
         and logits.ndim == 2
         and logits.shape[0] > 0
@@ -294,8 +293,7 @@ def build_flags(
     cached int32 candidate IDs rather than falling back to a dense bool mask.
     """
     if not (
-        os.environ.get("DSV41_FUSED_PREFILL_CANDIDATES", "1") != "0"
-        and candidates.is_cuda
+        candidates.is_cuda
         and candidates.dtype == torch.int32
         and candidates.ndim == 2
         and candidates.shape[0] > 0
@@ -330,8 +328,7 @@ def build_flags(
 def mask_candidates(logits: torch.Tensor, flags: torch.Tensor, block_size: int) -> bool:
     """Apply a previously built bitmap in place; False means no work launched."""
     if not (
-        os.environ.get("DSV41_FUSED_PREFILL_CANDIDATES", "1") != "0"
-        and logits.is_cuda
+        logits.is_cuda
         and logits.dtype == torch.float32
         and logits.ndim == 2
         and logits.shape[0] > 0

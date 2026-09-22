@@ -310,6 +310,16 @@ class PyModelInputs:
         bert_embedding_inputs: BertEmbeddingInputs = ...,
     ) -> None: ...
     @property
+    def need_all_logits(self) -> bool:
+        """Whether all input rows need logits; defaults to True."""
+    @need_all_logits.setter
+    def need_all_logits(self, arg0: bool) -> None: ...
+    @property
+    def need_all_hidden_states(self) -> bool:
+        """Whether all input hidden-state rows are required; defaults to True."""
+    @need_all_hidden_states.setter
+    def need_all_hidden_states(self, arg0: bool) -> None: ...
+    @property
     def attention_inputs(self) -> PyAttentionInputs:
         """
         Attention inputs structure

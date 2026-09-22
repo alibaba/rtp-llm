@@ -79,12 +79,14 @@ class V41IndexerQFusionCPU(unittest.TestCase):
             case["weights"].dtype = torch.float32
             self.assertTrue(fused.is_supported(**case))
 
-    def test_disable_and_cpu_short_circuit_without_cuda_queries(self):
-        with patch.dict(os.environ, {"DSV41_FUSED_INDEXER_Q": "0"}), patch.object(
+    def test_unsupported_dtype_and_cpu_short_circuit_without_cuda_queries(self):
+        case = _metadata()
+        case["q"].dtype = torch.float32
+        with patch.object(
             torch.cuda, "get_device_capability", side_effect=AssertionError
         ):
-            self.assertFalse(fused.is_supported(**_metadata()))
-        with patch.dict(os.environ, {"DSV41_FUSED_INDEXER_Q": "1"}), patch.object(
+            self.assertFalse(fused.is_supported(**case))
+        with patch.object(
             torch.cuda, "get_device_capability", side_effect=AssertionError
         ):
             q = torch.empty(1, 1, 32, 128, dtype=torch.bfloat16)
@@ -98,9 +100,7 @@ class V41IndexerQFusionCPU(unittest.TestCase):
             )
 
     def test_layout_dtype_shape_architecture_and_grad_gates(self):
-        with patch.dict(os.environ, {"DSV41_FUSED_INDEXER_Q": "1"}), patch.object(
-            torch.cuda, "get_device_capability", return_value=(10, 3)
-        ):
+        with patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
             for key, field, value in (
                 ("q", "dtype", torch.float32),
                 ("q", "shape", (4, 6, 64, 128)),
@@ -128,9 +128,7 @@ class V41IndexerQFusionCPU(unittest.TestCase):
                 self.assertFalse(fused.is_supported(**case))
             with torch.no_grad():
                 self.assertTrue(fused.is_supported(**case))
-        with patch.dict(os.environ, {"DSV41_FUSED_INDEXER_Q": "1"}), patch.object(
-            torch.cuda, "get_device_capability", return_value=(9, 0)
-        ):
+        with patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)):
             self.assertFalse(fused.is_supported(**_metadata()))
 
     def test_disabled_wrapper_preserves_gather_and_weight_arithmetic(self):
@@ -139,7 +137,7 @@ class V41IndexerQFusionCPU(unittest.TestCase):
         freqs = torch.randn(7, 32, dtype=torch.complex64)
         positions = torch.tensor([6, -2])
         payload, sf = object(), object()
-        with patch.dict(os.environ, {"DSV41_FUSED_INDEXER_Q": "0"}), patch.object(
+        with patch.object(fused, "is_supported", return_value=False), patch.object(
             indexer, "prepare_indexer_q", return_value=(payload, sf)
         ) as old:
             result = indexer.prepare_indexer_q_and_weights(q, weights, freqs, positions)
@@ -165,9 +163,6 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
     def setUp(self):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("V4.1 fused MXFP4 indexer Q requires SM100 family")
-        self.env = patch.dict(os.environ, {"DSV41_FUSED_INDEXER_Q": "1"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
 
     @torch.no_grad()
     def test_real_shapes_and_input_immutability(self):
@@ -266,7 +261,7 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
                 actual = indexer.score_decode_indexer(**case)
                 self.assertIsNotNone(actual)
                 torch.testing.assert_close(actual, legacy, rtol=0, atol=0)
-                with patch.dict(os.environ, {"DSV41_FUSED_INDEXER_Q": "0"}):
+                with patch.object(fused, "is_supported", return_value=False):
                     disabled = indexer.score_decode_indexer(**case)
                 torch.testing.assert_close(disabled, legacy, rtol=0, atol=0)
 

@@ -124,6 +124,55 @@ class V41OutputProjectionTest(unittest.TestCase):
             ):
                 self.assert_quant_equal(eager_quant(o, freqs), fused_quant(o, freqs))
 
+    def test_deterministic_cancellation_preserves_eager_rounding(self):
+        # Explicit inputs: separate FP32 products land exactly on BF16
+        # midpoints, then on FP8 midpoints. No device RNG is involved.
+        o = torch.full((2, 64, 512), 0.5, device="cuda", dtype=torch.bfloat16)
+        o[1].fill_(1.0)
+        o[:, 0, 448:450] = torch.tensor(
+            [[-0.326171875, -0.51953125], [-0.302734375, -0.828125]],
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        freqs = torch.ones((2, 32), device="cuda", dtype=torch.complex64)
+        freqs[:, 0] = torch.complex(
+            torch.tensor([0.5317438840866089, -0.34328246116638184], device="cuda"),
+            torch.tensor([0.8469052314758301, -0.9392322301864624], device="cuda"),
+        )
+        for backend in ("legacy", "v2", "auto"):
+            with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}):
+                expected = eager_quant(o, freqs)
+                self.assertEqual(
+                    expected[0].view(torch.uint8)[:, 0, 449].tolist(), [133, 135]
+                )
+                for impl in ("legacy", "optimized"):
+                    with self.subTest(backend=backend, impl=impl):
+                        self.assert_quant_equal(
+                            expected, fused_quant(o, freqs, impl=impl)
+                        )
+
+    def test_signed_zero_all_input_signs_and_frequency_quadrants(self):
+        o = torch.zeros((4, 64, 512), device="cuda", dtype=torch.bfloat16)
+        # Four head patterns cover (++), (+-), (-+), (--) input zero signs.
+        o[:, 1::4, 449::2] = -0.0
+        o[:, 2::4, 448::2] = -0.0
+        o[:, 3::4, 448:] = -0.0
+        freqs = torch.complex(
+            torch.tensor([-0.6, -0.6, 0.6, 0.6], device="cuda")[:, None].expand(4, 32),
+            torch.tensor([0.8, -0.8, 0.8, -0.8], device="cuda")[:, None].expand(4, 32),
+        )
+        for backend in ("legacy", "v2", "auto"):
+            with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}):
+                expected = eager_quant(o, freqs)
+                self.assertEqual(
+                    set(expected[0].view(torch.uint8).unique().tolist()), {0, 128}
+                )
+                for impl in ("legacy", "optimized"):
+                    with self.subTest(backend=backend, impl=impl):
+                        self.assert_quant_equal(
+                            expected, fused_quant(o, freqs, impl=impl)
+                        )
+
     def test_noncontiguous_and_batched_freqs(self):
         o, freqs = make_inputs(24, 2)
         storage = torch.zeros(24, 72, 520, device="cuda", dtype=o.dtype)
@@ -220,8 +269,7 @@ class V41OutputProjectionTest(unittest.TestCase):
                 expected_replay = grouped_output_projection(o, freqs, weight, scale)
                 torch.testing.assert_close(captured, expected_replay, rtol=0, atol=0)
                 self.assertFalse(is_supported(o[:0], freqs[:0], weight, scale))
-                with patch.dict(os.environ, {"DSV41_FUSED_OUTPUT_PROJECTION": "0"}):
-                    self.assertFalse(is_supported(o, freqs, weight, scale))
+                self.assertFalse(is_supported(o.float(), freqs, weight, scale))
             invalid = torch.empty(4, 6, 64, 512, device="cuda", dtype=torch.bfloat16)
             self.assertFalse(is_supported(invalid[::2], freqs[:2], weight, scale))
             self.assertFalse(is_supported(invalid, freqs[:3], weight, scale))

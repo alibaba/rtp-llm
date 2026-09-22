@@ -8,23 +8,17 @@ are unspecified. Candidate-block selection has a separate contract.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
-    _get_topk_workspace,
-    _topk_v3_enabled,
-)
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 def is_supported(logits: torch.Tensor, visible: torch.Tensor, topk: int = 512) -> bool:
     return (
-        os.environ.get("DSV41_FUSED_PREFILL_TOPK", "1") != "0"
-        and _topk_v3_enabled()
+        _TOPK_V3_OK
         and torch.version.hip is None
         and logits.is_cuda
         and logits.dtype == torch.float32
@@ -44,7 +38,6 @@ def is_supported(logits: torch.Tensor, visible: torch.Tensor, topk: int = 512) -
 @triton.jit(do_not_specialize=["ROWS", "WIDTH"])
 def _prefill_topk_bounds_kernel(
     visible,
-    starts,
     ends,
     ROWS,
     WIDTH,
@@ -55,7 +48,6 @@ def _prefill_topk_bounds_kernel(
     length = tl.load(visible + rows * VISIBLE_STRIDE, rows < ROWS, other=0)
     # Clamp in the input integer dtype before converting int64 positions.
     length = tl.minimum(tl.maximum(length, 0), WIDTH).to(tl.int32)
-    tl.store(starts + rows, 0, rows < ROWS)
     tl.store(ends + rows, length, rows < ROWS)
 
 
@@ -82,48 +74,26 @@ def _select_tokens(
     visible: torch.Tensor,
     topk: int = 512,
     *,
-    backend: str = "v3",
     bounds=None,
     out=None,
 ) -> torch.Tensor:
-    """Internal candidate entry point, also used by the standalone benchmark.
-
-    The public path uses v3, whose integer keys explicitly canonicalize both
-    NaN signs. The existing row-prefill implementations remain benchmark
-    candidates; they are not exposed by the public helper.
-    """
-    if backend not in ("v3", "insertion", "radix"):
-        raise ValueError(f"Unknown prefill TopK backend: {backend}")
+    """Use native v3 selection, which canonicalizes both NaN signs."""
     rows, width = logits.shape
     if bounds is None:
-        storage = torch.empty((2, rows), device=logits.device, dtype=torch.int32)
-        starts, ends = storage.unbind(0)
+        ends = torch.empty((rows,), device=logits.device, dtype=torch.int32)
         _prefill_topk_bounds_kernel[(triton.cdiv(rows, 256),)](
-            visible, starts, ends, rows, width, visible.stride(0), 256
+            visible, ends, rows, width, visible.stride(0), 256
         )
     else:
-        starts, ends = bounds
+        ends = bounds[1]
     output = (
         out
         if out is not None
         else torch.empty((rows, topk), device=logits.device, dtype=torch.int32)
     )
-    if backend == "v3":
-        rtp_llm_ops.topk_v3(
-            logits, ends, output, _get_topk_workspace(logits.device), topk, width
-        )
-    else:
-        rtp_llm_ops.dsv4_top_k_per_row_prefill(
-            logits,
-            starts,
-            ends,
-            output,
-            rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk,
-            backend == "radix",
-        )
+    rtp_llm_ops.topk_v3(
+        logits, ends, output, _get_topk_workspace(logits.device), topk, width
+    )
     _prefill_topk_finite_kernel[(rows,)](logits, ends, output, logits.stride(0), topk)
     return output
 

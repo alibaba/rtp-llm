@@ -10,19 +10,17 @@ is removed. Token selection uses RTP's existing exact radix-select kernel.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv4.fp8.indexer import _run_topk_v3, _topk_v3_enabled
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 def is_supported(logits: torch.Tensor, lengths: torch.Tensor, topk: int) -> bool:
     return (
-        os.environ.get("DSV41_FUSED_DECODE_TOPK", "1") != "0"
-        and _topk_v3_enabled()
+        _TOPK_V3_OK
         and logits.is_cuda
         and logits.dtype == torch.float32
         and logits.ndim == 2
@@ -181,8 +179,9 @@ def select_tokens(
 ) -> torch.Tensor:
     rows, width = logits.shape
     output = torch.empty((rows, topk), dtype=torch.int32, device=logits.device)
-    if not _run_topk_v3(logits, lengths, output, topk, width):
-        raise RuntimeError("V4.1 decode TopK support changed within a forward")
+    rtp_llm_ops.topk_v3(
+        logits, lengths, output, _get_topk_workspace(logits.device), topk, width
+    )
     _finite_topk_kernel[(rows, triton.cdiv(topk, 256))](
         logits, lengths, output, width, logits.stride(0), topk, 256
     )

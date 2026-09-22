@@ -9,7 +9,6 @@ indexer-query quantization), so DeepGEMM's MX mode applies both scale sets.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -36,8 +35,7 @@ class PrefillIndexerKeys:
 def is_supported(device: torch.device, num_heads: int, head_dim: int) -> bool:
     """Gate unsupported devices/dependencies, never catch execution failures."""
     if (
-        os.environ.get("DSV41_FUSED_PREFILL_INDEXER", "1") == "0"
-        or torch.device(device).type != "cuda"
+        torch.device(device).type != "cuda"
         or num_heads not in (32, 64)
         or head_dim != 128
     ):
@@ -212,8 +210,7 @@ def _use_clean_logits_only(device: torch.device) -> bool:
     gate to a new architecture without checking that complete-write contract.
     """
     return (
-        os.environ.get("DSV41_PREFILL_CLEAN_LOGITS_ONLY", "1") != "0"
-        and torch.device(device).type == "cuda"
+        torch.device(device).type == "cuda"
         and torch.cuda.get_device_capability(device)[0] == 10
     )
 

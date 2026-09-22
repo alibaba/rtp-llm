@@ -7,15 +7,9 @@ and valid request IDs; invalid positions are skipped before table loads.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
-
-
-def _enabled():
-    return os.environ.get("DSV41_FUSED_PREFILL_METADATA", "1") != "0"
 
 
 def _integer_vector(value, rows, device):
@@ -94,8 +88,7 @@ def try_slot_mapping(
 ):
     """Return int64 slots, or None before launch for unsupported metadata."""
     if not (
-        _enabled()
-        and positions.is_cuda
+        positions.is_cuda
         and torch.version.hip is None
         and positions.ndim == 1
         and positions.numel() > 0
@@ -169,8 +162,7 @@ def _prefill_bounds_kernel(
 def try_score_bounds(positions, width, ratio):
     """Build reusable int32 starts/ends directly from device positions."""
     if not (
-        _enabled()
-        and positions.is_cuda
+        positions.is_cuda
         and torch.version.hip is None
         and positions.ndim == 1
         and positions.numel() > 0

@@ -107,9 +107,12 @@ class _FakeV4:
 
 class PrefillFastPathTest(unittest.TestCase):
     def test_workspace_capacity_is_dynamic_only_for_v41_without_tensor_reads(self):
+        from rtp_llm.models_py.modules.dsv4 import chunk_env
+
         class AllocationCaptured(Exception):
             pass
 
+        chunk_rows = 4096
         cases = (
             # V4 keeps its bound capacities, independent of the live batch.
             (4, True, [107074], [0], 20, False),
@@ -124,16 +127,17 @@ class PrefillFastPathTest(unittest.TestCase):
             (4, True, [0], [0], 20, False),
             (1, False, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 16, False),
             (4, False, [17], [99], 16, False),
-            # V4.1 reserves only Q, including padding and all uncached rows.
-            (4, True, [107074], [0], 2, True),
-            (4, True, [100930], [6144], 2, True),
-            (4, True, [162350], [0], 3, True),
-            (4, True, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 2, True),
-            (4, True, [100930, 100930], [6144, 6144], 4, True),
-            (4, True, [1048575], [0], 16, True),
+            # V4.1 caps padded local Q rows to one chunk; the nonempty
+            # allocations below fit in one 1-GiB allocator bucket.
+            (4, True, [107074], [0], 1, True),
+            (4, True, [100930], [6144], 1, True),
+            (4, True, [162350], [0], 1, True),
+            (4, True, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 1, True),
+            (4, True, [100930, 100930], [6144, 6144], 1, True),
+            (4, True, [1048575], [0], 1, True),
             (1, False, [17], [99], 1, True),
-            (1, False, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 8, True),
-            (1, False, [1048576], [0], 64, True),
+            (1, False, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 1, True),
+            (1, False, [1048576], [0], 1, True),
             (2, True, [7, 9], [0, 100], 1, True),
             (8, True, [7, 9], [0, 100], 1, True),
             (4, True, [0], [0], 0, True),
@@ -167,7 +171,9 @@ class PrefillFastPathTest(unittest.TestCase):
                     captured.append(workspace_type(*args, **kwargs))
                     raise AllocationCaptured
 
-                with patch.dict(
+                with patch.object(
+                    chunk_env, "FLASH_MLA_SPARSE_Q_CHUNK", chunk_rows
+                ), patch.dict(
                     prefill_forward.os.environ, {"DSV41_PREFILL_Q_CHUNKED": "0"}
                 ), patch.object(
                     prefill_forward, "PrefillWorkspace", side_effect=capture_workspace
@@ -199,7 +205,8 @@ class PrefillFastPathTest(unittest.TestCase):
                     build_cp.assert_not_called()
                     embed.assert_not_called()
                 ws = captured[0]
-                self.assertEqual(ws._q_rows, rows if v41 else v4._prefill_ws_q_rows)
+                expected_rows = min(rows, chunk_rows) if v41 else v4._prefill_ws_q_rows
+                self.assertEqual(ws._q_rows, expected_rows)
                 self.assertEqual(ws._union.numel(), expected_gib * (1 << 30))
                 self.assertEqual(
                     ws._main_bytes,
@@ -209,7 +216,8 @@ class PrefillFastPathTest(unittest.TestCase):
                     ws._idx_bytes,
                     v4._prefill_ws_full_rows * 512 * 4 if cp_active and not v41 else 0,
                 )
-                self.assertEqual(ws.prefill_q(rows).shape, (rows, 64 * 512))
+                live_rows = min(rows, expected_rows)
+                self.assertEqual(ws.prefill_q(live_rows).shape, (live_rows, 64 * 512))
 
     def test_v41_workspace_is_bounded_by_attention_chunk(self):
         from rtp_llm.models_py.modules.dsv4.chunk_env import (
@@ -231,7 +239,7 @@ class PrefillFastPathTest(unittest.TestCase):
                     raise AllocationCaptured
 
                 with patch.dict(
-                    prefill_forward.os.environ, {"DSV41_PREFILL_Q_CHUNKED": "1"}
+                    prefill_forward.os.environ, {"DSV41_PREFILL_Q_CHUNKED": "0"}
                 ), patch.object(
                     prefill_forward, "PrefillWorkspace", side_effect=allocate
                 ):
@@ -244,7 +252,7 @@ class PrefillFastPathTest(unittest.TestCase):
                 )
                 self.assertFalse(captured[0]["reserve_cp"])
 
-    def test_v41_shared_scratch_is_released_on_success_and_failure(self):
+    def test_v41_shared_scratch_is_always_released_on_success_and_failure(self):
         for enabled in (False, True):
             for fail in (False, True):
                 with self.subTest(enabled=enabled, fail=fail):
@@ -292,10 +300,8 @@ class PrefillFastPathTest(unittest.TestCase):
                         else:
                             run()
                     self.assertIs(shared["layers"], registry)
-                    if enabled:
-                        self.assertEqual(set(shared), {"layers"})
-                    else:
-                        self.assertIn("prefill_index_plan", shared)
+                    # A stale A/B env must never retain per-forward scratch.
+                    self.assertEqual(set(shared), {"layers"})
 
     def test_workspace_is_allocated_before_cp_setup_and_embedding(self):
         v4 = _FakeV4()

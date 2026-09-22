@@ -72,11 +72,10 @@ def metadata(rows=17, width=32768):
 
 
 class V41PrefillCandidatesCPU(unittest.TestCase):
-    def test_default_gate_and_environment_disable(self):
+    def test_default_gate_and_unsupported_block_size(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(fused.is_supported(*metadata(), 8, 2048))
-        with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_CANDIDATES": "0"}):
-            self.assertFalse(fused.is_supported(*metadata(), 8, 2048))
+        self.assertFalse(fused.is_supported(*metadata(), 0, 2048))
         x = torch.empty(3, 41)
         self.assertIsNone(fused.select_candidates(x, torch.ones(3).long(), 8, 5))
         self.assertFalse(fused.mask_candidates(x, torch.ones(3, 1).int(), 8))
@@ -124,9 +123,6 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
     def setUp(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
-        self.env = patch.dict(os.environ, {"DSV41_FUSED_PREFILL_CANDIDATES": "1"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
 
     def check_case(self, logits, visible, block=8, k=2048):
         before = logits.clone()

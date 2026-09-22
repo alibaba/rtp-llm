@@ -12,7 +12,6 @@ retains the unfused path instead of initializing barriers during capture.
 from __future__ import annotations
 
 import importlib
-import os
 from functools import lru_cache
 from typing import Callable
 
@@ -61,8 +60,6 @@ def is_supported(
     norm: torch.nn.Module,
 ) -> bool:
     """Check the exact delayed-HC/RMSNorm contract without reading GPU data."""
-    if os.environ.get("DSV41_MEGA_MHC", "1") == "0":
-        return False
     if (
         not isinstance(attn_out, torch.Tensor)
         or attn_out.device.type != "cuda"

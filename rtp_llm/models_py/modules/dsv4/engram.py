@@ -252,8 +252,6 @@ class NgramHashState:
         if token_windows.is_cuda:
             from rtp_llm.models_py.modules.dsv4 import _engram_triton
 
-            if not _engram_triton.is_supported(token_windows):
-                raise RuntimeError("GPU Engram requires DSV41_ENGRAM_UVA=1")
             return _engram_triton.hash_token_windows(
                 token_windows,
                 dead_mask,
@@ -515,7 +513,7 @@ class HostEngramEmbedding:
         if indices.is_cuda:
             from rtp_llm.models_py.modules.dsv4 import _engram_triton
 
-            if self._uva is None or not _engram_triton.is_supported(indices):
+            if self._uva is None:
                 raise RuntimeError("GPU Engram lookup requires pinned UVA host tables")
             return _engram_triton.lookup_host_rows(*self._uva, indices, self._num_sms)
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
@@ -696,7 +694,6 @@ class Engram(nn.Module):
         self.register_buffer("q_weight", q_weight, persistent=False)
         self.register_buffer("k_weight", k_weight, persistent=False)
         self.eps = eps
-        self.inplace = os.environ.get("DSV41_ENGRAM_INPLACE", "1") == "1"
 
     @classmethod
     def from_checkpoint(cls, config, layer_id: int, checkpoint_path: str, device):
@@ -771,7 +768,7 @@ class Engram(nn.Module):
         # Engram is token-local after hashing. Bound lookup/projection/gate
         # temporaries for packed long prompts without changing the decode path.
         chunk_rows = 32768
-        inplace = self.inplace and _engram_inject_supported(
+        inplace = _engram_inject_supported(
             hidden, self.q_weight, self.k_weight, token_mask
         )
         if hidden.shape[0] > chunk_rows:

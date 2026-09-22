@@ -31,27 +31,22 @@ def _reference_logits(q, weights, k, visible):
 
 class V41PrefillIndexerCPU(unittest.TestCase):
     def test_clean_logits_only_defaults_to_verified_sm100(self):
-        with patch.dict(os.environ):
-            os.environ.pop("DSV41_PREFILL_CLEAN_LOGITS_ONLY", None)
-            for major in (8, 9, 10, 11, 12):
-                with self.subTest(major=major), patch.object(
-                    torch.cuda, "get_device_capability", return_value=(major, 0)
-                ):
-                    self.assertEqual(
-                        indexer._use_clean_logits_only(torch.device("cuda")),
-                        major == 10,
-                    )
+        for major in (8, 9, 10, 11, 12):
+            with self.subTest(major=major), patch.object(
+                torch.cuda, "get_device_capability", return_value=(major, 0)
+            ):
+                self.assertEqual(
+                    indexer._use_clean_logits_only(torch.device("cuda")),
+                    major == 10,
+                )
 
-    def test_clean_logits_only_disabled_and_cpu_do_not_query_cuda(self):
+    def test_clean_logits_cpu_does_not_query_cuda(self):
         with patch.object(
             torch.cuda,
             "get_device_capability",
             side_effect=AssertionError("Fallback must not query CUDA"),
         ):
-            with patch.dict(os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "1"}):
-                self.assertFalse(indexer._use_clean_logits_only(torch.device("cpu")))
-            with patch.dict(os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "0"}):
-                self.assertFalse(indexer._use_clean_logits_only(torch.device("cuda")))
+            self.assertFalse(indexer._use_clean_logits_only(torch.device("cpu")))
 
     def test_clean_logits_only_preserves_backend_tensor_without_dense_mask(self):
         clean = torch.tensor(
@@ -97,15 +92,12 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                 self.assertEqual(actual.dtype, torch.float32)
 
     def test_default_enable_and_supported_device_contract(self):
-        with patch.dict(os.environ), patch.object(
+        with patch.object(
             score_backend, "has_fp8_fp4_mqa_logits", return_value=True
         ), patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
-            os.environ.pop("DSV41_FUSED_PREFILL_INDEXER", None)
             self.assertTrue(indexer.is_supported(torch.device("cuda"), 32, 128))
 
-        with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_INDEXER": "1"}), patch.object(
-            score_backend, "has_fp8_fp4_mqa_logits", return_value=True
-        ):
+        with patch.object(score_backend, "has_fp8_fp4_mqa_logits", return_value=True):
             for major in (8, 9, 10, 11):
                 for heads, dim in ((32, 128), (64, 128), (16, 128), (32, 64)):
                     with self.subTest(major=major, heads=heads, dim=dim), patch.object(
@@ -117,7 +109,7 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                         )
 
     def test_missing_deepgemm_api_falls_back(self):
-        with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_INDEXER": "1"}), patch.object(
+        with patch.object(
             score_backend, "has_fp8_fp4_mqa_logits", return_value=False
         ), patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
             self.assertFalse(indexer.is_supported(torch.device("cuda"), 32, 128))
@@ -130,13 +122,13 @@ class V41PrefillIndexerCPU(unittest.TestCase):
         ):
             self.assertFalse(indexer.is_supported(torch.device("cpu"), 32, 128))
 
-    def test_explicit_disable_is_unsupported_without_querying_cuda(self):
-        with patch.dict(os.environ, {"DSV41_FUSED_PREFILL_INDEXER": "0"}), patch.object(
+    def test_unsupported_head_dim_does_not_query_cuda(self):
+        with patch.object(
             torch.cuda,
             "get_device_capability",
             side_effect=AssertionError("Disabled path must not query CUDA"),
         ):
-            self.assertFalse(indexer.is_supported(torch.device("cuda"), 32, 128))
+            self.assertFalse(indexer.is_supported(torch.device("cuda"), 32, 64))
 
     def test_k_quantization_uses_power_of_two_scales_and_exact_six(self):
         torch.manual_seed(41)
@@ -470,12 +462,9 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
                         )
                         bounded = visible.clamp(0, keys)
                         q, weights, k = self._inputs(len(ends), heads, keys, 61)
-                        with patch.dict(
-                            os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "1"}
-                        ):
-                            actual = self._score(q, weights, k, visible)
-                        with patch.dict(
-                            os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "0"}
+                        actual = self._score(q, weights, k, visible)
+                        with patch.object(
+                            indexer, "_use_clean_logits_only", return_value=False
                         ):
                             masked = self._score(q, weights, k, visible)
                         # The optimization changes no arithmetic, valid value,
@@ -509,14 +498,13 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
 
                 stream = torch.cuda.Stream()
                 stream.wait_stream(torch.cuda.current_stream())
-                with patch.dict(os.environ, {"DSV41_PREFILL_CLEAN_LOGITS_ONLY": "1"}):
-                    with torch.cuda.stream(stream):
-                        for _ in range(3):
-                            score()
-                    stream.synchronize()
-                    graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph, stream=stream):
-                        actual = score()
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        score()
+                stream.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = score()
                 torch.cuda.synchronize()
                 storage = actual.as_strided((rows, actual.stride(0)), actual.stride())
                 mixed = [0, 1, 255, 256, 257, keys - 1, keys]

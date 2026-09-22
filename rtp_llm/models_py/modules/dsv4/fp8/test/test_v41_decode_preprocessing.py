@@ -5,7 +5,6 @@ These slot tests apply to global CSA/HCA pools where physical entries equal
 logical compressed entries, not the padded INDEXER_KV pool.
 """
 
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,6 +25,16 @@ def _freqs(rows, device):
     return torch.polar(torch.ones_like(angles), angles)
 
 
+def _eager_q_rope(q, freqs, rope_dim):
+    apply_rotary_emb(q[..., -rope_dim:], freqs)
+
+
+def _reference_qkv(attn, x, positions):
+    # Keep an explicit eager oracle after removing the production A/B switch.
+    with patch.object(compute_qkv, "_apply_v41_q_rope", _eager_q_rope):
+        return compute_qkv.decode_compute_qkv(attn, x, positions)
+
+
 class V41DecodePreprocessingCPU(unittest.TestCase):
     def test_cpu_fallback_preserves_eager_result(self):
         q = torch.randn(2, 6, 64, 512, dtype=torch.bfloat16)
@@ -43,9 +52,6 @@ class V41DecodePreprocessingCPU(unittest.TestCase):
 class V41DecodePreprocessingCUDA(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(41)
-        self.gate = patch.dict(os.environ, {"DSV41_FUSED_DECODE_Q_ROPE": "1"})
-        self.gate.start()
-        self.addCleanup(self.gate.stop)
 
     def _assert_rope(self, got, expected, before):
         self.assertEqual(got.dtype, torch.bfloat16)
@@ -87,8 +93,7 @@ class V41DecodePreprocessingCUDA(unittest.TestCase):
             for span in (1, 6):
                 with self.subTest(batch=batch, span=span):
                     attn, projections, x, positions = self._attention(batch, span)
-                    with patch.dict(os.environ, {"DSV41_FUSED_DECODE_Q_ROPE": "0"}):
-                        expected = compute_qkv.decode_compute_qkv(attn, x, positions)
+                    expected = _reference_qkv(attn, x, positions)
                     got = compute_qkv.decode_compute_qkv(attn, x, positions)
                     self._assert_rope(
                         got.q, expected.q, projections["qb"].view_as(got.q)
@@ -98,25 +103,17 @@ class V41DecodePreprocessingCUDA(unittest.TestCase):
                             getattr(got, name), getattr(expected, name), rtol=0, atol=0
                         )
 
-    def test_disabled_and_unsupported_dtype_or_layout_use_eager(self):
+    def test_unsupported_dtype_or_layout_use_eager(self):
         freqs = _freqs(12, "cuda")
         cases = [
-            (torch.randn(2, 6, 64, 512, device="cuda"), "1"),
-            (torch.randn(2, 6, 64, 512, device="cuda", dtype=torch.bfloat16), "0"),
-            (
-                torch.randn(2, 6, 64, 1024, device="cuda", dtype=torch.bfloat16)[
-                    ..., ::2
-                ],
-                "1",
-            ),
+            torch.randn(2, 6, 64, 512, device="cuda"),
+            torch.randn(2, 6, 64, 1024, device="cuda", dtype=torch.bfloat16)[..., ::2],
         ]
-        for q, enabled in cases:
-            with self.subTest(dtype=q.dtype, stride=q.stride(), gate=enabled):
+        for q in cases:
+            with self.subTest(dtype=q.dtype, stride=q.stride()):
                 expected = q.clone()
                 apply_rotary_emb(expected[..., -64:], freqs)
-                with patch.dict(
-                    os.environ, {"DSV41_FUSED_DECODE_Q_ROPE": enabled}
-                ), patch.object(compute_qkv, "rope_only_inplace") as fused:
+                with patch.object(compute_qkv, "rope_only_inplace") as fused:
                     self.assertFalse(
                         compute_qkv._fused_v41_q_rope_supported(q, freqs, 64)
                     )
@@ -161,8 +158,7 @@ class V41DecodePreprocessingCUDA(unittest.TestCase):
                     projections["qb"].normal_()
                     positions.add_(7)
                     graph.replay()
-                    with patch.dict(os.environ, {"DSV41_FUSED_DECODE_Q_ROPE": "0"}):
-                        expected = compute_qkv.decode_compute_qkv(attn, x, positions)
+                    expected = _reference_qkv(attn, x, positions)
                     self._assert_rope(
                         got.q, expected.q, projections["qb"].view_as(got.q)
                     )

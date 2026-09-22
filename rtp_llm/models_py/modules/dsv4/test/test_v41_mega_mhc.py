@@ -151,9 +151,6 @@ class V41MegaMHCCudaTest(unittest.TestCase):
             raise unittest.SkipTest("mega_mhc requires Blackwell")
 
     def setUp(self):
-        env = patch.dict(os.environ, {"DSV41_MEGA_MHC": "1"})
-        env.start()
-        self.addCleanup(env.stop)
         torch.manual_seed(41)
 
     @torch.no_grad()
@@ -200,7 +197,10 @@ class V41MegaMHCCudaTest(unittest.TestCase):
     @torch.no_grad()
     def test_gate_and_predecessor_contract(self):
         case = make_case((1, 6))
-        with patch.dict(os.environ, {"DSV41_MEGA_MHC": "0"}):
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.hc.v41_mega_mhc._get_mega_mhc",
+            return_value=None,
+        ):
             self.assertFalse(is_supported(**case))
             self.assertIsNone(try_fused_post_pre(**case))
         for key in ("attn_out", "residual", "post", "comb"):

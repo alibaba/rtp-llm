@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
 
@@ -233,30 +232,27 @@ class V41DecodeIndexerTest(unittest.TestCase):
             with self.subTest(logical=logical, ratio=ratio):
                 _check_unallocated_table_rows(logical, ratio)
 
-    def test_disabled_and_device_gates(self):
+    def test_missing_backend_and_device_gates(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score
 
-        with patch.dict(os.environ, {"DSV41_FUSED_DECODE_INDEXER": "0"}):
+        with patch.object(
+            _indexer_score, "has_fp8_fp4_paged_mqa_logits", return_value=False
+        ):
             self.assertFalse(fused.is_supported(torch.device("cuda"), 128))
-        with patch.dict(os.environ, {"DSV41_FUSED_DECODE_INDEXER": "1"}):
-            self.assertFalse(fused.is_supported(torch.device("cpu"), 128))
-            self.assertFalse(fused.is_supported(torch.device("cuda"), 32))
-            self.assertFalse(
-                fused.is_supported(torch.device("cuda"), 128, num_heads=64)
-            )
+        self.assertFalse(fused.is_supported(torch.device("cpu"), 128))
+        self.assertFalse(fused.is_supported(torch.device("cuda"), 32))
+        self.assertFalse(fused.is_supported(torch.device("cuda"), 128, num_heads=64))
+        with patch.object(
+            _indexer_score, "has_fp8_fp4_paged_mqa_logits", return_value=True
+        ):
+            with patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)):
+                self.assertFalse(fused.is_supported(torch.device("cuda"), 64))
+                self.assertFalse(fused.is_supported(torch.device("cuda"), 128))
             with patch.object(
-                _indexer_score, "has_fp8_fp4_paged_mqa_logits", return_value=True
+                torch.cuda, "get_device_capability", return_value=(10, 3)
             ):
-                with patch.object(
-                    torch.cuda, "get_device_capability", return_value=(9, 0)
-                ):
-                    self.assertFalse(fused.is_supported(torch.device("cuda"), 64))
-                    self.assertFalse(fused.is_supported(torch.device("cuda"), 128))
-                with patch.object(
-                    torch.cuda, "get_device_capability", return_value=(10, 3)
-                ):
-                    self.assertTrue(fused.is_supported(torch.device("cuda"), 64))
-                    self.assertTrue(fused.is_supported(torch.device("cuda"), 128))
+                self.assertTrue(fused.is_supported(torch.device("cuda"), 64))
+                self.assertTrue(fused.is_supported(torch.device("cuda"), 128))
 
     def test_rejects_padded_cache_and_fp32_weight_loss(self):
         q = torch.empty(1, 6, 32, 128, dtype=torch.bfloat16)

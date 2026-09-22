@@ -45,6 +45,7 @@ class EngramCudaTest(unittest.TestCase):
             self.pinned.weight, self.pinned.scales, pinned=self.pinned
         )
 
+    @patch.dict(os.environ, {"DSV41_ENGRAM_UVA": "0"})
     def test_hash_and_host_lookup_capture_replay(self):
         self.assertTrue(self.pinned.storage.is_pinned())
         windows = torch.tensor(
@@ -209,11 +210,24 @@ class EngramCudaTest(unittest.TestCase):
                 return kv
 
         q = k = torch.ones((4, 5120), dtype=torch.bfloat16, device="cuda")
-        for setting in ("0", "1"):
-            with patch.dict(os.environ, {"DSV41_ENGRAM_INPLACE": setting}):
-                model = Engram(
-                    self.layout, 0, embedding, ConstantProjection(), q, k, 1e-20
+
+        def out_of_place_reference(model, hidden, hashes, mask):
+            # Allocation baseline belongs to this memory test, not a serving flag.
+            if hidden.shape[0] <= 32768:
+                return model._forward_rows(hidden, hashes, mask)
+            output = torch.empty_like(hidden)
+            for begin in range(0, hidden.shape[0], 32768):
+                end = min(begin + 32768, hidden.shape[0])
+                model._forward_rows(
+                    hidden[begin:end],
+                    hashes[begin:end],
+                    mask[begin:end],
+                    out=output[begin:end],
                 )
+            return output
+
+        for setting in ("0", "1"):
+            model = Engram(self.layout, 0, embedding, ConstantProjection(), q, k, 1e-20)
             for count in (3, 32769):
                 with self.subTest(setting=setting, count=count), torch.inference_mode():
                     hidden = torch.zeros(
@@ -228,7 +242,11 @@ class EngramCudaTest(unittest.TestCase):
                     chunk_sizes.clear()
                     baseline = torch.cuda.memory_allocated()
                     torch.cuda.reset_peak_memory_stats()
-                    output = model(hidden, hashes, mask)
+                    output = (
+                        out_of_place_reference(model, hidden, hashes, mask)
+                        if setting == "0"
+                        else model(hidden, hashes, mask)
+                    )
                     peak_bytes[setting, count] = (
                         torch.cuda.max_memory_allocated() - baseline
                     )

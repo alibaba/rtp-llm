@@ -281,6 +281,9 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     int   token_num        = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
+    // Host metadata only: replay retains its captured full-row computation.
+    py_model_inputs_.need_all_logits        = inputs.need_all_logits;
+    py_model_inputs_.need_all_hidden_states = inputs.need_all_hidden_states;
     optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
     if (engram_window_size_ > 0) {
         const auto& history  = inputs.engram_token_windows;
@@ -340,6 +343,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+
+    py_model_inputs_.need_all_logits        = inputs.need_all_logits;
+    py_model_inputs_.need_all_hidden_states = inputs.need_all_hidden_states;
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
@@ -1133,6 +1139,8 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
+    inputs.need_all_logits        = capture_mem_hold_.py_model_inputs_.need_all_logits;
+    inputs.need_all_hidden_states = capture_mem_hold_.py_model_inputs_.need_all_hidden_states;
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;

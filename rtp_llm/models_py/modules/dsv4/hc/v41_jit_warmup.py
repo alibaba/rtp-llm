@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from functools import partial
 
 import torch
@@ -215,15 +214,8 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     units, pairs = _collect_v41_hc_configs(v4)
     if not units:
         return
-    small_enabled = (
-        os.environ.get("DSV41_FUSED_MHC_PRENORM", "1") != "0"
-        and v41_prenorm._has_prenorm_gemm()
-    )
-    mega_enabled = (
-        bool(pairs)
-        and os.environ.get("DSV41_MEGA_MHC", "1") != "0"
-        and v41_mega_mhc._get_mega_mhc() is not None
-    )
+    small_enabled = v41_prenorm._has_prenorm_gemm()
+    mega_enabled = bool(pairs) and v41_mega_mhc._get_mega_mhc() is not None
     num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     small_ms = _small_prenorm_ms(max_m) if small_enabled else ()
     mega_ms = _mega_representative_ms(int(max_m), num_sms) if mega_enabled else ()

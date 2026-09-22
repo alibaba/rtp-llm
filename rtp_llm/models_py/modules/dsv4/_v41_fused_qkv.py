@@ -10,8 +10,6 @@ RTP's existing fused norm/RoPE kernel to preserve its rounding boundary.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -61,8 +59,7 @@ def strided_q_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
 def is_supported(linear, x, q_norm, q_rank) -> bool:
     """Metadata-only gate; unsupported inputs retain the two original linears."""
     return (
-        os.environ.get("DSV41_FUSED_QKV", "1") == "1"
-        and isinstance(linear, V41MXFP8Linear)
+        isinstance(linear, V41MXFP8Linear)
         and x.is_cuda
         and x.dtype == torch.bfloat16
         and x.ndim in (2, 3)

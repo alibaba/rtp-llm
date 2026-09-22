@@ -150,7 +150,7 @@ class SparsePrefillReferenceCPU(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "injected DG metadata failure"):
                 sparse.prepare_plan(candidates, visible, 65)
 
-    def test_cpu_and_disabled_gates_do_not_query_cuda_or_load_deepgemm(self):
+    def test_cpu_gate_does_not_query_cuda_or_load_deepgemm(self):
         sparse = sparse_module()
         candidates = torch.zeros(3, 64, dtype=torch.int32)
         visible = torch.ones(3, dtype=torch.int32)
@@ -161,9 +161,7 @@ class SparsePrefillReferenceCPU(unittest.TestCase):
         ), patch.object(
             sparse, "_get_deep_gemm", side_effect=AssertionError("CPU DeepGEMM load")
         ):
-            for flag in ("0", "1"):
-                with patch.dict(os.environ, {"DSV41_SPARSE_PREFILL_INDEXER": flag}):
-                    self.assertIsNone(sparse.prepare_plan(candidates, visible, 257))
+            self.assertIsNone(sparse.prepare_plan(candidates, visible, 257))
 
     def test_unwarmed_capture_returns_before_plan_allocation(self):
         sparse = sparse_module()
@@ -277,11 +275,6 @@ class SparsePrefillCUDA(unittest.TestCase):
             raise RuntimeError("Sparse CUDA validation requires an SM100-family GPU")
         cls.sparse = sparse_module()
         cls.device = torch.device("cuda")
-
-    def setUp(self):
-        self.flags = patch.dict(os.environ, {"DSV41_SPARSE_PREFILL_INDEXER": "1"})
-        self.flags.start()
-        self.addCleanup(self.flags.stop)
 
     def inputs(self, rows, count, seed):
         generator = torch.Generator(device=self.device).manual_seed(seed)

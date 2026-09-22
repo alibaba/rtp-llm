@@ -1,6 +1,5 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
-import os
 import weakref
 
 import torch
@@ -84,8 +83,6 @@ def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
     original allocations. Packed scales have an exact N-major leading
     dimension, so each fallback linear still packs its own small scale tensor.
     """
-    if os.environ.get("DSV41_FUSED_QKV", "1") != "1":
-        return None
     qw, qs, kw, ks = (weights[key] for key in (q_weight, q_scale, kv_weight, kv_scale))
     if not (
         qw.ndim == kw.ndim == 2

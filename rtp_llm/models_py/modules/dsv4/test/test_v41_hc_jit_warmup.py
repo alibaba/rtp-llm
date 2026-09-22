@@ -1,7 +1,6 @@
 """CPU contracts for V4.1 delayed-HC startup compilation; no GPU launches."""
 
 import contextlib
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -83,11 +82,6 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         )
         stack.enter_context(
             patch.object(warmup.v41_mega_mhc, "_get_mega_mhc", return_value=Mock())
-        )
-        stack.enter_context(
-            patch.dict(
-                os.environ, {"DSV41_FUSED_MHC_PRENORM": "1", "DSV41_MEGA_MHC": "1"}
-            )
         )
         for name in (
             "_run_deepgemm_warmup_launch_with_retry",
@@ -289,13 +283,16 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             serialized.assert_called_once()
         self.assertEqual(len(warmup._WARMED_KEYS), 1)
 
-    def test_feature_disables_compile_reachable_tilelang_fallback_only(self):
+    def test_missing_native_backends_compile_reachable_tilelang_fallback_only(self):
         with contextlib.ExitStack() as stack:
             self._mock_device(stack)
             stack.enter_context(
-                patch.dict(
-                    os.environ, {"DSV41_FUSED_MHC_PRENORM": "0", "DSV41_MEGA_MHC": "0"}
+                patch.object(
+                    warmup.v41_prenorm, "_has_prenorm_gemm", return_value=False
                 )
+            )
+            stack.enter_context(
+                patch.object(warmup.v41_mega_mhc, "_get_mega_mhc", return_value=None)
             )
             small = stack.enter_context(patch.object(warmup, "_launch_small_prenorm"))
             mega = stack.enter_context(patch.object(warmup, "_launch_mega"))

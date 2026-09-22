@@ -179,6 +179,10 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         )
         warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertEqual(operation.call_count, 2)
+        # Retired A/B flags must not invalidate an otherwise identical warmup.
+        with mock.patch.dict(os.environ, {"DSV41_FUSED_OUTPUT_PROJECTION": "0"}):
+            warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+        self.assertEqual(operation.call_count, 2)
         with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
             warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertEqual(operation.call_count, 4)

@@ -10,24 +10,10 @@ metadata kernels, so arbitrary prefix reuse does not require an M/N grid.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from functools import partial
 
 _WARMED: set[tuple] = set()
-_FEATURE_FLAGS = (
-    "DSV41_FUSED_PREFILL_GLOBAL",
-    "DSV41_FUSED_PREFILL_METADATA",
-    "DSV41_FUSED_PREFILL_Q",
-    "DSV41_FUSED_PREFILL_INDEXER",
-    "DSV41_FUSED_INDEXER_Q",
-    "DSV41_FUSED_PREFILL_TOPK",
-    "DSV4_TOPK_V3",
-    "DSV41_FUSED_PREFILL_CANDIDATES",
-    "DSV41_SPARSE_PREFILL_INDEXER",
-    "DSV41_PREFILL_DEEPSELECT",
-    "DSV41_PREFILL_CLEAN_LOGITS_ONLY",
-)
 
 
 @dataclass(frozen=True)
@@ -258,8 +244,8 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                 _require_launch(
                     mapping,
                     f"slot mapping {layout}",
-                    enabled=meta._enabled()
-                    and layout.owner_tokens_per_block % layout.tokens_per_block == 0,
+                    enabled=layout.owner_tokens_per_block % layout.tokens_per_block
+                    == 0,
                 )
     if layout.region == SWA_KV:
         _warm_swa_metadata(attn, layout, max_batch_size, device)
@@ -339,7 +325,7 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                         2 * count, torch.int64, device, 1, offset, fill=0
                     )
                     write_slots = _private_slots(count, layout.entries, device)
-                    for has_carry in ((False, True) if layout.ratio == 2 else (False,)):
+                    for has_carry in (False, True) if layout.ratio == 2 else (False,):
                         carry = (
                             (values[:1, :512].contiguous(), scores[:1].contiguous())
                             if has_carry
@@ -447,14 +433,14 @@ def _warm_indexer_layout(
         weights = raw_weights.squeeze(1).float()
     else:
         q_fp4, q_sf, weights = (x.squeeze(1) for x in prepared)
-    # Also compile the explicit quantizer used when the Q fusion is disabled.
+    # Also compile the explicit quantizer used for unsupported fused-Q layouts.
     indexer.quantize_indexer_q(q.squeeze(1))
     keys = indexer.PrefillIndexerKeys(
         torch.zeros((width, 64), dtype=torch.int8, device=device),
         torch.full((width,), 0x7F7F7F7F, dtype=torch.int32, device=device),
     )
     bounds = meta.try_score_bounds(positions, width, attn.compress_ratio)
-    _require_launch(bounds, "score bounds", enabled=meta._enabled())
+    _require_launch(bounds, "score bounds")
     visible = _indexer_warmup_vector(
         rows, torch.int32, device, vector_stride, vector_offset, fill=width
     )
@@ -536,7 +522,7 @@ def _warm_indexer_layout(
             rows, dtype, device, vector_stride, vector_offset, fill=width
         )
         plan = sparse.prepare_plan(ids, visible, width, block)
-        _require_launch(plan, "sparse index plan", enabled=sparse._enabled())
+        _require_launch(plan, "sparse index plan")
         if plan is not None:
             keys = indexer.PrefillIndexerKeys(
                 torch.zeros((width, 64), dtype=torch.int8, device=device),
@@ -649,9 +635,8 @@ def warmup_v41_attention_jit(
     if torch.cuda.get_device_capability(device)[0] != 10:
         return
     attentions = _collect_attentions(v4)
-    flags = tuple(os.environ.get(name, "1") for name in _FEATURE_FLAGS)
     stream = torch.cuda.current_stream(device)
-    prefix = (device.index, stream.cuda_stream, flags)
+    prefix = (device.index, stream.cuda_stream)
 
     def run(key, fn, deepgemm=False):
         key = prefix + key

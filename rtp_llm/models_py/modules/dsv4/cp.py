@@ -125,6 +125,9 @@ class CPContext:
     # gates should use these instead of synchronizing CUDA length tensors.
     input_lengths_global_host: Optional[Tuple[int, ...]] = None
     prefix_lengths_host: Optional[Tuple[int, ...]] = None
+    # CED only: gathered selected query rows scatter into the original fresh
+    # KV view before cache writes. None retains ordinary full CP execution.
+    gather_restore_positions: Optional[torch.Tensor] = None
     # CSA, HCA, and the nested indexer consume identical full-sequence
     # positions during one forward. Cache the tensors after the first build.
     _full_prefill_positions_cache: Optional[
@@ -698,7 +701,24 @@ def _cp_restore_gathered_full_2d(
         raise ValueError(
             f"CP gathered rows({gathered.size(0)}) != expected rows({expected_rows})"
         )
-    if cp_ctx.unpad_restore_is_prefix:
+    if getattr(cp_ctx, "gather_restore_positions", None) is not None:
+        expected_shape = (cp_ctx.seq_len_full, gathered.size(1))
+        if out is None:
+            out = gathered.new_empty(expected_shape)
+        elif (
+            out.shape != expected_shape
+            or out.dtype != gathered.dtype
+            or out.device != gathered.device
+        ):
+            raise ValueError(
+                "CED CP restore buffer does not match the original KV view"
+            )
+        full = out.zero_().index_copy_(
+            0,
+            cp_ctx.gather_restore_positions,
+            gathered.index_select(0, cp_ctx.unpad_restore),
+        )
+    elif cp_ctx.unpad_restore_is_prefix:
         full = gathered[: cp_ctx.seq_len_full]  # [seq_len_full, H], view
     else:
         if out is not None:

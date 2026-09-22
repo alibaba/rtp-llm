@@ -17,7 +17,6 @@ stream. Neither communication nor carry lifetime is changed by this module.
 from __future__ import annotations
 
 import math
-import os
 
 import torch
 import triton
@@ -36,8 +35,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
 
 def _enabled(tensor):
     return (
-        os.environ.get("DSV41_FUSED_PREFILL_GLOBAL", "1") != "0"
-        and tensor.is_cuda
+        tensor.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(tensor.device)[0] == 10
         and not invalid_kv_access_validation_enabled()

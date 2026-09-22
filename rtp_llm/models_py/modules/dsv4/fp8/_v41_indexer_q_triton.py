@@ -14,8 +14,6 @@ Those operations reuse RTP helpers. FP4 block scales remain separate.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -93,8 +91,7 @@ def is_supported(
 ) -> bool:
     """Only the production BF16/32-head/MXFP4 decode contract is fused."""
     if (
-        os.environ.get("DSV41_FUSED_INDEXER_Q", "1") == "0"
-        or q.device.type != "cuda"
+        q.device.type != "cuda"
         or q.ndim != 4
         or q.shape[2:] != (32, 128)
         or q.shape[0] < 1

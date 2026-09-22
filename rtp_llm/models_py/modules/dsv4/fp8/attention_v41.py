@@ -264,8 +264,7 @@ def _prefill_q_rope(x, freqs, rope_dim):
     if x.numel() == 0 or rope_dim == 0:
         return x
     if (
-        os.environ.get("DSV41_PREFILL_Q_ROPE_INPLACE", "1") != "0"
-        and x.is_cuda
+        x.is_cuda
         and x.dtype == torch.bfloat16
         and x.is_contiguous()
         and freqs.device == x.device
@@ -624,21 +623,13 @@ class AttentionV41FP8(AttentionFP8):
             if key in cache:
                 return cache[key]
             common = super()._build_shared_prefill_meta(*args, **kwargs)
-            if os.environ.get("DSV41_PREFILL_REQUEST_SLICES", "1") != "0":
-                common = common._replace(
-                    request_row_slices=_prefill_request_row_slices(common)
-                )
+            common = common._replace(
+                request_row_slices=_prefill_request_row_slices(common)
+            )
             cache[key] = common
             return common
         finally:
             self.compress_ratio = ratio
-
-    def _materialize_prefill_q(self, qkv, common):
-        if qkv.q is not None:
-            return qkv
-        return qkv._replace(
-            q=self._project_prefill_q(qkv.qr, common.freqs_cis, common.workspace)
-        )
 
     def _project_prefill_q(self, qr, freqs_cis, workspace):
         rows = qr.shape[0]
@@ -660,17 +651,6 @@ class AttentionV41FP8(AttentionFP8):
             out = qkv.qr.new_empty((0, self.dim))
             self._prefill_output_all_reduce(out)
             return out
-        if os.environ.get("DSV41_PREFILL_Q_CHUNKED", "1") == "0":
-            qkv = self._materialize_prefill_q(qkv, common)
-            return self._flash_mla_sparse_fwd_chunked_projected(
-                q=qkv.q,
-                kv=kv,
-                indices=indices,
-                topk_length=topk_length,
-                freqs_cis=common.freqs_cis,
-                profile_name=profile_name,
-            )
-
         from flash_mla import flash_mla_sparse_fwd
 
         out = torch.empty((rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device)
@@ -1143,8 +1123,7 @@ class AttentionV41FP8(AttentionFP8):
             shared.pop("prefill_candidate_mask", None)
             shared.pop("prefill_sparse_plans", None)
             shared["prefill_sparse_candidates"] = (
-                os.environ.get("DSV41_SPARSE_PREFILL_INDEXER", "1") != "0"
-                and self.index_topk == 512
+                self.index_topk == 512
                 and self.index_n_heads == 32
                 and candidate_size == 8
                 and prefill_deepselect.is_available(x.device)
@@ -1170,7 +1149,6 @@ class AttentionV41FP8(AttentionFP8):
                 shared["candidates"] is not None
                 and not shared["prefill_sparse_candidates"]
                 and x.is_cuda
-                and os.environ.get("DSV41_FUSED_PREFILL_CANDIDATES", "1") != "0"
                 and prefill_candidates.bitmap_is_bounded(
                     x.shape[0], max_blocks * candidate_size, candidate_size
                 )
@@ -1203,20 +1181,11 @@ class AttentionV41FP8(AttentionFP8):
             q = self._lin(self.index_wq, qr).view(
                 -1, self.index_n_heads, self.index_head_dim
             )
-            ced_layout = shared.get("ced_indexer_layout")
-            if ced_layout is None:
+            ced_projection = shared.get("ced_indexer_projection")
+            if ced_projection is None:
                 raw_weights = F.linear(x, self.index_weights)
             else:
-                # Keep this narrow GEMM's cuBLAS reduction/rounding identical to
-                # full prefill. A one-ULP BF16 head-weight change can change
-                # Top-K membership. This temporary is released before scoring.
-                original_rows, original_indices = ced_layout
-                full_x = x.new_zeros((original_rows, x.shape[-1]))
-                full_x.index_copy_(0, original_indices, x)
-                raw_weights = F.linear(full_x, self.index_weights).index_select(
-                    0, original_indices
-                )
-                del full_x
+                raw_weights = ced_projection(x, self.index_weights)
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
@@ -1228,7 +1197,7 @@ class AttentionV41FP8(AttentionFP8):
                     positions,
                     self.rope_head_dim,
                 )
-                if fused_indexer and os.environ.get("DSV41_FUSED_PREFILL_Q", "1") != "0"
+                if fused_indexer
                 else None
             )
             if prepared is not None:
@@ -1289,11 +1258,7 @@ class AttentionV41FP8(AttentionFP8):
                     )
                 )
                 request_bounds = None
-                if (
-                    contiguous
-                    and fused_indexer
-                    and os.environ.get("DSV41_FUSED_PREFILL_METADATA", "1") != "0"
-                ):
+                if contiguous and fused_indexer:
                     cache = shared.setdefault("prefill_score_bounds", {})
                     bounds_key = (
                         b,
@@ -1453,13 +1418,6 @@ class AttentionV41FP8(AttentionFP8):
 
     def _swa_prefill_workspace(self, qkv, common):
         """Return BF16 [request, prefix tail + new tokens] for sparse prefill."""
-        ced_start = self._shared_attention.get("ced_swa_start")
-        if ced_start is not None:
-            # CED replay has absolute positions but no computed SWA prefix.
-            # Its leading halo is discarded by the generation-only caller;
-            # reading historical pool entries here would contaminate it.
-            assert common.batch_size == 1 and self.layer_id > 20
-            return [qkv.kv_full], [ced_start]
         lengths_host = self._host_prefill_lengths(common)
         if not common.any_cont:
             return list(qkv.kv_full.split(lengths_host)), [0] * len(lengths_host)
@@ -2013,8 +1971,7 @@ class AttentionV41FP8(AttentionFP8):
         cp = self._cp_ctx
         sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
         if (
-            os.environ.get("DSV41_FUSED_DECODE_SLOTS", "1") != "0"
-            and selected.is_cuda
+            selected.is_cuda
             and selected.dtype == torch.int32
             and req.dtype == torch.int32
             and table.dtype == torch.int32

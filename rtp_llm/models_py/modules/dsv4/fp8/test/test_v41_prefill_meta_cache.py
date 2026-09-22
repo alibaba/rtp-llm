@@ -269,7 +269,8 @@ class V41PrefillMetaCacheTest(unittest.TestCase):
         layer20 = _make_attn(1, 20, shared)
         x = torch.zeros(8, 5120, dtype=torch.bfloat16)
         inputs = _inputs()
-        with patch.dict(os.environ, {"DSV41_PREFILL_REQUEST_SLICES": "1"}):
+        # Production request slices are mandatory even with a stale A/B env.
+        with patch.dict(os.environ, {"DSV41_PREFILL_REQUEST_SLICES": "0"}):
             meta2, parent = self._build(layer2, x, 0, inputs)
             self.assertEqual(parent.count, 1)
             self.assertEqual(meta2.request_row_slices, (slice(0, 8),))

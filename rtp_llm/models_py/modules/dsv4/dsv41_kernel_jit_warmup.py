@@ -74,7 +74,6 @@ def warmup_v41_dense_jit(model, *, max_m, device):
         tuple(sorted(outputs)),
         sms,
         os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto"),
-        os.environ.get("DSV41_FUSED_OUTPUT_PROJECTION", "1"),
     )
     if key in _DENSE_WARMED:
         return

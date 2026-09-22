@@ -26,7 +26,6 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import AttentionV41FP8
 
 _FUSED_MODULE = "rtp_llm.models_py.modules.dsv4.fp8._v41_decode_global"
-_ENV = "DSV41_FUSED_DECODE_GLOBAL"
 _KV_TPB = 128
 _STATE_TPB = 256
 _STATE_EB = 8
@@ -173,17 +172,16 @@ def _clone_case(case):
 
 
 def _reference(case):
-    with patch.dict(os.environ, {_ENV: "0", "DSV41_FUSED_DECODE_INDEXER": "1"}):
+    with patch.object(_fused(), "is_supported", return_value=False):
         AttentionV41FP8._produce_global_decode(
             case.owner, case.x, case.positions, case.req_ids, case.starts
         )
 
 
 def _candidate(case):
-    with patch.dict(os.environ, {_ENV: "1"}):
-        ok = _fused().try_produce_global(
-            case.owner, case.x, case.positions, case.req_ids, case.starts
-        )
+    ok = _fused().try_produce_global(
+        case.owner, case.x, case.positions, case.req_ids, case.starts
+    )
     if not ok:
         raise AssertionError("Supported GPU fixture unexpectedly used fallback")
 
@@ -386,12 +384,11 @@ class V41DecodeGlobalCPU(unittest.TestCase):
     def test_cpu_gate_returns_false_without_mutating_pools(self):
         case = _case("cpu", 2, 1, 6)
         before = _snapshot(case)
-        with patch.dict(os.environ, {_ENV: "1"}):
-            self.assertFalse(
-                _fused().try_produce_global(
-                    case.owner, case.x, case.positions, case.req_ids, case.starts
-                )
+        self.assertFalse(
+            _fused().try_produce_global(
+                case.owner, case.x, case.positions, case.req_ids, case.starts
             )
+        )
         for region, pool in before.items():
             torch.testing.assert_close(
                 case.owner._test_pools[region], pool, rtol=0, atol=0
@@ -596,7 +593,7 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
     def test_unsupported_inputs_do_not_write_pools(self):
         base = _case("cuda", 2, 1, 6)
         for label in (
-            "disabled",
+            "missing_cache",
             "validation_debug",
             "long_span",
             "sharded",
@@ -606,8 +603,9 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 case = _clone_case(base)
-                environment = "0" if label == "disabled" else "1"
-                if label == "long_span":
+                if label == "missing_cache":
+                    case.owner._kv_cache = None
+                elif label == "long_span":
                     case.x = case.x[:, :1].expand(1, 9, 5120).contiguous()
                     case.req_ids = torch.zeros(9, device="cuda", dtype=torch.int64)
                     case.positions = case.starts + torch.arange(9, device="cuda")
@@ -626,7 +624,6 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                 with patch.dict(
                     os.environ,
                     {
-                        _ENV: environment,
                         "DSV4_TRAP_INVALID_KV_ACCESS": (
                             "0" if label == "validation_debug" else "1"
                         ),

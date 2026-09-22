@@ -285,9 +285,6 @@ class PrefillRequestRowsCPU(unittest.TestCase):
 
         with ExitStack() as stack:
             stack.enter_context(
-                patch.dict(os.environ, {"DSV41_FUSED_PREFILL_METADATA": "1"})
-            )
-            stack.enter_context(
                 patch.object(attention, "rope_only", side_effect=lambda q, *a: q)
             )
             stack.enter_context(
@@ -489,7 +486,6 @@ class PrefillRequestRowsCPU(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "DSV41_FUSED_PREFILL_METADATA": "1",
                         "DSV41_SPARSE_PREFILL_PLAN_MAX_BYTES": "4096",
                     },
                 )

@@ -17,17 +17,21 @@ from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 
 class PrefillQMemoryTest(unittest.TestCase):
-    def test_workspace_capacity_tracks_chunk_switch(self):
+    def test_workspace_capacity_is_chunk_bounded_despite_stale_switch(self):
         with patch.object(chunk_env, "FLASH_MLA_SPARSE_Q_CHUNK", 4):
-            for enabled in ("0", "1"):
-                with patch.dict(os.environ, {"DSV41_PREFILL_Q_CHUNKED": enabled}):
+            for legacy_flag in (None, "0", "1"):
+                with patch.dict(os.environ):
+                    if legacy_flag is None:
+                        os.environ.pop("DSV41_PREFILL_Q_CHUNKED", None)
+                    else:
+                        os.environ["DSV41_PREFILL_Q_CHUNKED"] = legacy_flag
                     for rows in (0, 1, 4, 5, 131072):
                         self.assertEqual(
                             prefill_workspace.prefill_q_workspace_rows(rows),
-                            min(rows, 4) if enabled == "1" else rows,
+                            min(rows, 4),
                         )
 
-    def _case(self, rows, *, chunked):
+    def _case(self, rows):
         torch.manual_seed(7)
         owner = attention.AttentionV41FP8.__new__(attention.AttentionV41FP8)
         torch.nn.Module.__init__(owner)
@@ -82,16 +86,13 @@ class PrefillQMemoryTest(unittest.TestCase):
             freqs_cis=freqs,
             workspace=PrefillWorkspace(
                 torch.device("cpu"),
-                q_rows=min(rows, 4) if chunked else rows,
+                q_rows=min(rows, 4),
                 q_dim=16,
                 reserve_cp=False,
                 align_bytes=1,
             ),
         )
         with ExitStack() as stack:
-            stack.enter_context(
-                patch.dict(os.environ, {"DSV41_PREFILL_Q_CHUNKED": str(int(chunked))})
-            )
             stack.enter_context(patch.object(attention, "_FLASH_MLA_SPARSE_Q_CHUNK", 4))
             stack.enter_context(
                 patch.dict(
@@ -109,21 +110,20 @@ class PrefillQMemoryTest(unittest.TestCase):
             )
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
         owner._prefill_output_all_reduce.assert_called_once_with(result)
-        if chunked:
-            expected = []
-            for start in range(0, rows, 4):
-                count = min(4, rows - start)
-                expected.extend((name, count) for name in ("q", "mla", "output"))
-            self.assertEqual(events, expected)
-            self.assertLessEqual(len(set(pointers)), 1)
-        elif rows:
-            self.assertEqual(events[0], ("q", rows))
+        expected = []
+        for start in range(0, rows, 4):
+            count = min(4, rows - start)
+            expected.extend((name, count) for name in ("q", "mla", "output"))
+        self.assertEqual(events, expected)
+        self.assertLessEqual(len(set(pointers)), 1)
 
     def test_chunked_matches_full_projection_including_padding_and_tail(self):
         for rows in (0, 1, 4, 5, 11):
-            for chunked in (False, True):
-                with self.subTest(rows=rows, chunked=chunked):
-                    self._case(rows, chunked=chunked)
+            for legacy_flag in ("0", "1"):
+                with self.subTest(rows=rows, legacy_flag=legacy_flag), patch.dict(
+                    os.environ, {"DSV41_PREFILL_Q_CHUNKED": legacy_flag}
+                ):
+                    self._case(rows)
 
     def test_cpu_rope_falls_back_and_empty_does_not_launch(self):
         x = torch.tensor([[[1, 2, 3, 4]]], dtype=torch.bfloat16)
@@ -152,11 +152,13 @@ class PrefillQRopeCudaTest(unittest.TestCase):
                     if not strided:
                         freqs = freqs.contiguous()
                     expected = base.clone()
-                    with patch.dict(os.environ, {"DSV41_PREFILL_Q_ROPE_INPLACE": "0"}):
-                        attention._prefill_q_rope(expected, freqs, 64)
+                    # Keep the eager algorithm as the independent test oracle.
+                    if rows:
+                        attention.rope_only(expected, freqs, 64)
                     actual = base.clone()
                     pointer = actual.data_ptr()
-                    with patch.dict(os.environ, {"DSV41_PREFILL_Q_ROPE_INPLACE": "1"}):
+                    # The removed A/B switch must not disable the in-place path.
+                    with patch.dict(os.environ, {"DSV41_PREFILL_Q_ROPE_INPLACE": "0"}):
                         result = attention._prefill_q_rope(actual, freqs, 64)
                     self.assertIs(result, actual)
                     self.assertEqual(actual.data_ptr(), pointer)

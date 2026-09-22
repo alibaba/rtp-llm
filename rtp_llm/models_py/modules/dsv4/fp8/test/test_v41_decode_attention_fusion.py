@@ -312,12 +312,20 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
                         _source_entries=lambda _, p: p.shape[1],
                     )
                     attn._slots = MethodType(AttentionV41FP8._slots, attn)
-                    with patch.dict(os.environ, {"DSV41_FUSED_DECODE_SLOTS": "0"}):
-                        expected = AttentionV41FP8._decode_global_slots(
-                            attn, selected, requests
+                    # Independent slot reference, including invalid entries and
+                    # the padded-pool layout that requires the general path.
+                    expected = (
+                        attn._slots(
+                            region,
+                            (selected.long().clamp_min(0) + 1).reshape(-1) * ratio - 1,
+                            requests[:, None].expand_as(selected).reshape(-1),
                         )
+                        .reshape_as(selected)
+                        .int()
+                    )
+                    expected.masked_fill_(selected < 0, -1)
                     with patch.dict(
-                        os.environ, {"DSV41_FUSED_DECODE_SLOTS": "1"}
+                        os.environ, {"DSV41_FUSED_DECODE_SLOTS": "0"}
                     ), patch.object(
                         paged_topk_translator,
                         "translate_local_to_global_slots",
@@ -630,11 +638,6 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_decode_topk
 
         self.impl = _v41_decode_topk
-        enabled = patch.dict(
-            os.environ, {"DSV41_FUSED_DECODE_TOPK": "1", "DSV4_TOPK_V3": "1"}
-        )
-        enabled.start()
-        self.addCleanup(enabled.stop)
 
     @staticmethod
     def _old_candidates(logits, lengths, block_size=8, topk_blocks=2048):
@@ -890,9 +893,7 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         logits = torch.empty(2, 1024, device="cuda")
         lengths = torch.tensor([8, 900], dtype=torch.int32, device="cuda")
         self.assertTrue(self.impl.is_supported(logits, lengths, 512))
-        with patch.dict(os.environ, {"DSV41_FUSED_DECODE_TOPK": "0"}):
-            self.assertFalse(self.impl.is_supported(logits, lengths, 512))
-        with patch.dict(os.environ, {"DSV4_TOPK_V3": "0"}):
+        with patch.object(self.impl, "_TOPK_V3_OK", False):
             self.assertFalse(self.impl.is_supported(logits, lengths, 512))
         for values, lens, count in (
             (logits.to(torch.bfloat16), lengths, 512),

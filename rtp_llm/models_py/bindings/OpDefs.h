@@ -356,6 +356,10 @@ struct PyModelInputs {
     torch::Tensor                             mm_features_locs;
     torch::Tensor                             mm_features_spans;
 
+    // Preserve every row until the caller supplies its request-output contract.
+    bool need_all_logits        = true;
+    bool need_all_hidden_states = true;
+
     PyModelInputs() = default;
     PyModelInputs(torch::Tensor       input_ids,
                   torch::Tensor       input_hiddens,
