@@ -458,6 +458,7 @@ void RtpLLMOp::prepareStop(bool coordinated, int64_t target_step) {
 }
 
 void RtpLLMOp::stop() {
+    RTP_LLM_LOG_INFO("[KV_RPC] SERVER_STOP_ENTER caller=RtpLLMOp::stop");
     setKmonServiceServing(false);
     bool expected = false;
     if (is_server_shutdown_.compare_exchange_strong(expected, true)) {
@@ -473,12 +474,15 @@ void RtpLLMOp::stop() {
             // still executing collectives. BackendManager performs the drain and
             // a process-shared rank rendezvous before entering this method.
             RTP_LLM_LOG_INFO("Server shutdowning");
+            RTP_LLM_LOG_INFO("[KV_RPC] SERVER_SHUTDOWN_BEGIN caller=RtpLLMOp::stop deadline=immediate server=%p",
+                             grpc_server_.get());
             // The Python layer has already given active requests the configured
             // drain window. Do not wait indefinitely here: an on-flight streaming
             // RPC otherwise prevents rank 0 from reaching model shutdown after
             // all ranks have rendezvoused. An immediate deadline cancels any
             // request that survived the drain timeout.
             grpc_server_->Shutdown(std::chrono::system_clock::now());
+            RTP_LLM_LOG_INFO("[KV_RPC] SERVER_SHUTDOWN_END server=%p", grpc_server_.get());
         }
         if (grpc_server_thread_.joinable()) {
             grpc_server_thread_.join();
