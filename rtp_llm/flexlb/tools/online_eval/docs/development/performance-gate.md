@@ -34,7 +34,8 @@ predicted execution=550ms。它们是本轮显式比较对象，不能称为线�
 详细 RPC 信息留在原始 journal，并归档其路径与 SHA256。按完成时间建立索引后分桶，避免逐秒全表扫描。
 旧场景未声明此字段时保留客户端合同，不能称为引擎 TPS 门禁。
 
-暂不生成 HTML 时，离线门禁及 A/B 命令均支持 `--json-only`，保存 evidence、analysis.json 和指标差值。
+完整实验默认生成 HTML：每个单 run 独立报告，A/B 输出合图、A 图、B 图并附带两份单 run 报告。即使 FAIL/INVALID 也保留 HTML 和诊断证据。
+`--json-only` 仅供显式选择的离线诊断，不作为完整实验交付方式。
 运行流程见下文，统一使用 frozen 配置。
 
 ## 真实复制流量与线上 TPS 口径

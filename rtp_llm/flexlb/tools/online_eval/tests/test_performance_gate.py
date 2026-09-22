@@ -127,6 +127,36 @@ class PerformanceGateTest(unittest.TestCase):
         ]
         return e
 
+    def test_html_raw_engine_curves_and_missing_data_are_visible(self):
+        from workload.performance_views import panel, raw_engine_curves
+        e = self.engine_evidence()
+        with tempfile.TemporaryDirectory() as d:
+            chart, audit = panel(d, e, analyze(e))
+            self.assertTrue(audit["available"])
+            self.assertEqual(len(chart["presets"]["Decode TPS"]), 1)
+            self.assertEqual(len(chart["presets"]["Decode 逐引擎 TPS"]), 4)
+            self.assertTrue(set(chart["presets"]["Decode TPS"]) <= set(chart["presets"]["核心"]))
+            means = raw_engine_curves(e, "rtp_llm_generate_tps", "decode")[0][1]
+            self.assertEqual(means[0], (0, 120))
+            self.assertIn("成功 QPS", chart["presets"]["流量"])
+            for row in e["engine_tps_samples"]:
+                row["values"] = [[100, "60"], [110, "60"]]
+            means = raw_engine_curves(e, "rtp_llm_generate_tps", "decode")[0][1]
+            self.assertEqual(means, [(0, 120), (5, None), (10, 120)])
+            e["engine_tps_samples"] = [r for r in e["engine_tps_samples"]
+                if r["metric"]["engine_name"] != "decode-0"]
+            self.assertTrue(all(v is None for _, v in raw_engine_curves(e, "rtp_llm_generate_tps", "decode")[0][1]))
+            chart, _ = panel(d, evidence(), analyze(evidence()))
+            self.assertIn("完成输入 TPS", chart["presets"]["核心"])
+            # HTML must still exist for INVALID runs, with embedded plotting code.
+            bundle = report(d, e)
+            self.assertTrue((bundle / "report.html").is_file())
+            compare(e, e, Path(d)/"ab")
+            spec = json.loads((Path(d)/"ab/reports/comparison/master-performance/report-spec.json").read_text())
+            self.assertEqual([p["id"] for p in spec["panels"]], ["ab", "A", "B"])
+            self.assertTrue((Path(d)/"ab/left/reports/run/master-performance/report.html").is_file())
+            self.assertTrue((Path(d)/"ab/right/reports/run/master-performance/report.html").is_file())
+
     def test_engine_tps_floors_are_independent_of_client_tps(self):
         e = self.engine_evidence()
         self.assertEqual(analyze(e)["verdict"], "PASS")
