@@ -15,6 +15,7 @@ from flexlb_cfg import (
 )
 
 from runtime.resource_plan import VICTIM_OFFSETS
+from runtime.perf_presets import preset_names
 from scenario.contracts import PlanContext
 from scenario.loader import ScenarioError
 
@@ -171,12 +172,12 @@ def environment(value, path, profile):
     result = {"backend": "java_mock", "n_prefill": 2, "n_decode": 4}
     for key, default, allowed in (
         ("discovery", "file", ("file", "discovery_file")),
-        ("perf_preset", "default", ("default", "fault_env", "production_scale_20260920")),
+        ("perf_preset", "default", preset_names()),
         ("master_layout", "single", ("single", "dual_standalone")),
     ):
         val = value.get(key, default)
         if val not in allowed:
-            fail(path + "." + key, f"expected one of {allowed}")
+            fail(path + "." + key, f"invalid value {val!r}; expected one of {allowed}")
         result[key] = val
     if type(value.get("debug_enabled", False)) is not bool:
         fail(path + ".debug_enabled", "expected boolean")

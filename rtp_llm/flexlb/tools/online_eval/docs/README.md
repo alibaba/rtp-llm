@@ -19,7 +19,7 @@
 ### 参考
 
 - [参数参考](reference/parameters.md)
-- [入口清单与迁移](reference/entrypoints.md)
+- [命令入口](reference/entrypoints.md)
 - [结果与指标](reference/results.md)
 - [框架结构](reference/architecture.md)
 - [新增 case](reference/adding-cases.md)

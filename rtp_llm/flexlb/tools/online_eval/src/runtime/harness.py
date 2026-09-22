@@ -163,13 +163,8 @@ def default_perf() -> dict:
     caliber. Suites that need custom step pricing still declare
     ``step_ms_by_batch`` / ``step_base_ms`` explicitly.
     """
-    return {
-        "block_size": 1024,
-        "sleep_scale": 1.0,
-        "decode": {
-            "scale": 1.0,
-        },
-    }
+    from runtime.perf_presets import load_preset
+    return load_preset("default")[0]
 
 
 # ---------------------------------------------------------------------------
@@ -2707,9 +2702,8 @@ def fault_env_perf() -> dict:
     engine never complete decode) — the flat 100ms declaration restores the
     historical timing envelope this family was calibrated on.
     """
-    perf = default_perf()
-    perf["prefill"] = {"fixed_ms": 100.0, "scale": 1.0}
-    return perf
+    from runtime.perf_presets import load_preset
+    return load_preset("fault_env")[0]
 
 
 def _initial_engine_names(env) -> set:

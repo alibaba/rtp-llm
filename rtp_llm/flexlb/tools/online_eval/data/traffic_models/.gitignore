@@ -1,0 +1,3 @@
+# New binary captures require an explicit catalog entry and a consuming case.
+*.xz
+!prefix_lineage_v2_ac2f8aad.xz

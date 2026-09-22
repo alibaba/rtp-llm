@@ -1,0 +1,1 @@
+{"block_size": 1024, "sleep_scale": 1.0, "decode": {"scale": 1.0}, "prefill": {"fixed_ms": 100.0, "scale": 1.0}}

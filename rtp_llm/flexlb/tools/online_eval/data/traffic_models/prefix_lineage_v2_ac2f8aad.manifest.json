@@ -27,5 +27,11 @@
     "short_requests": 3609,
     "relative_change": -0.0026549410262789903
   },
-  "allocation_bitmap": "reserve discarded v1 partial-block labels; no tail lengths retained"
+  "allocation_bitmap": "reserve discarded v1 partial-block labels; no tail lengths retained",
+  "manifest_schema_version": 1,
+  "codec": {
+    "name": "prefix_lineage",
+    "version": 2
+  },
+  "capture_source": "frontend"
 }

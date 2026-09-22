@@ -11,7 +11,11 @@ import math
 import random
 from pathlib import Path
 
-PROFILE = Path(__file__).resolve().parents[2] / 'config/traffic_profiles/frontend_20260921.json'
+from traffic.catalog import model_entry
+
+PROFILE_ENTRY, PROFILE_PATHS = model_entry()
+PROFILE = PROFILE_PATHS['calibration_profile']
+PROFILE_SYMBOL = PROFILE_ENTRY['profile_symbol']
 FIELDS = {'seed','count','block_size','families','shared_blocks','prefix_blocks','suffix_blocks',
           'zipf_alpha','cold_fraction','session_requests','session_growth_blocks','output_tokens',
           'priority','input_distribution','output_distribution','pinned_blocks','profile'}
@@ -36,10 +40,10 @@ def resolve(parameters):
     if type(parameters.get('seed')) is not int or type(parameters.get('count')) is not int or not 1 <= parameters['count'] <= 1000000:
         raise ValueError('explicit integer seed and bounded count required')
     p = dict(parameters)
-    profile = p.pop('profile', 'frontend_20260921' if 'families' not in p else None)
+    profile = p.pop('profile', PROFILE_SYMBOL if 'families' not in p else None)
     provenance = None
     if profile:
-        if profile != 'frontend_20260921':
+        if profile != PROFILE_SYMBOL:
             raise ValueError('unknown calibration profile')
         document = json.loads(PROFILE.read_text())
         provenance = document['calibration']

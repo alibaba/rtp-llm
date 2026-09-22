@@ -13,6 +13,13 @@ from scripts.pipeline.execute_cases import STRESS_BAND_FLOOR
 
 
 class StressRuntimeTest(unittest.TestCase):
+    def test_performance_file_compatibility_default_and_cli_precedence(self):
+        with mock.patch.dict("os.environ", {"PERFORMANCE_FILE": "/tmp/from-env.json"}):
+            self.assertEqual(Path("/tmp/from-env.json"),
+                             stress.parse_args(["--dry-run"]).performance)
+            self.assertEqual(Path("/tmp/from-cli.json"),
+                             stress.parse_args(["--dry-run", "--performance", "/tmp/from-cli.json"]).performance)
+
     def test_metric_whitelist_is_exactly_the_prior_producer_contract(self):
         self.assertEqual(13, len(stress.MASTER_METRIC_WHITELIST))
         self.assertEqual(len(stress.MASTER_METRIC_WHITELIST),

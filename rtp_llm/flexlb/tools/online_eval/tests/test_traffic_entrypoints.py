@@ -73,8 +73,10 @@ class TrafficEntrypointTest(unittest.TestCase):
     def test_java_templates_are_reproducible_from_model(self):
         from scripts.pipeline.derive_master_templates import derive
 
-        model = ROOT / "data/traffic_models/frontend_20260921.xz"
-        stored = json.loads((ROOT / "data/traffic_models/master_batch_templates.json").read_text())
+        from traffic.catalog import model_entry
+        paths = model_entry()[1]
+        model = paths["model"]
+        stored = json.loads(paths["java_fixture"].read_text())
         self.assertEqual(stored, derive(model))
         self.assertGreaterEqual(len({row["il"] for row in stored["templates"]}), 32)
 

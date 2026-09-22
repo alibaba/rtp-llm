@@ -1,0 +1,9 @@
+{
+  "default": {"performance": "config/perf_presets/default.json"},
+  "fault_env": {"performance": "config/perf_presets/fault_env.json"},
+  "production_scale_20260920": {
+    "performance": "data/performance/production_scale_20260920.json",
+    "mock_heap": "32g",
+    "mock_extra_args": ["--prefill-block-size", "512", "--decode-block-size", "64"]
+  }
+}

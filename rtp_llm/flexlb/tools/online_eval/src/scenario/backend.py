@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from runtime.requests import ClientRecords, request_success
+from runtime.perf_presets import load_preset
 from scenario.runtime import StageTimeout
 
 
@@ -475,14 +476,13 @@ def make_env_spec(plan, profile, lease):
     from runtime.harness import (
         EnvSpec,
         MasterSpec,
-        default_perf,
-        fault_env_perf,
     )
 
     kwargs = {
         k: OMIT if v == {"omit": True} else v
         for k, v in plan["config_overrides"].items()
     }
+    preset_perf, preset_runtime = load_preset(plan["perf_preset"])
     spec = EnvSpec(
         label="scenario",
         runtime_mode="scenario",
@@ -500,27 +500,13 @@ def make_env_spec(plan, profile, lease):
             if plan.get("master_layout", "single") == "dual_standalone"
             else []
         ),
-        perf=(
-            fault_env_perf() if plan["perf_preset"] == "fault_env" else default_perf()
-        ),
+        perf=preset_perf,
         master_env=({"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}),
         master_debug_log=plan.get("master_debug_log", False),
     )
-    if plan["perf_preset"] == "production_scale_20260920":
-        import json
-        from pathlib import Path
-
-        spec.perf = json.loads(
-            (
-                Path(__file__).resolve().parents[2]
-                / "config/perf_presets"
-                / "production_scale_20260920.json"
-            ).read_text()
-        )
-        spec.mock_heap = "32g"
-        spec.mock_extra_args.extend(
-            ["--prefill-block-size", "512", "--decode-block-size", "64"]
-        )
+    if "mock_heap" in preset_runtime:
+        spec.mock_heap = preset_runtime["mock_heap"]
+    spec.mock_extra_args.extend(preset_runtime.get("mock_extra_args", []))
     for key in (
         "prefill_cache_blocks",
         "decode_cache_blocks",

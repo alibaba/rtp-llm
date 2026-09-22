@@ -15,7 +15,7 @@ python3 tools/online_eval/scripts/commands/run_stress.py \
   --warmup-s 10 --fetch-output-stream 1
 ```
 
-默认源是 `data/traffic_models/frontend_20260921.xz`：匿名 prefix DAG 模型，
+默认源是 `data/traffic_models/prefix_lineage_v2_ac2f8aad.xz`：匿名 prefix DAG 模型，
 不是原始访问日志。脚本先核验模型 SHA，再在运行目录生成 `traffic-plan.jsonl`
 及其 manifest，Java 只读取这份临时计划。模型有 141113 个事件、原始跨度约
 900 秒；`--replay-speed 4` 对应全量模型平均约 627 名义 QPS。改变目标 QPS 时按下式重算：

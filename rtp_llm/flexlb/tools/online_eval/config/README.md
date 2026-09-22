@@ -8,8 +8,7 @@
 | `suites.yaml` | core、functional、workload 等 suite 的选例、覆盖及采集档位。 |
 | `scale_cases/` | 独立的规模实验配置（线上、历史 A/B、lineage、监控复核等），不进入日常回归。 |
 | `report_views/` | 报告视图定义及参数扫描示例。 |
-| `perf_presets/` | 规模实验的性能参数预设。 |
-| `traffic_profiles/` | 流量重放时使用的前端 profile 配置。 |
+| `perf_presets/` | 手写的预设登记与基础性能声明；标定所得性能文件存于 `data/performance/`。 |
 | `load_client_env.txt` | Java load client 的环境变量清单。 |
 | `mode_profiles.yaml` | 指向根目录同名表的链接，供模式配置统一管理。 |
 

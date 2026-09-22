@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "default_trace": "pinned_prefix_lineage_v2",
+  "models": {
+    "pinned_prefix_lineage_v2": {
+      "codec": "prefix_lineage",
+      "codec_version": 2,
+      "source": "frontend",
+      "model": "traffic_models/prefix_lineage_v2_ac2f8aad.xz",
+      "manifest": "traffic_models/prefix_lineage_v2_ac2f8aad.manifest.json",
+      "java_fixture": "traffic_models/prefix_lineage_v2_ac2f8aad.templates.json",
+      "calibration_profile": "calibration/prefix_lineage_v2_ac2f8aad.profile.json",
+      "profile_symbol": "frontend_20260921"
+    }
+  }
+}

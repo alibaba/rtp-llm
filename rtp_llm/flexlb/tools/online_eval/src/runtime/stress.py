@@ -71,7 +71,9 @@ def parse_args(argv=None):
     p.add_argument("--mock-base-grpc-port", type=int, default=61000)
     p.add_argument("--master-http-port", type=int, default=7001)
     p.add_argument("--master-management-port", type=int, default=7002)
-    p.add_argument("--performance", type=Path, default=TOOL_DIR / "data/performance/dsv4_flash_performance.fast_ab.json")
+    p.add_argument("--performance", type=Path,
+                   default=Path(os.environ["PERFORMANCE_FILE"]) if os.environ.get("PERFORMANCE_FILE")
+                   else TOOL_DIR / "data/performance/dsv4_flash_performance.fast_ab.json")
     p.add_argument("--traffic-source-spec", type=Path)
     p.add_argument("--traffic-output-tokens", type=int, default=420)
     p.add_argument("--limit", type=int, default=1000)
@@ -159,7 +161,8 @@ def _traffic(a, output: Path):
         spec = json.loads(a.traffic_source_spec.read_text())
         base = a.traffic_source_spec.resolve().parent
     else:
-        model = TOOL_DIR / "data/traffic_models/frontend_20260921.xz"
+        from traffic.catalog import model_entry
+        model = model_entry()[1]["model"]
         manifest = json.loads(model.with_suffix(".manifest.json").read_text())
         if model.stat().st_size != manifest["bytes"] or sha256_file(model) != manifest["sha256"]:
             raise ValueError("lineage model differs from its pinned manifest")

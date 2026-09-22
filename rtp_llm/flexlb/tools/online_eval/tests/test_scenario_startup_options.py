@@ -4,6 +4,7 @@ import copy
 import unittest
 
 from runtime.harness import default_perf, fault_env_perf
+from runtime.perf_presets import load_preset, preset_names
 from scenario import compile_scenarios
 from scenario.backend import make_env_spec
 from scenario.catalog import handlers
@@ -20,6 +21,17 @@ def spec(raw):
 
 
 class StartupOptionsTest(unittest.TestCase):
+    def test_preset_registry_is_total_and_rejects_typos_before_launch(self):
+        self.assertEqual(("default", "fault_env", "production_scale_20260920"), preset_names())
+        for name in preset_names():
+            self.assertIsInstance(load_preset(name)[0], dict)
+            self.assertEqual(spec({"perf_preset": name}).perf, load_preset(name)[0])
+        for typo in ("production_scale_2026092", "Default", "", None):
+            with self.subTest(typo=typo), self.assertRaisesRegex(ValueError, "perf_preset"):
+                load_preset(typo)
+            with self.subTest(typo=typo), self.assertRaises(Exception):
+                spec({"perf_preset": typo})
+
     def test_waiting_cap_merges_birth_perf_without_adding_batch_limits(self):
         for preset, base in (
             ("default", default_perf()),
