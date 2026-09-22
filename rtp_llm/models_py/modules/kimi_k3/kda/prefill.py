@@ -314,6 +314,7 @@ class KimiK3KDAPrefill(nn.Module):
         cu_seqlens_cpu: torch.Tensor,
         checkpoint_interval: int,
         checkpoint_states: torch.Tensor,
+        checkpoint_offsets: torch.Tensor,
     ) -> torch.Tensor:
         """Run the cache-backed cuLA checkpoint path."""
 
@@ -356,6 +357,7 @@ class KimiK3KDAPrefill(nn.Module):
                 dt_bias=self._dt_bias_fp32,
                 checkpoint_interval=checkpoint_interval,
                 checkpoint_states=checkpoint_states,
+                checkpoint_offsets=(None if single_sequence else checkpoint_offsets),
             )
             if (
                 published_checkpoints is None
@@ -460,6 +462,7 @@ class KimiK3KDAPrefill(nn.Module):
             cu_seqlens_cpu=metadata.cu_seqlens_cpu,
             checkpoint_interval=metadata.checkpoint_tokens,
             checkpoint_states=metadata.recurrent_checkpoints,
+            checkpoint_offsets=metadata.recurrent.checkpoint_offsets,
         )
         self.cache.store_recurrent_checkpoints(
             metadata.recurrent_checkpoints,
