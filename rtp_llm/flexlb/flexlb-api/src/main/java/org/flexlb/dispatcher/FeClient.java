@@ -1,5 +1,6 @@
 package org.flexlb.dispatcher;
 
+import com.google.common.cache.CacheBuilder;
 import io.netty.channel.ChannelOption;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -22,7 +23,6 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
@@ -41,7 +41,8 @@ public class FeClient {
 
     // Avoid URI template parsing per chunk; bound the cache across discovery changes.
     private static final int URI_CACHE_MAX = 2048;
-    private final Map<String, URI> uriCache = new ConcurrentHashMap<>();
+    private final Map<String, URI> uriCache = CacheBuilder.newBuilder()
+            .maximumSize(URI_CACHE_MAX).<String, URI>build().asMap();
 
     public FeClient(WebClient.Builder builder,
                     @Qualifier("dispatcherFeConnectionProvider") ConnectionProvider provider,
@@ -124,9 +125,6 @@ public class FeClient {
     private URI resolveUri(String feBaseUrl, String fePath, String rawQuery) {
         if (rawQuery != null && !rawQuery.isEmpty()) {
             return URI.create(feBaseUrl + fePath + "?" + rawQuery);
-        }
-        if (uriCache.size() >= URI_CACHE_MAX) {
-            uriCache.clear();
         }
         return uriCache.computeIfAbsent(feBaseUrl + fePath, URI::create);
     }

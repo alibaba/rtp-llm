@@ -684,7 +684,6 @@ class Pipeline(object):
             ],
             headers=headers,
             group_id=base_request_id,
-            **kwargs,
         )
 
     async def batch_infer_prepared(
@@ -695,7 +694,6 @@ class Pipeline(object):
         input_urls: Optional[List[List[str]]] = None,
         headers: Optional[Dict[str, Any]] = None,
         group_id: Optional[int] = None,
-        **kwargs: Any,
     ) -> List[GenerateResponse]:
         """Submit request-owned configs as one atomic batch on a PDFUSION backend.
 

@@ -301,6 +301,7 @@ class BatchFrontendWorkerTest(TestCase):
             max_new_tokens=37,
             generation_config={"max_new_tokens": 8, "aux_info": False},
             headers={"X-Request-ID": "trace", "ignored": "value"},
+            group_id=-1,
             **{request_id_field_name: 700},
         )
         result = asyncio.run(CompleteResponseAsyncGenerator.get_last_value(response))

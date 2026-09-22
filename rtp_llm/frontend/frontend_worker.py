@@ -270,7 +270,6 @@ class FrontendWorker:
             input_urls=request.input_urls,
             headers=headers,
             group_id=request.request_id,
-            **kwargs,
         )
         yield BatchPipelineResponse(
             response_batch=[

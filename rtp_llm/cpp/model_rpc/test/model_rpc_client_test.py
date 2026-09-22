@@ -2102,16 +2102,22 @@ class DispatcherBatchRpcTest(TestCase):
         response = BatchGenerateOutputsPB()
         response.results.add().final_output.SetInParent()
         response.results.add().final_output.SetInParent()
-        inputs = [self.input(1, timeout_ms=1001), self.input(2, timeout_ms=0)]
+        response.results.add().final_output.SetInParent()
+        inputs = [
+            self.input(1, timeout_ms=1001),
+            self.input(2, timeout_ms=0),
+            self.input(3, timeout_ms=None),
+        ]
         result, stub = self.invoke(inputs, response)
-        self.assertEqual([1, 2], result)
+        self.assertEqual([1, 2, 3], result)
         request = stub.BatchGenerateCall.call_args.args[0]
         self.assertEqual(
-            [1001, 30000], [item.generate_config.timeout_ms for item in request.inputs]
+            [1001, 30000, 30000],
+            [item.generate_config.timeout_ms for item in request.inputs],
         )
         self.assertEqual(30.0, stub.BatchGenerateCall.call_args.kwargs["timeout"])
         self.assertEqual(
-            [1001, 0], [item.generate_config.timeout_ms for item in inputs]
+            [1001, 0, None], [item.generate_config.timeout_ms for item in inputs]
         )
 
     def test_response_must_contain_exactly_one_result_per_item(self):
