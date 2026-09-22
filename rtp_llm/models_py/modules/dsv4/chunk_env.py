@@ -42,3 +42,14 @@ def dsv4_chunk_tokens_from_env(
         )
         value = default
     return max(value, int(min_value))
+
+
+# Workspace sizing and the attention loop must use the same process-wide size.
+FLASH_MLA_SPARSE_Q_CHUNK = dsv4_chunk_tokens_from_env(
+    "DSV4_FLASH_MLA_SPARSE_Q_CHUNK", min_value=0
+)
+if FLASH_MLA_SPARSE_Q_CHUNK <= 0:
+    raise ValueError(
+        "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for streaming "
+        "attention output projection"
+    )

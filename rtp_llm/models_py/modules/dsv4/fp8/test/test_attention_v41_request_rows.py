@@ -179,6 +179,13 @@ class PrefillRequestRowsCPU(unittest.TestCase):
         owner = attention.AttentionV41FP8.__new__(attention.AttentionV41FP8)
         torch.nn.Module.__init__(owner)
         owner.compress_ratio = 2
+        owner._shared_attention = {}
+        owner._rope_base = 160000
+        owner._rope_max_seq_len = 1048576
+        owner._rope_o_seq_len = 65536
+        owner._rope_factor = 16
+        owner._rope_beta_fast = 32
+        owner._rope_beta_slow = 1
 
         def base(*args, **kwargs):
             self.assertEqual(owner.compress_ratio, 0)

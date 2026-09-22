@@ -571,47 +571,19 @@ def mxfp8_activation_reference(x: torch.Tensor) -> torch.Tensor:
     return values.reshape(x.shape).to(x.dtype)
 
 
-def gated_engram_residual(
-    hidden: torch.Tensor,
-    kv: torch.Tensor,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    eps: float,
-    token_mask: Optional[torch.Tensor] = None,
-    *,
-    out: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Exact normalized signed-square-root gate used by the reference."""
-    if out is not None and (
-        out.shape != hidden.shape
-        or out.dtype != hidden.dtype
-        or out.device != hidden.device
-        or not out.is_contiguous()
-    ):
-        raise ValueError("Engram output must be contiguous and match hidden states")
-    if (
-        out is not None
-        and out.numel()
-        and any(
-            value is not None
-            and out.untyped_storage().data_ptr() == value.untyped_storage().data_ptr()
-            for value in (hidden, kv, q_weight, k_weight, token_mask)
-        )
-    ):
-        raise ValueError("Engram output must not share storage with its inputs")
-    if (
+def _engram_inject_supported(hidden, q_weight, k_weight, token_mask):
+    return (
         not torch.is_grad_enabled()
         and hidden.is_cuda
         and hidden.ndim == 3
         and hidden.numel() > 0
-        and (hidden.shape[-2], hidden.shape[-1]) == (4, 5120)
-        and kv.shape == hidden.shape[:-2] + (5 * 5120,)
+        and hidden.shape[-2:] == (4, 5120)
         and q_weight.shape == k_weight.shape == (4, 5120)
         and all(
             value.dtype == torch.bfloat16
             and value.device == hidden.device
             and value.is_contiguous()
-            for value in (hidden, kv, q_weight, k_weight)
+            for value in (hidden, q_weight, k_weight)
         )
         and (
             token_mask is None
@@ -622,6 +594,51 @@ def gated_engram_residual(
                 and token_mask.is_contiguous()
             )
         )
+    )
+
+
+def gated_engram_residual(
+    hidden: torch.Tensor,
+    kv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    eps: float,
+    token_mask: Optional[torch.Tensor] = None,
+    *,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Exact normalized signed-square-root gate used by the reference.
+
+    In inference, ``out`` may exactly alias ``hidden``. The native kernel
+    owns disjoint rows; the reference materializes its result before copying.
+    All other shared-storage outputs are rejected conservatively.
+    """
+    if out is not None and (
+        out.shape != hidden.shape
+        or out.dtype != hidden.dtype
+        or out.device != hidden.device
+        or not out.is_contiguous()
+    ):
+        raise ValueError("Engram output must be contiguous and match hidden states")
+    if out is not None and out.numel():
+        output_storage = out.untyped_storage().data_ptr()
+        if any(
+            value is not None and output_storage == value.untyped_storage().data_ptr()
+            for value in (kv, q_weight, k_weight, token_mask)
+        ):
+            raise ValueError("Engram output must not share storage with other inputs")
+        if output_storage == hidden.untyped_storage().data_ptr() and (
+            torch.is_grad_enabled()
+            or out.storage_offset() != hidden.storage_offset()
+            or out.stride() != hidden.stride()
+        ):
+            raise ValueError("Engram hidden alias must be exact and inference-only")
+    if (
+        _engram_inject_supported(hidden, q_weight, k_weight, token_mask)
+        and kv.shape == hidden.shape[:-2] + (5 * 5120,)
+        and kv.dtype == torch.bfloat16
+        and kv.device == hidden.device
+        and kv.is_contiguous()
     ):
         from rtp_llm.models_py.modules.dsv4._engram_inject_triton import (
             engram_inject_kernel,
@@ -679,6 +696,7 @@ class Engram(nn.Module):
         self.register_buffer("q_weight", q_weight, persistent=False)
         self.register_buffer("k_weight", k_weight, persistent=False)
         self.eps = eps
+        self.inplace = os.environ.get("DSV41_ENGRAM_INPLACE", "1") == "1"
 
     @classmethod
     def from_checkpoint(cls, config, layer_id: int, checkpoint_path: str, device):
@@ -753,8 +771,15 @@ class Engram(nn.Module):
         # Engram is token-local after hashing. Bound lookup/projection/gate
         # temporaries for packed long prompts without changing the decode path.
         chunk_rows = 32768
+        inplace = self.inplace and _engram_inject_supported(
+            hidden, self.q_weight, self.k_weight, token_mask
+        )
         if hidden.shape[0] > chunk_rows:
-            output = torch.empty_like(hidden, memory_format=torch.contiguous_format)
+            output = (
+                hidden
+                if inplace
+                else torch.empty_like(hidden, memory_format=torch.contiguous_format)
+            )
             for begin in range(0, hidden.shape[0], chunk_rows):
                 end = min(begin + chunk_rows, hidden.shape[0])
                 self._forward_rows(
@@ -764,7 +789,9 @@ class Engram(nn.Module):
                     out=output[begin:end],
                 )
             return output
-        return self._forward_rows(hidden, hash_ids, token_mask)
+        return self._forward_rows(
+            hidden, hash_ids, token_mask, out=hidden if inplace else None
+        )
 
     def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
         rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)

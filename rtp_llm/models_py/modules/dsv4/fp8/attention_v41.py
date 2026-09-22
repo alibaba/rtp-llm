@@ -14,12 +14,16 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
     HCA_KV,
     INDEXER_KV,
     SWA_KV,
+)
+from rtp_llm.models_py.modules.dsv4.chunk_env import (
+    FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
 )
 from rtp_llm.models_py.modules.dsv4.cp import _cp_restore_gathered_full_2d
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_deepselect as prefill_deepselect
@@ -253,6 +257,26 @@ def compress_pairs(values, scores, norm_weight, eps):
 def rope_only(x, freqs, rope_dim):
     apply_rotary_emb(x[..., -rope_dim:].unsqueeze(0), freqs)
     return x
+
+
+def _prefill_q_rope(x, freqs, rope_dim):
+    """Rotate the BF16 projection in place without an FP32 Q-sized temporary."""
+    if x.numel() == 0 or rope_dim == 0:
+        return x
+    if (
+        os.environ.get("DSV41_PREFILL_Q_ROPE_INPLACE", "1") != "0"
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
+        and freqs.device == x.device
+        and freqs.dtype == torch.complex64
+        and freqs.shape == (x.shape[0], rope_dim // 2)
+        and 0 < rope_dim <= x.shape[-1]
+        and rope_dim % 2 == 0
+    ):
+        rope_only_inplace(x[..., -rope_dim:], freqs)
+        return x
+    return rope_only(x, freqs, rope_dim)
 
 
 def fp8_roundtrip(x):
@@ -612,14 +636,62 @@ class AttentionV41FP8(AttentionFP8):
     def _materialize_prefill_q(self, qkv, common):
         if qkv.q is not None:
             return qkv
+        return qkv._replace(
+            q=self._project_prefill_q(qkv.qr, common.freqs_cis, common.workspace)
+        )
+
+    def _project_prefill_q(self, qr, freqs_cis, workspace):
+        rows = qr.shape[0]
+        q_out = workspace.prefill_q(rows).view(rows, self.n_heads * self.head_dim)
+        if rows == 0:
+            return q_out.view(rows, self.n_heads, self.head_dim)
+        with record_function_range("dsv41.prefill.q_lora_b_rope"):
+            q = self._lin(self.wq_b, qr, out=q_out).view(
+                rows, self.n_heads, self.head_dim
+            )
+            return _prefill_q_rope(q, freqs_cis, self.rope_head_dim)
+
+    def _prefill_sparse_attention(
+        self, qkv, common, *, kv, indices, topk_length, profile_name
+    ):
+        """Project Q into reusable chunk storage immediately before its MLA call."""
         rows = qkv.qr.shape[0]
-        q_out = common.workspace.prefill_q(rows).view(
-            rows, self.n_heads * self.head_dim
-        )
-        q = self._lin(self.wq_b, qkv.qr, out=q_out).view(
-            -1, self.n_heads, self.head_dim
-        )
-        return qkv._replace(q=rope_only(q, common.freqs_cis, self.rope_head_dim))
+        if rows == 0:
+            out = qkv.qr.new_empty((0, self.dim))
+            self._prefill_output_all_reduce(out)
+            return out
+        if os.environ.get("DSV41_PREFILL_Q_CHUNKED", "1") == "0":
+            qkv = self._materialize_prefill_q(qkv, common)
+            return self._flash_mla_sparse_fwd_chunked_projected(
+                q=qkv.q,
+                kv=kv,
+                indices=indices,
+                topk_length=topk_length,
+                freqs_cis=common.freqs_cis,
+                profile_name=profile_name,
+            )
+
+        from flash_mla import flash_mla_sparse_fwd
+
+        out = torch.empty((rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device)
+        for start in range(0, rows, _FLASH_MLA_SPARSE_Q_CHUNK):
+            end = min(start + _FLASH_MLA_SPARSE_Q_CHUNK, rows)
+            freqs = common.freqs_cis[start:end]
+            q = self._project_prefill_q(qkv.qr[start:end], freqs, common.workspace)
+            with record_function_range(profile_name):
+                o, _, _ = flash_mla_sparse_fwd(
+                    q=q,
+                    kv=kv,
+                    indices=indices[start:end],
+                    sm_scale=self.softmax_scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=topk_length[start:end],
+                )
+            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                self._prefill_output_proj_into(o, freqs, out=out[start:end])
+            dispose_tensor(o)
+        self._prefill_output_all_reduce(out)
+        return out
 
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
@@ -1524,18 +1596,29 @@ class AttentionV41FP8(AttentionFP8):
         self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
         if not self.compress_ratio:
             if swa_only_workspace is not None:
-                qkv = self._materialize_prefill_q(qkv, common)
                 dispose_tensor(qkv.kv_full)
                 meta = common.swa_meta
-                return self._flash_mla_sparse_fwd_chunked_projected(
-                    q=qkv.q,
+                return self._prefill_sparse_attention(
+                    qkv,
+                    common,
                     kv=swa_only_workspace.view(-1, 1, self.head_dim),
                     indices=meta.combined_indices.unsqueeze(1),
                     topk_length=meta.combined_lens,
-                    freqs_cis=common.freqs_cis,
                     profile_name="dsv41.prefill.swa_concat.flash_mla",
                 )
-            return self._forward_prefill_swa_only(qkv, common)
+            topk = common.topk_idxs
+            if topk.dim() == 3:
+                topk = topk.squeeze(0)
+            out = self._prefill_sparse_attention(
+                qkv,
+                common,
+                kv=qkv.kv_full.unsqueeze(1),
+                indices=topk.unsqueeze(1).to(torch.int32),
+                topk_length=common.swa_meta.topk_length_kv_full,
+                profile_name="dsv41.prefill.swa.flash_mla_kv_full",
+            )
+            dispose_tensor(qkv.kv_full)
+            return out
         positions = (
             common.cp_ctx.global_positions.long()
             if common.cp_on
@@ -1622,13 +1705,12 @@ class AttentionV41FP8(AttentionFP8):
             if indices.shape[1] % 64:
                 indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
             self._shared_attention["prefill_index_plan"] = (selected, indices, lens)
-        qkv = self._materialize_prefill_q(qkv, common)
-        return self._flash_mla_sparse_fwd_chunked_projected(
-            q=qkv.q,
+        return self._prefill_sparse_attention(
+            qkv,
+            common,
             kv=torch.cat(chunks).unsqueeze(1),
             indices=indices.unsqueeze(1),
             topk_length=lens,
-            freqs_cis=common.freqs_cis,
             profile_name="dsv41.prefill.shared_global",
         )
 

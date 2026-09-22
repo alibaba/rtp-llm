@@ -167,7 +167,9 @@ class PrefillFastPathTest(unittest.TestCase):
                     captured.append(workspace_type(*args, **kwargs))
                     raise AllocationCaptured
 
-                with patch.object(
+                with patch.dict(
+                    prefill_forward.os.environ, {"DSV41_PREFILL_Q_CHUNKED": "0"}
+                ), patch.object(
                     prefill_forward, "PrefillWorkspace", side_effect=capture_workspace
                 ), patch.object(
                     prefill_forward, "build_cp_context_for_forward"
@@ -208,6 +210,92 @@ class PrefillFastPathTest(unittest.TestCase):
                     v4._prefill_ws_full_rows * 512 * 4 if cp_active and not v41 else 0,
                 )
                 self.assertEqual(ws.prefill_q(rows).shape, (rows, 64 * 512))
+
+    def test_v41_workspace_is_bounded_by_attention_chunk(self):
+        from rtp_llm.models_py.modules.dsv4.chunk_env import (
+            FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
+        )
+
+        class AllocationCaptured(Exception):
+            pass
+
+        for rows in (0, 2, _FLASH_MLA_SPARSE_Q_CHUNK + 2, 262214, 1048576):
+            with self.subTest(rows=rows):
+                v4 = _FakeV4()
+                v4.args = SimpleNamespace(v41_config={})
+                v4._prefill_ws_q_dim = 64 * 512
+                captured = []
+
+                def allocate(*args, **kwargs):
+                    captured.append(kwargs)
+                    raise AllocationCaptured
+
+                with patch.dict(
+                    prefill_forward.os.environ, {"DSV41_PREFILL_Q_CHUNKED": "1"}
+                ), patch.object(
+                    prefill_forward, "PrefillWorkspace", side_effect=allocate
+                ):
+                    with self.assertRaises(AllocationCaptured):
+                        prefill_forward.forward_layers(
+                            v4, None, torch.empty(rows, device="meta"), None, None, None
+                        )
+                self.assertEqual(
+                    captured[0]["q_rows"], min(rows, _FLASH_MLA_SPARSE_Q_CHUNK)
+                )
+                self.assertFalse(captured[0]["reserve_cp"])
+
+    def test_v41_shared_scratch_is_released_on_success_and_failure(self):
+        for enabled in (False, True):
+            for fail in (False, True):
+                with self.subTest(enabled=enabled, fail=fail):
+                    v4 = _FakeV4()
+                    registry = {i: layer.attn for i, layer in enumerate(v4.layers)}
+                    shared = {"layers": registry, "global": {0: torch.ones(2)}}
+                    for attn in registry.values():
+                        object.__setattr__(attn, "_shared_attention", shared)
+
+                    def layer_call(hidden, *_args, **_kwargs):
+                        shared["global"] = {0: torch.ones(2)}
+                        shared["prefill_index_plan"] = torch.ones(3)
+                        if fail:
+                            raise RuntimeError("layer failed")
+                        return hidden
+
+                    with patch.dict(
+                        prefill_forward.os.environ,
+                        {"DSV41_PREFILL_RELEASE_SHARED": str(int(enabled))},
+                    ), patch.object(
+                        prefill_forward,
+                        "_prefill_fast_path_layer_calls",
+                        return_value=(layer_call, layer_call),
+                    ), patch.object(
+                        prefill_forward, "_prefill_fast_path_enabled", return_value=True
+                    ), patch.object(
+                        prefill_forward, "build_and_propagate_prefill_meta_fp8"
+                    ), patch.object(
+                        prefill_forward, "clear_prefill_meta_shared_fp8"
+                    ):
+
+                        def run():
+                            return prefill_forward.forward_layers(
+                                v4,
+                                None,
+                                torch.tensor([3, 4]),
+                                torch.tensor([0, 1]),
+                                torch.tensor([0, 2]),
+                                None,
+                            )
+
+                        if fail:
+                            with self.assertRaisesRegex(RuntimeError, "layer failed"):
+                                run()
+                        else:
+                            run()
+                    self.assertIs(shared["layers"], registry)
+                    if enabled:
+                        self.assertEqual(set(shared), {"layers"})
+                    else:
+                        self.assertIn("prefill_index_plan", shared)
 
     def test_workspace_is_allocated_before_cp_setup_and_embedding(self):
         v4 = _FakeV4()

@@ -11,8 +11,8 @@ those buffers would otherwise pin process-wide on a near-full 1M+CP8 card.
 Each compressor role owns a fixed sub-region of ONE union buffer carved by byte
 offsets (see :class:`PrefillWorkspace` for the layout). Ordinary V4 retains
 fixed maximum Q and CP row capacities, identical on every forward for allocator
-reuse. Only V4.1 sizes Q to the actual rank-local padded token count and passes
-``reserve_cp=False``: it owns its CP gather buffers separately, without V4's
+reuse. V4.1 bounds Q to one attention chunk of rank-local padded tokens and
+passes ``reserve_cp=False``: it owns its CP gather buffers separately, without V4's
 compressor or nested indexer modules. Widths remain model-level maxima, and the
 union retains its 1 GiB allocation buckets for both models.
 
@@ -31,7 +31,19 @@ layers, never recycled by the allocator) and relies on the
 ``cp._CP_ROLE_*``.
 """
 
+import os
+
 import torch
+
+
+def prefill_q_workspace_rows(rows: int) -> int:
+    """V4.1 Q capacity: one attention chunk, or all rows for the fallback."""
+    if os.environ.get("DSV41_PREFILL_Q_CHUNKED", "1") != "0":
+        from rtp_llm.models_py.modules.dsv4.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
+
+        return min(int(rows), FLASH_MLA_SPARSE_Q_CHUNK)
+    return int(rows)
+
 
 # Default union-buffer alignment. Rounding every per-forward union block up to a
 # clean 1 GiB multiple allows adjacent input sizes to reuse one allocation

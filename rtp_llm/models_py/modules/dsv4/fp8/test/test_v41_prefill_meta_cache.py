@@ -17,6 +17,7 @@ Covers ``AttentionV41FP8._build_shared_prefill_meta``'s
 import os
 import sys
 import unittest
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -34,6 +35,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (  # noqa: E402
 )
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
+    release_v41_prefill_shared,
 )
 
 
@@ -96,6 +98,42 @@ def _inputs():
 
 
 class V41PrefillMetaCacheTest(unittest.TestCase):
+    def test_shared_tensors_live_until_their_last_consumer(self):
+        layers = {
+            i: SimpleNamespace(
+                kv_source_layer_id=2 if i < 8 else 8,
+                index_source_layer_id=2 if i < 4 else (4 if i < 8 else 8),
+                is_index_source=i in (2, 4, 8),
+            )
+            for i in range(2, 10)
+        }
+        shared = {
+            "layers": layers,
+            "global": {2: torch.ones(2)},
+            "topk": {2: torch.ones(2)},
+            "candidates": torch.ones(2),
+            "prefill_chunk_meta": torch.ones(2),
+        }
+        shared["prefill_index_plan"] = (shared["topk"][2], torch.ones(2))
+        global_ref = weakref.ref(shared["global"][2])
+        topk_ref = weakref.ref(shared["topk"][2])
+        candidate_ref = weakref.ref(shared["candidates"])
+
+        release_v41_prefill_shared(shared, 2)
+        self.assertIsNotNone(global_ref())
+        self.assertIsNotNone(topk_ref())
+        release_v41_prefill_shared(shared, 3)
+        self.assertIsNone(topk_ref())
+        self.assertNotIn("prefill_index_plan", shared)
+        self.assertIsNotNone(global_ref())
+        release_v41_prefill_shared(shared, 7)
+        self.assertIsNone(global_ref())
+        self.assertNotIn("prefill_chunk_meta", shared)
+        self.assertIsNotNone(candidate_ref())
+        release_v41_prefill_shared(shared, 8)
+        self.assertIsNone(candidate_ref())
+        self.assertIs(shared["layers"], layers)
+
     def test_broadcast_releases_bucket_cache_after_success_or_failure(self):
         for fail in (False, True):
             with self.subTest(fail=fail):

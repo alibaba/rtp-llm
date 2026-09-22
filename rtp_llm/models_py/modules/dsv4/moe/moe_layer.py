@@ -93,6 +93,24 @@ def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
     return padded_seq_len // cp_size
 
 
+def cp_padded_batch_tokens_per_rank_bound(
+    max_batch_tokens: int, cp_size: int, max_batch_size: int
+) -> int:
+    """Bound a batch whose requests are padded independently for ZigZag CP.
+
+    Each nonempty request adds at most ``2 * cp_size - 1`` padding tokens.
+    The sum of padded lengths is a multiple of ``2 * cp_size``, so rounding
+    this upper bound down gives an even rank-local row count.
+    """
+    max_batch_tokens = max(int(max_batch_tokens), 0)
+    cp_size = max(int(cp_size), 1)
+    if cp_size == 1:
+        return max_batch_tokens
+    max_batch_size = min(max(int(max_batch_size), 1), max_batch_tokens)
+    alignment = 2 * cp_size
+    return 2 * ((max_batch_tokens + max_batch_size * (alignment - 1)) // alignment)
+
+
 def resolve_moe_max_tokens_per_rank(
     max_seq_len: int,
     current_max_tokens_per_rank: int,

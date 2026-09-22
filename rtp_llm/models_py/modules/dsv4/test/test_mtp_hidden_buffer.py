@@ -1,5 +1,6 @@
 import types
 import unittest
+from itertools import product
 from unittest import mock
 
 import torch
@@ -8,6 +9,9 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     DeepSeekV4Model,
     Dsv4MtpHiddenBufferSpec,
     Dsv4SharedRuntimeBufferStore,
+)
+from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
+    cp_padded_batch_tokens_per_rank_bound,
 )
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
 
@@ -30,6 +34,103 @@ class MtpHiddenBufferTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         Dsv4SharedRuntimeBufferStore._reset_for_test()
+
+    @staticmethod
+    def _capacity_model(
+        *,
+        v41=True,
+        cp_size=4,
+        max_seq_len=1048576,
+        token_budget=1048576,
+        max_batch_size=48,
+        context_batch_size=1,
+        decode=False,
+        speculative=False,
+        gen_num_per_cycle=5,
+    ):
+        return types.SimpleNamespace(
+            _v4_args=types.SimpleNamespace(
+                v41_config={} if v41 else None,
+                max_seq_len=max_seq_len,
+                max_tokens_per_rank=max_seq_len,
+            ),
+            _prefill_cp_size=cp_size,
+            _max_prefill_batch_tokens=token_budget,
+            _max_generate_batch_size=max_batch_size,
+            _max_context_batch_size=context_batch_size,
+            _is_decode_role=decode,
+            _is_speculative=speculative,
+            _gen_num_per_cycle=gen_num_per_cycle,
+        )
+
+    def test_v41_aux_capacity_covers_many_independently_padded_requests(self):
+        model = self._capacity_model()
+        lengths = [24385] * 43
+        self.assertLess(sum(lengths), model._max_prefill_batch_tokens)
+        local_rows = sum(2 * ((length + 7) // 8) for length in lengths)
+        self.assertEqual(local_rows, 262214)
+        capacity = DeepSeekV4Model._resolve_shared_token_capacity(model)
+        self.assertGreaterEqual(capacity, local_rows)
+        self.assertEqual(capacity, 262228)
+        # The shared target/draft storage remains fixed even at this boundary.
+        store = self._make_store(mtp=True, token_capacity=capacity)
+        module = _RuntimeModule()
+        buffer = store.bind(module)
+        address = buffer.data_ptr()
+        features = torch.ones(local_rows, 3, dtype=torch.bfloat16)
+        V4Transformer._write_mtp_hidden_buffer(module, features, is_cuda_graph=False)
+        self.assertEqual(buffer.data_ptr(), address)
+        self.assertTrue(torch.equal(buffer[:local_rows], features))
+        maximum_batch = [21841] * 48
+        self.assertLess(sum(maximum_batch), model._max_prefill_batch_tokens)
+        self.assertLess(
+            max(maximum_batch) * len(maximum_batch), model._max_prefill_batch_tokens
+        )
+        local_rows = sum(2 * ((length + 7) // 8) for length in maximum_batch)
+        self.assertLessEqual(local_rows, capacity)
+
+    def test_cp_batch_bound_covers_small_exhaustive_partitions(self):
+        for cp_size, count in product((1, 2, 4, 8), range(1, 5)):
+            for lengths in product(range(1, 6), repeat=count):
+                budget = sum(lengths)
+                capacity = cp_padded_batch_tokens_per_rank_bound(budget, cp_size, count)
+                if cp_size == 1:
+                    local_rows = budget
+                else:
+                    alignment = 2 * cp_size
+                    local_rows = sum(
+                        2 * ((length + alignment - 1) // alignment)
+                        for length in lengths
+                    )
+                self.assertGreaterEqual(capacity, local_rows)
+
+    def test_v41_capacity_keeps_warmup_floor_and_non_cp_token_budget(self):
+        for cp_size in (1, 2, 4, 8):
+            model = self._capacity_model(cp_size=cp_size, token_budget=16)
+            self.assertEqual(
+                DeepSeekV4Model._resolve_shared_token_capacity(model),
+                1048576 // cp_size,
+            )
+        model = self._capacity_model(cp_size=1, max_seq_len=1024, token_budget=4096)
+        self.assertEqual(DeepSeekV4Model._resolve_shared_token_capacity(model), 4096)
+
+    def test_v4_and_decode_capacity_remain_unchanged(self):
+        for cp_size, context_batch_size in product((1, 2, 4, 8), (1, 3)):
+            model = self._capacity_model(
+                v41=False,
+                cp_size=cp_size,
+                context_batch_size=context_batch_size,
+            )
+            self.assertEqual(
+                DeepSeekV4Model._resolve_shared_token_capacity(model),
+                1048576 // cp_size * context_batch_size,
+            )
+        for v41, speculative in product((False, True), repeat=2):
+            model = self._capacity_model(v41=v41, decode=True, speculative=speculative)
+            expected = 48 * (6 if speculative else 1)
+            self.assertEqual(
+                DeepSeekV4Model._resolve_shared_token_capacity(model), expected
+            )
 
     @staticmethod
     def _make_store(
@@ -207,6 +308,7 @@ class MtpHiddenBufferTest(unittest.TestCase):
 
     def test_mega_se_output_is_pausable_and_reused_with_graph_addresses(self):
         import torch
+
         from rtp_llm.models_py.modules.dsv4.moe import mega_se_buf
 
         with mock.patch.object(

@@ -3,9 +3,11 @@
 import importlib.util
 import json
 import math
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -205,6 +207,58 @@ class EngramTest(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=invalid)
+
+    def test_exact_hidden_output_alias_is_inference_only(self):
+        hidden = torch.randn(3, 4, 32).bfloat16()
+        kv = torch.randn(3, 5 * 32).bfloat16()
+        q = k = torch.ones(4, 32).bfloat16()
+        mask = torch.tensor([True, False, True])
+        original = hidden.clone()
+        expected = engram.gated_engram_residual(hidden, kv, q, k, 1e-20, mask)
+        with torch.no_grad():
+            actual = engram.gated_engram_residual(
+                hidden, kv, q, k, 1e-20, mask, out=hidden.view_as(hidden)
+            )
+        self.assertEqual(actual.data_ptr(), hidden.data_ptr())
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(actual[1], original[1], rtol=0, atol=0)
+        with self.assertRaisesRegex(ValueError, "inference-only"):
+            engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=hidden)
+
+    def test_inplace_rejects_shifted_and_other_input_aliases(self):
+        storage = torch.randn(4, 4, 32).bfloat16()
+        hidden = storage[:3]
+        kv = torch.randn(3, 5 * 32).bfloat16()
+        q = k = torch.ones(4, 32).bfloat16()
+        with torch.no_grad(), self.assertRaisesRegex(ValueError, "exact"):
+            engram.gated_engram_residual(hidden, kv, q, k, 1e-20, out=storage[1:])
+        for input_name in ("kv", "q_weight", "k_weight", "token_mask"):
+            with self.subTest(input_name=input_name), torch.no_grad():
+                args = dict(kv=kv, q_weight=q, k_weight=k, token_mask=None)
+                if input_name == "kv":
+                    # The overlap extends beyond the hidden view in its storage.
+                    args[input_name] = storage.flatten()[: 3 * 5 * 32].view(3, -1)
+                elif input_name == "token_mask":
+                    args[input_name] = hidden.view(torch.bool).flatten()[:3]
+                else:
+                    args[input_name] = hidden[0]
+                with self.assertRaisesRegex(ValueError, "other inputs"):
+                    engram.gated_engram_residual(hidden, **args, eps=1e-20, out=hidden)
+
+    def test_inplace_option_is_fixed_at_construction(self):
+        q = k = torch.ones(4, 32).bfloat16()
+
+        def create():
+            return engram.Engram(self.layout, 0, None, torch.nn.Identity(), q, k, 1e-20)
+
+        with patch.dict(os.environ, {}):
+            os.environ.pop("DSV41_ENGRAM_INPLACE", None)
+            enabled = create()
+            os.environ["DSV41_ENGRAM_INPLACE"] = "0"
+            disabled = create()
+            os.environ["DSV41_ENGRAM_INPLACE"] = "1"
+            self.assertTrue(enabled.inplace)
+            self.assertFalse(disabled.inplace)
 
     def test_mxfp8_reference_matches_independent_numpy_rounding(self):
         torch.manual_seed(7)

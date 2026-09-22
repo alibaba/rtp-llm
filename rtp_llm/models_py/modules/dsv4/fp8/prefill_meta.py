@@ -30,6 +30,56 @@ def _flat_optional(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return None if t is None else t.reshape(-1).contiguous()
 
 
+def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> None:
+    """Release prefill tensors after their last consumer, or at forward exit.
+
+    Calls run on the forward stream after a complete layer. Dropping references
+    preserves allocator stream ordering without a device or host synchronization.
+    The layer registry and paged KV pools are not per-forward scratch.
+    """
+    if layer_id is None:
+        for key in (
+            "global",
+            "topk",
+            "candidates",
+            "candidate_mask",
+            "prefill_candidate_mask",
+            "prefill_sparse_candidates",
+            "prefill_sparse_plans",
+            "prefill_score_bounds",
+            "prefill_chunk_meta",
+            "prefill_index_plan",
+            "prefill_meta_common",
+        ):
+            shared.pop(key, None)
+        return
+
+    remaining = [attn for index, attn in shared["layers"].items() if index > layer_id]
+    for key, source_attr, dependent_keys in (
+        ("global", "kv_source_layer_id", ("prefill_chunk_meta",)),
+        ("topk", "index_source_layer_id", ("prefill_index_plan",)),
+    ):
+        values = shared.get(key, {})
+        live_sources = {getattr(attn, source_attr, None) for attn in remaining}
+        for source in tuple(values):
+            if source not in live_sources:
+                del values[source]
+        if not values:
+            for dependent in dependent_keys:
+                shared.pop(dependent, None)
+
+    if not any(getattr(attn, "is_index_source", False) for attn in remaining):
+        for key in (
+            "candidates",
+            "candidate_mask",
+            "prefill_candidate_mask",
+            "prefill_sparse_candidates",
+            "prefill_sparse_plans",
+            "prefill_score_bounds",
+        ):
+            shared.pop(key, None)
+
+
 def build_and_propagate_prefill_meta_fp8(
     v4: "V4Transformer",
     x_first_layer: torch.Tensor,

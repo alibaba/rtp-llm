@@ -109,9 +109,13 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
     clear_prefill_meta_shared_fp8,
+    release_v41_prefill_shared,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    prefill_q_workspace_rows,
+)
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -335,8 +339,15 @@ def forward_layers(
     after that layer's forward.
     """
     # Allocate before CP metadata or embedding can split a reusable cached block.
-    # V4.1 Q preserves input_ids' full rank-local padded row count. Ordinary V4
-    # retains its fixed maximum Q and compressor CP capacities for allocator reuse.
+    # V4.1 streams padded query rows through one Q chunk. Ordinary V4 retains
+    # its fixed maximum Q and compressor CP capacities for allocator reuse.
+    shared_prefill = None
+    if os.environ.get("DSV41_PREFILL_RELEASE_SHARED", "1") != "0":
+        first_attn = getattr(next(iter(v4.layers), None), "attn", None)
+        shared_prefill = getattr(first_attn, "_shared_attention", None)
+        if shared_prefill is not None:
+            release_v41_prefill_shared(shared_prefill)
+
     ws: Optional[PrefillWorkspace] = None
     if v4.fp8_kv_cache:
         # AttentionV41FP8 only uses prefill_q: its global/KV gathers own their
@@ -350,7 +361,11 @@ def forward_layers(
         )
         ws = PrefillWorkspace(
             input_ids.device,
-            q_rows=int(input_ids.size(0)) if v41 else v4._prefill_ws_q_rows,
+            q_rows=(
+                prefill_q_workspace_rows(input_ids.size(0))
+                if v41
+                else v4._prefill_ws_q_rows
+            ),
             q_dim=v4._prefill_ws_q_dim,
             reserve_cp=reserve_cp,
             cp_rows=v4._prefill_ws_full_rows,
@@ -546,6 +561,8 @@ def forward_layers(
                         kv_cache=kv_cache,
                         block_tables_by_type=block_tables_by_type,
                     )  # [T, hc, dim]
+                    if shared_prefill is not None:
+                        release_v41_prefill_shared(shared_prefill, layer_idx)
                     if layer_idx in capture_ids:
                         v4.capture_aux_hidden(layer_idx, h)
                     if _rt_on:
@@ -594,6 +611,8 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+        if shared_prefill is not None:
+            release_v41_prefill_shared(shared_prefill)
 
     if v4._mtp_hidden_buffer is not None:
         if capture_aux:

@@ -1,7 +1,9 @@
 """Run on an explicitly reserved GPU; covers pinned host reads in graph replay."""
 
+import os
 import unittest
 import uuid
+from unittest.mock import patch
 
 import torch
 
@@ -96,6 +98,18 @@ class EngramCudaTest(unittest.TestCase):
                     actual = gated_engram_residual(
                         hidden, kv, q_weight, k_weight, 1e-20, token_mask
                     )
+                    inplace_hidden = hidden.clone()
+                    inplace = gated_engram_residual(
+                        inplace_hidden,
+                        kv,
+                        q_weight,
+                        k_weight,
+                        1e-20,
+                        token_mask,
+                        out=inplace_hidden.view_as(inplace_hidden),
+                    )
+                self.assertEqual(inplace.data_ptr(), inplace_hidden.data_ptr())
+                torch.testing.assert_close(inplace, actual, rtol=0, atol=0)
                 ai = actual.view(torch.int16).to(torch.int32)
                 bi = expected.view(torch.int16).to(torch.int32)
                 ulp = (
@@ -147,6 +161,105 @@ class EngramCudaTest(unittest.TestCase):
         graph.replay()
         torch.cuda.synchronize()
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_gated_engram_residual_inplace_capture_replay(self):
+        hidden = torch.randn(7, 4, 5120, device="cuda").bfloat16()
+        kv = torch.randn(7, 5 * 5120, device="cuda").bfloat16()
+        q = torch.randn(4, 5120, device="cuda").bfloat16()
+        k = torch.randn(4, 5120, device="cuda").bfloat16()
+        mask = torch.arange(7, device="cuda") % 2 == 0
+
+        def call():
+            return gated_engram_residual(hidden, kv, q, k, 1e-20, mask, out=hidden)
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream), torch.inference_mode():
+            for _ in range(3):
+                call()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream), torch.inference_mode():
+            output = call()
+        self.assertEqual(output.data_ptr(), hidden.data_ptr())
+        for _ in range(3):
+            hidden.normal_()
+            kv.normal_()
+            mask.logical_not_()
+            with torch.inference_mode():
+                expected = gated_engram_residual(hidden, kv, q, k, 1e-20, mask)
+            graph.replay()
+            torch.cuda.synchronize()
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_chunked_forward_reuses_hidden_with_option_and_grad_fallback(self):
+        chunk_sizes = []
+        peak_bytes = {}
+
+        def embedding(ids, device):
+            chunk_sizes.append(ids.shape[0])
+            return torch.zeros(
+                (ids.shape[0], 1, 1), device=device, dtype=torch.bfloat16
+            )
+
+        class ConstantProjection(torch.nn.Module):
+            def forward(self, rows):
+                kv = rows.new_zeros((rows.shape[0], 5 * 5120))
+                kv[:, 4 * 5120 :] = 1
+                return kv
+
+        q = k = torch.ones((4, 5120), dtype=torch.bfloat16, device="cuda")
+        for setting in ("0", "1"):
+            with patch.dict(os.environ, {"DSV41_ENGRAM_INPLACE": setting}):
+                model = Engram(
+                    self.layout, 0, embedding, ConstantProjection(), q, k, 1e-20
+                )
+            for count in (3, 32769):
+                with self.subTest(setting=setting, count=count), torch.inference_mode():
+                    hidden = torch.zeros(
+                        (count, 4, 5120), dtype=torch.bfloat16, device="cuda"
+                    )
+                    hashes = torch.zeros(
+                        (count, self.layout.n_hash_cols),
+                        dtype=torch.int64,
+                        device="cuda",
+                    )
+                    mask = torch.arange(count, device="cuda") % 3 != 0
+                    chunk_sizes.clear()
+                    baseline = torch.cuda.memory_allocated()
+                    torch.cuda.reset_peak_memory_stats()
+                    output = model(hidden, hashes, mask)
+                    peak_bytes[setting, count] = (
+                        torch.cuda.max_memory_allocated() - baseline
+                    )
+                    self.assertEqual(
+                        output.data_ptr() == hidden.data_ptr(), setting == "1"
+                    )
+                    expected = torch.sigmoid(torch.tensor(0.001)).bfloat16().item()
+                    torch.testing.assert_close(
+                        output[:, 0, 0],
+                        mask.to(torch.bfloat16) * expected,
+                        rtol=0,
+                        atol=0,
+                    )
+                    self.assertLessEqual(max(chunk_sizes), 32768)
+                    self.assertEqual(sum(chunk_sizes), count)
+                    if setting == "0":
+                        self.assertEqual(hidden.count_nonzero().item(), 0)
+                    del hidden, output
+            hidden = torch.zeros(
+                (3, 4, 5120), dtype=torch.bfloat16, device="cuda", requires_grad=True
+            )
+            output = model(hidden, hashes[:3])
+            self.assertNotEqual(output.data_ptr(), hidden.data_ptr())
+            self.assertEqual(hidden.count_nonzero().item(), 0)
+            output.float().sum().backward()
+            self.assertTrue(hidden.grad.isfinite().all().item())
+            del hidden, output
+        self.assertGreaterEqual(
+            peak_bytes["0", 32769] - peak_bytes["1", 32769],
+            32769 * 4 * 5120 * torch.bfloat16.itemsize,
+        )
 
     def test_complete_engram_capture_changes_input_and_preserves_mask(self):
         projection = V41MXFP8Linear(

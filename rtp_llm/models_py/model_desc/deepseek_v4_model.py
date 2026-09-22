@@ -57,6 +57,7 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
 )
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
     chunked_moe_enabled,
+    cp_padded_batch_tokens_per_rank_bound,
     cp_padded_tokens_per_rank_bound,
     moe_chunk_tokens_from_env,
     resolve_moe_max_tokens_per_rank,
@@ -536,12 +537,21 @@ class DeepSeekV4Model(GptModelBase):
                 gen_num_per_cycle=self._gen_num_per_cycle,
             )
         cp_size = int(self._prefill_cp_size)
-        if cp_size > 1:
-            return (
-                cp_padded_tokens_per_rank_bound(int(self._v4_args.max_seq_len), cp_size)
-                * self._max_context_batch_size
+        warmup_capacity = (
+            cp_padded_tokens_per_rank_bound(int(self._v4_args.max_seq_len), cp_size)
+            * self._max_context_batch_size
+        )
+        if self._v4_args.v41_config is not None:
+            # max_context_batch_size sizes startup warmup, not scheduler
+            # admission. Real DSpARK batches can contain max_generate_batch_size
+            # single-sequence requests, each with its own CP padding.
+            scheduler_capacity = cp_padded_batch_tokens_per_rank_bound(
+                self._max_prefill_batch_tokens,
+                cp_size,
+                self._max_generate_batch_size,
             )
-        return self._v4_args.max_seq_len * self._max_context_batch_size
+            return max(warmup_capacity, scheduler_capacity)
+        return warmup_capacity
 
     def _resolve_mtp_hidden_token_capacity(self) -> int:
         return self._resolve_shared_token_capacity()
@@ -812,9 +822,7 @@ class DeepSeekV4Model(GptModelBase):
         del self.weight
 
         if torch.cuda.is_available() and device_str.startswith("cuda"):
-            gpu_mem_gb = (
-                torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
-            )
+            gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
             logging.info("[DeepSeekV4Model] GPU mem after load: %.1f GB", gpu_mem_gb)
 
         # Pre-warm the TileLang sparse_attn kernel before the C++ engine

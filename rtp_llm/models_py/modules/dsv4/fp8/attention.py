@@ -53,7 +53,9 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
 # Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
+from rtp_llm.models_py.modules.dsv4.chunk_env import (
+    FLASH_MLA_SPARSE_Q_CHUNK as _FLASH_MLA_SPARSE_Q_CHUNK,
+)
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
@@ -390,19 +392,6 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
 
 
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
-
-# Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
-# validate the environment once at module import instead of parsing it in the
-# per-layer forward hot path.
-_FLASH_MLA_SPARSE_Q_CHUNK = dsv4_chunk_tokens_from_env(
-    "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
-    min_value=0,
-)
-if _FLASH_MLA_SPARSE_Q_CHUNK <= 0:
-    raise ValueError(
-        "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for streaming "
-        "attention output projection"
-    )
 
 
 def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
