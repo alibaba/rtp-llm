@@ -135,7 +135,8 @@ def engine_tps_checks(evidence):
     metrics, checks = {}, []
     for name, engines in groups.items():
         expected = evidence["provenance"]["topology"][ENGINE_TPS[name]]
-        if type(expected) is not int or expected <= 0 or len(engines) != expected:
+        if (type(expected) is not int or expected <= 0 or len(engines) != expected
+                or len({key[0] for key in engines}) != expected):
             raise ValueError("engine TPS coverage/epoch mismatch: " + name)
         means = []
         for priorities in engines.values():
@@ -380,7 +381,7 @@ def analyze(evidence):
         engine_metrics, engine_checks = engine_tps_checks(evidence)
         m.update(engine_metrics)
         checks.extend(engine_checks)
-    except (KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         errors.append("engine TPS: " + str(exc))
     for i in range(math.ceil(duration)):
         start, end = lo + i * 1000, min(hi, lo + (i + 1) * 1000)
@@ -403,6 +404,19 @@ def analyze(evidence):
             else "FAIL" if any(x["status"] == "FAIL" for x in checks) else "PASS"
         ),
     )
+    return result
+
+
+def compact_flow(snapshot):
+    """Keep every request and gate field; verbose RPC metadata stays in the journal."""
+    issued = {"rid", "send_start_epoch_ms", "input_len", "output_len", "pacing_lag_ms"}
+    terminal = {"rid", "send_start_epoch_ms", "input_len", "output_len", "status",
+                "total_ms", "ttft_ms", "observed_output_tokens"}
+    result = {k: v for k, v in snapshot.items() if k not in {"issued", "records"}}
+    result["issued"] = [{k: v for k, v in row.items() if k in issued}
+                        for row in snapshot["issued"]]
+    result["records"] = [{k: v for k, v in row.items() if k in terminal}
+                         for row in snapshot["records"]]
     return result
 
 

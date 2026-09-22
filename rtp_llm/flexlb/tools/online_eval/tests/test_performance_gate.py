@@ -77,6 +77,7 @@ def evidence():
 
 class PerformanceGateTest(unittest.TestCase):
     def test_completion_buckets_do_not_depend_on_journal_order(self):
+        from workload.performance_gate import compact_flow
         original = evidence()
         expected = analyze(original)
         shuffled = copy.deepcopy(original)
@@ -85,6 +86,8 @@ class PerformanceGateTest(unittest.TestCase):
         actual = analyze(shuffled)
         self.assertEqual(actual["metrics"], expected["metrics"])
         self.assertEqual(actual["windows"], expected["windows"])
+        shuffled["flow"] = compact_flow(shuffled["flow"])
+        self.assertEqual(analyze(shuffled), actual)
 
     def test_finish_archives_scoped_raw_evidence_before_analysis(self):
         from types import SimpleNamespace
@@ -97,13 +100,16 @@ class PerformanceGateTest(unittest.TestCase):
         monitor = mock.Mock()
         monitor.query.return_value = raw
         with tempfile.TemporaryDirectory() as d:
+            flow.directory = Path(d)
+            (flow.directory/"client_lifecycle.jsonl").write_text("journal retained")
             ctx = SimpleNamespace(artifact_dir=Path(d), monitor=monitor,
                 resource=lambda name, kind: flow if kind == "java_flow" else e)
             with mock.patch("scenario.actions.performance.analyze", side_effect=RuntimeError("analysis interrupted")):
                 with self.assertRaisesRegex(RuntimeError, "analysis interrupted"):
                     finish(ctx, dict(flow="flow", evidence="evidence"), mock.Mock())
             archived = json.loads((Path(d)/"performance-gate-evidence.json").read_text())
-            self.assertEqual(archived["flow"], snapshot)
+            self.assertEqual(analyze(archived)["metrics"], analyze(dict(e, flow=snapshot))["metrics"])
+            self.assertEqual(len(archived["flow"]["journal"]["sha256"]), 64)
             self.assertEqual(archived["engine_tps_samples"], raw)
             self.assertIn('__name__=~"rtp_llm_context_tps|', monitor.query.call_args.args[0])
             monitor.raw.assert_not_called()

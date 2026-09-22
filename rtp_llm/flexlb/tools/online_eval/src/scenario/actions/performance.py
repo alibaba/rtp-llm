@@ -7,7 +7,7 @@ from pathlib import Path
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.actions.elastic import _validate
-from workload.performance_gate import validate, report, analyze, trace_workload_sha, ENGINE_TPS, write_evidence
+from workload.performance_gate import validate, report, analyze, trace_workload_sha, ENGINE_TPS, write_evidence, compact_flow
 from traffic.traffic_source import sha256_file
 
 
@@ -119,7 +119,9 @@ def finish(ctx, p, deadline):
         flow.drain(deadline)
     except Exception as exc:
         e["errors"].append("drain: " + str(exc))
-    e["flow"] = flow.evidence_snapshot()
+    e["flow"] = compact_flow(flow.evidence_snapshot())
+    journal = flow.directory / "client_lifecycle.jsonl"
+    e["flow"]["journal"] = dict(path=str(journal), sha256=sha256_file(journal))
     if "engine_tps" in e["criteria"]:
         try:
             # Query only the contract metrics; fetching all 240 engines' series
