@@ -76,6 +76,16 @@ def evidence():
 
 
 class PerformanceGateTest(unittest.TestCase):
+    def test_completion_buckets_do_not_depend_on_journal_order(self):
+        original = evidence()
+        expected = analyze(original)
+        shuffled = copy.deepcopy(original)
+        shuffled["flow"]["records"].reverse()
+        shuffled["flow"]["issued"].reverse()
+        actual = analyze(shuffled)
+        self.assertEqual(actual["metrics"], expected["metrics"])
+        self.assertEqual(actual["windows"], expected["windows"])
+
     def test_finish_archives_scoped_raw_evidence_before_analysis(self):
         from types import SimpleNamespace
         from scenario.actions.performance import finish
