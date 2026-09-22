@@ -3,9 +3,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from online_eval.traffic_source import materialize,validate_plan,SOURCES
-from online_eval.prefix_lineage import encode,decode,expand
-from online_eval.playback import normalize,comparison_notice,iteration_windows
+from flexlb_eval.traffic.traffic_source import materialize,validate_plan,SOURCES
+from flexlb_eval.traffic.prefix_lineage import encode,decode,expand
+from flexlb_eval.traffic.playback import normalize,comparison_notice,iteration_windows
 
 
 class TrafficSourceTest(unittest.TestCase):
@@ -94,7 +94,7 @@ class PlaybackReportTest(unittest.TestCase):
         self.assertEqual(windows[1]['input_tokens'],1024)
 
     def test_ab_precheck_includes_source_notice_even_when_trace_differs(self):
-        from stress.reporting.compare_ab import precheck,PrecheckError
+        from flexlb_eval.analysis.compare_ab import precheck,PrecheckError
         def run(sha,realism):
             return dict(meta=dict(trace_file_sha256=sha,traffic_manifests=[dict(realism=realism)]),run_meta=None)
         with self.assertRaisesRegex(PrecheckError,'不可直比'):

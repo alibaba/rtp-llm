@@ -1,8 +1,8 @@
 import copy
 import unittest
 
-from flexlb_test_framework.workload.view_render import render, build_spec
-from flexlb_test_framework.workload.views import build, digest, metric
+from flexlb_eval.workload.view_render import render, build_spec
+from flexlb_eval.workload.views import build, digest, metric
 
 
 class ReportViewsTest(unittest.TestCase):

@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from flexlb_test_framework.workload.compare import compare
-from flexlb_test_framework.workload.evidence_analysis import mature_series
+from flexlb_eval.workload.compare import compare
+from flexlb_eval.workload.evidence_analysis import mature_series
 
 
 class WorkloadCompareTest(unittest.TestCase):

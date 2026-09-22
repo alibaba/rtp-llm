@@ -13,15 +13,15 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_test_framework.scenario import compile_scenarios
-from flexlb_test_framework.scenario.actions import elastic as e
-from flexlb_test_framework.scenario.actions import elastic_concurrent as concurrent
-from flexlb_test_framework.scenario.actions import elastic_full as full
-from flexlb_test_framework.scenario.actions import elastic_lifecycle as life
-from flexlb_test_framework.scenario.actions import engine_control as control
-from flexlb_test_framework.scenario.catalog import handlers as builtin_handlers
-from flexlb_test_framework.scenario.loader import load_scenarios
-from flexlb_test_framework.scenario.runtime import execute_instance
+from flexlb_eval.scenario import compile_scenarios
+from flexlb_eval.scenario.actions import elastic as e
+from flexlb_eval.scenario.actions import elastic_concurrent as concurrent
+from flexlb_eval.scenario.actions import elastic_full as full
+from flexlb_eval.scenario.actions import elastic_lifecycle as life
+from flexlb_eval.scenario.actions import engine_control as control
+from flexlb_eval.scenario.catalog import handlers as builtin_handlers
+from flexlb_eval.scenario.loader import load_scenarios
+from flexlb_eval.scenario.runtime import execute_instance
 
 
 class Clock:
@@ -497,7 +497,7 @@ class FullTests(unittest.TestCase):
             ), patch.object(
                 concurrent, "mutation_http", side_effect=http
             ), patch(
-                "flexlb_test_framework.harness.http_post_json", side_effect=master
+                "flexlb_eval.runtime.harness.http_post_json", side_effect=master
             ), patch.object(
                 life,
                 "_master_get",

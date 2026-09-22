@@ -10,9 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flexlb_test_framework.scenario.actions import master
-from flexlb_test_framework.scenario.contracts import PlanContext
-from flexlb_test_framework.scenario.runtime import Deadline, RuntimeContext
+from flexlb_eval.scenario.actions import master
+from flexlb_eval.scenario.contracts import PlanContext
+from flexlb_eval.scenario.runtime import Deadline, RuntimeContext
 
 
 class MasterActionsTest(unittest.TestCase):
@@ -266,7 +266,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual([rows[1]], self.ctx.resource(out.output["rows"], "ha_rows"))
 
     def test_finite_cold_batch_keeps_every_request_and_validates_distribution(self):
-        from flexlb_test_framework.scenario.actions.elastic import RecordedRequests
+        from flexlb_eval.scenario.actions.elastic import RecordedRequests
 
         self.ctx.env.spec.master_stable_window_s = 0
         self.ctx.ops = SimpleNamespace(next_request_id=Mock(side_effect=range(1, 21)))
@@ -314,7 +314,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertTrue(all(row["status"] == "PASS" for row in self.ctx.cleanup(5)))
 
     def test_successive_dual_probes_share_environment_request_ids(self):
-        from flexlb_test_framework.scenario.actions.elastic import RecordedRequests
+        from flexlb_eval.scenario.actions.elastic import RecordedRequests
 
         self.ctx.env.spec.master_stable_window_s = 0
         self.ctx.env.master_specs = {
@@ -346,7 +346,7 @@ class MasterActionsTest(unittest.TestCase):
         fresh_ops = [Mock(), Mock()]
         with patch.object(master, "_process"), patch.object(
             RecordedRequests, "run", run
-        ), patch("flexlb_test_framework.engine_ops.EngineOps", side_effect=fresh_ops):
+        ), patch("flexlb_eval.runtime.engine_ops.EngineOps", side_effect=fresh_ops):
             results = [master._batch(self.ctx, params, self.deadline) for _ in range(2)]
         ids = [json.loads(Path(x.artifacts[0]).read_text())["records"] for x in results]
         self.assertEqual(
@@ -465,14 +465,14 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual([rows[0]], self.ctx.resource(out.output["rows"], "ha_rows"))
 
     def test_master_programs_compile_with_explicit_registered_actions(self):
-        from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
-        from flexlb_test_framework.scenario.actions.engine_control import (
+        from flexlb_eval.scenario import compile_scenarios, load_scenarios
+        from flexlb_eval.scenario.actions.engine_control import (
             HANDLERS as controls,
         )
-        from flexlb_test_framework.scenario.actions.engine_fault import (
+        from flexlb_eval.scenario.actions.engine_fault import (
             HANDLERS as faults,
         )
-        from flexlb_test_framework.scenario.actions.master_observation import (
+        from flexlb_eval.scenario.actions.master_observation import (
             HANDLERS as observations,
         )
 
@@ -576,7 +576,7 @@ class MasterActionsTest(unittest.TestCase):
         with patch.dict(
             sys.modules, {"grpc": SimpleNamespace(RpcError=RpcError)}
         ), patch(
-            "flexlb_test_framework.scenario.actions.engine_control._http",
+            "flexlb_eval.scenario.actions.engine_control._http",
             return_value=snapshot,
         ):
             out = master._direct(self.ctx, {"engine": "prefill-0"}, self.deadline)

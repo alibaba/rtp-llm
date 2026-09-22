@@ -104,7 +104,7 @@ validated production distribution here.
 Inspect generated traffic without KMonitor:
 
 ```sh
-python3 -m online_eval.workload_profile PATH/flows/scale_in.jsonl \
+python3 -m flexlb_eval.traffic.workload_profile PATH/flows/scale_in.jsonl \
   --output traffic-profile.json --capacities 128 256 512 1024
 ```
 
@@ -131,7 +131,7 @@ ones. Forward means and request-weighted batch sizes are labeled explicitly.
 Recompute the identical verdict offline without acquiring fresh metrics:
 
 ```sh
-python3 -m flexlb_test_framework.workload.cache_gate PATH/cache-gate-evidence.json \
+python3 -m flexlb_eval.workload.cache_gate PATH/cache-gate-evidence.json \
   --output replayed-report
 ```
 
@@ -236,7 +236,7 @@ still owns mock execution timing. `actual-master-config.json` and the manifest
 are archived separately from `master_config.json` (mock formula envelope).
 
 Run both versions sequentially with the same YAML and distinct output directories.
-Then `python -m flexlb_test_framework.workload.cache_gate_ab OLD_EVIDENCE NEW_EVIDENCE
+Then `python -m flexlb_eval.workload.cache_gate_ab OLD_EVIDENCE NEW_EVIDENCE
 --output AB_DIRECTORY` checks criteria, topology, performance, actual Master
 config, mock formula and trace SHA equality, preserves individual decisions and
 renders two multi-curve panels aligned at withdrawal. Only aligned FAIL/PASS
@@ -286,6 +286,6 @@ calibrated output model explicitly. Keep captures/model artifacts outside Git.
 Passing a threshold gate alone does not establish reproduction of the historical
 90%-to-teens sustained collapse; report baseline, tail recovery and evictions.
 
-Pod-local capture CLI: `python3 -m online_eval.capture_frontend_prefix --start EPOCH_MS --end EPOCH_MS --out /tmp/OWNED_PREFIX` from the frontend working directory. It reads the existing access logs at low priority when launched with `nice`, writes compressed prefix metadata and a coverage/SHA summary, and does not alter service configuration. Collect the same interval on each pod and name the artifacts `pod-N.jsonl.gz` and `pod-N.summary.json`.
+Pod-local capture CLI: `python3 -m flexlb_eval.traffic.capture_frontend_prefix --start EPOCH_MS --end EPOCH_MS --out /tmp/OWNED_PREFIX` from the frontend working directory. It reads the existing access logs at low priority when launched with `nice`, writes compressed prefix metadata and a coverage/SHA summary, and does not alter service configuration. Collect the same interval on each pod and name the artifacts `pod-N.jsonl.gz` and `pod-N.summary.json`.
 
-On the development host, run `python3 -m online_eval.fit_frontend_prefix --source CAPTURE_DIR --out FIT_DIR --qps 240 --expected-pods 20 --output-tokens 420`. Choose the output cap explicitly from the calibrated model; these numbers are an example, not universal defaults. The fit emits an empirical lineage model, compact plan and provenance report. Missing pods remain explicit and mismatched capture intervals are rejected.
+On the development host, run `python3 -m flexlb_eval.traffic.fit_frontend_prefix --source CAPTURE_DIR --out FIT_DIR --qps 240 --expected-pods 20 --output-tokens 420`. Choose the output cap explicitly from the calibrated model; these numbers are an example, not universal defaults. The fit emits an empirical lineage model, compact plan and provenance report. Missing pods remain explicit and mismatched capture intervals are rejected.

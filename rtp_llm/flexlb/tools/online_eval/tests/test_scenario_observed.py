@@ -6,8 +6,8 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from flexlb_test_framework.scenario.observed import ObservedRequestBatch
-from flexlb_test_framework.scenario.runtime import (
+from flexlb_eval.scenario.observed import ObservedRequestBatch
+from flexlb_eval.scenario.runtime import (
     Deadline,
     RuntimeContext,
     StageTimeout,
@@ -157,7 +157,7 @@ class ObservedTests(unittest.TestCase):
             )
             caught = None
             with patch(
-                "flexlb_test_framework.scenario.backend.threading.Thread",
+                "flexlb_eval.scenario.backend.threading.Thread",
                 thread_factory,
             ):
                 try:

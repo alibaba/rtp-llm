@@ -30,7 +30,7 @@ import unittest
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
-AGGREGATE = TOOLS_DIR / "src/stress/analysis/aggregate.py"
+AGGREGATE = TOOLS_DIR / "src/flexlb_eval/analysis/aggregate.py"
 T0 = 1_788_283_848_000  # epoch ms anchor (== first client send)
 
 ARR_BASE = "flexlb_auto_tpm_request_count_total"

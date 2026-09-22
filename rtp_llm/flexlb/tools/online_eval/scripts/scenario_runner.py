@@ -12,15 +12,15 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 
-from flexlb_test_framework.scenario import (
+from flexlb_eval.scenario import (
     ScenarioError,
     compile_scenarios,
     load_scenarios,
 )
-from flexlb_test_framework.suites import classify
-from flexlb_test_framework.scenario.catalog import handlers
-from flexlb_test_framework.scenario.compiler import plan_counts
-from flexlb_test_framework.scenario.lease import validate_lease
+from flexlb_eval.scenario.suites import classify
+from flexlb_eval.scenario.catalog import handlers
+from flexlb_eval.scenario.compiler import plan_counts
+from flexlb_eval.scenario.lease import validate_lease
 
 LIST_FIELDS = (
     "id",
@@ -146,10 +146,10 @@ def main(argv=None):
         return 2
 
     # Keep --list-json free of gRPC/proto/process initialization.
-    from flexlb_test_framework.scenario.backend import JavaMockBackend
-    from flexlb_test_framework.scenario.runtime import StageTimeout, execute_instance
+    from flexlb_eval.scenario.backend import JavaMockBackend
+    from flexlb_eval.scenario.runtime import StageTimeout, execute_instance
 
-    from flexlb_test_framework.workload.runtime import execute_workload
+    from flexlb_eval.workload.runtime import execute_workload
 
     cancelled = threading.Event()
 
@@ -192,7 +192,7 @@ def main(argv=None):
         for sig, handler in previous.items():
             signal.signal(sig, handler)
         if args.archive:
-            from online_eval.archive import create_archive
+            from flexlb_eval.artifacts.archive import create_archive
 
             create_archive(
                 args.archive, {"run": args.out_dir}, kind="scenario",

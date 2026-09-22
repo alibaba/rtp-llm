@@ -51,7 +51,7 @@ python3 tools/online_eval/scripts/parallel_runner.py \
 ## 比较两次场景
 
 ```bash
-PYTHONPATH=tools/online_eval python3 -m flexlb_test_framework.workload.compare \
+PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m flexlb_eval.workload.compare \
   --baseline /path/to/A/analysis.json \
   --candidate /path/to/B/analysis.json \
   --out /path/to/comparison

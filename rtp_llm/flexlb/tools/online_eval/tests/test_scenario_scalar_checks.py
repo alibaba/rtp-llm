@@ -3,9 +3,9 @@
 import tempfile
 import unittest
 
-from flexlb_test_framework.scenario import ScenarioError, compile_scenarios
-from flexlb_test_framework.scenario.contracts import StageHandler, StageOutput
-from flexlb_test_framework.scenario.runtime import execute_instance
+from flexlb_eval.scenario import ScenarioError, compile_scenarios
+from flexlb_eval.scenario.contracts import StageHandler, StageOutput
+from flexlb_eval.scenario.runtime import execute_instance
 from test_scenario_runtime import Backend, Clock, source
 
 

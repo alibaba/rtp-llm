@@ -4,15 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from online_eval.traffic_source import materialize
-from online_eval.workload_profile import profile
-from flexlb_test_framework.workload.cache_gate import (
+from flexlb_eval.traffic.traffic_source import materialize
+from flexlb_eval.traffic.workload_profile import profile
+from flexlb_eval.workload.cache_gate import (
     align_send_counters,
     analyze,
     write_report,
 )
-from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
-from flexlb_test_framework.scenario.catalog import handlers
+from flexlb_eval.scenario import compile_scenarios, load_scenarios
+from flexlb_eval.scenario.catalog import handlers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -185,7 +185,7 @@ class CacheGateTest(unittest.TestCase):
             self.assertIn(["Master completion QPS", "0%", "MISSING", "本次归档没有该监控序列"], audit)
 
     def test_ab_requires_aligned_controls(self):
-        from flexlb_test_framework.workload.cache_gate_ab import compare
+        from flexlb_eval.workload.cache_gate_ab import compare
 
         old, new = self.evidence(0.1), self.evidence(0.8)
         for i, e in enumerate((old, new)):

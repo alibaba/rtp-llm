@@ -2,7 +2,7 @@
 
 import unittest
 
-from flexlb_test_framework.scenario.runtime import Deadline, StageTimeout
+from flexlb_eval.scenario.runtime import Deadline, StageTimeout
 
 
 class DeadlineBoundaryTest(unittest.TestCase):

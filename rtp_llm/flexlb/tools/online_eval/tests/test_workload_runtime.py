@@ -5,11 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
-from flexlb_test_framework.scenario.catalog import handlers
-from flexlb_test_framework.scenario.runtime import execute_instance
-from flexlb_test_framework.suites import classify
-from flexlb_test_framework.workload.runtime import execute_workload
+from flexlb_eval.scenario import compile_scenarios, load_scenarios
+from flexlb_eval.scenario.catalog import handlers
+from flexlb_eval.scenario.runtime import execute_instance
+from flexlb_eval.scenario.suites import classify
+from flexlb_eval.workload.runtime import execute_workload
 from test_scenario_runtime import Backend, Clock, source
 
 ROOT = Path(__file__).resolve().parents[1]

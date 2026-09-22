@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import parallel_runner
-from flexlb_test_framework import instance_runner
+from flexlb_eval.runtime import instance_runner
 
 
 class RepositoryLayoutTest(unittest.TestCase):
@@ -62,8 +62,8 @@ class RepositoryLayoutTest(unittest.TestCase):
                     self.assertTrue(result.stdout.strip())
 
     def test_inventory_stays_complete_without_retired_modules(self):
-        from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
-        from flexlb_test_framework.scenario.catalog import handlers
+        from flexlb_eval.scenario import compile_scenarios, load_scenarios
+        from flexlb_eval.scenario.catalog import handlers
 
         plans = compile_scenarios(
             load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
@@ -84,6 +84,15 @@ class RepositoryLayoutTest(unittest.TestCase):
         self.assertFalse(
             any(name.startswith("flexlb_test_framework.cases") for name in sys.modules)
         )
+
+    def test_source_components_are_unified(self):
+        expected = {
+            "monitoring", "traffic", "runtime", "cases", "scenario",
+            "workload", "analysis", "reporting", "artifacts",
+        }
+        self.assertEqual(expected, {p.name for p in (ROOT / "src/flexlb_eval").iterdir() if p.is_dir()})
+        for old_package in ("online_eval", "flexlb_test_framework", "stress"):
+            self.assertFalse((ROOT / "src" / old_package).exists(), old_package)
 
     def test_stress_shell_resolves_roots_before_starting_services(self):
         # Stop before sourcing the Java helper, after the real path assignments.

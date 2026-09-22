@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
+from flexlb_eval.scenario import compile_scenarios, load_scenarios
 
 
 class RequestShapeTests(unittest.TestCase):

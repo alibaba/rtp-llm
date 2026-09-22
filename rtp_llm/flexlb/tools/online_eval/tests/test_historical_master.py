@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from flexlb_test_framework import historical_master as hm
+from flexlb_eval.runtime import historical_master as hm
 
 
 class HistoricalMasterTest(unittest.TestCase):

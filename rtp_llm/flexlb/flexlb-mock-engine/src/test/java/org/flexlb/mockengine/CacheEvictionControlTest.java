@@ -31,8 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * KV observation/control capabilities backing the flexlb_test_framework KV case family
- * (tools/online_eval/flexlb_test_framework/cases/kv/):
+ * KV observation/control capabilities backing the flexlb_eval KV case family
+ * (tools/online_eval/config/scenarios/kv/):
  *
  * <p>1. per-engine key-set exposure — every /snapshot engine dict carries
  * {@code cache_key_set} (the engine's full MockLruBlockCache key list,

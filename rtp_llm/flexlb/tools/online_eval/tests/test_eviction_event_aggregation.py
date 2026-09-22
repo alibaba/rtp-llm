@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 class EvictionEventAggregationTest(unittest.TestCase):
     def load(self, events):
-        source = Path(__file__).resolve().parents[1] / "src/stress/analysis/aggregate.py"
+        source = Path(__file__).resolve().parents[1] / "src/flexlb_eval/analysis/aggregate.py"
         text = source.read_text()
         block = text[
             text.index("def validate_eviction_event(") : text.index(

@@ -10,19 +10,19 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from environment_expectations import configuration
-from flexlb_test_framework.harness import render_env
-from flexlb_test_framework.scenario import compile_scenarios
-from flexlb_test_framework.scenario.actions.environment import (
+from flexlb_eval.runtime.harness import render_env
+from flexlb_eval.scenario import compile_scenarios
+from flexlb_eval.scenario.actions.environment import (
     _validate,
     mutate_config,
     reconfigure,
     startup_probe,
 )
-from flexlb_test_framework.scenario.backend import JavaMockBackend
-from flexlb_test_framework.scenario.catalog import handlers
-from flexlb_test_framework.scenario.compiler import environment
-from flexlb_test_framework.scenario.contracts import PlanContext
-from flexlb_test_framework.scenario.runtime import (
+from flexlb_eval.scenario.backend import JavaMockBackend
+from flexlb_eval.scenario.catalog import handlers
+from flexlb_eval.scenario.compiler import environment
+from flexlb_eval.scenario.contracts import PlanContext
+from flexlb_eval.scenario.runtime import (
     Deadline,
     RuntimeContext,
     _core_action,
@@ -230,8 +230,8 @@ class EnvironmentTest(unittest.TestCase):
             mock_http_port=54999,
         )
         with patch(
-            "flexlb_test_framework.harness.EnvManager.ensure", return_value=env
-        ) as ensure, patch("flexlb_test_framework.engine_ops.EngineOps"):
+            "flexlb_eval.runtime.harness.EnvManager.ensure", return_value=env
+        ) as ensure, patch("flexlb_eval.runtime.engine_ops.EngineOps"):
             self.ctx.env_epoch = 1
             first = environment(self.raw_env, "test", PROFILE)
             backend.setup(self.ctx, first, self.deadline)
@@ -299,7 +299,7 @@ class EnvironmentTest(unittest.TestCase):
                 backend.probe_startup(self.ctx, {}, "{}", self.deadline)
 
     def test_real_harness_startup_failure_tail_uses_isolated_log(self):
-        from flexlb_test_framework.harness import EnvManager, EnvSpec
+        from flexlb_eval.runtime.harness import EnvManager, EnvSpec
 
         directory = Path(self.tmp.name)
         log_root = directory / "private"
@@ -327,14 +327,14 @@ class EnvironmentTest(unittest.TestCase):
                 stream.write("ConfigValidationException from owned start\n")
             return NS(pid=123, alive=lambda: False, tail_log=lambda: "owned stdout")
 
-        with patch("flexlb_test_framework.harness.API_JAR", jar), patch(
-            "flexlb_test_framework.harness.resolve_java21", return_value="unused-java"
+        with patch("flexlb_eval.runtime.harness.API_JAR", jar), patch(
+            "flexlb_eval.runtime.harness.resolve_java21", return_value="unused-java"
         ), patch(
-            "flexlb_test_framework.harness.port_in_use", return_value=False
+            "flexlb_eval.runtime.harness.port_in_use", return_value=False
         ), patch.object(
             manager, "_master_env", return_value={}
         ), patch(
-            "flexlb_test_framework.harness.ProcessOps.start", side_effect=launch
+            "flexlb_eval.runtime.harness.ProcessOps.start", side_effect=launch
         ):
             with self.assertRaises(RuntimeError) as error:
                 manager.start_master(env)

@@ -7,4 +7,4 @@ __pycache__/
 *.zip
 results/
 reports/
-artifacts/
+/artifacts/

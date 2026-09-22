@@ -8,8 +8,8 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flexlb_test_framework.scenario.actions import engine_fault as ef
-from flexlb_test_framework.scenario.runtime import Deadline, RuntimeContext
+from flexlb_eval.scenario.actions import engine_fault as ef
+from flexlb_eval.scenario.runtime import Deadline, RuntimeContext
 
 
 class EngineFaultTests(unittest.TestCase):

@@ -9,13 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from flexlb_test_framework.scenario.actions import elastic as e
-from flexlb_test_framework.scenario.actions.elastic_skew_requests import (
+from flexlb_eval.scenario.actions import elastic as e
+from flexlb_eval.scenario.actions.elastic_skew_requests import (
     SkewFlow,
     SkewRecordedRequests,
     summary,
 )
-from flexlb_test_framework.scenario.runtime import Deadline, RuntimeContext
+from flexlb_eval.scenario.runtime import Deadline, RuntimeContext
 from test_scenario_backend import Ops
 from test_scenario_elastic_runtime import Clock
 
@@ -57,7 +57,7 @@ class SkewTests(unittest.TestCase):
             self.assertEqual(calls[0][:2], (0, 45))
             params["phase"] = "steady"
             with patch(
-                "flexlb_test_framework.harness.http_post_json",
+                "flexlb_eval.runtime.harness.http_post_json",
                 return_value=(200, {"worker_summary": {"PREFILL": {"alive": 0}}}),
             ):
                 e._window(ctx, params, Deadline(200, clock, clock.sleep))
@@ -118,7 +118,7 @@ class SkewTests(unittest.TestCase):
             ctx.ops.schedule_pb2_grpc = NS(
                 FlexlbServiceStub=lambda channel: NS(Schedule=NS(future=future))
             )
-            from flexlb_test_framework.scenario.observed import ObservedRequestBatch
+            from flexlb_eval.scenario.observed import ObservedRequestBatch
 
             join = ObservedRequestBatch._join_window
 
@@ -330,7 +330,7 @@ class SkewTests(unittest.TestCase):
                 record = records.issue(1, clock)
                 records.run(record, dict(input_len=10, output_len=2, block_keys=[1]))
                 if expired:
-                    from flexlb_test_framework.scenario.runtime import StageTimeout
+                    from flexlb_eval.scenario.runtime import StageTimeout
 
                     with self.assertRaises(StageTimeout):
                         summary(records.snapshot_records())

@@ -4,13 +4,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flexlb_test_framework.instance_plan import (
+from flexlb_eval.runtime.instance_plan import (
     InstancePlanError,
     parse_catalog,
     plan_instances,
     select_instances,
 )
-from flexlb_test_framework.resource_plan import ResourcePlanError
+from flexlb_eval.runtime.resource_plan import ResourcePlanError
 
 
 def catalog():

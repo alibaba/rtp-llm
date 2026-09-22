@@ -1,6 +1,6 @@
 import unittest
 
-from flexlb_test_framework.scenario.actions.elastic_convergence import (
+from flexlb_eval.scenario.actions.elastic_convergence import (
     convergence_bound,
     dead_interval,
     evaluate_convergence,
@@ -87,10 +87,10 @@ class ConvergenceTest(unittest.TestCase):
         from pathlib import Path
         from types import SimpleNamespace
 
-        from flexlb_test_framework.scenario.actions.elastic_concurrent import (
+        from flexlb_eval.scenario.actions.elastic_concurrent import (
             crossfire_validate,
         )
-        from flexlb_test_framework.scenario.loader import load_document
+        from flexlb_eval.scenario.loader import load_document
 
         workers = load_document(
             Path(__file__).resolve().parents[1]

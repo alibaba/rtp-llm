@@ -13,9 +13,9 @@ from types import SimpleNamespace as NS
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
-from flexlb_test_framework.scenario.backend import JavaMockBackend
-from flexlb_test_framework.scenario.loader import ScenarioError
-from flexlb_test_framework.scenario.runtime import Deadline, RuntimeContext
+from flexlb_eval.scenario.backend import JavaMockBackend
+from flexlb_eval.scenario.loader import ScenarioError
+from flexlb_eval.scenario.runtime import Deadline, RuntimeContext
 from scenario_runner import instance_directory, select, summarize
 
 

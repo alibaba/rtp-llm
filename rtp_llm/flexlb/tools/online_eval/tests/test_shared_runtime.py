@@ -8,10 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from online_eval.load_client import LOAD_CLIENT_ENV_VARS
-from online_eval.metrics import parse_prometheus_samples
-from online_eval.requests import ClientRecords, request_success
-from flexlb_test_framework.harness import ClientOps, _parse_per_engine_lines
+from flexlb_eval.runtime.load_client import LOAD_CLIENT_ENV_VARS
+from flexlb_eval.monitoring.metrics import parse_prometheus_samples
+from flexlb_eval.runtime.requests import ClientRecords, request_success
+from flexlb_eval.runtime.harness import ClientOps, _parse_per_engine_lines
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,7 +22,7 @@ class SharedRuntimeTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import sys; import online_eval.requests; "
+                "import sys; import flexlb_eval.runtime.requests; "
                 'assert not any(k.startswith("flexlb_test_framework") for k in sys.modules)',
             ],
             cwd=ROOT,

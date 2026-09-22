@@ -6,8 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from stress.reporting import compare_ab as ab
-from stress.analysis import compare_twin as twin
+from flexlb_eval.analysis import compare_ab as ab
+from flexlb_eval.analysis import compare_twin as twin
 
 
 def run(contract="execution_us_v1"):

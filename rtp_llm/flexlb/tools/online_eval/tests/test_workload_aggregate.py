@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from flexlb_test_framework.workload.aggregate import aggregate_workload
+from flexlb_eval.workload.aggregate import aggregate_workload
 
 
 class WorkloadAggregateTest(unittest.TestCase):
@@ -130,7 +130,7 @@ class WorkloadAggregateTest(unittest.TestCase):
             self.assertIn('"timeOriginLabel": "t=0 = 首个请求发出"', html)
 
     def test_actual_engine_address_is_joined_only_when_unambiguous(self):
-        from flexlb_test_framework.workload.aggregate import client_row
+        from flexlb_eval.workload.aggregate import client_row
 
         record = dict(
             wire_request_id=1,

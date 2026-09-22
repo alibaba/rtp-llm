@@ -35,8 +35,8 @@ import unittest
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
-AGGREGATE = TOOLS_DIR / "src/stress/analysis/aggregate.py"
-CANVAS = TOOLS_DIR / "src/stress/reporting/report.py"
+AGGREGATE = TOOLS_DIR / "src/flexlb_eval/analysis/aggregate.py"
+CANVAS = TOOLS_DIR / "src/flexlb_eval/reporting/stress_report.py"
 T0 = 1_788_283_848_000  # epoch ms 锚点（与 client_events 首发送同拍）
 
 DISPATCH_REASON_BASE = "flexlb_app_engine_balancing_master_dispatch_reason_total"

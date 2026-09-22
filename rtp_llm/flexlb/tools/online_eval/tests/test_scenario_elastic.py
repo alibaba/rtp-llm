@@ -8,7 +8,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flexlb_test_framework.scenario.actions import elastic as e
+from flexlb_eval.scenario.actions import elastic as e
 
 
 class Deadline:
@@ -407,7 +407,7 @@ class ElasticFlowTests(unittest.TestCase):
 
 class ElasticBaselineTests(unittest.TestCase):
     def test_low_nonempty_hit_is_observed_without_new_threshold(self):
-        from flexlb_test_framework.scenario.runtime import Deadline as RuntimeDeadline
+        from flexlb_eval.scenario.runtime import Deadline as RuntimeDeadline
         from test_scenario_elastic_runtime import Clock
 
         data = ElasticMetricTests.data()
@@ -606,7 +606,7 @@ class ElasticMutationTests(unittest.TestCase):
         )
         self.ctx.env = NS(discovery_file=file)
         with patch(
-            "flexlb_test_framework.harness.http_post_json",
+            "flexlb_eval.runtime.harness.http_post_json",
             return_value=(200, {"worker_summary": {"PREFILL": summary}}),
         ):
             return e._topology(

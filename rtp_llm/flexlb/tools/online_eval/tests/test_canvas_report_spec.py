@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from stress.reporting import report as generator
-from stress.reporting import renderer
+from flexlb_eval.reporting import stress_report as generator
+from flexlb_eval.reporting import renderer
 
 
 class ReportSpecTest(unittest.TestCase):

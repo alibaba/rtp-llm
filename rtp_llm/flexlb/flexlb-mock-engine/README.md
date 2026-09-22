@@ -691,7 +691,7 @@ Java stack described in this README is the only implementation.
 The Python **smoke client family** has been retired and removed (it was
 tooling, not the mock engine): `flexlb_smoke_base.py`,
 `priority_preemption_smoke.py` and their tests are gone — their coverage
-lives in the `tools/online_eval/src/flexlb_test_framework/` functional-test framework,
+lives in the `tools/online_eval/src/flexlb_eval/` functional-test framework,
 which talks to the Java cluster over its gRPC + HTTP control plane.
 `encode_unique_key` now lives in
 `online_eval/proto_utils.py`, used by the remaining analysis tooling.

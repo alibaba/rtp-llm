@@ -15,14 +15,14 @@ from environment_expectations import environment as expected_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_test_framework.scenario import compile_scenarios
-from flexlb_test_framework.scenario.actions import elastic as e
-from flexlb_test_framework.scenario.actions import elastic_concurrent as concurrent
-from flexlb_test_framework.scenario.actions import elastic_lifecycle as life
-from flexlb_test_framework.scenario.actions import engine_control as control
-from flexlb_test_framework.scenario.backend import make_env_spec
-from flexlb_test_framework.scenario.loader import load_scenarios
-from flexlb_test_framework.scenario.runtime import execute_instance
+from flexlb_eval.scenario import compile_scenarios
+from flexlb_eval.scenario.actions import elastic as e
+from flexlb_eval.scenario.actions import elastic_concurrent as concurrent
+from flexlb_eval.scenario.actions import elastic_lifecycle as life
+from flexlb_eval.scenario.actions import engine_control as control
+from flexlb_eval.scenario.backend import make_env_spec
+from flexlb_eval.scenario.loader import load_scenarios
+from flexlb_eval.scenario.runtime import execute_instance
 
 
 class Clock:
@@ -343,7 +343,7 @@ class SingleBatchTests(unittest.TestCase):
             ), patch.object(concurrent, "mutation_http", http), patch.object(
                 life, "_master_get", accounting
             ), patch(
-                "flexlb_test_framework.harness.http_post_json",
+                "flexlb_eval.runtime.harness.http_post_json",
                 return_value=(
                     200,
                     dict(worker_summary=dict(PREFILL=dict(discovered=1, alive=1))),

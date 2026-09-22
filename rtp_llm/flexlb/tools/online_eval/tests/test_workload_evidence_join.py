@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from flexlb_test_framework.workload.evidence import join_evidence
+from flexlb_eval.workload.evidence import join_evidence
 
 
 class EvidenceJoinTest(unittest.TestCase):
@@ -35,7 +35,7 @@ class EvidenceJoinTest(unittest.TestCase):
             self.assertIsNone(result["requests"][0]["endpoint_generation"])
 
     def test_attempt_crossing_restart_is_not_assigned_a_false_generation(self):
-        from flexlb_test_framework.workload.evidence import master_incarnation
+        from flexlb_eval.workload.evidence import master_incarnation
 
         history = [
             dict(target="A", generation=1, started_epoch_ms=100),

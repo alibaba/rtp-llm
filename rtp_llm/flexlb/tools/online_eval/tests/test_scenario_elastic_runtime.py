@@ -18,11 +18,11 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from flexlb_test_framework.scenario import compile_scenarios
-from flexlb_test_framework.scenario.actions import elastic as e
-from flexlb_test_framework.scenario.contracts import CheckResult, StageOutput
-from flexlb_test_framework.scenario.loader import load_scenarios
-from flexlb_test_framework.scenario.runtime import execute_instance
+from flexlb_eval.scenario import compile_scenarios
+from flexlb_eval.scenario.actions import elastic as e
+from flexlb_eval.scenario.contracts import CheckResult, StageOutput
+from flexlb_eval.scenario.loader import load_scenarios
+from flexlb_eval.scenario.runtime import execute_instance
 
 
 class Clock:
@@ -211,7 +211,7 @@ class ElasticRuntimeTests(unittest.TestCase):
         plans = compile_scenarios([("pilot.yaml", self.source())], handlers=handlers)
         results = []
         with patch(
-            "flexlb_test_framework.harness.http_post_json",
+            "flexlb_eval.runtime.harness.http_post_json",
             return_value=(
                 200,
                 dict(worker_summary={"PREFILL": dict(discovered=1, alive=1)}),
