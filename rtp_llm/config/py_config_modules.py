@@ -661,6 +661,28 @@ class GrammarAdmissionConfig:
         )
 
 
+class DeterministicInferenceConfig:
+    """确定性推理开关配置（batch 组成确定性通路）。
+
+    默认关闭；开启后按 level 重组引擎配置，使请求输出不再依赖 batch 组成：
+    - decode: 固定 decode 几何（单尺寸 CUDA Graph + B_det padding）；
+    - full:   额外强制单请求串行服务（prefill 独占 + max_generate_batch_size=1），
+              每个请求与 solo 场景 bitwise 一致。
+    """
+
+    def __init__(self):
+        self.enable: bool = False
+        self.level: str = "full"  # "decode" | "full"
+        self.decode_batch_size: int = 8
+
+    def to_string(self):
+        return (
+            f"enable: {self.enable}\n"
+            f"level: {self.level}\n"
+            f"decode_batch_size: {self.decode_batch_size}"
+        )
+
+
 class PyEnvConfigs:
     def __init__(self):
         self.server_config: ServerConfig = ServerConfig()
@@ -714,6 +736,7 @@ class PyEnvConfigs:
         self.grammar_admission_config = GrammarAdmissionConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
+        self.deterministic_config = DeterministicInferenceConfig()
 
     def to_string(self):
         return (
@@ -772,4 +795,5 @@ class PyEnvConfigs:
             + self.grammar_admission_config.to_string()
             + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
+            "[deterministic_config]\n" + self.deterministic_config.to_string() + "\n\n"
         )

@@ -16,6 +16,7 @@ from rtp_llm.server.server_args.concurrent_group_args import init_concurrent_gro
 from rtp_llm.server.server_args.device_resource_group_args import (
     init_device_resource_group_args,
 )
+from rtp_llm.server.server_args.deterministic_group_args import init_deterministic_group_args
 from rtp_llm.server.server_args.embedding_group_args import init_embedding_group_args
 from rtp_llm.server.server_args.engine_group_args import init_engine_group_args
 from rtp_llm.server.server_args.fifo_scheduler_group_args import (
@@ -459,6 +460,7 @@ def init_all_group_args(
     init_device_resource_group_args(
         parser, py_env_configs.device_resource_config, py_env_configs.runtime_config
     )
+    init_deterministic_group_args(parser, py_env_configs.deterministic_config)
     init_embedding_group_args(parser, py_env_configs.embedding_config)
     init_engine_group_args(parser, py_env_configs.runtime_config)
     init_fifo_scheduler_group_args(

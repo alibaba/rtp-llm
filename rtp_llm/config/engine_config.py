@@ -246,6 +246,13 @@ class EngineConfig:
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
 
+        apply_deterministic_inference_config(
+            py_env_configs.deterministic_config,
+            runtime_config,
+            hw_kernel_config,
+            parallelism_config,
+        )
+
         # Setup PD separation config
         setup_pd_sep_config(
             engine_config.pd_sep_config,
@@ -255,6 +262,73 @@ class EngineConfig:
         )
 
         return engine_config
+
+
+def apply_deterministic_inference_config(
+    deterministic_config,
+    runtime_config,
+    hw_kernel_config,
+    parallelism_config,
+) -> None:
+    """Apply the deterministic-inference switch to engine configs.
+
+    Default (enable=False) is a strict no-op: this function returns before
+    touching any config so the default serving path is unchanged.
+
+    level="decode" (mechanism A): force single-size decode CUDA graph so every
+    decode step runs at one fixed geometry (batch padded to B_det with dummy
+    rows).
+
+    level="full" (mechanisms A + F + G): additionally force single-request
+    serial serving -- every request prefills alone and decodes as the only real
+    row of the padded batch, which is exactly the solo composition. This
+    removes batch-composition-dependent kernel selection in batched prefill
+    (cuBLASLt heuristics switch algorithms by total M) and decode neighbor-KV
+    effects, so each request reproduces the solo output bitwise regardless of
+    concurrent traffic.
+    """
+    if not deterministic_config.enable:
+        return
+
+    level = deterministic_config.level
+    if level not in ("decode", "full"):
+        raise ValueError(
+            f"invalid deterministic_level: {level!r} (expected 'decode' or 'full')"
+        )
+    b_det = int(deterministic_config.decode_batch_size)
+    if b_det <= 0:
+        raise ValueError(
+            f"deterministic_decode_batch_size must be positive, got {b_det}"
+        )
+
+    # Mechanism A: fixed decode geometry via a single-size decode CUDA graph.
+    if not hw_kernel_config.enable_cuda_graph:
+        logging.info(
+            "deterministic_inference: force enable_cuda_graph=True for fixed decode geometry"
+        )
+    hw_kernel_config.enable_cuda_graph = True
+    hw_kernel_config.decode_capture_batch_sizes = [b_det]
+
+    if level == "full":
+        # Mechanisms F + G: single-request serial serving. The scheduler admits
+        # at most one running stream, so each request prefills alone (M equals
+        # its own length) and decodes as the only real row of the B_det batch.
+        runtime_config.max_generate_batch_size = 1
+
+    # Mechanism C: pin the NCCL algorithm for TP>1 so all-reduce reduction
+    # order does not depend on the NCCL communicator's algorithm selection.
+    tp_size = getattr(parallelism_config, "tp_size", 1) or 1
+    if tp_size > 1:
+        os.environ.setdefault("NCCL_ALGO", "Ring")
+
+    logging.info(
+        "deterministic_inference enabled: level=%s, decode graph batch size=%d, "
+        "max_generate_batch_size=%d%s",
+        level,
+        b_det,
+        runtime_config.max_generate_batch_size,
+        ", NCCL_ALGO=Ring" if tp_size > 1 else "",
+    )
 
 
 # ============================================================================
