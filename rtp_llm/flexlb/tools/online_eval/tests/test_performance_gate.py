@@ -76,6 +76,28 @@ def evidence():
 
 
 class PerformanceGateTest(unittest.TestCase):
+    def test_finish_archives_scoped_raw_evidence_before_analysis(self):
+        from types import SimpleNamespace
+        from scenario.actions.performance import finish
+        e = self.engine_evidence()
+        snapshot = e.pop("flow")
+        raw = e.pop("engine_tps_samples")
+        flow = mock.Mock()
+        flow.evidence_snapshot.return_value = snapshot
+        monitor = mock.Mock()
+        monitor.query.return_value = raw
+        with tempfile.TemporaryDirectory() as d:
+            ctx = SimpleNamespace(artifact_dir=Path(d), monitor=monitor,
+                resource=lambda name, kind: flow if kind == "java_flow" else e)
+            with mock.patch("scenario.actions.performance.analyze", side_effect=RuntimeError("analysis interrupted")):
+                with self.assertRaisesRegex(RuntimeError, "analysis interrupted"):
+                    finish(ctx, dict(flow="flow", evidence="evidence"), mock.Mock())
+            archived = json.loads((Path(d)/"performance-gate-evidence.json").read_text())
+            self.assertEqual(archived["flow"], snapshot)
+            self.assertEqual(archived["engine_tps_samples"], raw)
+            self.assertIn('__name__=~"rtp_llm_context_tps|', monitor.query.call_args.args[0])
+            monitor.raw.assert_not_called()
+
     def engine_evidence(self):
         from workload.performance_gate import ENGINE_TPS
         e = evidence()

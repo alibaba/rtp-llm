@@ -309,10 +309,14 @@ def analyze(evidence):
     def finished(r):
         return r["send_start_epoch_ms"] + r["total_ms"]
 
+    # Index once: scanning every request for every one-second bucket made the
+    # full-scale gate spend its finish deadline analyzing an already drained run.
+    completed = sorted((r for r in all_rows if r["status"] == "ok"), key=finished)
+    completed_stamps = [finished(r) for r in completed]
+
     def completions(start, end):
-        return [
-            r for r in all_rows if r["status"] == "ok" and start <= finished(r) < end
-        ]
+        return completed[bisect.bisect_left(completed_stamps, start):
+                         bisect.bisect_left(completed_stamps, end)]
 
     sends = sorted(r["send_start_epoch_ms"] for r in all_rows)
     ends = sorted(finished(r) for r in all_rows)
@@ -402,13 +406,20 @@ def analyze(evidence):
     return result
 
 
+def write_evidence(path, evidence):
+    """Atomic compact JSON; raw journals remain the source of detailed RPC fields."""
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w") as stream:
+        json.dump(evidence, stream, separators=(",", ":"), allow_nan=False)
+    temporary.replace(path)
+
+
 def report(directory, evidence, result=None, telemetry_directory=None):
     result = analyze(evidence) if result is None else result
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "performance-gate-evidence.json").write_text(
-        json.dumps(evidence, indent=2, allow_nan=False)
-    )
+    write_evidence(directory / "performance-gate-evidence.json", evidence)
     p = evidence.get("provenance", {})
     from workload.performance_views import panel
 

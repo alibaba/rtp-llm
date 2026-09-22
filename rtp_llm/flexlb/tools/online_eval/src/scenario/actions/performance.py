@@ -1,12 +1,13 @@
 """Fixed-window observation over the existing Java flow and runtime lifecycle."""
 
 import json
+import math
 import time
 from pathlib import Path
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.actions.elastic import _validate
-from workload.performance_gate import validate, report, analyze, trace_workload_sha, ENGINE_TPS
+from workload.performance_gate import validate, report, analyze, trace_workload_sha, ENGINE_TPS, write_evidence
 from traffic.traffic_source import sha256_file
 
 
@@ -121,14 +122,21 @@ def finish(ctx, p, deadline):
     e["flow"] = flow.evidence_snapshot()
     if "engine_tps" in e["criteria"]:
         try:
-            e["engine_tps_samples"] = [
-                row
-                for chunk in ctx.monitor.raw("mock", e["window"]["start_epoch_ms"] / 1000,
-                                             e["window"]["end_epoch_ms"] / 1000)
-                for row in chunk if row["metric"].get("__name__") in ENGINE_TPS
-            ]
+            # Query only the contract metrics; fetching all 240 engines' series
+            # and discarding most of them after JSON decoding is unbounded work.
+            e["engine_tps_samples"] = []
+            cursor = e["window"]["start_epoch_ms"] / 1000
+            end = e["window"]["end_epoch_ms"] / 1000
+            selector = '{job="mock",__name__=~"' + "|".join(ENGINE_TPS) + '"}'
+            while cursor < end:
+                right = min(end, cursor + 60)
+                expression = selector + f"[{math.ceil((right - cursor) * 1000)}ms]"
+                e["engine_tps_samples"].extend(ctx.monitor.query(expression, right))
+                cursor = right
         except Exception as exc:
             e["errors"].append("engine TPS collection: " + str(exc))
+    # Preserve terminal evidence even if analysis or presentation later times out.
+    write_evidence(ctx.artifact_dir / "performance-gate-evidence.json", e)
     result = analyze(e)
     bundle = report(ctx.artifact_dir, e, result)
     return StageOutput(
