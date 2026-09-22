@@ -222,6 +222,18 @@ class CacheGateTest(unittest.TestCase):
             report_spec = json.loads((Path(d) / "from-dirs/reports/comparison/cache-scale-in-ab/report-spec.json").read_text())
             self.assertEqual(report_spec["panels"][0]["id"], "ab-overlay")
             self.assertEqual(len(report_spec["panels"]), 3)
+            overlay = report_spec["panels"][0]
+            expected_core = {
+                f"{side} · {metric}"
+                for side in ("old", "new")
+                for metric in ("P Waiting / engine", "P engine count", "P cache hit ratio")
+            }
+            present = {s["name"] for s in overlay["series"]}
+            self.assertEqual(set(overlay["presets"]["核心"]), expected_core & present)
+            self.assertEqual(
+                {s["name"] for s in overlay["series"] if not s["hidden"]},
+                expected_core & present,
+            )
             self.assertEqual(compare(a, b, Path(d) / "report-only", mode="none")["decision"], "REPORT_ONLY")
             self.assertEqual(compare(a, b, Path(d) / "weak", mode="weak")["decision"], "ALIGNED")
             new["provenance"].pop("actual_master_config")

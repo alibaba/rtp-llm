@@ -15,6 +15,7 @@ REQUIRED = (
     "/topology", "/capacity", "/performance", "/master_config",
     "/actual_master_config", "/configuration_sha256", "/trace_sha256",
 )
+CORE_METRICS = {"P Waiting / engine", "P engine count", "P cache hit ratio"}
 
 
 def _load(path):
@@ -110,10 +111,7 @@ def compare(old_path, new_path, output, *, mode="strong"):
                 "P engine count": ("#fa8c16", "#722ed1"),
                 "Client success QPS": ("#ad6800", "#13c2c2"),
             }.get(series["name"], (series["color"], series["color"]))[label == "new"]
-            paired["hidden"] = series["name"] not in {
-                "P cache hit ratio", "P Waiting / engine",
-                "P engine count", "Client success QPS",
-            }
+            paired["hidden"] = series["name"] not in CORE_METRICS
             combined.append(paired)
         panels.append(panel)
     overlay = copy.deepcopy(panels[0])
