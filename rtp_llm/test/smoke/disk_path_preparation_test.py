@@ -29,6 +29,50 @@ class DiskPathPreparationTest(unittest.TestCase):
             )
             self.assertTrue(all(os.path.isdir(path) for path in paths))
 
+    def test_smoke_repeat_expands_once_and_preserves_other_messages(self):
+        query_result = {
+            "smoke_repeat": {
+                "message_index": 0,
+                "count": 3,
+                "separator": "|",
+            },
+            "query": {
+                "messages": [
+                    {"role": "user", "content": "x"},
+                    {"role": "user", "content": "tail"},
+                ]
+            },
+        }
+
+        CaseRunner._expand_smoke_repeat(query_result)
+        self.assertEqual(
+            query_result["query"]["messages"],
+            [
+                {"role": "user", "content": "x|x|x"},
+                {"role": "user", "content": "tail"},
+            ],
+        )
+        self.assertTrue(query_result["_smoke_repeat_expanded"])
+
+        CaseRunner._expand_smoke_repeat(query_result)
+        self.assertEqual(query_result["query"]["messages"][0]["content"], "x|x|x")
+
+    def test_smoke_repeat_rejects_oversized_expansion(self):
+        query_result = {
+            "smoke_repeat": {"message_index": 0, "count": 2},
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "x" * CaseRunner._MAX_SMOKE_REPEAT_CHARS,
+                    }
+                ]
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            CaseRunner._expand_smoke_repeat(query_result)
+
 
 if __name__ == "__main__":
     unittest.main()
