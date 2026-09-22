@@ -54,7 +54,6 @@ API_JAR = (
     if HISTORICAL_MASTER
     else FLEXLB_DIR / "flexlb-api" / "target" / "flexlb-api-1.0.0-SNAPSHOT.jar"
 )
-TRACE_FILE = TOOL_DIR / "data" / "online_logs" / "trace_30min.jsonl"
 
 # ---------------------------------------------------------------------------
 # FLEXLB_CONFIG SSOT — flexlb_cfg (re-exported)

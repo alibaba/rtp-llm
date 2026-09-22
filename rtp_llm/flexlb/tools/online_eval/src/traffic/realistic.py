@@ -81,7 +81,7 @@ def resolve(parameters):
     return p, provenance
 
 
-def write_trace(path, parameters, namespace, base_dir=None):
+def write_trace(path, parameters, namespace, base_dir=None, *, max_requests=None):
     p, calibration = resolve(parameters)
     rng = random.Random(p['seed'])
     # Separate streams: changing output lengths cannot alter input reuse.
@@ -103,7 +103,7 @@ def write_trace(path, parameters, namespace, base_dir=None):
     sessions = [[] for _ in weights]
     rounds = [0 for _ in weights]
     with Path(path).open('w') as out:
-        for i in range(p['count']):
+        for i in range(min(p['count'], max_requests) if max_requests is not None else p['count']):
             cold = rng.random() < p['cold_fraction']
             family = bisect.bisect_right(cumulative,rng.random()*cumulative[-1])
             if cold:

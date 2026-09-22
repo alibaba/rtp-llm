@@ -88,14 +88,14 @@ lsof -nP -iTCP:61000-62249 -sTCP:LISTEN | head
 
 ```bash
 EVAL_DIR="$PWD/rtp_llm/flexlb/tools/online_eval"
-test -s "$EVAL_DIR/data/online_logs/trace_30min.jsonl"
+test -s "$EVAL_DIR/data/traffic_models/frontend_20260921.xz"
 test -s "$EVAL_DIR/data/config/master_fixed_window.json"
 test -s "$EVAL_DIR/data/performance/dsv4_flash_performance.fast_ab.json"
 ```
 
 三份文件的作用：
 
-- `trace_30min.jsonl`：脱敏后的相对到达时间、输入/输出 token 长度和伪名 cache key。
+- `frontend_20260921.xz`：匿名 prefix DAG 的压缩模型；运行时在输出目录生成 Java 发送器的临时请求计划。
 - `master_fixed_window.json`：Master 进程配置；公式位于其中
   `FLEXLB_CONFIG.router.roles.prefill.executionTimeEstimator.expression`。
 - `dsv4_flash_performance.fast_ab.json`：mock 的 decode batch 曲线和 `sleep_scale`。
@@ -151,11 +151,7 @@ python3 -m unittest discover -s tools/online_eval/tests
 
 profile 已内置精确的测试类 includes；不需要手写 `-Dtest`。上游无匹配性能类的模块会正常放行，每个性能类都在不可复用的新 fork 中执行。
 
-E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 8192 条请求。请求不是 2-token 或全 0 的 synthetic input：
-
-- `tools/online_eval/data/online_logs/sample_access.json` 提供 29699 个脱敏 token 的序列形态和最小化 generate config。
-- `tools/online_eval/data/online_logs/trace_30min.jsonl` 提供真实输入/输出长度分布、相对到达时间和伪名 block hash 分布。
-- 构造模板前使用固定 seed 对不同 token ID 建立一一映射，目标是大于日志最大 token ID 的独立伪 ID 区间。因此输入长度、token 位置、重复关系和频次分布保持不变，但发送集合与日志 token ID 集合完全不相交；原始 request ID 和 trace ID 也不会进入发送请求。128 个模板中的第一个使用脱敏后的完整序列，其余模板按 trace 均匀取样并从脱敏序列取不同片段。伪 ID 只用于不执行词表解码的 mock engine，不能发送给真实推理引擎。当前 trace 本身不含 `input_ids`，因此这些模板不能描述为独立的原始线上请求。
+E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 8192 条请求。128 个模板来自 `tools/online_eval/data/traffic_models/master_batch_templates.json`，由匿名 prefix DAG 模型的前 128 个事件派生，每条最多 32768 token。测试校验派生文件记录的模型 SHA 与原模型文件一致；块标签展开为匿名 token，并按共享前缀生成稳定的调度 key。它不包含原始请求或真实 token 内容，也不宣称复现原日志的生成参数或真实推理效果。历史归档下的 `source.sha256` 记录的是旧实验快照，不作为当前输入清单。
 
 默认在 20 核及以上机器要求 client/Master QPS 均不低于 5000，Master P99 不高于 250 ms；较小机器的 QPS 门槛按 CPU 数缩放。可覆盖参数：
 
@@ -166,7 +162,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 -Dflexlb.perf.e2e.token-id-remap-seed=1592652261
 ```
 
-该 UT 使用单个高容量 mock prefill/decode，目的是让 mock worker 不先成为瓶颈。750/500 拓扑、真实 trace 到达间隔和长时间稳态仍由 `run_online_eval.sh` 验证，不能用 UT 结果替代正式容量报告。
+该 UT 使用单个高容量 mock prefill/decode，目的是让 mock worker 不先成为瓶颈。750/500 拓扑、匿名 prefix DAG 模型的真实相对到达间隔和长时间稳态仍由 `run_online_eval.sh` 验证，不能用 UT 结果替代正式容量报告。
 
 同一个 E2E 类还包含 engine scale 回归矩阵：
 

@@ -91,7 +91,7 @@ def validate_plan(path, namespace=None):
     return count
 
 
-def materialize(path, specification, namespace, base_dir):
+def materialize(path, specification, namespace, base_dir, *, max_requests=None):
     if not isinstance(specification, dict) or set(specification) != {
         "kind",
         "model",
@@ -102,12 +102,15 @@ def materialize(path, specification, namespace, base_dir):
     identity = tuple(specification[k] for k in ("kind", "model", "version"))
     if not all(isinstance(v, str) for v in identity) or identity not in SOURCES:
         raise ValueError("unknown source model/version")
+    if max_requests is not None and (type(max_requests) is not int or max_requests < 1):
+        raise ValueError("max_requests must be a positive integer")
     path = Path(path)
     if path.exists():
         raise ValueError("request plan destination must be fresh")
     temporary = path.with_suffix(path.suffix + ".pending")
     try:
-        semantics = SOURCES[identity](temporary, specification["parameters"], namespace, base_dir)
+        semantics = SOURCES[identity](temporary, specification["parameters"], namespace, base_dir,
+                                      max_requests=max_requests)
         count = validate_plan(temporary, namespace)
         digest = sha256_file(temporary)
         temporary.replace(path)
@@ -118,6 +121,7 @@ def materialize(path, specification, namespace, base_dir):
             namespace=namespace,
             sha256=digest,
             request_count=count,
+            projection=dict(max_requests=max_requests, selected_requests=count),
             reproducibility="DETERMINISTIC_INPUT",
             **semantics,
             key_validation="Java token hashing before sending",

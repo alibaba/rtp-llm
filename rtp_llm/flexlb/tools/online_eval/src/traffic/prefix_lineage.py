@@ -138,7 +138,7 @@ def expand(events):
         yield ts, labels
 
 
-def write_trace(path, parameters, namespace, base_dir):
+def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
     p = parameters
     if set(p) != {'path', 'sha256', 'count', 'output_tokens', 'priority'}:
         raise ValueError('lineage v2 requires pinned model, count, output_tokens and priority; pacing belongs to client')
@@ -151,7 +151,8 @@ def write_trace(path, parameters, namespace, base_dir):
     if type(p['count']) is not int or len(events) != p['count']:
         raise ValueError('lineage model count mismatch')
     with Path(path).open('w') as out:
-        for i, (ts, labels) in enumerate(expand(events)):
+        selected = events[:max_requests] if max_requests is not None else events
+        for i, (ts, labels) in enumerate(expand(selected)):
             out.write(json.dumps(dict(rid=f'{namespace}:{i}', ts=ts, il=len(labels)*BLOCK,
                 ol=p['output_tokens'], priority=p['priority'], cache_key_block_size=BLOCK,
                 input_token_blocks=labels), separators=(',', ':'))+'\n')

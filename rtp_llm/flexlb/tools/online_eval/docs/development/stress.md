@@ -13,26 +13,35 @@ export RUN_ID=stress-$(date +%Y%m%d-%H%M%S)
 export N_PREFILL=12 N_DECODE=40
 export FLEXLB_MASTER_MODE=wb
 export SEND_MODE=replay LOOP=1 DURATION_S=120
-export REPLAY_SPEED=82
+export REPLAY_SPEED=4
 export FLEXLB_WARMUP_SECONDS=10
 export FETCH_OUTPUT_STREAM=1
 
 bash tools/online_eval/scripts/stress/run_online_eval.sh
 ```
 
-`REPLAY_SPEED=82` 只对应仓库当前 `trace_30min.jsonl` 的约 650 名义 QPS 标定。替换 trace 或目标 QPS 时按下式重算：
+默认源是 `data/traffic_models/frontend_20260921.xz`：匿名 prefix DAG 模型，
+不是原始访问日志。脚本先核验模型 SHA，再在运行目录生成 `traffic-plan.jsonl`
+及其 manifest，Java 只读取这份临时计划。模型有 141113 个事件、原始跨度约
+900 秒；`REPLAY_SPEED=4` 对应全量模型平均约 627 名义 QPS。改变目标 QPS 时按下式重算：
 
 ```text
 speed = round(target_qps × (max(valid_ts)-min(valid_ts)) / valid_request_count)
 ```
 
-`valid_request_count` 只统计 `output_len > 0` 的请求。报告中的实发 QPS 才是结果口径，不能用名义 QPS 替代。
+`valid_request_count` 是模型事件数；实际 `LIMIT`、时长和发送拥塞会改变实发
+QPS，报告中的实发 QPS 才是结果口径。要使用参数化合成源，设置
+`TRAFFIC_SOURCE_SPEC=/path/to/source.json`，文件遵守
+`synthetic/realistic/1` 的 `kind/model/version/parameters` 格式；到达节奏仍由
+`SEND_MODE`、`SEND_MODE_QPS` 等客户端参数控制。合成源的时间戳只是序号，
+因此默认使用 uniform 与 `SEND_MODE_QPS=650`，显式 replay 会报错。脚本拒绝外部 `TRACE_FILE`，
+因此不会绕过两种源的校验。实验间须固定模型 SHA、参数、节奏及输出长度。
 
 `FETCH_OUTPUT_STREAM=1` 用于正式端到端 A/B；设为 `0` 时仅验证调度和引擎执行，客户端不会形成完整输出链路。
 
 ## 参数选择
 
-- replay 保留 trace 的到达间隔与 burst；uniform 用于显式容量扫描。两者结果不能直接混作同一基线。
+- replay 保留 prefix DAG 模型的到达间隔与 burst；uniform 用于显式容量扫描。两者结果不能直接混作同一基线。
 - `N_PREFILL/N_DECODE` 决定拓扑；改变拓扑就是改变实验条件。
 - `FLEXLB_MASTER_MODE` 决定调度和投递形态。
 - `COLLECTION_PROFILE=aggregate|request|diagnostic` 决定证据量；默认 `aggregate`。

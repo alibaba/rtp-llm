@@ -12,9 +12,10 @@
 | `trace/prefix_lineage/2` | SHA 固定的 XZ 列式模型 | 原始相对毫秒 | 实测前缀结构；token 长度块对齐有损 |
 | `synthetic/realistic/1` | seed、长度分布、族/会话、精确块 | 请求序号 | 参数分布；客户端负责节奏 |
 
-旧四项注册和 lineage v1 不再接受。`run_online_eval.sh` 原有原始 trace 文件
-入口没有被删除：它直接交文件给 Java，并不调用 `trace/recorded` 注册项。
-旧场景必须迁移，不能通过别名悄悄复用旧口径。
+旧四项注册和 lineage v1 不再接受。压测入口现在也调用注册表，将匿名模型
+或 `TRAFFIC_SOURCE_SPEC` 指定的参数化源物化到运行目录。`TRACE_FILE` 只作为
+生成后的 Java 发送器输入，不能指定原始日志。旧场景必须迁移，不能通过别名
+悄悄复用旧口径。
 
 ### Lineage v2
 

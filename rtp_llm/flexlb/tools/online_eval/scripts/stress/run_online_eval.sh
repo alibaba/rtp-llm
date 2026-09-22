@@ -34,7 +34,23 @@ if [[ "${LOAD_CLIENT_IMPL:-}" == "python" || "${MOCK_ENGINE_IMPL:-}" == "python"
   exit 1
 fi
 
-TRACE_FILE="${TRACE_FILE:-${ONLINE_EVAL_DIR}/data/online_logs/trace_30min.jsonl}"
+# Source selection is explicit. TRACE_FILE is reserved for the generated Java
+# sender plan and must not accept an arbitrary repository log as a third source.
+if [[ -n "${TRACE_FILE:-}" ]]; then
+  echo "TRACE_FILE is generated per run; use TRAFFIC_SOURCE_SPEC for a registered source" >&2
+  exit 2
+fi
+TRAFFIC_SOURCE_SPEC="${TRAFFIC_SOURCE_SPEC:-}"
+TRAFFIC_OUTPUT_TOKENS="${TRAFFIC_OUTPUT_TOKENS:-420}"
+TRAFFIC_KIND=trace
+if [[ -n "${TRAFFIC_SOURCE_SPEC}" ]]; then
+  TRAFFIC_KIND="$(python3 - "${TRAFFIC_SOURCE_SPEC}" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["kind"])
+PY
+)"
+fi
 PERFORMANCE_FILE="${PERFORMANCE_FILE:-${ONLINE_EVAL_DIR}/data/performance/dsv4_flash_performance.fast_ab.json}"
 RUN_ROOT="${RUN_ROOT:-${ONLINE_EVAL_DIR}/run}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
@@ -139,6 +155,10 @@ START_MOCK="${START_MOCK:-1}"
 MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"  # no-op, see NOTE above (lib default)
 
 LIMIT="${LIMIT:-1000}"
+if [[ ! "${LIMIT}" =~ ^(0|[1-9][0-9]*)$ ]] || (( LIMIT > 2147483647 )); then
+  echo "LIMIT must be a nonnegative Java int" >&2
+  exit 2
+fi
 DURATION_S="${DURATION_S:-120}"
 # REPLAY_SPEED: replay pacing multiplier, pure pass-through. The caller is
 # expected to supply it (the orchestrator auto-calibrates from the trace:
@@ -185,13 +205,17 @@ FORCE_PRIORITY="${FORCE_PRIORITY:-50}"
 # LOOP=1 explicitly opts into cyclic refill; default is one finite pass.
 # uniform mode also obeys explicit LOOP/MAX_LAPS; it no longer implies looping.
 LOOP="${LOOP:-0}"
-# Send mode is a pure pass-through (single env-var layer). Default replay
-# (trace-timestamp pacing; user-approved 2026-09-02, speed auto-calibrated
-# upstream). uniform is the explicit opt-in for the strictest scheduling
-# regime / pressure-boundary / capacity-critical scans and requires
-# SEND_MODE_QPS. Baseline break: pre-2026-09-02 uniform-default runs are not
-# directly comparable with replay-default runs.
-SEND_MODE="${SEND_MODE:-replay}"
+# Empirical DAG timestamps default to replay pacing. Synthetic sources carry
+# ordinal timestamps only and default to uniform pacing with SEND_MODE_QPS.
+if [[ "${TRAFFIC_KIND}" == synthetic ]]; then
+  SEND_MODE="${SEND_MODE:-uniform}"
+  if [[ "${SEND_MODE}" == replay ]]; then
+    echo "synthetic traffic has ordinal timestamps; select uniform pacing and SEND_MODE_QPS" >&2
+    exit 2
+  fi
+else
+  SEND_MODE="${SEND_MODE:-replay}"
+fi
 SEND_MODE_QPS="${SEND_MODE_QPS:-650}"
 # Traffic ramp-up for uniform mode: QPS climbs linearly 0 -> SEND_MODE_QPS
 # over RAMP_UP_SECONDS, then stays constant (replay mode ignores ramp-up).
@@ -552,6 +576,19 @@ assert_mock_engine_healthy() {
 }
 
 mkdir -p "${RUN_DIR}"
+TRACE_FILE="${RUN_DIR}/traffic-plan.jsonl"
+traffic_limit_args=()
+if (( LIMIT > 0 )); then traffic_limit_args=(--max-requests "${LIMIT}"); fi
+if [[ -n "${TRAFFIC_SOURCE_SPEC}" ]]; then
+  PYTHONPATH="${ONLINE_EVAL_DIR}/src:${ONLINE_EVAL_DIR}" python3 "${ONLINE_EVAL_DIR}/scripts/materialize_traffic.py" \
+    --spec "${TRAFFIC_SOURCE_SPEC}" --namespace "stress-${RUN_ID}" \
+    "${traffic_limit_args[@]}" --out "${TRACE_FILE}"
+else
+  PYTHONPATH="${ONLINE_EVAL_DIR}/src:${ONLINE_EVAL_DIR}" python3 "${ONLINE_EVAL_DIR}/scripts/materialize_traffic.py" \
+    --lineage-model "${ONLINE_EVAL_DIR}/data/traffic_models/frontend_20260921.xz" \
+    --output-tokens "${TRAFFIC_OUTPUT_TOKENS}" --namespace "stress-${RUN_ID}" \
+    "${traffic_limit_args[@]}" --out "${TRACE_FILE}"
+fi
 python3 - "${ONLINE_EVAL_DIR}" "${FLEXLB_MASTER_MODE}" "${FLEXLB_PROFILE}" \
   "${FLEXLB_PROFILE_EXPLICIT}" "${RUN_DIR}/mode_plan.json" <<'PY'
 import json
