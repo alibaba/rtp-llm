@@ -9,7 +9,11 @@
     const title = document.createElement('h3'); title.textContent = panel.title; wrap.appendChild(title);
     const caption = document.createElement('p'); caption.textContent = panel.caption; wrap.appendChild(caption);
     const toolbar = document.createElement('div'); toolbar.className='multi-toolbar'; wrap.appendChild(toolbar);
-    const choices = document.createElement('div'); choices.className='multi-choices'; wrap.appendChild(choices);
+    const picker = document.createElement('div'); picker.className='multi-picker'; toolbar.appendChild(picker);
+    const pickerButton = document.createElement('button'); pickerButton.type='button'; pickerButton.className='multi-picker-button'; pickerButton.setAttribute('aria-expanded','false'); picker.appendChild(pickerButton);
+    const dropdown = document.createElement('div'); dropdown.className='multi-dropdown'; dropdown.hidden=true; picker.appendChild(dropdown);
+    const search = document.createElement('input'); search.type='search'; search.className='multi-search'; search.placeholder='搜索指标'; search.setAttribute('aria-label','搜索指标'); dropdown.appendChild(search);
+    const choices = document.createElement('div'); choices.className='multi-choices'; dropdown.appendChild(choices);
     const box = document.createElement('div'); box.className='multi-plot'; box.style.cssText='height:580px;position:relative';
     const canvas = document.createElement('canvas'); box.appendChild(canvas);
     const hover = document.createElement('div'); hover.className='multi-hover'; hover.style.display='none'; box.appendChild(hover);
@@ -51,16 +55,23 @@
         }}}
       }
     });
-    const inputs=[], legendLabels=[]; let lastGroup=null;
-    datasets.forEach((d,i)=>{if(d.group!==lastGroup){const group=document.createElement('div');group.className='multi-group';group.textContent=d.group;choices.appendChild(group);lastGroup=d.group;}
+    const inputs=[], legendLabels=[], groups=[]; let lastGroup=null;
+    datasets.forEach((d,i)=>{if(d.group!==lastGroup){const group=document.createElement('div');group.className='multi-group';group.textContent=d.group;choices.appendChild(group);groups.push({element:group,indices:[]});lastGroup=d.group;}
+      groups[groups.length-1].indices.push(i);
       const label=document.createElement('label');label.className='multi-choice';label.title=d.description;
       const swatch=document.createElement('i');swatch.style.backgroundColor=d.baseColor;label.appendChild(swatch);
       const input=document.createElement('input');input.type='checkbox';input.checked=!d.hidden;input.onchange=()=>{chart.setDatasetVisibility(i,input.checked);refresh();};label.appendChild(input);
       label.appendChild(document.createTextNode(' '+d.label));label.onmouseenter=()=>focus(i);label.onmouseleave=()=>focus(null);
       label.ondblclick=()=>{const isolated=datasets.every((_,j)=>chart.isDatasetVisible(j)===(j===i));datasets.forEach((_,j)=>chart.setDatasetVisibility(j,isolated||j===i));refresh();};
       choices.appendChild(label);inputs.push(input);legendLabels.push(label);});
+    function filterChoices() {const query=search.value.trim().toLocaleLowerCase();legendLabels.forEach((label,i)=>{label.hidden=!!query&&!datasets[i].label.toLocaleLowerCase().includes(query);});groups.forEach(group=>{group.element.hidden=group.indices.every(i=>legendLabels[i].hidden);});}
+    search.oninput=filterChoices;
+    function setPickerOpen(open) {dropdown.hidden=!open;pickerButton.setAttribute('aria-expanded',String(open));if(open) search.focus();}
+    pickerButton.onclick=()=>setPickerOpen(dropdown.hidden);
+    picker.onkeydown=event=>{if(event.key==='Escape') {setPickerOpen(false);pickerButton.focus();}};
+    document.addEventListener('click',event=>{if(!picker.contains(event.target)) setPickerOpen(false);});
     function focus(index) {focused=index;datasets.forEach((d,i)=>{d.borderWidth=index===null?2:(i===index?4:1);d.borderColor=index===null||i===index?d.baseColor:d.baseColor+'33';});legendLabels.forEach((label,i)=>{label.style.opacity=index===null||i===index?'1':'0.38';});chart.update('none');}
-    function refresh() {Object.keys(panel.axes).forEach(axis=>{chart.options.scales[axis].display=datasets.some((d,i)=>d.yAxisID===axis&&chart.isDatasetVisible(i));});inputs.forEach((input,i)=>{input.checked=chart.isDatasetVisible(i);});if(focused!==null) focus(focused);else chart.update('none');}
+    function refresh() {Object.keys(panel.axes).forEach(axis=>{chart.options.scales[axis].display=datasets.some((d,i)=>d.yAxisID===axis&&chart.isDatasetVisible(i));});inputs.forEach((input,i)=>{input.checked=chart.isDatasetVisible(i);});pickerButton.textContent='指标 '+inputs.filter(input=>input.checked).length+'/'+inputs.length+' ▾';if(focused!==null) focus(focused);else chart.update('none');}
     function button(label,action) {const b=document.createElement('button');b.textContent=label;b.onclick=action;toolbar.appendChild(b);}
     Object.entries(panel.presets || {}).forEach(([name,selected])=>button(name,()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,selected.includes(d.label)));refresh();}));
     button('全选',()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,true));refresh();});button('清空',()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,false));refresh();});

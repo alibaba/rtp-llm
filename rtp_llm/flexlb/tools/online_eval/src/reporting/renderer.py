@@ -257,11 +257,15 @@ body{margin:0;padding:24px;background:var(--bg);color:var(--fg);
 header{margin-bottom:20px}
 h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .sub{color:var(--sub)}
-.multi-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}
+.multi-toolbar{position:sticky;top:8px;z-index:5;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;padding:8px;background:rgba(255,255,255,.97);border:1px solid var(--border);border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
 .multi-toolbar button{border:1px solid #d9d9d9;background:#fff;border-radius:6px;padding:5px 11px;cursor:pointer}
 .multi-toolbar button:hover{border-color:#1677ff;color:#1677ff}.multi-range{margin-left:auto;color:var(--sub)}
 .multi-range input{margin:0 5px;border:1px solid #d9d9d9;border-radius:5px;padding:4px}
-.multi-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(225px,1fr));gap:5px 10px;margin:10px 0 14px;padding:10px;border:1px solid var(--border);border-radius:8px;background:#fafafa}
+.multi-picker{position:relative}.multi-picker-button{font-weight:600;color:#1677ff}
+.multi-dropdown{position:absolute;top:calc(100% + 8px);left:0;width:min(520px,calc(100vw - 56px));max-height:min(68vh,560px);overflow:auto;padding:10px;background:#fff;border:1px solid #d9d9d9;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.18)}
+.multi-dropdown[hidden],.multi-choice[hidden],.multi-group[hidden]{display:none}
+.multi-search{position:sticky;top:-10px;z-index:1;width:100%;padding:7px 10px;border:1px solid #d9d9d9;border-radius:6px;background:#fff}
+.multi-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:4px 8px;margin-top:8px}
 .multi-group{grid-column:1/-1;color:var(--sub);font-size:12px;font-weight:650;margin-top:4px}
 .multi-choice{display:flex;align-items:center;gap:5px;min-width:0;padding:4px 7px;border-radius:5px;cursor:pointer;transition:opacity .12s,background .12s}
 .multi-choice:hover{background:#eef4ff}.multi-choice i,.multi-hover-row i{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}

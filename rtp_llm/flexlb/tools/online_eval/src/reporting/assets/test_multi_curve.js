@@ -1,10 +1,13 @@
 const assert = require('node:assert/strict');
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.style = {}; }
+  constructor(tag) { this.tag = tag; this.children = []; this.style = {}; this.attributes = {}; }
   appendChild(child) { this.children.push(child); return child; }
   append(...children) { this.children.push(...children); }
+  setAttribute(key,value) { this.attributes[key]=value; }
+  focus() { this.focused=true; }
+  contains(child) { return this===child||this.children.some(c=>c instanceof Element&&c.contains(child)); }
 }
-global.document = {createElement:tag=>new Element(tag),createTextNode:text=>text};
+global.document = {createElement:tag=>new Element(tag),createTextNode:text=>text,addEventListener:()=>{}};
 global.Chart = class {
   constructor(canvas,spec) {this.data=spec.data;this.options=spec.options;this.visible=spec.data.datasets.map(d=>!d.hidden);}
   setDatasetVisibility(i,v) {this.visible[i]=v;}
@@ -23,11 +26,22 @@ assert.equal(chart.options.scales.queue.display,false);
 assert.equal(chart.data.datasets[0].data[1].y,null);
 assert.equal(chart.data.datasets[1].data[0].y,1000); // never silently normalize units
 const toolbar=root.children[0].children[2];
-toolbar.children[0].onclick();
+const picker=toolbar.children[0],pickerButton=picker.children[0],dropdown=picker.children[1];
+assert.equal(dropdown.hidden,true);
+pickerButton.onclick();assert.equal(dropdown.hidden,false);
+assert.equal(pickerButton.attributes['aria-expanded'],'true');
+const search=dropdown.children[0],choices=dropdown.children[1];
+search.value='queue';search.oninput();
+assert.equal(choices.children.find(c=>c.tag==='label').hidden,true);
+assert.equal(choices.children.filter(c=>c.tag==='label')[1].hidden,false);
+search.value='';search.oninput();
+picker.onkeydown({key:'Escape'});assert.equal(dropdown.hidden,true);
+toolbar.children[1].onclick();
 assert.deepEqual(chart.visible,[false,true]);
+assert.match(pickerButton.textContent,/1\/2/);
 assert.equal(chart.options.scales.pct.display,false);
 assert.equal(chart.options.scales.queue.display,true);
-const range=toolbar.children.find(c=>c.tag==='div');
+const range=toolbar.children.find(c=>c.className==='multi-range');
 const [from,to]=range.children.filter(c=>c.tag==='input');
 from.value='3';to.value='7';from.onchange();
 assert.equal(chart.options.scales.x.min,3);assert.equal(chart.options.scales.x.max,7);
