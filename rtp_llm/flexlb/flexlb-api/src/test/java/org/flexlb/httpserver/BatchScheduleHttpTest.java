@@ -19,6 +19,8 @@ import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.NullSource;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
@@ -48,30 +50,29 @@ class BatchScheduleHttpTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"FE,false,true", "BE,true,false", "FE_AND_BE,true,true", ",true,false"})
-    void completedAllocationIsSerializedWithoutRestamping(AllocationType type, boolean be, boolean fe) {
-        BatchScheduleTarget target = BatchScheduleTarget.of(new WorkerHost("10.0.0.9", 8000), RoleType.PDFUSION, EngineType.LLM);
-        BatchScheduleResponse allocation = BatchScheduleResponse.success(be ? List.of(target) : List.of());
-        if (fe) {
-            allocation.setFrontendUrls(List.of("http://master-selected-fe"));
-        }
-        when(coordinator.schedule(any())).thenReturn(Mono.just(allocation));
+    @EnumSource(AllocationType.class)
+    @NullSource
+    void completedAllocationUsesOneAddressSchema(AllocationType type) {
+        boolean be = type != AllocationType.FE;
+        BatchScheduleTarget target = be
+                ? BatchScheduleTarget.of(new WorkerHost("10.0.0.9", 8000), RoleType.PDFUSION, EngineType.LLM)
+                : BatchScheduleTarget.frontend("http://10.0.0.9:8000");
+        when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target))));
         var response = client.post().uri("/rtp_llm/batch_schedule").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(type == null ? "{\"batch_count\":1}" : String.format(
                         "{\"batch_count\":1,\"allocation_type\":\"%s\"}", type))
-                .exchange().expectStatus().isOk().expectBody();
+                .exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.server_status.length()").isEqualTo(1)
+                .jsonPath("$.server_status[0].server_ip").isEqualTo("10.0.0.9")
+                .jsonPath("$.server_status[0].http_port").isEqualTo(8000)
+                .jsonPath("$.server_status[0].role").isEqualTo(be ? "PDFUSION" : "FRONTEND")
+                .jsonPath("$.server_status[0].arpc_port").doesNotExist()
+                .jsonPath("$.server_status[0].fe_url").doesNotExist()
+                .jsonPath("$.frontend_urls").doesNotExist();
         if (be) {
-            response.jsonPath("$.server_status[0].server_ip").isEqualTo("10.0.0.9")
-                    .jsonPath("$.server_status[0].http_port").isEqualTo(8000)
-                    .jsonPath("$.server_status[0].grpc_port").isEqualTo(8001)
-                    .jsonPath("$.server_status[0].fe_url").doesNotExist();
+            response.jsonPath("$.server_status[0].grpc_port").isEqualTo(8001);
         } else {
-            response.jsonPath("$.server_status").isEmpty();
-        }
-        if (fe) {
-            response.jsonPath("$.frontend_urls[0]").isEqualTo("http://master-selected-fe");
-        } else {
-            response.jsonPath("$.frontend_urls").doesNotExist();
+            response.jsonPath("$.server_status[0].grpc_port").doesNotExist();
         }
         verify(coordinator).schedule(argThat(r -> r.getBatchCount() == 1
                 && r.getAllocationType() == (type == null ? AllocationType.BE : type)));

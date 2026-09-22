@@ -55,6 +55,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -184,6 +185,9 @@ class DispatcherE2ETest {
             reply(i, 200, "{\"response_batch\":[\"ok\"]}");
         }
         startDispatcher(1);
+        if (expectBeAssignment) {
+            pool.next(); // An independent FE cursor must not affect colocated BE assignment.
+        }
         JSONArray preview = preview("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", "split", 2);
         assertFalse(preview.toJSONString().contains("role_addrs"));
         JSONObject body = JSONObject.of("prompt_batch", JSONArray.of("a", "b", "c"));
@@ -193,14 +197,15 @@ class DispatcherE2ETest {
             JSONObject chunk = takeChunk(i, "/batch_infer", "prompt_batch", 1);
             assertEquals(String.valueOf((char) ('a' + i)), chunk.getJSONArray("prompt_batch").getString(0));
             assertFalse(chunk.containsKey("pre_assigned_be"));
-            Object expected = expectBeAssignment ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "10.0.0." + (i + 1),
-                    "http_port", 23840, "grpc_port", 23841)) : null;
+            Object expected = expectBeAssignment ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "localhost",
+                    "http_port", frontends.get(i).getPort(), "grpc_port", frontends.get(i).getPort() + 1)) : null;
             JSONObject config = chunk.getJSONObject(configKey);
             assertEquals(expected, config == null ? null : config.get("role_addrs"));
         }
-        verify(coordinator).schedule(argThat(r -> r.getAllocationType() == (expectBeAssignment ? AllocationType.FE_AND_BE : AllocationType.FE)));
+        verify(coordinator).schedule(argThat(r -> r.getAllocationType() == (expectBeAssignment ? AllocationType.BE : AllocationType.FE)));
         if (expectBeAssignment) {
             verify(workers).schedule(3);
+            verify(pool, never()).nextBatch(anyInt());
         } else {
             verifyNoInteractions(workers);
         }
@@ -273,6 +278,21 @@ class DispatcherE2ETest {
     }
 
     @Test
+    void preassignmentRejectsNonFusionWorkersBeforeHttpFanout() {
+        startDispatcher(1);
+        BatchScheduleTarget prefill = BatchScheduleTarget.of(
+                new WorkerHost("localhost", frontends.getFirst().getPort()), RoleType.PREFILL, EngineType.LLM);
+        when(workers.schedule(1)).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(prefill))));
+
+        JSONObject response = post("/batch_infer", "{\"prompt_batch\":[\"a\"]}", 400);
+
+        assertEquals("invalid_batch_request", response.getString("error"));
+        assertTrue(response.toJSONString().contains("colocated PDFUSION"));
+        assertNoFeTraffic();
+        verify(pool, never()).nextBatch(anyInt());
+    }
+
+    @Test
     void emptyRequestsAndBatchesContactNoFe() {
         startDispatcher(2);
         post("/_dryrun/batch_infer", "", 400);
@@ -303,9 +323,9 @@ class DispatcherE2ETest {
     private void startDispatcher(int chunkSize) {
         lb.getHttpDispatcher().setEnabled(true);
         List<String> urls = frontends.stream().map(fe -> fe.url("/").toString().replaceAll("/$", "")).toList();
-        pool = DispatcherTestSupport.fePool(allocationFails ? List.of() : urls, cfg);
+        pool = spy(DispatcherTestSupport.fePool(allocationFails ? List.of() : urls, cfg));
         cfg.setBatchTimeoutMs(5000);
-        cfg.setFePoolServiceId("e2e.fe.publish");
+        cfg.setFePoolServiceId(cfg.isPreAssignBe() ? "" : "e2e.fe.publish");
         cfg.setSubBatch("size:" + chunkSize);
         cfg.setSubBatchSpec(SubBatchSpec.parse(cfg.getSubBatch()));
         connections = ConnectionProvider.builder("e2e").build();
@@ -316,8 +336,9 @@ class DispatcherE2ETest {
             int count = call.getArgument(0);
             List<BatchScheduleTarget> targets = new ArrayList<>();
             for (int i = 0; i < count; i++) {
-                // Independent FE and BE hosts: HTTP must use the FE pool, never the worker HTTP port.
-                BatchScheduleTarget target = BatchScheduleTarget.of(new WorkerHost("10.0.0." + (i + 1), 23840), RoleType.PDFUSION, lb.getWorkerRegistry().getEngineType());
+                MockWebServer frontend = frontends.get(i % frontends.size());
+                BatchScheduleTarget target = BatchScheduleTarget.of(new WorkerHost("localhost", frontend.getPort()),
+                        RoleType.PDFUSION, lb.getWorkerRegistry().getEngineType());
                 targets.add(target);
             }
             return Mono.just(BatchScheduleResponse.success(targets));

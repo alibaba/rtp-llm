@@ -73,6 +73,9 @@ class DispatchConfigTest {
         assertEquals("/frontend_health", defaults.getProbePath());
         assertEquals("secret", defaults.getTrustedRoutingToken());
         assertFalse(JsonUtils.toString(defaults).contains("secret"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> load(Map.of("dispatch.fe-pool-service-id", "independent-fe")))
+                .getMessage().contains("DISPATCH_PRE_ASSIGN_BE=false"));
         credentials.set("DISPATCH_ROUTING_TOKEN", "");
         DispatchConfig cfg = load(Map.of(
                 "dispatch.fe-pool-service-id", "fe", "dispatch.sub-batch", "size:7",

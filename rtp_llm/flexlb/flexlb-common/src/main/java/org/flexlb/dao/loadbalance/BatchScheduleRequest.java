@@ -23,14 +23,6 @@ public class BatchScheduleRequest {
     private AllocationType allocationType = AllocationType.BE;
 
     public enum AllocationType {
-        BE, FE, FE_AND_BE;
-
-        public boolean includesBe() {
-            return this == BE || this == FE_AND_BE;
-        }
-
-        public boolean includesFe() {
-            return this == FE || this == FE_AND_BE;
-        }
+        BE, FE
     }
 }

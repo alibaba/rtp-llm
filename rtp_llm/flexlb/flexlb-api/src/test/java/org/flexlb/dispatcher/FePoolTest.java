@@ -65,6 +65,7 @@ class FePoolTest {
         assertThrows(IllegalArgumentException.class, () -> configuration.fePool(cfg, discovery, workers, model,
                 WebClient.create(), DispatcherTestSupport.noopMetrics()));
         cfg.setFePoolServiceId("fe");
+        cfg.setPreAssignBe(false);
         when(discovery.getHosts("fe")).thenReturn(List.of(WorkerHost.of("independent-fe", 8088)));
         pool = configuration.fePool(cfg, discovery, workers, model, WebClient.create(), DispatcherTestSupport.noopMetrics());
         pool.start();

@@ -12,9 +12,11 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
 import org.flexlb.util.CommonUtils;
 
+import java.net.URI;
+
 /**
- * Worker placement in server_status: EMBEDDING exposes ARPC, LLM exposes gRPC.
- * FE HTTP destinations are returned separately in BatchScheduleResponse.frontendUrls.
+ * One allocated FE or BE address in server_status. A colocated PDFUSION worker's
+ * HTTP port reaches its FE, and its gRPC port supplies BE preassignment.
  */
 @Getter
 @Setter
@@ -34,6 +36,19 @@ public class BatchScheduleTarget {
     private Integer arpcPort;
 
     private RoleType role;
+
+    public String httpUrl() {
+        return "http://" + serverIp + ":" + httpPort;
+    }
+
+    public static BatchScheduleTarget frontend(String url) {
+        URI uri = URI.create(url);
+        BatchScheduleTarget target = new BatchScheduleTarget();
+        target.serverIp = uri.getHost();
+        target.httpPort = uri.getPort();
+        target.role = RoleType.FRONTEND;
+        return target;
+    }
 
     public static BatchScheduleTarget of(WorkerHost worker, RoleType role, EngineType engineType) {
         BatchScheduleTarget target = new BatchScheduleTarget();

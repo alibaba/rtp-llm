@@ -72,6 +72,8 @@ public class DispatcherConfiguration {
         Assert.isTrue(c.getProbePath().startsWith("/") && probe.getRawAuthority() == null && probe.getRawFragment() == null,
                 "dispatch.probe-path must be an absolute HTTP path without authority or fragment");
         Assert.isTrue(c.getBatchTimeoutMs() > 0, "dispatch.batch-timeout-ms must be > 0");
+        Assert.isTrue(!c.isPreAssignBe() || c.getFePoolServiceId().isBlank(),
+                "BE preassignment uses colocated worker HTTP endpoints; set DISPATCH_PRE_ASSIGN_BE=false for an FE pool override");
         Assert.isTrue(!c.isPreAssignBe() || !c.getTrustedRoutingToken().isBlank(),
                 "DISPATCH_ROUTING_TOKEN must be non-blank when preAssignBe is enabled");
         c.setSubBatchSpec(SubBatchSpec.parse(c.getSubBatch()));

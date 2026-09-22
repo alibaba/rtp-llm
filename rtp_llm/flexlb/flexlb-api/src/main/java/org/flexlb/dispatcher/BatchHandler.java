@@ -11,6 +11,7 @@ import org.flexlb.dao.loadbalance.BatchScheduleRequest.AllocationType;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.BatchScheduleCoordinator;
@@ -154,10 +155,13 @@ public class BatchHandler {
                                 allocation.getErrorMessage());
                     }
                     List<BatchScheduleTarget> targets = allocation.getServerStatus();
+                    if (assignBe && targets.stream().anyMatch(target -> target.getRole() != RoleType.PDFUSION)) {
+                        return badRequest("BE preassignment requires colocated PDFUSION; set DISPATCH_PRE_ASSIGN_BE=false");
+                    }
                     List<JSONObject> chunkBodies = batch.chunks(assignBe ? targets : List.of());
                     return fanoutService.dispatchChunks(
                                     spec == BatchEndpointSpec.ROOT ? BatchEndpointSpec.BATCH_INFER.getPath() : spec.getPath(), chunkBodies,
-                                    allocation.getFrontendUrls(), spec,
+                                    targets.stream().map(BatchScheduleTarget::httpUrl).toList(), spec,
                                     request.headers().asHttpHeaders(),
                                     request.uri().getRawQuery())
                             .publishOn(cpuScheduler)
@@ -187,8 +191,8 @@ public class BatchHandler {
             int chunkCount, boolean assignBe) {
         BatchScheduleRequest request = new BatchScheduleRequest();
         request.setBatchCount(chunkCount);
-        // Every chunk goes to an FE; optional BE placement does not change its HTTP destination.
-        request.setAllocationType(assignBe ? AllocationType.FE_AND_BE : AllocationType.FE);
+        // Preassignment selects one colocated worker for both the FE HTTP call and BE RPC address.
+        request.setAllocationType(assignBe ? AllocationType.BE : AllocationType.FE);
         return batchScheduleCoordinator.schedule(request);
     }
 }

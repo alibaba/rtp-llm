@@ -77,6 +77,7 @@ class DispatcherStartupTest {
                  "hosts":{"be":["127.0.0.1:%d"],"fe":["127.0.0.1:%d"]}}
                 """.formatted(protocol, frontend.getPort() + (protocol.equals("grpc") ? 1 : 0), frontend.getPort()));
         builder.environment().put("DISPATCH_ROUTING_TOKEN", enabled ? "startup-test-secret" : "");
+        builder.environment().put("DISPATCH_PRE_ASSIGN_BE", separateFe ? "false" : "true");
         if (separateFe) {
             builder.environment().put("DISPATCH_FE_POOL_SERVICE_ID", "fe");
         } else {
