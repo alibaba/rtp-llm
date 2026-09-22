@@ -4,12 +4,12 @@ Outputs remain independently specified: the capture is error censored. Session
 turns are not identifiable here and default to a declared disabled component.
 """
 import argparse
-import collections
 import hashlib
 import json
 import os
 from pathlib import Path
-from traffic.prefix_lineage import decode, expand
+from traffic.prefix_lineage import decode
+from traffic.structure import capture_shape, joint_distribution
 
 
 def calibrate(raw, report, report_sha):
@@ -18,14 +18,11 @@ def calibrate(raw, report, report_sha):
     # A dense empirical inverse CDF preserves the long tail and mean better than
     # interpolating three percentiles. Deterministic, bounded profile size.
     values=[sizes[int(q*(len(sizes)-1)/1000)] for q in range(1001)]
-    counts=collections.Counter()
-    prefix_depths=[]
-    for event, (_,labels) in zip(events,expand(events)):
-        counts[tuple(labels[:8])] += 1
-        if event[3]:prefix_depths.append(event[3])
+    family_counts=capture_shape(events)["families"]
+    prefix_depths=[event[3] for event in events if event[3]]
     cold=sum(e[3]==0 for e in events)/len(events)
-    families=max(5,len(counts))
-    top5=sum(v for _,v in counts.most_common(5))/len(events)
+    families=max(5,len(family_counts))
+    top5=sum(family_counts[:5])/len(events)
     lo,hi=0.0,4.0
     for _ in range(40):
         alpha=(lo+hi)/2
@@ -35,11 +32,12 @@ def calibrate(raw, report, report_sha):
     depth=sorted(prefix_depths)[len(prefix_depths)//2] if prefix_depths else 1
     # Family concentration is defined at 4K in the empirical report.
     depth=max(8,depth)
-    return dict(data_kind='synthetic', generator=dict(kind='synthetic',model='realistic',version='1'),
+    return dict(schema_version=2, data_kind='synthetic', generator=dict(kind='synthetic',model='realistic',version='1'),
         parameters=dict(block_size=512,families=families,shared_blocks=0,
         prefix_blocks=depth,suffix_blocks=1,zipf_alpha=(lo+hi)/2,cold_fraction=cold,
         session_requests=1,session_growth_blocks=0,
-        input_distribution=dict(values=values,weights=[1]*len(values))),
+        input_distribution=dict(values=values,weights=[1]*len(values)),
+        joint_distribution=joint_distribution(events)),
         calibration=dict(model_sha256=hashlib.sha256(raw).hexdigest(),fit_report_sha256=report_sha,
             provenance=metadata['provenance'],held_out_validated=False,
             targets=dict(mean_input_tokens=sum(sizes)/len(sizes),p99_input_tokens=values[990],

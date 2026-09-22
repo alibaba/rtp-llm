@@ -142,3 +142,5 @@ A/B 报告检查 realism/tail/arrival 与跨轮身份策略，差异强制显示
 `20260921_080828.` / `playback-final` 运行 Java 测试 42 项全通过，
 包括实际 sender loop 的有限 uniform、4 倍真实时间回放、两轮 iteration
 记录。sender 测试使用受控 Schedule 响应，只证明播放行为，不是规模性能验收。
+
+联合结构采样、兼容性与独立观察工具见[合成保真度](synthetic-fidelity.md)。

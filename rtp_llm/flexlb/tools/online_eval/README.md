@@ -14,3 +14,5 @@
 各组件直接作为 `src` 下的 Python 包导入；从项目根目录运行测试时使用 `PYTHONPATH=src:.`。旧的三个根层转发入口已经退役；使用 `scripts/commands/` 中的命令。Whale 镜像沿用根目录的 `flexlb_cfg.py`、`mode_profiles.py` 和 `mode_profiles.yaml` 固定拷贝路径，`config/mode_profiles.yaml` 链接到同一份模式表。
 
 目录内容分别见 [config](config/README.md) 和 [data](data/README.md)。更多说明见[文档导航](docs/README.md)。
+
+合成输入与真实捕获的独立对比工具：[`compare_traffic.py` 使用与口径](docs/reference/concepts/synthetic-fidelity.md)。

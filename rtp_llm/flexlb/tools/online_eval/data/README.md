@@ -65,3 +65,6 @@ python3 scripts/pipeline/describe_traffic.py data/traffic_models/glm-5.3_2026092
 `synthetic_baseline.json` 与 `synthetic_prefill_100ms.json` 是合成测试性能模型；
 `deepseek_v4_flash_decode_table.json` 保留 decode 表标定，`deepseek_v4_flash_sm100.json` 是 SM100 开发环境参数；
 `glm_5_3_l20d.json` 来自 GLM-5.3 L20D 对齐实验。它们的模型名不代表上述流量的服务模型。
+
+合成画像 schema 2 保存联合分布；默认仍保持独立采样的旧 seed 语义。显式 `sampling: joint` 使用联合采样，
+独立对比工具及限制见[合成保真度](../docs/reference/concepts/synthetic-fidelity.md)。

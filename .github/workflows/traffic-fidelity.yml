@@ -1,0 +1,37 @@
+name: Traffic profile integrity
+on:
+  pull_request:
+    paths:
+      - 'rtp_llm/flexlb/tools/online_eval/data/calibration/**'
+      - 'rtp_llm/flexlb/tools/online_eval/data/traffic_models/**'
+      - 'rtp_llm/flexlb/tools/online_eval/src/traffic/**'
+      - 'rtp_llm/flexlb/tools/online_eval/scripts/commands/compare_traffic.py'
+      - 'rtp_llm/flexlb/tools/online_eval/src/analysis/traffic_fidelity*'
+      - 'rtp_llm/flexlb/tools/online_eval/tests/test_traffic_fidelity.py'
+      - '.github/workflows/traffic-fidelity.yml'
+  push:
+    paths:
+      - 'rtp_llm/flexlb/tools/online_eval/data/calibration/**'
+      - 'rtp_llm/flexlb/tools/online_eval/data/traffic_models/**'
+      - 'rtp_llm/flexlb/tools/online_eval/src/traffic/**'
+      - 'rtp_llm/flexlb/tools/online_eval/scripts/commands/compare_traffic.py'
+      - 'rtp_llm/flexlb/tools/online_eval/src/analysis/traffic_fidelity*'
+      - 'rtp_llm/flexlb/tools/online_eval/tests/test_traffic_fidelity.py'
+      - '.github/workflows/traffic-fidelity.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check calibrated claims and production sampling
+        working-directory: rtp_llm/flexlb/tools/online_eval
+        env:
+          PYTHONPATH: 'src:tests:.'
+        run: python3 -m unittest test_traffic_fidelity -v
