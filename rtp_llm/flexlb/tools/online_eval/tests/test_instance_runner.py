@@ -177,6 +177,7 @@ raise SystemExit(child.main())
 schema_version: 2
 case: grade_protocol
 metadata: {description: Grade protocol fixture, category: status}
+test: {kind: functional, description: Grade protocol fixture, collection: diagnostic}
 profiles: [batch-window]
 environment: {backend: java_mock, n_prefill: 1, n_decode: 1}
 variants: [{id: default}]

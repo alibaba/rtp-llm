@@ -25,6 +25,10 @@ variants:
 - id: generation_bump
   program: generation_bump
 - id: flap
+  test:
+    kind: workload
+    description: Multi-window load, topology or recovery lifecycle
+    collection: request
   environment:
     n_decode: 4
     master_sync_log: false
@@ -1375,3 +1379,8 @@ parameters:
       metric: success
       op: eq
       expected: 1
+
+test:
+  kind: functional
+  description: Bounded protocol, state or admission contract
+  collection: diagnostic

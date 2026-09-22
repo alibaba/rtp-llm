@@ -31,7 +31,7 @@ class WraparoundTests(unittest.TestCase):
     def test_formal_loader_compiler_retains_independent_clocks_all_profiles(self):
         root = Path(__file__).resolve().parents[1]
         plans = compile_scenarios(
-            load_scenarios(root / "config/scenarios/master"), handlers=handlers()
+            load_scenarios(root / "config/scenarios/client_fallback_failback.yaml"), handlers=handlers()
         )
         selected = [p for p in plans if p["variant_id"] == "wraparound"]
         self.assertEqual(4, len(selected))

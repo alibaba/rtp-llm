@@ -161,3 +161,8 @@ parameters:
       discovered: 1
       alive: 1
       present: false
+
+test:
+  kind: workload
+  description: Multi-window load, topology or recovery lifecycle
+  collection: request

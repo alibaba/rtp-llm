@@ -116,3 +116,9 @@ parameters:
     min_decode_inflight: 1
   check:
     min_success_rate: 1.0
+
+test:
+  kind: workload
+  description: Java background traffic persists across Python checkpoints and Decode
+    scale-out
+  collection: request

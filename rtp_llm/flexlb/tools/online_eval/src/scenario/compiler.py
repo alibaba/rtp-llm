@@ -585,6 +585,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "execution",
                     "requires",
                     "findings",
+                    "test",
                 },
                 {"id"},
             )
@@ -774,6 +775,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         "variant": vid,
                         "variant_id": vid,
                         "profile": p,
+                        **({"test": copy.deepcopy(variant["test"])} if "test" in variant else {}),
                         "effective_axes": resolved["effective_axes"],
                         "effective_capabilities": resolved["effective_capabilities"],
                         "grade": grade,

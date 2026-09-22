@@ -63,3 +63,8 @@ parameter_schema:
     minimum: 0.01
     maximum: 10
     integer: false
+
+test:
+  kind: functional
+  description: Bounded protocol, state or admission contract
+  collection: diagnostic

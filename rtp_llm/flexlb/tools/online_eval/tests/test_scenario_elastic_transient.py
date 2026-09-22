@@ -311,7 +311,7 @@ class TransientTests(unittest.TestCase):
         plan = next(
             p
             for p in compile_scenarios(
-                load_scenarios(ROOT / "config/scenarios/elastic/lifecycle.yaml"),
+                load_scenarios(ROOT / "config/scenarios/elastic_lifecycle.yaml"),
                 handlers=handlers,
             )
             if p["variant_id"] == "transient_imbalance"
@@ -339,7 +339,7 @@ class TransientTests(unittest.TestCase):
         plan = next(
             p
             for p in compile_scenarios(
-                load_scenarios(ROOT / "config/scenarios/elastic/lifecycle.yaml"),
+                load_scenarios(ROOT / "config/scenarios/elastic_lifecycle.yaml"),
                 handlers=handlers,
             )
             if p["variant_id"] == "transient_imbalance"

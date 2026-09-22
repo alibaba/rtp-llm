@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-INDEX = ROOT / "config/perf_presets/index.json"
+INDEX = ROOT / "config/performance_presets.json"
 
 
 def _registry():

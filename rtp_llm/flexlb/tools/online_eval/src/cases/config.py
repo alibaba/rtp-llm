@@ -155,6 +155,7 @@ def configure_program(config, source):
             "metadata",
             "parameter_schema",
             "analysis",
+            "test",
         },
         source,
     )
@@ -201,6 +202,7 @@ def configure_program(config, source):
                 "parameters",
                 "metadata",
                 "parameter_schema",
+                "test",
             },
             source + ".variants",
         )
@@ -241,6 +243,11 @@ def configure_program(config, source):
         )
         build(builder)
         variant = copy.deepcopy(row.get("metadata", {}))
+        from scenario.suites import normalize_test
+
+        if not isinstance(config.get("test", {}), dict) or not isinstance(row.get("test", {}), dict):
+            raise ScenarioError(f"{source}.test: expected mapping")
+        variant["test"] = normalize_test(_merge_data(config.get("test", {}), row.get("test", {})))
         variant.update(
             id=identity, profiles=copy.deepcopy(profiles), stages=builder.finish()
         )

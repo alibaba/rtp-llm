@@ -17,7 +17,7 @@ from scenario import (
     compile_scenarios,
     load_scenarios,
 )
-from scenario.suites import classify, preselect_documents
+from scenario.suites import classify, preselect_documents, suite_names
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
 from scenario.lease import validate_lease
@@ -51,6 +51,7 @@ def inventory(plans):
     for plan in plans:
         row = {key: plan[key] for key in LIST_FIELDS}
         row["test_kind"] = plan.get("test_kind", "functional")
+        row["test"] = plan["test"]
         if "implementation" in plan:
             row["implementation"] = plan["implementation"]
         row["execution"] = {
@@ -96,7 +97,7 @@ def main(argv=None):
     parser.add_argument("--profile")
     parser.add_argument("--master-mode", choices=("sb", "sn", "wb", "wn"))
     parser.add_argument(
-        "--suite", choices=("core", "functional", "workload", "all"), default="all"
+        "--suite", choices=suite_names(), default="all"
     )
     parser.add_argument(
         "--grade", choices=("strict", "normal", "loose"), default="normal"

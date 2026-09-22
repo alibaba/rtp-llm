@@ -141,7 +141,7 @@ class DecodeScaleOutTest(unittest.TestCase):
 
     def test_python_plan_has_four_profiles_and_one_dynamic_addition(self):
         plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/elastic/lifecycle.yaml"),
+            load_scenarios(ROOT / "config/scenarios/elastic_lifecycle.yaml"),
             handlers=handlers(),
         )
         plans = [p for p in plans if p["variant_id"] == "decode_scale_out_protection"]
@@ -159,7 +159,7 @@ class DecodeScaleOutTest(unittest.TestCase):
             self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 1)
 
     def test_configuration_rejects_traffic_below_old_pool_capacity(self):
-        cfg = load_document(ROOT / "config/scenarios/elastic/lifecycle.yaml")
+        cfg = load_document(ROOT / "config/scenarios/elastic_lifecycle.yaml")
         cfg["variants"] = [cfg["variants"][0]]
         cfg["variants"][0]["parameters"]["concurrency"] = 16
         with self.assertRaisesRegex(ValueError, "exceed.*capacity"):

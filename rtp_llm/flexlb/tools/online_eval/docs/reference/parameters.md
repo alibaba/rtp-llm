@@ -9,7 +9,7 @@
 | `--master-mode sb\|sn\|wb\|wn` | 功能、场景、压测共用的 Master 形态缩写；映射在 `config/mode_profiles.yaml` |
 | `--profile` | 完整配置名；和显式 mode 不一致时失败 |
 | `--config-override k=v,...` | 压测专用的受校验配置覆盖；最终渲染写入 `master_config.json` |
-| `--suite core\|functional\|workload\|all` | 功能/场景实例集合；`run_cases.py` 默认 core |
+| `--suite core\|functional\|workload\|all` | CI suite 或实例性质筛选；`run_cases.py` 默认值来自 `config/suites.yaml`，当前为 core |
 | `--parallel` | 功能/场景 lane 数；性能比较和故障场景通常为 1 |
 | `--dry-run` | 不启动服务，显示资源或压测计划 |
 
@@ -47,4 +47,4 @@
 
 ## Mock 性能模型
 
-`--performance` 读取 P/D 时间、KV 容量和可选噪声 JSON，默认 `data/performance/dsv4_flash_performance.fast_ab.json`；`PERFORMANCE_FILE` 环境变量可覆盖缺省值，显式 `--performance` 优先。`--mock-heap`、`--master-heap`、`--client-heap` 设置 JVM heap；`--decode-max-concurrency`、`--prefill-cache-blocks`、`--decode-cache-blocks` 设置 mock 资源。性能模型说明见 [`flexlb-mock-engine/README.md`](../../../../flexlb-mock-engine/README.md)。修改模型后，报告必须记录文件内容或摘要；同名文件不保证内容相同。
+`--performance` 读取 P/D 时间、KV 容量和可选噪声 JSON，默认 `data/performance/deepseek_v4_flash_decode_table.json`；`PERFORMANCE_FILE` 环境变量可覆盖缺省值，显式 `--performance` 优先。`--mock-heap`、`--master-heap`、`--client-heap` 设置 JVM heap；`--decode-max-concurrency`、`--prefill-cache-blocks`、`--decode-cache-blocks` 设置 mock 资源。性能模型说明见 [`flexlb-mock-engine/README.md`](../../../../flexlb-mock-engine/README.md)。修改模型后，报告必须记录文件内容或摘要；同名文件不保证内容相同。

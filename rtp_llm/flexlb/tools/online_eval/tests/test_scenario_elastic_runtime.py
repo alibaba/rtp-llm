@@ -94,7 +94,7 @@ class ElasticRuntimeTests(unittest.TestCase):
         self.assertEqual(result["stages"][2]["checks"][0]["id"], "membership")
 
     def source(self):
-        source = load_scenarios(ROOT / "config/scenarios/elastic/lifecycle.yaml")[0][1]
+        source = load_scenarios(ROOT / "config/scenarios/elastic_lifecycle.yaml")[0][1]
         source["variants"] = [
             v for v in source["variants"] if v["id"].startswith("kv_skew_")
         ]

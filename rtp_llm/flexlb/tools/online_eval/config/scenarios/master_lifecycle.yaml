@@ -31,6 +31,10 @@ variants:
         omit: true
   program: kill_single
 - id: freeze_short_long
+  test:
+    kind: workload
+    description: Multi-window load, topology or recovery lifecycle
+    collection: request
   environment:
     master_layout: dual_standalone
     discovery: file
@@ -38,6 +42,10 @@ variants:
     config_overrides: {}
   program: freeze_short_long
 - id: kill_dual_b_to_a
+  test:
+    kind: workload
+    description: Multi-window load, topology or recovery lifecycle
+    collection: request
   profiles:
   - batch-window
   execution:
@@ -236,3 +244,8 @@ parameters:
       metric: duplicate_ids
       op: eq
       expected: 0
+
+test:
+  kind: functional
+  description: Bounded protocol, state or admission contract
+  collection: diagnostic

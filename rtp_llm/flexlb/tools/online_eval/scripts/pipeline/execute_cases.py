@@ -14,6 +14,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 from typing import IO
 
 from runtime.harness import PROBE_BIND_HOST, port_in_use
+from scenario.suites import default_suite, suite_names
 from runtime.resource_plan import (
     MOCK_WINDOW_LAST,
     child_port_env,
@@ -677,9 +678,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--suite",
-        choices=("core", "functional", "workload", "all"),
-        default="core",
-        help="select five core contracts, the extended functional matrix, sustained workloads, or all",
+        choices=suite_names(),
+        default=default_suite(),
+        help="select a declared CI suite, an instance kind, or all; defaults to config/suites.yaml",
     )
     args = parser.parse_args()
     if args.master_mode:

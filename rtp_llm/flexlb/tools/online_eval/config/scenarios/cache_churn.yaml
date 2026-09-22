@@ -22,6 +22,10 @@ variants:
     prefill_cache_blocks: 24
   program: hot_churn
 - id: lru_affinity
+  test:
+    kind: functional
+    description: Bounded protocol, state or admission contract
+    collection: diagnostic
   environment:
     prefill_cache_blocks: 4
     decode_cache_blocks: 4
@@ -2150,3 +2154,8 @@ parameters:
     expected:
       still_pinned: 3
       not_evicted: 0
+
+test:
+  kind: workload
+  description: Multi-window load, topology or recovery lifecycle
+  collection: request

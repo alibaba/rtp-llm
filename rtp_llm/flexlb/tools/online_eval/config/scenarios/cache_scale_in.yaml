@@ -7,7 +7,7 @@ environment:
   discovery: discovery_file
   n_prefill: 125
   n_decode: 536
-  perf_preset: production_scale_20260920
+  perf_preset: glm_5_3_l20d
   prefill_cache_blocks: 31218
   decode_cache_blocks: 46157
   prefill_cache_policy:
@@ -61,7 +61,7 @@ parameters:
       model: prefix_lineage
       version: '2'
       parameters:
-        path: ../../../data/traffic_models/prefix_lineage_v2_ac2f8aad.xz
+        path: ../../data/traffic_models/prefix_lineage_v2_ac2f8aad.xz
         sha256: ac2f8aad472e882de2c649f5e0507d76787655a66d53e0e7285bdcb8aae87cca
         count: 141113
         output_tokens: 420
@@ -89,3 +89,8 @@ analysis:
   expected_verdicts:
     old: FAIL
     new: PASS
+
+test:
+  kind: workload
+  description: Fixed Java traffic across one-step P withdrawal with cache collapse adjudication
+  collection: request

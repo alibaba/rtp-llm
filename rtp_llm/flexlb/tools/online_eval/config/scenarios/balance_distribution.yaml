@@ -346,3 +346,8 @@ parameters:
       property: P2
       diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
     teardown_timeout_s: 120
+
+test:
+  kind: workload
+  description: Twelve paced windows with full request completion and continuous telemetry
+  collection: request

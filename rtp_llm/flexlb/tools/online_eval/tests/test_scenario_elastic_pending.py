@@ -46,7 +46,7 @@ class PendingTests(unittest.TestCase):
     ):
         handlers = {h.name: h for h in e.HANDLERS + control.HANDLERS}
         plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/elastic/pending_drain.yaml"),
+            load_scenarios(ROOT / "config/scenarios/elastic_pending_drain.yaml"),
             handlers=handlers,
         )
         plan = next(p for p in plans if p["variant_id"] == variant)

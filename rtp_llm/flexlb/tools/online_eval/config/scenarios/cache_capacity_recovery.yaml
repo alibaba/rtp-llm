@@ -1448,3 +1448,8 @@ parameters:
         strict: 2
         normal: 3
         loose: 5
+
+test:
+  kind: functional
+  description: Bounded protocol, state or admission contract
+  collection: diagnostic

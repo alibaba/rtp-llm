@@ -26,7 +26,7 @@ class CaseConfigTest(unittest.TestCase):
         from flexlb_cfg import ConfigOverride, render_env
 
         plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/core/request_completion.yaml"),
+            load_scenarios(ROOT / "config/scenarios/request_completion.yaml"),
             handlers=handlers(),
         )
         self.assertEqual(len(plans), 4)
@@ -43,7 +43,7 @@ class CaseConfigTest(unittest.TestCase):
             )
 
     def config(self):
-        config = load_document(ROOT / "config/scenarios/core/request_completion.yaml")
+        config = load_document(ROOT / "config/scenarios/request_completion.yaml")
         return config
 
     def compile(self, config):

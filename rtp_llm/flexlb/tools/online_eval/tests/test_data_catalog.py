@@ -39,13 +39,14 @@ class DataCatalogTest(unittest.TestCase):
         from scenario.loader import load_document
         config_roots = {path.name for path in (ROOT / "config").iterdir()}
         self.assertEqual({"README.md", "load_client_env.txt", "mode_profiles.yaml",
-                          "perf_presets", "report_views", "scenarios", "suites.yaml"},
+                          "performance_presets.json", "report_views", "scenarios", "suites.yaml"},
                          config_roots, "config contains an unclassified input")
         data_roots = {path.name for path in (ROOT / "data").iterdir()}
         self.assertEqual({"README.md", "catalog.json", "calibration", "performance",
                           "traffic_models"}, data_roots, "data contains an unclassified artifact")
         self.assertFalse((ROOT / "config/traffic_profiles").exists())
-        self.assertEqual([], list((ROOT / "config/perf_presets").glob("*scale*.json")))
+        self.assertFalse((ROOT / "config/perf_presets").exists())
+        self.assertTrue(all(p.is_file() for p in (ROOT / "config/scenarios").iterdir()))
         self.assertEqual([], list((ROOT / "data").rglob("*.yaml")))
         listed = {str((ROOT / "data" / entry["model"]).relative_to(ROOT))
                   for entry in data_catalog.catalog()["models"].values()}

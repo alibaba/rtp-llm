@@ -20,7 +20,7 @@ from scenario.loader import load_scenarios
 class ProfileTests(unittest.TestCase):
     def test_complete_old_configs_and_explicit_profile_variants(self):
         plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/elastic/concurrent_mutation.yaml"),
+            load_scenarios(ROOT / "config/scenarios/elastic_concurrent_mutation.yaml"),
             handlers={h.name: h for h in e.HANDLERS},
         )
         expected = {

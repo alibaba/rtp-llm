@@ -41,7 +41,7 @@ class BalanceTests(unittest.TestCase):
     ):
         handlers = builtin_handlers()
         plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/elastic/lifecycle.yaml"), handlers=handlers
+            load_scenarios(ROOT / "config/scenarios/elastic_lifecycle.yaml"), handlers=handlers
         )
         plan = next(p for p in plans if p["variant_id"] == "steady_recovery")
         self.assertEqual(len(plan["stages"]), 14)

@@ -1,114 +1,117 @@
-"""Explicit test classification, independent of categories and execution profiles."""
+"""Instance-owned test metadata and explicit CI selection, independent of paths."""
 
+import copy
 import math
+import re
 from pathlib import Path
 
 from scenario.loader import ScenarioError, load_document
 
 CATALOG = Path(__file__).resolve().parents[2] / "config/suites.yaml"
 KINDS = ("functional", "workload")
-SUITES = ("core", *KINDS, "all")
+FILTERS = (*KINDS, "all")
+DEFAULT_MONITORING = {
+    "capture_metrics": True,
+    "sample_interval_s": 1.0,
+    "max_sample_gap_s": 5.0,
+    "collector_shutdown_s": 10.0,
+}
+
+
+def normalize_test(value):
+    if not isinstance(value, dict) or set(value) - {"kind", "description", "collection", "monitoring"}:
+        raise ScenarioError("test must declare kind, description and collection; optional monitoring")
+    if value.get("kind") not in KINDS:
+        raise ScenarioError("test.kind must be functional or workload")
+    if not isinstance(value.get("description"), str) or not value["description"].strip():
+        raise ScenarioError("test.description is required")
+    if value.get("collection") not in ("aggregate", "request", "diagnostic"):
+        raise ScenarioError("test.collection must be aggregate, request or diagnostic")
+    patch = value.get("monitoring", {})
+    if not isinstance(patch, dict) or set(patch) - set(DEFAULT_MONITORING):
+        raise ScenarioError("invalid test.monitoring fields")
+    monitoring = {**DEFAULT_MONITORING, **patch}
+    if type(monitoring["capture_metrics"]) is not bool:
+        raise ScenarioError("test.monitoring.capture_metrics must be boolean")
+    for key in ("sample_interval_s", "collector_shutdown_s", "max_sample_gap_s"):
+        v = monitoring[key]
+        if type(v) not in (int, float) or not math.isfinite(v) or v <= 0:
+            raise ScenarioError("invalid test.monitoring budget: " + key)
+    if monitoring["max_sample_gap_s"] < monitoring["sample_interval_s"]:
+        raise ScenarioError("maximum sample gap is shorter than sampling interval")
+    return {**value, "monitoring": monitoring}
+
+
+def _catalog(path=CATALOG):
+    data = load_document(path)
+    if set(data) != {"schema_version", "default_suite", "ci_suites"} or data["schema_version"] != 2:
+        raise ScenarioError("invalid CI suite catalog: expected schema_version 2")
+    suites = data["ci_suites"]
+    if not isinstance(suites, dict) or not suites:
+        raise ScenarioError("ci_suites must be a nonempty mapping")
+    for name, members in suites.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name) or name in FILTERS:
+            raise ScenarioError("invalid or reserved CI suite name: " + str(name))
+        if not isinstance(members, list) or not members or any(
+            not isinstance(member, str) or not re.fullmatch(r"[A-Za-z0-9_-]+::[A-Za-z0-9_-]+", member)
+            for member in members
+        ) or len(set(members)) != len(members):
+            raise ScenarioError("CI suite requires unique case::variant identities: " + name)
+    if data["default_suite"] not in suites:
+        raise ScenarioError("default_suite must name a declared CI suite")
+    return data
+
+
+def suite_names(catalog=CATALOG):
+    return (*_catalog(catalog)["ci_suites"], *FILTERS)
+
+
+def default_suite(catalog=CATALOG):
+    return _catalog(catalog)["default_suite"]
+
+
+def _matches(key, kind, suite, suites):
+    if suite not in (*suites, *FILTERS):
+        raise ScenarioError("unknown suite: " + str(suite))
+    return suite == "all" or suite == kind or key in suites.get(suite, ())
 
 
 def preselect_documents(documents, suite="all", catalog=CATALOG):
-    """Avoid compiling unrelated large workloads for functional listings/runs."""
-    if suite not in SUITES:
-        raise ScenarioError("unknown suite: " + suite)
-    if suite in ("all", "workload"):
-        return documents
-    data = load_document(catalog)
-    if data.get("schema_version") != 1 or not isinstance(data.get("cases"), dict) or not isinstance(data.get("core_cases"), dict):
-        raise ScenarioError("invalid suite catalog")
+    """Select variants before resource checks; directory names never select tests."""
+    suites = _catalog(catalog)["ci_suites"]
     selected = []
     for path, document in documents:
-        keys = [document["id"] + "::" + variant["id"] for variant in document["variants"]]
-        if any(
-            key not in data["cases"]
-            or (suite == "core" and key in data["core_cases"])
-            or (suite == "functional" and data["cases"][key].get("kind") == "functional")
-            for key in keys
-        ):
-            selected.append((path, document))
+        variants = []
+        for variant in document["variants"]:
+            key = document["id"] + "::" + variant["id"]
+            test = normalize_test(variant.get("test"))
+            if _matches(key, test["kind"], suite, suites):
+                variants.append(variant)
+        if variants:
+            doc = copy.deepcopy(document)
+            doc["variants"] = copy.deepcopy(variants)
+            selected.append((path, doc))
     return selected
 
 
 def classify(plans, suite="all", catalog=CATALOG):
-    if suite not in SUITES:
-        raise ScenarioError("unknown suite: " + suite)
-    data = load_document(catalog)
-    if data.get("schema_version") != 1 or not isinstance(data.get("cases"), dict):
-        raise ScenarioError("invalid suite catalog")
-    runtime = data.get("workload_runtime", {})
-    if (
-        set(runtime)
-        != {
-            "capture_metrics",
-            "sample_interval_s",
-            "collector_shutdown_s",
-            "max_sample_gap_s",
-        }
-        or type(runtime["capture_metrics"]) is not bool
-    ):
-        raise ScenarioError("invalid workload runtime configuration")
-    for key in ("sample_interval_s", "collector_shutdown_s", "max_sample_gap_s"):
-        value = runtime[key]
-        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-            raise ScenarioError("invalid workload budget: " + key)
-    if runtime["max_sample_gap_s"] < runtime["sample_interval_s"]:
-        raise ScenarioError("maximum sample gap is shorter than sampling interval")
-    entries = data["cases"]
-    core = data.get("core_cases")
-    if (
-        not isinstance(core, dict)
-        or len(core) != 5
-        or any(not isinstance(key, str) or not reason for key, reason in core.items())
-    ):
-        raise ScenarioError("core_cases must define exactly five documented variants")
-    for key, entry in entries.items():
-        if (
-            not isinstance(entry, dict)
-            or entry.get("kind") not in KINDS
-            or entry.get("collection", "aggregate") not in ("aggregate", "request", "diagnostic")
-            or not entry.get("reason")
-        ):
-            raise ScenarioError("invalid suite entry: " + key)
+    suites = _catalog(catalog)["ci_suites"]
     selected = []
     for plan in plans:
         key = plan["scenario_id"] + "::" + plan["variant_id"]
-        entry = entries.get(key)
-        # External extension plans retain functional execution until classified.
-        # Bundled configurations must never silently escape the coverage ledger.
-        if entry is None and Path(plan["source_path"]).resolve().is_relative_to(
-            CATALOG.parent / "scenarios"
-        ):
-            raise ScenarioError("unclassified bundled case: " + key)
-        kind = entry["kind"] if entry else "functional"
-        selected_by_suite = (
-            suite == "all"
-            or suite == kind
-            or (suite == "core" and kind == "functional" and key in core)
-        )
-        if selected_by_suite:
-            selected.append(
-                dict(
-                    plan,
-                    test_kind=kind,
-                    collection_profile=(entry or {}).get("collection", "aggregate" if kind == "workload" else "diagnostic"),
-                    workload_runtime=(
-                        dict(data["workload_runtime"]) if kind == "workload" else {}
-                    ),
-                )
-            )
-    if suite == "core":
-        selected_keys = {
-            plan["scenario_id"] + "::" + plan["variant_id"] for plan in selected
-        }
-        missing = set(core) - selected_keys
+        test = normalize_test(plan.get("test"))
+        kind = test["kind"]
+        if _matches(key, kind, suite, suites):
+            selected.append(dict(
+                plan, test_kind=kind, test_description=test["description"],
+                collection_profile=test["collection"],
+                workload_runtime=test["monitoring"] if kind == "workload" else {},
+            ))
+    if suite in suites:
+        actual = {p["scenario_id"] + "::" + p["variant_id"] for p in selected}
+        missing = set(suites[suite]) - actual
         if missing:
-            raise ScenarioError(
-                "core suite is unsupported by the selected profile: "
-                + ", ".join(sorted(missing))
-            )
-        if len(selected) != 5:
-            raise ScenarioError("core suite must compile to exactly five instances")
+            raise ScenarioError("CI suite is unsupported by the selected source/profile; missing: " + ", ".join(sorted(missing)))
+    elif suite not in FILTERS:
+        raise ScenarioError("unknown suite: " + str(suite))
     return selected

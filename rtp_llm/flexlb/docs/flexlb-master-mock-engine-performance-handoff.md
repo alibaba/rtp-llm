@@ -92,7 +92,7 @@ lsof -nP -iTCP:61000-62249 -sTCP:LISTEN | head
 EVAL_DIR="$PWD/rtp_llm/flexlb/tools/online_eval"
 test -s "$EVAL_DIR/data/traffic_models/frontend_20260921.xz"
 test -s "$EVAL_DIR/data/config/master_fixed_window.json"
-test -s "$EVAL_DIR/data/performance/dsv4_flash_performance.fast_ab.json"
+test -s "$EVAL_DIR/data/performance/deepseek_v4_flash_decode_table.json"
 ```
 
 三份文件的作用：
@@ -100,7 +100,7 @@ test -s "$EVAL_DIR/data/performance/dsv4_flash_performance.fast_ab.json"
 - `frontend_20260921.xz`：匿名 prefix DAG 的压缩模型；运行时在输出目录生成 Java 发送器的临时请求计划。
 - `master_fixed_window.json`：Master 进程配置；公式位于其中
   `FLEXLB_CONFIG.router.roles.prefill.executionTimeEstimator.expression`。
-- `dsv4_flash_performance.fast_ab.json`：mock 的 decode batch 曲线和 `sleep_scale`。
+- `deepseek_v4_flash_decode_table.json`：mock 的 decode batch 曲线和 `sleep_scale`。
 
 ## 4. 编译和快速校验
 
@@ -267,7 +267,7 @@ N_PREFILL=750 \
 N_DECODE=500 \
 MOCK_BASE_GRPC_PORT=61000 \
 JAVA_MOCK_EVENT_LOOP_THREADS=32 \
-PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.fast_ab.json" \
+PERFORMANCE_FILE="$PWD/data/performance/deepseek_v4_flash_decode_table.json" \
 PROCESS_CONFIG_FILE="$PWD/data/config/master_fixed_window.json" \
 FETCH_OUTPUT_STREAM=0 \
 SCHEDULE_WORKER_SIZE=16 \
@@ -301,7 +301,7 @@ BASE_ENV=(
   N_DECODE=500
   MOCK_BASE_GRPC_PORT=61000
   JAVA_MOCK_EVENT_LOOP_THREADS=32
-  "PERFORMANCE_FILE=$PWD/data/performance/dsv4_flash_performance.fast_ab.json"
+  "PERFORMANCE_FILE=$PWD/data/performance/deepseek_v4_flash_decode_table.json"
   "PROCESS_CONFIG_FILE=$PWD/data/config/master_fixed_window.json"
   FETCH_OUTPUT_STREAM=0
   SCHEDULE_WORKER_SIZE=16

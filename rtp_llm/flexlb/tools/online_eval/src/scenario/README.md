@@ -21,7 +21,7 @@ budgets. An adapter must declare its maximum additions and use this facade.
 
 Environment fields include worker counts, cache block counts, controlled
 `config_overrides`, `discovery: file|discovery_file`,
-`perf_preset` names come from `config/perf_presets/index.json` and `debug_enabled: true|false`. Profile axes come
+`perf_preset` names come from `config/performance_presets.json` and `debug_enabled: true|false`. Profile axes come
 from the existing flexlb_cfg generator. Arbitrary imports, expressions, raw config,
 master environment variables and undeclared backend topologies are rejected.
 The optional `metric_whitelist` field maps only to

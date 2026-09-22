@@ -76,3 +76,8 @@ parameters:
       metric: duplicate_ids
       op: eq
       expected: 0
+
+test:
+  kind: workload
+  description: Multi-window load, topology or recovery lifecycle
+  collection: request

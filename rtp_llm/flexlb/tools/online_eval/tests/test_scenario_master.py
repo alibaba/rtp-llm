@@ -476,9 +476,10 @@ class MasterActionsTest(unittest.TestCase):
             HANDLERS as observations,
         )
 
-        root = Path(__file__).resolve().parents[1] / "config/scenarios/master"
+        root = Path(__file__).resolve().parents[1] / "config/scenarios"
         plans = compile_scenarios(
-            load_scenarios(root),
+            [document for name in ("master_lifecycle", "master_ha_failover", "client_fallback_failback")
+             for document in load_scenarios(root / (name + ".yaml"))],
             handlers={
                 h.name: h for h in master.HANDLERS + observations + controls + faults
             },

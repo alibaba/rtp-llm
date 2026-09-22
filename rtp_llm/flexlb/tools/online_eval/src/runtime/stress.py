@@ -74,7 +74,7 @@ def parse_args(argv=None):
     p.add_argument("--master-management-port", type=int, default=7002)
     p.add_argument("--performance", type=Path,
                    default=Path(os.environ["PERFORMANCE_FILE"]) if os.environ.get("PERFORMANCE_FILE")
-                   else TOOL_DIR / "data/performance/dsv4_flash_performance.fast_ab.json")
+                   else TOOL_DIR / "data/performance/deepseek_v4_flash_decode_table.json")
     traffic = p.add_mutually_exclusive_group()
     traffic.add_argument("--traffic-source-spec", type=Path)
     traffic.add_argument("--traffic-model", choices=tuple(catalog()["models"]),

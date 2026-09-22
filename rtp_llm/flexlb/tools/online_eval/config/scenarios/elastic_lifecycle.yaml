@@ -1899,3 +1899,8 @@ parameter_schema:
     minimum: 20
     maximum: 60
     integer: true
+
+test:
+  kind: workload
+  description: Multi-window load, topology or recovery lifecycle
+  collection: request

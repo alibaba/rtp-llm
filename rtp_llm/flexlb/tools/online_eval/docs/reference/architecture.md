@@ -12,9 +12,9 @@ parallel runner        分配 lane，启动 Master/Mock，执行并清理
 result/report          原始证据、分析 JSON 和 HTML
 ```
 
-压测使用同一 Java Master、Mock Engine、流量和报告组件，但由 `scripts/commands/run_stress.py` 组织固定流程。功能与场景共享 `scripts/commands/run_cases.py`，其内部执行引擎为 `scripts/pipeline/execute_cases.py`：`core` 和 `functional` 都选择 5 个核心合同，`workload` 增加持续流量、阶段观测和 Prometheus 证据。旧扩展功能矩阵已删除，历史版本由 Git 保存。
+压测使用同一 Java Master、Mock Engine、流量和报告组件，但由 `scripts/commands/run_stress.py` 组织固定流程。功能与场景共享 `scripts/commands/run_cases.py`，其内部执行引擎为 `scripts/pipeline/execute_cases.py`：`core` 按 CI 清单选择，`functional` 按实例性质筛选，当前两者均包含 5 个核心合同，`workload` 增加持续流量、阶段观测和 Prometheus 证据。旧扩展功能矩阵已删除，历史版本由 Git 保存。
 
-`config/mode_profiles.yaml` 只定义运行时形态和观测默认值；`config/suites.yaml` 定义 core 选择、functional/workload 分类、采集档位和覆盖关系；场景 YAML 不允许嵌入任意 Python 流程。
+`config/mode_profiles.yaml` 只定义运行时形态和观测默认值；`config/suites.yaml` 仅定义 CI 必跑清单和默认 suite；实例的 `test` 字段定义 functional/workload 性质、采集档位和监控覆盖参数；场景 YAML 不允许嵌入任意 Python 流程。
 
 资源句柄包含环境代次。环境重建后，旧句柄只能作为历史证据读取，不能继续操作新进程。Schedule、流消费、业务 FINISHED 和资源释放是不同事实，测试必须分别取证。
 

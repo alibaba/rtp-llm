@@ -11,7 +11,7 @@ from workload.cache_gate_ab import load_comparison_policy
 
 class AbCurvesTest(unittest.TestCase):
     def test_scale_in_analysis_policy_from_runnable_scenario(self):
-        policy = load_comparison_policy(ROOT / "config/scenarios/workload/cache_scale_in.yaml")
+        policy = load_comparison_policy(ROOT / "config/scenarios/cache_scale_in.yaml")
         self.assertEqual(policy["mode"], "strong")
         self.assertEqual(policy["expected_verdicts"], {"old": "FAIL", "new": "PASS"})
 

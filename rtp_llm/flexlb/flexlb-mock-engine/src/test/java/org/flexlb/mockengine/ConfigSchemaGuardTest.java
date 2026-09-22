@@ -12,8 +12,8 @@ class ConfigSchemaGuardTest {
     };
 
     private static final String[] PERFORMANCES = {
-            "../tools/online_eval/data/performance/dsv4_flash_performance.fast_ab.json",
-            "../tools/online_eval/data/performance/dsv4_flash_performance.sm100_dev.json",
+            "../tools/online_eval/data/performance/deepseek_v4_flash_decode_table.json",
+            "../tools/online_eval/data/performance/deepseek_v4_flash_sm100.json",
     };
 
     @Test

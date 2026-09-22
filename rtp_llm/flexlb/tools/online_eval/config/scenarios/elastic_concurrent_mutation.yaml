@@ -173,3 +173,8 @@ parameters:
         min_post_samples: 2
         nonbatch_failfast_s: 2
         batch_failfast_s: 5
+
+test:
+  kind: workload
+  description: Multi-window load, topology or recovery lifecycle
+  collection: request

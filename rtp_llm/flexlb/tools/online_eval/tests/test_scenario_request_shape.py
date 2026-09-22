@@ -17,7 +17,7 @@ class RequestShapeTests(unittest.TestCase):
             compile_scenarios(docs, grade="invented")
 
     def source(self):
-        source = copy.deepcopy(load_scenarios(ROOT / "config/scenarios/core")[0][1])
+        source = copy.deepcopy(load_scenarios(ROOT / "config/scenarios/request_completion.yaml")[0][1])
         source["stages"] = source.pop("variants")[0]["stages"]
         return source
 

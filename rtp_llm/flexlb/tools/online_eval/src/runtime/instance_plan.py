@@ -132,6 +132,8 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
                         "estimated_duration_s",
                         "resource_budget",
                         "execution",
+                        "test_kind",
+                        "test",
                     )
                     if key in row
                 },
