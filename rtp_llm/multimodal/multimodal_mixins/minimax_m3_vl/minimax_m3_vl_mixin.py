@@ -1127,4 +1127,4 @@ class MiniMaxM3VLMixin(BaseMultiModalMixin):
         return MiniMaxM3VLImageEmbedding(mm_related_params).visual
 
 
-register_multimodal_mixin(["minimax_m3_vl"], MiniMaxM3VLMixin)
+register_multimodal_mixin(["minimax_m3_vl", "minimax_m31_vl"], MiniMaxM3VLMixin)

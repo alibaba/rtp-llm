@@ -19,7 +19,9 @@ namespace rtp_llm {
 
 class CudaGraphRunner: public GraphBase {
 public:
-    CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
+    CudaGraphRunner(const GraphParams& graph_params,
+                    py::object         py_instance,
+                    const char*        forward_method_name = "forward"):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
@@ -32,7 +34,10 @@ public:
         seq_size_per_block_(graph_params.tokens_per_block),
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
+        input_hidden_size_(graph_params.input_hidden_size > 0 ? graph_params.input_hidden_size :
+                                                                graph_params.hidden_size * graph_params.hc_mult),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
+        require_exact_decode_geometry_(graph_params.require_exact_decode_geometry),
         draft_prefill_requires_full_token_capacity_(graph_params.draft_prefill_requires_full_token_capacity),
         sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
@@ -50,21 +55,23 @@ public:
         }
         max_bs_                 = graph_params.max_context_batch_size;
         py_attn_pyobj_method_   = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_      = py_instance_.attr("forward");
+        py_forward_method_      = py_instance_.attr(forward_method_name);
         const auto graph_device = cuda_graph::graphDevice(device_index_);
         options_cuda_int32_     = torch::TensorOptions().dtype(torch::kInt32).device(graph_device).requires_grad(false);
         options_cpu_int32_      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(graph_device).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d, device_index_: %d",
+            hidden_size_: %d, input_hidden_size_: %zu, num_tokens_per_bs_: %d, exact_decode_batch_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d, device_index_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
                          kernel_seq_size_per_block_,
                          hidden_size_,
+                         input_hidden_size_,
                          num_tokens_per_bs_,
+                         require_exact_decode_geometry_,
                          is_prefill_cuda_graph_mode_,
                          is_target_verify_,
                          device_index_);
@@ -140,11 +147,13 @@ private:
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
+    size_t                  input_hidden_size_{0};
     // DSv4 head-channel residual multiplier (≥1; defaults to 1 for non-DSv4
     // models). input_hiddens captures with hidden_size_ * hc_mult_ so the MTP
     // draft graph can take the target's pre-hc residual ([T, hc*dim]) as
     // input. The post-reduce output tensor still uses hidden_size_.
     int              hc_mult_{1};
+    bool             require_exact_decode_geometry_{false};
     bool             draft_prefill_requires_full_token_capacity_{false};
     int              sp_steps_{0};
     std::vector<int> capture_range_;

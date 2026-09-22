@@ -84,6 +84,8 @@ def _apply_minimax_m3_vl_mtp_config(config, config_json):
 
     text_cfg = config_json.get("text_config", config_json)
     MiniMaxM3._from_text_config(config, text_cfg)
+
+
 class MiniMaxM3_VL(MiniMaxM3):
     """MiniMax-M3 VL LLM container; ViT runs in the multimodal path."""
 

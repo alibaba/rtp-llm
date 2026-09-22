@@ -79,6 +79,10 @@ public:
         return false;
     }
 
+    virtual bool isDSpark() {
+        return false;
+    }
+
     virtual bool isEagle() {
         return false;
     }

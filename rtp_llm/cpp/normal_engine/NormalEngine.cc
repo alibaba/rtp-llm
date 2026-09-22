@@ -19,6 +19,7 @@
 #include <chrono>
 #include <csignal>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <random>
@@ -93,7 +94,15 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     if (propose_params_) {
-        reserve_step_ = propose_params_->gen_num_per_circle + 1;
+        const auto gamma = propose_params_->gen_num_per_circle;
+        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
+            RTP_LLM_CHECK_WITH_INFO(gamma <= static_cast<size_t>(std::numeric_limits<int>::max()) / 3,
+                                    "DSpARK gen_num_per_circle is too large: %zu",
+                                    gamma);
+            reserve_step_ = static_cast<int>(3 * gamma);
+        } else {
+            reserve_step_ = gamma + 1;
+        }
     } else {
         reserve_step_ = 0;
     }
@@ -697,7 +706,7 @@ bool NormalEngine::isTimelineProfilingEnabled() const {
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
         return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
-               || propose_params_->sp_type == SP_TYPE_EAGLE3;
+               || propose_params_->sp_type == SP_TYPE_EAGLE3 || propose_params_->sp_type == SP_TYPE_DSPARK;
     }
     return false;
 }
@@ -707,6 +716,10 @@ bool NormalEngine::isEagle() {
         return propose_params_->sp_type == SP_TYPE_EAGLE;
     }
     return false;
+}
+
+bool NormalEngine::isDSpark() {
+    return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
 }
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {

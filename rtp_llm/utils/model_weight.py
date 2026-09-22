@@ -1174,6 +1174,11 @@ class W:
     multi_tokens_predict_d2t_map = "multi_tokens_predict_d2t_map"
     multi_tokens_predict_t2d_map = "multi_tokens_predict_t2d_map"
 
+    # DSpARK model-level projection and low-rank Markov head.
+    dspark_fc_w = "dspark_fc.weight"
+    dspark_markov_w1 = "dspark_markov_w1.weight"
+    dspark_markov_w2 = "dspark_markov_w2.weight"
+
     # eagle3
     eagle3_fc_proj = "eagle3_fc.weight"
     eagle3_fc_norm_gamma = "eagle3_fc.gamma"
@@ -1500,6 +1505,9 @@ class W:
         multi_tokens_predict_final_ln_beta: sp_id,
         multi_tokens_predict_d2t_map: sp_id,
         multi_tokens_predict_t2d_map: sp_id,
+        dspark_fc_w: sp_id,
+        dspark_markov_w1: sp_id,
+        dspark_markov_w2: sp_id,
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
         eagle3_aux_norm_gamma: sp_id,

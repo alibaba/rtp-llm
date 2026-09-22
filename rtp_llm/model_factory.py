@@ -161,6 +161,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.MTP
             or sp_type == SpeculativeType.EAGLE3
             or sp_type == SpeculativeType.EAGLE
+            or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
             if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp"):
@@ -413,13 +414,14 @@ class ModelFactory:
             SpeculativeType.MTP,
             SpeculativeType.EAGLE,
             SpeculativeType.EAGLE3,
+            SpeculativeType.DSPARK,
         ]:
             logging.error(
-                "Speculative engine only supports MTP, EAGLE and EAGLE3, but got %s",
+                "Speculative engine only supports MTP, EAGLE, EAGLE3 and DSpARK, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP, EAGLE and EAGLE3, but got %s"
+                "Speculative engine only supports MTP, EAGLE, EAGLE3 and DSpARK, but got %s"
                 % sp_config.type.name
             )
 
@@ -465,4 +467,92 @@ class ModelFactory:
             kv_cache_dtype_override=propose_kv_cache_dtype,
         )
 
+        if sp_config.type == SpeculativeType.DSPARK:
+            ModelFactory._setup_dspark_configs(
+                sp_config, model_config, propose_model_config
+            )
+
         return propose_model_config
+
+    @staticmethod
+    def _setup_dspark_configs(
+        sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
+    ) -> None:
+        """Validate the fixed-width DSpARK contract and target capture rows."""
+        required = {
+            "dspark_noise_token_id": propose_model_config.dspark_noise_token_id,
+            "dspark_target_layer_ids": propose_model_config.dspark_target_layer_ids,
+            "dspark_markov_rank": propose_model_config.dspark_markov_rank,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                "sp_type dspark requires draft checkpoint metadata: "
+                + ", ".join(missing)
+            )
+
+        gamma = int(sp_config.gen_num_per_cycle)
+        if gamma <= 0:
+            raise ValueError(
+                f"dspark requires a positive gen_num_per_cycle, got {gamma}"
+            )
+        noise_token_id = int(propose_model_config.dspark_noise_token_id)
+        # Some DSpARK checkpoints keep a target-sized input embedding while
+        # exposing a reduced draft output vocabulary for the Markov head.
+        configured_input_vocab_size = getattr(
+            propose_model_config, "input_vocab_size", 0
+        )
+        input_vocab_size = int(
+            configured_input_vocab_size or propose_model_config.vocab_size
+        )
+        if not 0 <= noise_token_id < input_vocab_size:
+            raise ValueError(
+                f"invalid dspark_noise_token_id {noise_token_id} for "
+                f"input_vocab_size {input_vocab_size}"
+            )
+
+        target_layer_ids = [
+            int(layer_id) for layer_id in propose_model_config.dspark_target_layer_ids
+        ]
+        if not target_layer_ids:
+            raise ValueError("dspark_target_layer_ids must not be empty")
+        if target_layer_ids != sorted(set(target_layer_ids)):
+            raise ValueError(
+                "dspark_target_layer_ids must be unique and ordered by target "
+                f"layer boundary, got {target_layer_ids}"
+            )
+        invalid = [
+            layer_id
+            for layer_id in target_layer_ids
+            if layer_id < 0 or layer_id >= model_config.num_layers
+        ]
+        if invalid:
+            raise ValueError(
+                f"dspark_target_layer_ids {invalid} are out of range for target "
+                f"with {model_config.num_layers} layers"
+            )
+        markov_rank = int(propose_model_config.dspark_markov_rank)
+        if markov_rank <= 0:
+            raise ValueError(f"invalid dspark_markov_rank: {markov_rank}")
+
+        sp_config.sp_dspark_mask_token_id = noise_token_id
+        sp_config.sp_dspark_sample_from_anchor = bool(
+            propose_model_config.dspark_sample_from_anchor
+        )
+        model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        logging.info(
+            "DSpARK fixed-width wiring: gamma=%d, noise_token_id=%d, "
+            "target capture layer ids=%s, markov_rank=%d",
+            gamma,
+            noise_token_id,
+            target_layer_ids,
+            markov_rank,
+        )
+        # MiniMax-M3 already owns a multi-layer target-capture buffer. Reuse
+        # that exact path instead of adding a second full-sequence allocation.
+        if model_config.model_type.startswith("minimax_m3"):
+            model_config._minimax_m3_target_hidden_state_layer_ids = tuple(
+                target_layer_ids
+            )
+            model_config.hc_mult = len(target_layer_ids)

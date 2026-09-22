@@ -349,3 +349,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     timeout = "short",
 )
+
+py_test(
+    name = "minimax_m31_dspark_mock_test",
+    srcs = ["minimax_m31_dspark_mock_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "short",
+)

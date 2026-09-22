@@ -966,9 +966,10 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         # DeepEP low-latency dispatch allocates per routed expert row.
         model_config = getattr(py_env_configs, "model_config", None)
         moe_k = getattr(model_config, "moe_k", 0) if model_config is not None else 0
-        if (
-            not moe_k
-            and getattr(py_env_configs.model_args, "model_type", "") == "minimax_m3"
+        if not moe_k and getattr(py_env_configs.model_args, "model_type", "") in (
+            "minimax_m3",
+            "minimax_m31",
+            "minimax_m31_vl",
         ):
             moe_k = 4
         ll_num_max_token *= max(1, int(moe_k or 1))

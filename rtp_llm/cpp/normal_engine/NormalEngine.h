@@ -63,6 +63,7 @@ private:
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
     bool isMTPEagle() override;
+    bool isDSpark() override;
     bool isEagle() override;
 
 private:

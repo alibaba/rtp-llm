@@ -61,6 +61,30 @@ _FP8_E4M3_MAX = tl.constexpr(448.0)
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def expand_dspark_visible_seq_lens(
+    write_seq_lens: torch.Tensor, request_batch_size: int, total_tokens: int
+) -> torch.Tensor:
+    """Make every row in a request's DSpARK query block see the block tail.
+
+    ``write_seq_lens`` must remain untouched for paged slot writes.  This
+    helper derives the attention-only lengths after those writes complete.
+    """
+    if request_batch_size <= 0 or total_tokens <= 0:
+        raise ValueError("DSpARK query geometry must be positive")
+    if total_tokens % request_batch_size:
+        raise ValueError("DSpARK query rows must be divisible by request rows")
+    if write_seq_lens.numel() != total_tokens:
+        raise ValueError("DSpARK write length rows must match query token rows")
+    query_width = total_tokens // request_batch_size
+    return (
+        write_seq_lens.view(request_batch_size, query_width)[:, -1:]
+        .expand(request_batch_size, query_width)
+        .reshape(-1)
+        .contiguous()
+    )
+
+
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -4298,6 +4322,7 @@ class MSAAttention(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         use_fused_addressing: bool = False,
         use_paged_capacity_bound: bool = False,
+        noncausal_query_block: bool = False,
     ) -> torch.Tensor:
         from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
             minimax_paged_sparse_decode,
@@ -4329,6 +4354,7 @@ class MSAAttention(nn.Module):
             use_fused_cuda=use_fused_addressing,
         )
         request_batch_size = int(request_block_table.shape[0])
+        write_seq_lens = seq_lens
 
         if self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale):
             paged_kv_base = self._paged_kv_base_view(kv_cache)
@@ -4336,7 +4362,7 @@ class MSAAttention(nn.Module):
             q, idx_q = self._decode_project_fused_qkv_idx(
                 total_tokens,
                 positions,
-                seq_lens,
+                write_seq_lens,
                 phys_block_table,
                 paged_kv_base,
                 paged_idx_k,
@@ -4384,7 +4410,7 @@ class MSAAttention(nn.Module):
             self._apply_rope(idx_q, idx_k, positions)
 
             paged_decode_views = self._write_kv_cache_and_idx_k_for_decode(
-                kv_cache, k, v, idx_k, seq_lens, phys_block_table
+                kv_cache, k, v, idx_k, write_seq_lens, phys_block_table
             )
         if paged_decode_views is None:
             raise RuntimeError(
@@ -4393,6 +4419,16 @@ class MSAAttention(nn.Module):
         paged_main_k, paged_main_v, phys_block_table, paged_idx_k, paged_idx_scale = (
             paged_decode_views
         )
+
+        # Target verification is causal inside its fixed-width block. DSpARK
+        # deliberately is not: every query row attends to the complete query
+        # block after all K/V/index-K rows have been written. Preserve the
+        # original per-token lengths for slot addressing above, then widen only
+        # the attention-visible length here.
+        if noncausal_query_block:
+            seq_lens = expand_dspark_visible_seq_lens(
+                write_seq_lens, request_batch_size, total_tokens
+            )
 
         if self._cuda_graph_forward_active() or use_paged_capacity_bound:
             max_seqlen_k = self._cuda_graph_max_kv(attn_inputs, request_block_table)
@@ -4416,7 +4452,7 @@ class MSAAttention(nn.Module):
             paged_idx_k=paged_idx_k,
             paged_idx_scale=paged_idx_scale,
             score_block_table=request_block_table,
-            score_seq_lens=seq_lens.view(request_batch_size, -1)[:, -1],
+            score_seq_lens=seq_lens.view(request_batch_size, -1)[:, -1].contiguous(),
             decode_query_len=total_tokens // request_batch_size,
         )
         o = torch.where(valid_token_mask[:, None, None], o, torch.zeros_like(o))
@@ -4429,6 +4465,26 @@ class MSAAttention(nn.Module):
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output
+
+    def forward_dspark_query_block(
+        self,
+        hidden_states: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        kv_cache: LayerKVCache,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Evaluate a fixed-width DSpARK block with non-causal intra-block visibility."""
+        return self._forward_target_verify(
+            hidden_states,
+            attn_inputs,
+            kv_cache,
+            x_fp8=x_fp8,
+            x_scale=x_scale,
+            use_fused_addressing=True,
+            use_paged_capacity_bound=True,
+            noncausal_query_block=True,
+        )
 
     def forward_paged_continuation(
         self,

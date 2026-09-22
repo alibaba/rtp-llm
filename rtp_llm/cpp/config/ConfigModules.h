@@ -175,29 +175,29 @@ struct KVCacheConfig {
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool        enable_memory_cache_sm_copy             = false;
-    std::string memory_cache_h2d_copy_mode                = "auto";
-    bool        memory_cache_h2d_copy_strict              = false;
-    bool        enable_memory_cache_h2d_3d_batch_auto     = false;
-    std::string memory_cache_d2h_copy_mode                = "auto";
-    bool        memory_cache_d2h_copy_strict              = false;
-    bool        enable_memory_cache_d2h_3d_batch_auto     = false;
-    bool        enable_remote_cache                       = false;
-    bool    write_cache_sync                             = false;
-    bool    enable_tiered_memory_cache                   = false;
-    bool    enable_gpu_prefix_tree                       = true;
-    bool    enable_prefix_tree_memory_cache              = true;
-    bool    enable_legacy_memory_connector_fallback      = true;
-    int64_t prefix_tree_memory_state_swa_pool_ratio      = 0;
-    bool    enable_dsv4_state_block_independent_eviction = false;
-    int64_t device_cache_min_free_blocks                 = 0;
-    bool    enable_memory_cache_remote_eviction           = false;
-    int     device_cache_high_watermark_ratio             = 95;
-    int     memory_cache_high_watermark_ratio             = 95;
-    int     memory_cache_remote_eviction_watermark_ratio  = 90;
-    int     memory_cache_remote_eviction_timeout_ms       = 2000;
-    int     memory_cache_remote_eviction_max_blocks       = 32;
-    int     load_cache_retry_times = 1;  // Maximum retry attempts for load cache transfer failures
+    bool        enable_memory_cache_sm_copy                  = false;
+    std::string memory_cache_h2d_copy_mode                   = "auto";
+    bool        memory_cache_h2d_copy_strict                 = false;
+    bool        enable_memory_cache_h2d_3d_batch_auto        = false;
+    std::string memory_cache_d2h_copy_mode                   = "auto";
+    bool        memory_cache_d2h_copy_strict                 = false;
+    bool        enable_memory_cache_d2h_3d_batch_auto        = false;
+    bool        enable_remote_cache                          = false;
+    bool        write_cache_sync                             = false;
+    bool        enable_tiered_memory_cache                   = false;
+    bool        enable_gpu_prefix_tree                       = true;
+    bool        enable_prefix_tree_memory_cache              = true;
+    bool        enable_legacy_memory_connector_fallback      = true;
+    int64_t     prefix_tree_memory_state_swa_pool_ratio      = 0;
+    bool        enable_dsv4_state_block_independent_eviction = false;
+    int64_t     device_cache_min_free_blocks                 = 0;
+    bool        enable_memory_cache_remote_eviction          = false;
+    int         device_cache_high_watermark_ratio            = 95;
+    int         memory_cache_high_watermark_ratio            = 95;
+    int         memory_cache_remote_eviction_watermark_ratio = 90;
+    int         memory_cache_remote_eviction_timeout_ms      = 2000;
+    int         memory_cache_remote_eviction_max_blocks      = 32;
+    int         load_cache_retry_times = 1;  // Maximum retry attempts for load cache transfer failures
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
@@ -329,7 +329,8 @@ enum SpeculativeType {
     SP_TYPE_MTP           = 2,  // Multi-token prediction (DeepSeek-V3)
     SP_TYPE_EAGLE3        = 3,  // EAGLE-3
     SP_TYPE_EAGLE         = 4,  // EAGLE
-    SP_TYPE_DETERMINISTIC = 5   // Deterministic (Prompt-Lookup)
+    SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
+    SP_TYPE_DSPARK        = 6   // DSpARK block-diffusion draft
 };
 
 struct SpeculativeExecutionConfig {
@@ -345,6 +346,8 @@ struct SpeculativeExecutionConfig {
     int             fp8_kv_cache                    = -1;
     std::string     quantization                    = "";
     std::string     checkpoint_path                 = "";
+    int64_t         sp_dspark_mask_token_id         = -1;
+    bool            sp_dspark_sample_from_anchor    = true;
     std::string     to_string() const;
 
     // Helper functions for enum conversion

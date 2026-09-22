@@ -16,7 +16,10 @@ public:
                             const SpeculativeExecutionConfig&  sp_config,
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-        propose_step_(sp_config.gen_num_per_cycle) {}
+        propose_step_(sp_config.gen_num_per_cycle),
+        is_dspark_(sp_config.type == SP_TYPE_DSPARK),
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -65,6 +68,42 @@ public:
                                           const SamplerOutput&   sampler_output,
                                           TensorHolder&          host_holder);
 
+    void validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const;
+
+    void buildDSparkProposeInput(GptModelInputs&      model_input,
+                                 const torch::Tensor& anchors,
+                                 const torch::Tensor& committed_ends,
+                                 TensorHolder&        host_holder);
+
+    struct DSparkRoundState {
+        torch::Tensor anchors;
+        torch::Tensor committed_ends;
+        torch::Tensor position_bases;
+    };
+
+    DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
+                                           const GptModelInputs& model_input,
+                                           TensorHolder&         host_holder) const;
+
+    void prepareDSparkProposeModelInput(const DSparkRoundState& round_state,
+                                        GptModelInputs&         model_input,
+                                        TensorHolder&           host_holder);
+
+    void prepareDSparkTargetVerifyModelInput(const DSparkRoundState& round_state,
+                                             GptModelInputs&         model_input,
+                                             const torch::Tensor&    proposals,
+                                             TensorHolder&           host_holder);
+
+    void prepareDSparkTargetVerifyModelInput(GptModelInputs&      model_input,
+                                             const torch::Tensor& anchors,
+                                             const torch::Tensor& committed_ends,
+                                             const torch::Tensor& proposals,
+                                             TensorHolder&        host_holder);
+
+    void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
+                                           const torch::Tensor& target_features,
+                                           size_t               batch_size);
+
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -105,6 +144,22 @@ protected:
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
-    int propose_step_;
+    torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
+    torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
+    torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
+    torch::Tensor collectDSparkPositionBases(const StreamGroups& stream_groups) const;
+    torch::Tensor expandDSparkPositionIds(const torch::Tensor& position_bases, int64_t width) const;
+    int64_t       dsparkQueryWidth() const {
+        return propose_step_ + static_cast<int64_t>(!dspark_sample_from_anchor_);
+    }
+
+    int     propose_step_;
+    bool    is_dspark_                 = false;
+    int32_t dspark_mask_token_id_      = -1;
+    bool    dspark_sample_from_anchor_ = true;
+
+    torch::Tensor dspark_combo_cache_;
+    torch::Tensor dspark_input_lengths_cache_;
+    torch::Tensor dspark_lm_indexes_cache_;
 };
 }  // namespace rtp_llm

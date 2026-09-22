@@ -965,7 +965,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MTP", SP_TYPE_MTP)
         .value("EAGLE3", SP_TYPE_EAGLE3)
         .value("EAGLE", SP_TYPE_EAGLE)
-        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC);
+        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC)
+        .value("DSPARK", SP_TYPE_DSPARK);
 
     // Register SpeculativeExecutionConfig
     py::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
@@ -993,6 +994,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("fp8_kv_cache", &SpeculativeExecutionConfig::fp8_kv_cache)
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
+        .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
+        .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -1007,10 +1010,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.fp8_kv_cache,
                                       self.quantization,
                                       self.checkpoint_path,
-                                      self.deterministic_draft_exact_match);
+                                      self.deterministic_draft_exact_match,
+                                      self.sp_dspark_mask_token_id,
+                                      self.sp_dspark_sample_from_anchor);
             },
             [](py::tuple t) {
-                if (t.size() != 10 && t.size() != 11 && t.size() != 12)
+                if (t.size() != 10 && t.size() != 11 && t.size() != 12 && t.size() != 13 && t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1029,8 +1034,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     c.quantization    = t[next_field++].cast<std::string>();
                     c.checkpoint_path = t[next_field++].cast<std::string>();
-                    if (t.size() == 12) {
-                        c.deterministic_draft_exact_match = t[next_field].cast<bool>();
+                    if (t.size() >= 12) {
+                        c.deterministic_draft_exact_match = t[next_field++].cast<bool>();
+                    }
+                    if (t.size() >= 13) {
+                        c.sp_dspark_mask_token_id = t[next_field++].cast<int64_t>();
+                    }
+                    if (t.size() == 14) {
+                        c.sp_dspark_sample_from_anchor = t[next_field].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());

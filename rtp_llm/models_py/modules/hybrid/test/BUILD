@@ -109,3 +109,10 @@ py_test(
     tags = ["open_skip", "SM100_X86"],
     exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
 )
+
+py_test(
+    name = "test_minimax_m31_dspark_attention",
+    srcs = ["test_minimax_m31_dspark_attention.py"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "short",
+)

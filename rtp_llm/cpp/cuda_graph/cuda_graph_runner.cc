@@ -840,11 +840,24 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     RTP_LLM_CHECK_WITH_INFO(!capture_range_.empty(),
                             "decode cuda graph is enabled but capture_range_ is empty; refusing normal fallback");
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_batch_size);
+    if (require_exact_decode_geometry_ && it == capture_range_.end()) {
+        RTP_LLM_LOG_DEBUG("exact decode CUDA graph batch exceeds capture range: batch=%d max_capture=%d; "
+                          "run eager forward",
+                          state.current_batch_size,
+                          capture_range_.back());
+        return false;
+    }
     RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),
                             "decode cuda graph is enabled but batch size %d exceeds max captured %d; "
                             "extend decode_capture_batch_sizes or reduce batch size",
                             state.current_batch_size,
                             capture_range_.back());
+    if (require_exact_decode_geometry_ && *it != state.current_batch_size) {
+        RTP_LLM_LOG_DEBUG("exact decode CUDA graph has no batch bucket: batch=%d next_capture=%d; run eager forward",
+                          state.current_batch_size,
+                          *it);
+        return false;
+    }
     state.current_real_graph_bs = *it;
     RTP_LLM_LOG_DEBUG(
         "batch size used in replay: %d (graph key %d)", state.current_batch_size, state.current_real_graph_bs);
@@ -870,6 +883,16 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
             "decode cuda graph is enabled but cannot infer prefill token count without CPU sync; refusing normal fallback");
     } else {
         state.seq_len_sum = cuda_graph_bs;
+    }
+    if (require_exact_decode_geometry_) {
+        const int expected_tokens = state.current_batch_size * num_tokens_per_bs_;
+        if (state.seq_len_sum != expected_tokens) {
+            RTP_LLM_LOG_DEBUG("exact decode CUDA graph token geometry mismatch: tokens=%d expected=%d; "
+                              "run eager forward",
+                              state.seq_len_sum,
+                              expected_tokens);
+            return false;
+        }
     }
     RTP_LLM_LOG_DEBUG("can run cuda graph for decode");
     return true;
@@ -943,6 +966,12 @@ bool CudaGraphRunner::canReplayInputHiddens(const PyModelInputs& inputs, const C
 
     if (input_hiddens.dim() == 0) {
         return input_hiddens.numel() == captured_hiddens.numel();
+    }
+    if (require_exact_decode_geometry_ && input_hiddens.size(0) != captured_hiddens.size(0)) {
+        RTP_LLM_LOG_DEBUG("skip exact CUDA graph replay: input_hiddens rows mismatch, live=%ld captured=%ld",
+                          input_hiddens.size(0),
+                          captured_hiddens.size(0));
+        return false;
     }
     if (input_hiddens.size(0) > captured_hiddens.size(0)) {
         return false;
@@ -1152,11 +1181,11 @@ void CudaGraphRunner::initCapture() {
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
-        // DSv4 MTP draft consumes the target's pre-hc residual ([T, hc*dim])
-        // as input_hiddens; for everyone else hc_mult_ == 1 so this matches
-        // the post-reduce hidden size. The output tensor below stays at
-        // hidden_size_ (post-reduce) regardless.
-        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
+        // The input row width is independent from the model output width:
+        // MTP commonly uses hidden_size * hc_mult while DSpARK commit consumes
+        // a concatenation of target-layer features.
+        inputs.input_hiddens =
+            torch::zeros({max_num_token_, static_cast<int64_t>(input_hidden_size_)}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 

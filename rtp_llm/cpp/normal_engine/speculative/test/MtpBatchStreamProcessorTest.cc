@@ -144,6 +144,130 @@ public:
     }
 };
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkBuildsFixedWidthProposalAndVerifyInputs) {
+    ModelConfig                 model_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types               = {CacheGroupType::FULL};
+    model_config.max_seq_len               = 128;
+    model_config.vocab_size                = 16;
+    model_config.num_layers                = 1;
+    sp_config.type                         = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle            = 3;
+    sp_config.sp_dspark_mask_token_id      = 15;
+    sp_config.sp_dspark_sample_from_anchor = true;
+
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    TensorHolder            holder;
+    GptModelInputs          proposal_input;
+    auto                    anchors        = torch::tensor({2, 7}, torch::kInt32);
+    auto                    committed_ends = torch::tensor({11, 23}, torch::kInt32);
+    processor.buildDSparkProposeInput(proposal_input, anchors, committed_ends, holder);
+
+    EXPECT_EQ(toVec<int32_t>(proposal_input.combo_tokens), (std::vector<int32_t>{2, 15, 15, 7, 15, 15}));
+    EXPECT_EQ(toVec<int32_t>(proposal_input.input_lengths), (std::vector<int32_t>{3, 3}));
+    EXPECT_EQ(toVec<int32_t>(proposal_input.prefix_lengths), (std::vector<int32_t>{11, 23}));
+    EXPECT_EQ(toVec<int32_t>(proposal_input.lm_output_indexes), (std::vector<int32_t>{0, 1, 2, 3, 4, 5}));
+    EXPECT_FALSE(proposal_input.last_hidden_states.defined());
+    EXPECT_TRUE(proposal_input.is_target_verify);
+
+    GptModelInputs verify_input;
+    auto           proposals = torch::tensor({{3, 4, 5}, {8, 9, 10}}, torch::kInt32);
+    processor.prepareDSparkTargetVerifyModelInput(verify_input, anchors, committed_ends, proposals, holder);
+    EXPECT_EQ(toVec<int32_t>(verify_input.combo_tokens), (std::vector<int32_t>{2, 3, 4, 5, 7, 8, 9, 10}));
+    EXPECT_EQ(toVec<int32_t>(verify_input.input_lengths), (std::vector<int32_t>{4, 4}));
+    EXPECT_EQ(toVec<int32_t>(verify_input.prefix_lengths), (std::vector<int32_t>{11, 23}));
+    EXPECT_EQ(toVec<int32_t>(verify_input.lm_output_indexes), (std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+    EXPECT_TRUE(verify_input.is_target_verify);
+
+    auto target_features = torch::zeros({8, 6}, torch::TensorOptions().device(torch::kCUDA));
+    processor.updateDecodePostDSparkCommitInput(verify_input, target_features, 2);
+    EXPECT_EQ(verify_input.last_hidden_states.data_ptr(), target_features.data_ptr());
+    EXPECT_EQ(verify_input.last_hidden_states_layout, MtpHiddenStatesLayout::GLOBAL);
+    // Every TP rank must retain the dense verify-row geometry for the commit
+    // forward. Shrinking this to one row per request makes the TP lm-head
+    // collective use different element counts and deadlock.
+    EXPECT_EQ(toVec<int32_t>(verify_input.lm_output_indexes), (std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkCanExcludeAnchorFromLmRows) {
+    ModelConfig                 model_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types               = {CacheGroupType::FULL};
+    model_config.max_seq_len               = 128;
+    model_config.vocab_size                = 16;
+    model_config.num_layers                = 1;
+    sp_config.type                         = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle            = 3;
+    sp_config.sp_dspark_mask_token_id      = 15;
+    sp_config.sp_dspark_sample_from_anchor = false;
+
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    TensorHolder            holder;
+    GptModelInputs          input;
+    processor.buildDSparkProposeInput(
+        input, torch::tensor({2, 7}, torch::kInt32), torch::tensor({11, 23}, torch::kInt32), holder);
+    EXPECT_EQ(toVec<int32_t>(input.combo_tokens), (std::vector<int32_t>{2, 15, 15, 15, 7, 15, 15, 15}));
+    EXPECT_EQ(toVec<int32_t>(input.input_lengths), (std::vector<int32_t>{4, 4}));
+    EXPECT_EQ(toVec<int32_t>(input.lm_output_indexes), (std::vector<int32_t>{1, 2, 3, 5, 6, 7}));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSingleRequestDSparkSyntheticRound) {
+    ModelConfig                 model_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types               = {CacheGroupType::FULL};
+    model_config.max_seq_len               = 128;
+    model_config.vocab_size                = 6;
+    model_config.num_layers                = 1;
+    sp_config.type                         = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle            = 3;
+    sp_config.sp_dspark_mask_token_id      = 5;
+    sp_config.sp_dspark_sample_from_anchor = true;
+
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    TensorHolder            holder;
+    auto                    anchors        = torch::tensor({0}, torch::kInt32);
+    auto                    committed_ends = torch::tensor({9}, torch::kInt32);
+
+    GptModelInputs proposal_input;
+    processor.buildDSparkProposeInput(proposal_input, anchors, committed_ends, holder);
+    EXPECT_EQ(toVec<int32_t>(proposal_input.combo_tokens), (std::vector<int32_t>{0, 5, 5}));
+
+    auto                            float_cuda  = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                            base_logits = torch::tensor({{0.0f, 20.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+                                                                 {0.0f, 0.0f, 20.0f, 0.0f, 0.0f, 0.0f},
+                                                                 {0.0f, 0.0f, 0.0f, 20.0f, 0.0f, 0.0f}},
+                                     float_cuda);
+    auto                            temperature = torch::full({1}, 1.0e-6f, float_cuda);
+    auto                            markov_w1   = torch::zeros({6, 2}, float_cuda);
+    auto                            markov_w2   = torch::zeros({6, 2}, float_cuda);
+    speculative::SpeculativeSampler sampler(torch::Tensor(), 3, speculative::DraftProposalMode::LEGACY);
+    auto draft = sampler.sampleDSparkDraft(base_logits, anchors.to(torch::kCUDA), temperature, markov_w1, markov_w2, 6);
+    EXPECT_EQ(toVec<int32_t>(draft.token_ids), (std::vector<int32_t>{1, 2, 3}));
+
+    GptModelInputs verify_input;
+    processor.prepareDSparkTargetVerifyModelInput(verify_input, anchors, committed_ends, draft.token_ids, holder);
+    EXPECT_EQ(toVec<int32_t>(verify_input.combo_tokens), (std::vector<int32_t>{0, 1, 2, 3}));
+
+    auto target_features = torch::arange(16, float_cuda).reshape({4, 4});
+    processor.updateDecodePostDSparkCommitInput(verify_input, target_features, 1);
+    EXPECT_EQ(verify_input.last_hidden_states.data_ptr(), target_features.data_ptr());
+
+    // The next proposal rewrites the complete fixed-width query block: no
+    // rejected/stale token from the previous verify row remains reachable.
+    processor.buildDSparkProposeInput(
+        proposal_input, torch::tensor({2}, torch::kInt32), torch::tensor({11}, torch::kInt32), holder);
+    EXPECT_EQ(toVec<int32_t>(proposal_input.combo_tokens), (std::vector<int32_t>{2, 5, 5}));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMemcpy) {
     constexpr int64_t stream_count = 64;
     constexpr int64_t score_len    = 4;

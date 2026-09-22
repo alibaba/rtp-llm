@@ -59,6 +59,12 @@ class ModelConfig(CppModelConfig):
     _python_fields = {
         "is_mtp",
         "mtp_layer_offset",
+        "dspark_noise_token_id",
+        "dspark_target_layer_ids",
+        "dspark_markov_rank",
+        "dspark_sample_from_anchor",
+        "mock_nvfp4_moe",
+        "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
         "has_lm_head_bias",
@@ -520,6 +526,14 @@ class ModelConfig(CppModelConfig):
         # Additional Python-only fields
         self.is_mtp: bool = False
         self.mtp_layer_offset: int = 0
+        # DSpARK draft checkpoint metadata. Proposal width is runtime-owned by
+        # SpeculativeExecutionConfig.gen_num_per_cycle.
+        self.dspark_noise_token_id: Optional[int] = None
+        self.dspark_target_layer_ids: Optional[list[int]] = None
+        self.dspark_markov_rank: Optional[int] = None
+        self.dspark_sample_from_anchor: bool = True
+        self.mock_nvfp4_moe: bool = False
+        self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False

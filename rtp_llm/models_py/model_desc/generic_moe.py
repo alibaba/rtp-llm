@@ -516,26 +516,16 @@ class GenericMoeDecoderLayer(nn.Module):
             hw_kernel_config,
         )
 
-        # Determine if this is a Dense layer (before first MoE layer or dense only)
-        if layer_idx not in config.moe_layer_index:
-            self.mlp = DenseMLP(
-                config.activation_type,
-                parallelism_config,
-                weights,
-                quant_config,
-                swiglu_oai_params=_resolve_swiglu_oai_params(config),
-            )
-        else:
-            self.mlp = GenericMoeLayer(
-                config,
-                parallelism_config,
-                weights,
-                moe_config,
-                max_generate_batch_size,
-                enable_cuda_graph=enable_cuda_graph,
-                hw_kernel_config=hw_kernel_config,
-                layer_idx=layer_idx,
-            )
+        self.mlp = self._create_mlp(
+            config,
+            parallelism_config,
+            weights,
+            moe_config,
+            max_generate_batch_size,
+            enable_cuda_graph,
+            hw_kernel_config,
+            layer_idx,
+        )
 
         _prefetch_gate = getattr(self.self_attn, "cp_prefix_prefetch_enabled", None)
         self._join_cp_prefix_prefetch = (
@@ -596,6 +586,39 @@ class GenericMoeDecoderLayer(nn.Module):
             and self.mlp.shared_expert is not None
             and self._fuse_post_norm_quant_moe_params is not None
         )
+
+    def _create_mlp(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        moe_config: MoeConfig,
+        max_generate_batch_size: int,
+        enable_cuda_graph: bool,
+        hw_kernel_config: Optional["HWKernelConfig"],
+        layer_idx: int,
+    ) -> nn.Module:
+        quant_config = config.quant_config
+        # Determine if this is a Dense layer (before first MoE layer or dense only)
+        if layer_idx not in config.moe_layer_index:
+            return DenseMLP(
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                swiglu_oai_params=_resolve_swiglu_oai_params(config),
+            )
+        else:
+            return GenericMoeLayer(
+                config,
+                parallelism_config,
+                weights,
+                moe_config,
+                max_generate_batch_size,
+                enable_cuda_graph=enable_cuda_graph,
+                hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
+            )
 
     def _create_attention(
         self,

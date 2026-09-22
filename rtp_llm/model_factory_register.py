@@ -21,6 +21,20 @@ _loaded_model_modules = _lazy_model_registry.loaded_modules
 _internal_lazy_models_registered = False
 _internal_legacy_models_loaded = False
 
+MINIMAX_M3_VERSION_ENV = "MINIMAX_M3_VERSION"
+
+
+def _get_minimax_m3_auto_model_type() -> str:
+    """Resolve the shared HF architecture without changing explicit MODEL_TYPE."""
+    version = os.environ.get(MINIMAX_M3_VERSION_ENV, "3.1").strip().lower()
+    if version in ("3.1", "31", "m3.1", "m31"):
+        return "minimax_m31_vl"
+    if version in ("3", "3.0", "m3", "m3.0"):
+        return "minimax_m3_vl"
+    raise ValueError(
+        f"invalid {MINIMAX_M3_VERSION_ENV}={version!r}; expected '3.1' or '3'"
+    )
+
 
 def register_model(
     name: str,
@@ -236,6 +250,13 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model(
         "minimax_m3_mtp", "rtp_llm.models.minimax_m3_mtp", ["MiniMaxM3MTP"]
     )
+    register_lazy_model("minimax_m31", "rtp_llm.models.minimax_m31")
+    register_lazy_model("minimax_m31_vl", "rtp_llm.models.minimax_m31_vl")
+    register_lazy_model(
+        "minimax_m31_dspark",
+        "rtp_llm.models.minimax_m31_dspark",
+        ["MiniMaxM31DSpark"],
+    )
     register_lazy_model(
         "minimax_m3_vl_mtp",
         "rtp_llm.models.minimax_m3_mtp",
@@ -420,6 +441,8 @@ class ModelDict:
                     return "gpt_neox_13b"
                 else:
                     return "gpt_neox"
+            if architecture == "MiniMaxM3SparseForConditionalGeneration":
+                return _get_minimax_m3_auto_model_type()
             return ModelDict.get_ft_model_type_by_hf_architectures(architecture)
         else:
             logging.warning(f"config have no architectures: {config}")

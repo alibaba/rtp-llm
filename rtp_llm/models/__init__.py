@@ -30,6 +30,9 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "MiniMaxM3Eagle1": "rtp_llm.models.minimax_m3_eagle1",
     "MiniMaxM3Eagle3": "rtp_llm.models.minimax_m3_eagle3",
     "MiniMaxM3MTP": "rtp_llm.models.minimax_m3_mtp",
+    "MiniMaxM31": "rtp_llm.models.minimax_m31",
+    "MiniMaxM31_VL": "rtp_llm.models.minimax_m31_vl",
+    "MiniMaxM31DSpark": "rtp_llm.models.minimax_m31_dspark",
     "MiniMaxM3VLMTP": "rtp_llm.models.minimax_m3_mtp",
     "Baichuan": "rtp_llm.models.llama",
     "Llava": "rtp_llm.models.llava",
@@ -65,6 +68,8 @@ from .jina_bert.jina_bert import JinaBert
 from .megatron_bert import MegatronBert
 from .minimax_m3 import MiniMaxM3
 from .minimax_m3_vl import MiniMaxM3_VL
+from .minimax_m31 import MiniMaxM31
+from .minimax_m31_vl import MiniMaxM31_VL
 from .mixtral import Mixtral
 from .qwen3_next.qwen3_next import Qwen3Next
 from .qwen3_next.qwen3_next_mtp import Qwen3NextMTP

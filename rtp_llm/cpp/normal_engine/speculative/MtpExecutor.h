@@ -105,6 +105,10 @@ protected:
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
+    SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
+                                      const torch::Tensor& base_logits,
+                                      const torch::Tensor& anchors);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs&     model_input,
@@ -208,6 +212,9 @@ private:
     size_t                                           hidden_size_;
     size_t                                           propose_step_;
     size_t                                           draft_vocab_size_;
+    bool                                             is_dspark_ = false;
+    torch::Tensor                                    dspark_markov_w1_;
+    torch::Tensor                                    dspark_markov_w2_;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;

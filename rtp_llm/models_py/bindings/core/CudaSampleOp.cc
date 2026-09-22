@@ -4,6 +4,7 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
@@ -375,6 +376,28 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                int64_t(stream));
 }
 
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
+    RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
+                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
+                            "probability sampling expects contiguous CUDA FP32 [batch,vocab] probabilities");
+    const auto           batch_size = probabilities.size(0);
+    c10::cuda::CUDAGuard device_guard(probabilities.device());
+    auto [seed, offset] = get_seed_and_offset(/*increment_size=*/4);
+    auto token_ids =
+        torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(probabilities.device()));
+    auto valid = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(probabilities.device()));
+    sampling_from_probs(probabilities,
+                        token_ids,
+                        valid,
+                        std::nullopt,
+                        /*deterministic=*/true,
+                        std::nullopt,
+                        seed,
+                        std::nullopt,
+                        offset);
+    return token_ids;
+}
+
 void rejectionSampling(const RejectionSamplingParams& params) {
     RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
     RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
@@ -737,6 +760,13 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                  params.output_emitted_token_num_d,
                                  true,
                                  int64_t(stream));
+}
+
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
+    RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
+                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
+                            "probability sampling expects contiguous CUDA/HIP FP32 [batch,vocab] probabilities");
+    return torch::multinomial(probabilities, 1, /*replacement=*/false).squeeze(-1).to(torch::kInt32);
 }
 
 void rejectionSampling(const RejectionSamplingParams& params) {

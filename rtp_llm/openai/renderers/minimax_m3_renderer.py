@@ -129,3 +129,4 @@ class MiniMaxM3Renderer(ReasoningToolBaseRenderer):
 
 
 register_renderer("minimax_m3", MiniMaxM3Renderer)
+register_renderer("minimax_m31", MiniMaxM3Renderer)

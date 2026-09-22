@@ -39,6 +39,12 @@ struct GraphParams {
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
     // produced by the target's getMtpTargetHiddenStates accessor.
     int64_t hc_mult = 1;
+    // Width of one input_hiddens row. This may differ from model hidden_size
+    // for auxiliary-feature consumers such as DSpARK commit.
+    std::size_t input_hidden_size = 0;
+    // DSpARK commit/propose side effects are only safe for the exact captured
+    // request geometry. Missing buckets must use eager execution, not padding.
+    bool require_exact_decode_geometry = false;
     // Some draft models intentionally execute prefill with a fixed max-batch token layout.
     // Keep this execution capability separate from hidden-width expansion.
     bool draft_prefill_requires_full_token_capacity = false;

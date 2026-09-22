@@ -1112,6 +1112,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
+            RTP_LLM_CHECK_WITH_INFO(dspark_model_role_ == DSparkModelRole::NONE,
+                                    "DSpARK does not support layer micro-batching");
             return forwardMicroBatched(inputs);
         }
         const bool              has_context_request   = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
@@ -1210,15 +1212,34 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto py_model_forward = py_model_.attr("forward");
-            auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
-            py_model_outputs      = outputs.cast<PyModelOutputs>();
-            hidden_states         = py_model_outputs.hidden_states.clone();
+            held_attn_pyobj_             = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            const char* method           = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                           dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                            "forward";
+            auto        py_model_forward = py_model_.attr(method);
+            auto        outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
+            py_model_outputs             = outputs.cast<PyModelOutputs>();
+            hidden_states                = py_model_outputs.hidden_states.clone();
         }
 
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
+        }
+
+        // DSpARK has two construction-time wrapper roles with deliberately
+        // different output contracts. Proposal rows need the normal lm_head
+        // so C++ can apply the Markov correction and sample draft tokens.
+        // Commit only injects target features into the draft KV cache; running
+        // final norm/lm_head (or CP output gathering) here is unused work and
+        // changes a cache-side-effect-only operation into a logits forward.
+        if (dspark_model_role_ != DSparkModelRole::NONE) {
+            if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
+                return callForwardPostLayers(hidden_states, inputs, true);
+            }
+            GptModelOutputs outputs;
+            outputs.hidden_states     = hidden_states;
+            outputs.all_hidden_states = hidden_states;
+            return outputs;
         }
 
         if (!(device_props_.enable_prefill_cp && has_context_request) && inputs.mtp_iteration_step == 0

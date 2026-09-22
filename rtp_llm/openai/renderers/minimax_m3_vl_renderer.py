@@ -185,3 +185,4 @@ class MiniMaxM3VLRenderer(MiniMaxM3Renderer):
 
 
 register_renderer("minimax_m3_vl", MiniMaxM3VLRenderer)
+register_renderer("minimax_m31_vl", MiniMaxM3VLRenderer)
