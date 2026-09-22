@@ -6,6 +6,7 @@ This mode is used for dynamic batch processing.
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -116,6 +117,103 @@ class TestFlashInferNativePrefillSupport(unittest.TestCase):
         config = FMHAConfig()
         config.disable_flashinfer_native = True
         self.assertTrue(_is_fmha_impl_disabled("FlashInferNativePrefillImpl", config))
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestTRTLLMFMHAv2PrefillQuantization(unittest.TestCase):
+    def test_unit_scale_inputs_and_base_dtype_are_preserved(self):
+        module = "rtp_llm.models_py.modules.factory.attention.cuda_impl.trt"
+        for dtype in (torch.float16, torch.bfloat16):
+            for heads, kv_heads in ((4, 4), (28, 4)):
+                for fp8 in (False, True):
+                    for strided in (False, True):
+                        with self.subTest(
+                            dtype=dtype, heads=heads, fp8=fp8, strided=strided
+                        ):
+                            config = AttentionConfigs()
+                            config.head_num = heads
+                            config.kv_head_num = kv_heads
+                            config.size_per_head = 128
+                            config.dtype = dtype
+                            config.kv_cache_dtype = (
+                                KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE
+                            )
+                            config.fp8_kv_cache_mode = int(fp8)
+                            op = TRTLLMFMHAv2PrefillOp(config)
+                            op.attention_type = "mha" if heads == kv_heads else "gqa"
+                            width = (heads + 2 * kv_heads) * 128
+                            values = torch.tensor(
+                                [
+                                    0,
+                                    1,
+                                    -1,
+                                    100,
+                                    -100,
+                                    448,
+                                    -448,
+                                    500,
+                                    -500,
+                                    1000,
+                                    -1000,
+                                    1e-4,
+                                ],
+                                dtype=dtype,
+                                device="cuda",
+                            )
+                            qkv = values.repeat((4 * width + 11) // 12)[
+                                : 4 * width
+                            ].view(4, width)
+                            if strided:
+                                qkv = qkv.repeat_interleave(2, dim=1)[:, ::2]
+                            original = qkv.clone()
+                            expected = (
+                                qkv.float().clamp(-448, 448).to(torch.float8_e4m3fn)
+                                if fp8
+                                else qkv
+                            )
+                            params = SimpleNamespace(
+                                seq_lens=torch.tensor(
+                                    [4], device="cuda", dtype=torch.int32
+                                ),
+                                max_q_len=4,
+                                max_kv_len=4,
+                                batch_size=1,
+                                cu_seqlens=torch.tensor(
+                                    [0, 4], device="cuda", dtype=torch.int32
+                                ),
+                            )
+                            with patch(
+                                f"{module}.trtllm_fmha_v2_prefill",
+                                return_value=torch.zeros(
+                                    4, heads, 128, device="cuda", dtype=dtype
+                                ),
+                            ) as fmha:
+                                output = op.forward(qkv, None, params)
+                            kwargs = fmha.call_args.kwargs
+                            actual = kwargs["qkv"]
+                            if heads == kv_heads:
+                                self.assertEqual(kwargs["input_layout"], "PACKED_QKV")
+                                self.assertEqual(actual.dtype, expected.dtype)
+                                actual = actual.reshape(4, width)
+                            else:
+                                self.assertEqual(
+                                    kwargs["input_layout"], "CONTIGUOUS_Q_KV"
+                                )
+                                for part in actual:
+                                    self.assertEqual(part.dtype, expected.dtype)
+                                actual = torch.cat(
+                                    [part.float().reshape(4, -1) for part in actual],
+                                    dim=1,
+                                )
+                            self.assertTrue(torch.isfinite(actual.float()).all().item())
+                            torch.testing.assert_close(
+                                actual.float(), expected.float(), rtol=0, atol=0
+                            )
+                            torch.testing.assert_close(qkv, original, rtol=0, atol=0)
+                            self.assertEqual(output.dtype, dtype)
+                            self.assertEqual(output.shape, (4, heads * 128))
+                            self.assertEqual(kwargs["out_dtype"], dtype)
+                            self.assertEqual(kwargs["bmm2_scale"], 1.0)
 
 
 class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):

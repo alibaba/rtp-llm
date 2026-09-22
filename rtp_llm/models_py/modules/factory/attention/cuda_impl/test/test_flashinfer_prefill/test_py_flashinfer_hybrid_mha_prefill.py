@@ -886,6 +886,169 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
                         atol=0.02,
                     )
 
+    def test_mode2_large_negative_logits_merge_distinct_values_with_subdivision(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+
+        device = torch.device("cuda")
+        harness = TestPyFlashinferHybridPrefillAttnOp()
+        harness.device = device
+        prefix_lengths = [33, 129, 4807]
+        input_lengths = [129, 4807, 33]
+        sequence_lengths = [
+            prefix + current for prefix, current in zip(prefix_lengths, input_lengths)
+        ]
+        physical_page_size = 64
+        for dtype in (torch.float16, torch.bfloat16):
+            for subdivision in (1, 2, 4):
+                with self.subTest(dtype=dtype, subdivision=subdivision):
+                    kernel_page_size = physical_page_size // subdivision
+                    config = harness._create_config(
+                        head_num=28,
+                        head_num_kv=4,
+                        size_per_head=128,
+                        seq_size_per_block=kernel_page_size,
+                    )
+                    config.attn_configs.dtype = dtype
+                    config.attn_configs.tokens_per_block = physical_page_size
+                    config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+                    config.attn_configs.fp8_kv_cache_mode = 2
+                    config.attn_configs.is_causal = True
+                    inputs = harness._create_chunked_prefill_attention_inputs(
+                        len(prefix_lengths),
+                        prefix_lengths,
+                        input_lengths,
+                        kernel_page_size,
+                        dtype=dtype,
+                    )
+
+                    physical_pages = sum(
+                        math.ceil(length / physical_page_size)
+                        for length in sequence_lengths
+                    )
+                    page_ids = list(range(1, 2 * physical_pages, 2))
+                    page_ids = page_ids[::2] + page_ids[1::2]
+                    physical_blocks = harness._create_kv_cache_block_ids(
+                        len(sequence_lengths), sequence_lengths, physical_page_size
+                    )
+                    block_table = torch.zeros_like(inputs.kv_cache_kernel_block_id)
+                    page_offset = 0
+                    for batch_idx, length in enumerate(sequence_lengths):
+                        num_physical_pages = math.ceil(length / physical_page_size)
+                        physical_blocks[batch_idx, :num_physical_pages] = torch.tensor(
+                            page_ids[page_offset : page_offset + num_physical_pages],
+                            dtype=torch.int32,
+                        )
+                        num_kernel_pages = math.ceil(length / kernel_page_size)
+                        for logical_page in range(num_kernel_pages):
+                            block_table[batch_idx, logical_page] = (
+                                physical_blocks[batch_idx, logical_page // subdivision]
+                                * subdivision
+                                + logical_page % subdivision
+                            )
+                        page_offset += num_physical_pages
+                    inputs.kv_cache_block_id = physical_blocks
+                    inputs.kv_cache_block_id_device = physical_blocks.to(device)
+                    inputs.kv_cache_kernel_block_id = block_table
+                    inputs.kv_cache_kernel_block_id_device = block_table.to(device)
+
+                    kernel_page_count = 2 * physical_pages * subdivision
+                    cache = LayerKVCache()
+                    cache.kv_cache_base = torch.zeros(
+                        kernel_page_count,
+                        2,
+                        4,
+                        kernel_page_size,
+                        128,
+                        dtype=torch.float8_e4m3fn,
+                        device=device,
+                    )
+                    cache.kv_scale_base = torch.ones(
+                        kernel_page_count,
+                        2 * 4 * kernel_page_size,
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    writer = KVCacheWriteOp(
+                        num_kv_heads=4,
+                        head_size=128,
+                        physical_page_size=physical_page_size,
+                        kernel_page_size=kernel_page_size,
+                        dynamic_mode=True,
+                    )
+                    prefix_params = rtp_llm_ops.FlashInferMlaAttnParams()
+                    prefix_params.fill_params(
+                        torch.zeros_like(inputs.prefix_lengths),
+                        inputs.prefix_lengths,
+                        inputs.prefix_lengths,
+                        block_table,
+                        kernel_page_size,
+                        False,
+                    )
+                    writer.set_params(prefix_params)
+                    k_prefix = torch.full(
+                        (sum(prefix_lengths), 4, 128), -32, dtype=dtype, device=device
+                    )
+                    writer.forward(k_prefix, torch.ones_like(k_prefix), cache)
+
+                    op = PyFlashinferHybridPrefillAttnOp(config.attn_configs, inputs)
+                    writer.set_params(op.prepare(inputs))
+                    total_tokens = sum(input_lengths)
+                    q = torch.full(
+                        (total_tokens, 28, 128), 32, dtype=dtype, device=device
+                    )
+                    k = torch.full(
+                        (total_tokens, 4, 128), -32, dtype=dtype, device=device
+                    )
+                    v = torch.full_like(k, 3)
+                    output = op.forward(q, k, v, cache, writer)
+                    self.assertEqual(output.shape, q.shape)
+                    self.assertEqual(output.dtype, dtype)
+                    self.assertTrue(torch.isfinite(output).all().item())
+
+                    scale_view = cache.kv_scale_base.view(
+                        kernel_page_count, 2, 4, kernel_page_size
+                    )
+                    restored_cache = cache.kv_cache_base.float() * scale_view.unsqueeze(
+                        -1
+                    )
+                    token_offset = 0
+                    for batch_idx, (prefix_length, input_length) in enumerate(
+                        zip(prefix_lengths, input_lengths)
+                    ):
+                        with self.subTest(prefix=prefix_length, current=input_length):
+                            positions = torch.arange(
+                                prefix_length + input_length, device=device
+                            )
+                            pages = inputs.kv_cache_kernel_block_id_device[
+                                batch_idx, positions // kernel_page_size
+                            ]
+                            offsets = positions % kernel_page_size
+                            restored = restored_cache[pages, :, :, offsets]
+                            expected_cache = torch.full_like(restored, -32)
+                            expected_cache[:, 1] = torch.where(
+                                positions < prefix_length, 1.0, 3.0
+                            ).view(-1, 1, 1)
+                            torch.testing.assert_close(
+                                restored, expected_cache, rtol=1e-5, atol=1e-5
+                            )
+
+                            actual = output[token_offset : token_offset + input_length]
+                            causal_count = torch.arange(
+                                1, input_length + 1, dtype=torch.float32, device=device
+                            )
+                            # All-one V would hide incorrect LSE merging.
+                            expected = (prefix_length + causal_count * 3) / (
+                                prefix_length + causal_count
+                            )
+                            expected = (
+                                expected.to(dtype).view(-1, 1, 1).expand_as(actual)
+                            )
+                            torch.testing.assert_close(
+                                actual, expected, rtol=1e-2, atol=1e-2
+                            )
+                        token_offset += input_length
+
 
 class TestDynamicFp8FactoryGating(unittest.TestCase):
     @staticmethod

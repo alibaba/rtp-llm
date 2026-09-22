@@ -35,6 +35,73 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         # Call parent setUp for common initialization
         super().setUp()
 
+    def test_dynamic_fp8_large_negative_logits_preserve_constant_values(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            for length in (33, 129, 4807):
+                with self.subTest(dtype=dtype, length=length):
+                    config = self._create_config(
+                        head_num=28,
+                        head_num_kv=4,
+                        size_per_head=128,
+                        seq_size_per_block=64,
+                    )
+                    config.attn_configs.dtype = dtype
+                    config.attn_configs.fp8_kv_cache_mode = 2
+                    config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+                    inputs = self._create_prefill_attention_inputs(1, [length], 64)
+                    op = PyFlashinferPrefillAttnOp(config.attn_configs)
+                    op.prepare(inputs)
+                    q = torch.full(
+                        (length, 28, 128), 32, dtype=dtype, device=self.device
+                    )
+                    k = torch.full(
+                        (length, 4, 128), -32, dtype=dtype, device=self.device
+                    )
+                    v = torch.ones_like(k)
+                    output = op.forward(q, k, v)
+                    torch.testing.assert_close(
+                        output, torch.ones_like(output), rtol=0.01, atol=0.01
+                    )
+
+    def test_dynamic_fp8_empty_causal_rows_are_finite(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            for sm_scale in (None, 1.0):
+                with self.subTest(dtype=dtype, sm_scale=sm_scale):
+                    config = self._create_config(
+                        head_num=28,
+                        head_num_kv=4,
+                        size_per_head=128,
+                        seq_size_per_block=64,
+                    )
+                    config.attn_configs.dtype = dtype
+                    config.attn_configs.fp8_kv_cache_mode = 2
+                    config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+                    op = PyFlashinferPrefillAttnOp(
+                        config.attn_configs, sm_scale=sm_scale
+                    )
+                    op.prefill_wrapper.plan(
+                        torch.tensor([0, 3], dtype=torch.int32, device=self.device),
+                        torch.tensor([0, 1], dtype=torch.int32, device=self.device),
+                        28,
+                        4,
+                        128,
+                        128,
+                        causal=True,
+                        sm_scale=sm_scale,
+                        q_data_type=dtype,
+                        kv_data_type=dtype,
+                        o_data_type=dtype,
+                    )
+                    q = torch.full((3, 28, 128), 32, dtype=dtype, device=self.device)
+                    k = torch.full((1, 4, 128), -32, dtype=dtype, device=self.device)
+                    output, lse = op.prefill_wrapper.run(
+                        q, k, torch.ones_like(k), return_lse=True
+                    )
+                    expected = torch.zeros_like(output)
+                    expected[-1] = 1
+                    torch.testing.assert_close(output, expected, rtol=0.01, atol=0.01)
+                    self.assertTrue(torch.isfinite(lse).all().item())
+
     def _create_kv_cache(
         self,
         total_blocks: int,

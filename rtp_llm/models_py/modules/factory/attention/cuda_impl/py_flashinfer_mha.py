@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, Optional
 
+import flashinfer
 import torch
 from flashinfer import decode as flashinfer_decode
 from flashinfer.cascade import merge_state_in_place
@@ -9,6 +10,7 @@ from flashinfer.prefill import (
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
 )
+from packaging.version import Version
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
@@ -246,7 +248,7 @@ def _page_geometry(attn_configs: AttentionConfigs) -> tuple[int, int, int]:
     )
 
 
-_DYNAMIC_FP8_DIRECT_SCALE_JIT_VERSION = "v3"
+_DYNAMIC_FP8_DIRECT_SCALE_JIT_VERSION = "v5"
 _DYNAMIC_FP8_DIRECT_SCALE_VARIANT_NAME = "RtpLlmDynamicFp8Attention<use_custom_mask>"
 _DYNAMIC_FP8_DIRECT_SCALE_VARIANT_DECL = r"""
 #include <flashinfer/attention/variants.cuh>
@@ -348,51 +350,69 @@ def _dynamic_fp8_decode_jit_args(
     )
 
 
-def _create_dynamic_fp8_decode_wrapper(
-    workspace: torch.Tensor,
-    q_dtype: torch.dtype,
-    output_dtype: torch.dtype,
-    head_dim: int,
-) -> BatchDecodeWithPagedKVCacheWrapper:
+def _get_dynamic_fp8_jit_module(jit_args: tuple[Any, ...]) -> tuple[Any, list[str]]:
+    required_apis = (
+        "gen_customize_batch_prefill_module",
+        "get_batch_prefill_jit_module",
+    )
+    if Version(flashinfer.__version__) < Version("0.6.9") or not all(
+        callable(getattr(flashinfer_decode, name, None)) for name in required_apis
+    ):
+        raise RuntimeError(
+            "FP8 KV cache mode 2 requires FlashInfer >= 0.6.9 with the "
+            "JitSpec batch-prefill API; found FlashInfer "
+            f"{flashinfer.__version__}. Install the project's updated CUDA dependencies."
+        )
+
     include_dir = (
         Path(__file__).resolve().parent / "flashinfer_direct_scale" / "include"
     )
     patched_header = include_dir / "flashinfer" / "attention" / "prefill.cuh"
     if not patched_header.is_file():
         raise RuntimeError(f"missing FlashInfer direct-scale header: {patched_header}")
+    math_header = include_dir / "flashinfer" / "math.cuh"
+    if not math_header.is_file():
+        raise RuntimeError(f"missing FlashInfer mode-2 math header: {math_header}")
 
-    jit_args = _dynamic_fp8_decode_jit_args(q_dtype, output_dtype, head_dim)
     uri = jit_args[0]
     with _g_flashinfer_jit_header_lock:
         cached_module = _g_dynamic_fp8_jit_modules.get(uri)
         if cached_module is None:
-            original_generator = flashinfer_decode.gen_customize_batch_prefill_module
-
-            def generate_with_direct_scale_headers(*args, **kwargs):
-                spec = original_generator(*args, **kwargs)
-                spec.extra_include_dirs = [
-                    include_dir,
-                    *(spec.extra_include_dirs or []),
-                ]
-                return spec
-
-            flashinfer_decode.gen_customize_batch_prefill_module = (
-                generate_with_direct_scale_headers
+            spec = flashinfer_decode.gen_customize_batch_prefill_module(
+                "fa2", *jit_args
             )
-            try:
-                jit_module = flashinfer_decode.get_batch_prefill_jit_module(
-                    uri,
-                    flashinfer_decode.gen_customize_batch_prefill_module(
-                        "fa2", *jit_args
-                    ).build_and_load(),
+            if not hasattr(spec, "extra_include_dirs") or not callable(
+                getattr(spec, "build_and_load", None)
+            ):
+                raise RuntimeError(
+                    "FP8 KV cache mode 2 requires a FlashInfer JitSpec with "
+                    "extra_include_dirs and build_and_load(); found FlashInfer "
+                    f"{flashinfer.__version__} returning {type(spec).__name__}."
                 )
-            finally:
-                flashinfer_decode.gen_customize_batch_prefill_module = (
-                    original_generator
-                )
+            spec.extra_include_dirs = [include_dir, *(spec.extra_include_dirs or [])]
+            # Relative upstream includes must see the same sentinel as the private kernel.
+            spec.extra_cuda_cflags = [
+                *(getattr(spec, "extra_cuda_cflags", None) or []),
+                "-include",
+                str(math_header),
+            ]
+            jit_module = flashinfer_decode.get_batch_prefill_jit_module(
+                uri, spec.build_and_load()
+            )
             cached_module = (jit_module, list(jit_args[7]))
             _g_dynamic_fp8_jit_modules[uri] = cached_module
+    return cached_module
 
+
+def _create_dynamic_fp8_decode_wrapper(
+    workspace: torch.Tensor,
+    q_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+    head_dim: int,
+) -> BatchDecodeWithPagedKVCacheWrapper:
+    cached_module = _get_dynamic_fp8_jit_module(
+        _dynamic_fp8_decode_jit_args(q_dtype, output_dtype, head_dim)
+    )
     wrapper = BatchDecodeWithPagedKVCacheWrapper(
         workspace,
         "HND",
@@ -403,6 +423,49 @@ def _create_dynamic_fp8_decode_wrapper(
     wrapper._jit_module = cached_module[0]
     wrapper._jit_additional_tensor_names = list(cached_module[1])
     return wrapper
+
+
+def _bind_dynamic_fp8_prefill_module(
+    wrapper: Any, dtype: torch.dtype, head_dim: int, sm_scale: Optional[float] = None
+) -> None:
+    scale = float(head_dim**-0.5 if sm_scale is None else sm_scale)
+    scale_uri = scale.hex().replace(".", "_").replace("-", "m").replace("+", "p")
+    uri = (
+        f"rtp_llm_dynamic_fp8_prefill_{_DYNAMIC_FP8_DIRECT_SCALE_JIT_VERSION}_"
+        f"{_dtype_uri_component(dtype)}_hd_{head_dim}_scale_{scale_uri}"
+    )
+    variant = f"""
+#include <flashinfer/attention/variant_helper.cuh>
+struct RtpLlmFp8PrefillAttention : AttentionVariantBase {{
+  static constexpr bool use_per_token_kv_scale = false;
+  uint32_t qo_len, kv_len, window_left;
+  float sm_scale_log2;
+  template <typename Params>
+  __device__ __forceinline__ RtpLlmFp8PrefillAttention(
+      const Params& params, uint32_t batch_idx, uint8_t*)
+      : qo_len(params.get_qo_len(batch_idx)), kv_len(params.get_kv_len(batch_idx)),
+        window_left(params.window_left >= 0 ? params.window_left : kv_len),
+        sm_scale_log2({scale!r}f * math::log2e) {{}}
+}};
+"""
+    jit_args = (
+        uri,
+        dtype,
+        dtype,
+        dtype,
+        torch.int32,
+        head_dim,
+        head_dim,
+        [],
+        [],
+        [],
+        [],
+        "RtpLlmFp8PrefillAttention",
+        variant,
+    )
+    module, tensor_names = _get_dynamic_fp8_jit_module(jit_args)
+    wrapper._jit_module = module
+    wrapper._jit_additional_tensor_names = list(tensor_names)
 
 
 def _validate_dynamic_fp8_scale(
@@ -539,8 +602,12 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
             "HND",
-            backend=backend,
+            backend="fa2" if self.dynamic_fp8 else backend,
         )
+        if self.dynamic_fp8:
+            _bind_dynamic_fp8_prefill_module(
+                self.prefill_wrapper, self.dtype, self.head_dim_qk
+            )
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -837,12 +904,16 @@ class PyFlashinferPrefillAttnOp(object):
         self.page_size = attn_configs.kernel_tokens_per_block
         # TODO: maybe use v_head_dim
         self.head_dim_vo = attn_configs.size_per_head
-        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            self.g_workspace_buffer,
-            backend=backend,
-        )
         self.dynamic_fp8 = _is_dynamic_fp8(attn_configs)
         self.dtype = attn_configs.dtype
+        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+            self.g_workspace_buffer,
+            backend="fa2" if self.dynamic_fp8 else backend,
+        )
+        if self.dynamic_fp8:
+            _bind_dynamic_fp8_prefill_module(
+                self.prefill_wrapper, self.dtype, self.head_dim_qk, sm_scale
+            )
         self.q_dtype = attn_q_dtype(attn_configs)
         self.kv_dtype = attn_kv_dtype(attn_configs)
         self.is_causal = attn_configs.is_causal
@@ -965,13 +1036,20 @@ class PyFlashinferHybridPrefillAttnOp(object):
         # The serial ragged/write/paged flow can share one workspace buffer.
         self.ragged_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
             self.g_workspace_buffer,
-            backend=backend,
+            backend="fa2" if self.dynamic_fp8 else backend,
         )
         self.prefix_paged_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
             "HND",
-            backend=backend,
+            backend="fa2" if self.dynamic_fp8 else backend,
         )
+        if self.dynamic_fp8:
+            _bind_dynamic_fp8_prefill_module(
+                self.ragged_wrapper, self.dtype, self.head_dim_qk
+            )
+            _bind_dynamic_fp8_prefill_module(
+                self.prefix_paged_wrapper, self.dtype, self.head_dim_qk
+            )
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
