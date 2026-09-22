@@ -17,25 +17,23 @@ environment:
   prefill_max_waiting_batches: 256
   config_overrides:
     max_inflight_per_prefill_worker: 1024
-    prefill_expression: 77.82664607924481 + 112.5170362714666 * batchSize + 10.87594301934867
-      * sum(computeTokens / 1024.)
+    prefill_expression: 77.82664607924481 + 112.5170362714666 * batchSize + 10.87594301934867 * sum(computeTokens / 1024.)
 execution:
-  timeout_s: 1200
+  timeout_s: 1800
   stage_timeout_s: 60
-  cleanup_timeout_s: 360
+  cleanup_timeout_s: 660
 metadata:
-  description: Empirical frontend prefix model; output cap independent, no looping;
-    actual timestamps available for true-ts playback.
+  description: Empirical frontend prefix lineage; ordinary single-run absolute cache gate at the known 125P to 64P control point.
   category: kv
 variants:
 - id: step
   program: step
 parameters:
   gate:
-    target_p: 8
-    warmup_timeout_s: 180
-    baseline_s: 30
-    observe_s: 180
+    target_p: 64
+    warmup_timeout_s: 240
+    baseline_s: 60
+    observe_s: 300
     sample_s: 1
     window_s: 10
     step_s: 1
@@ -43,7 +41,7 @@ parameters:
     max_gap_s: 5
     qps: 240
     qps_tolerance: 0.1
-    baseline_min_hit: 0.65
+    baseline_min_hit: 0.85
     baseline_max_spread: 0.05
     absolute_min_hit: 0.45
     max_drop: 0.25
@@ -57,7 +55,7 @@ parameters:
     phase_id: continuous
     poll_s: 0.1
     jvm_xms: 1g
-    jvm_xmx: 32g
+    jvm_xmx: 48g
     source:
       kind: trace
       model: prefix_lineage
@@ -69,10 +67,10 @@ parameters:
         output_tokens: 420
         priority: 50
     client:
-      DURATION_S: '420'
+      DURATION_S: '588'
       MAX_CONCURRENCY: '32768'
-      TIMEOUT_MS: '300000'
-      RESPONSE_TIMEOUT: '360'
+      TIMEOUT_MS: '600000'
+      RESPONSE_TIMEOUT: '660'
       REPLAY_UNIQUE_PREFIX: 'false'
       FETCH_OUTPUT_STREAM: 'true'
       N_CHANNELS: '16'
@@ -81,6 +79,6 @@ parameters:
       PRIORITY: '50'
       playback:
         mode: uniform
-        qps: 240
+        qps: 240.0
         max_laps: 1
         identity: structural-relabel

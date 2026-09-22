@@ -407,12 +407,12 @@ def write_report(directory, evidence, result):
     meta = run_meta(
         dict(id="cache-scale-in", instance=provenance.get("instance")),
         implementation=dict(
-            files=provenance.get("files"), master=provenance.get("historical_master")
+            files=provenance.get("files"), master=provenance.get("master_artifact")
         ),
         workload=provenance.get("trace"),
         configuration={
             k: provenance.get(k)
-            for k in ("topology", "performance", "master_config", "mock_formula_config")
+            for k in ("topology", "capacity", "performance", "master_config", "actual_master_config")
         },
         environment=provenance.get("client_environment"),
         evidence=[

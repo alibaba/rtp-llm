@@ -58,3 +58,18 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.compare \
 ```
 
 只能比较相同实例和声明配置。阶段按同名步骤对齐；缺采样显示为 `MISSING_DATA`，不能当作零。变化排序是调查入口，不自动等于产品回归。
+
+## Cache 缩容的单 run 与 A/B
+
+`config/scale_cases/cache_scale_in_lineage.yaml` 是真实前端前缀谱系流量的单 run 缩容门禁。分别使用普通启动路径运行旧、新 Master；可用 `FLEXLB_FT_MASTER_JAR` 指定 JAR，`FLEXLB_FT_MASTER_CONFIG_FILE` 指定实际配置。`FLEXLB_FT_MASTER_SOURCE_COMMIT` 只声明源码来源；每轮证据独立记录实际 JAR 哈希与生效配置，不要求事前 manifest。
+
+两轮完成后，再用只读的分析策略生成 A/B 报告：
+
+```bash
+PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.cache_gate_ab \
+  OLD_RUN_DIR NEW_RUN_DIR \
+  --config tools/online_eval/config/scale_cases/cache_scale_in_historical_ab.yaml \
+  --output AB_DIR
+```
+
+报告核对流量、拓扑、容量、性能和 Master 配置，缺字段会显示 UNKNOWN；曲线按缩容事件对齐。默认强判定观察 old FAIL / new PASS；`--mode weak` 只核对控制变量，`--mode none` 只出报告。A/B 不修改单 run 的 PASS / FAIL / INVALID 结论。

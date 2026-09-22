@@ -139,6 +139,8 @@ def observe(ctx, p, deadline):
     evidence["provenance"] = dict(
         instance=ctx.instance["id"],
         topology=dict(prefill=ctx.env.spec.n_prefill, decode=ctx.env.spec.n_decode),
+        capacity=dict(prefill_cache_blocks=ctx.env.spec.prefill_cache_blocks,
+                      decode_cache_blocks=ctx.env.spec.decode_cache_blocks),
         configuration_sha256=ctx.instance.get("implementation", {}).get(
             "configuration_sha256"
         ),
@@ -150,15 +152,18 @@ def observe(ctx, p, deadline):
         performance=json.loads(ctx.env.perf_file.read_text()),
         master_config=json.loads((ctx.env.run_dir / "master_config.json").read_text()),
     )
-    actual_config = ctx.env.run_dir / "actual-master-config.json"
-    if actual_config.exists():
-        evidence["provenance"]["mock_formula_config"] = evidence["provenance"][
-            "master_config"
-        ]
-        evidence["provenance"]["master_config"] = json.loads(actual_config.read_text())
-        evidence["provenance"]["historical_master"] = json.loads(
-            (ctx.env.run_dir / "historical-master.json").read_text()
-        )
+    evidence["provenance"]["actual_master_config"] = json.loads(
+        (ctx.env.run_dir / "actual-master-config.json").read_text()
+    )
+    evidence["provenance"]["master_artifact"] = json.loads(
+        (ctx.env.run_dir / "master-artifact.json").read_text()
+    )
+    client_env = json.loads((flow.directory / "flow-input.json").read_text())["environment"]
+    evidence["provenance"]["client_environment"] = {
+        key: value for key, value in client_env.items()
+        if key not in {"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID",
+                       "GRPC_TARGET", "OUTPUT_DIR"}
+    }
     path = ctx.artifact_dir / "cache-gate-evidence.json"
 
     def event(name):

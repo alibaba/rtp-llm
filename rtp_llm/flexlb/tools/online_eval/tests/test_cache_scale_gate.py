@@ -192,13 +192,17 @@ class CacheGateTest(unittest.TestCase):
             e["events"] = [{"name": "withdraw_start", "t": 20}]
             e["provenance"] = dict(
                 topology={"prefill": 2, "decode": 2},
+                capacity={"prefill_cache_blocks": 128, "decode_cache_blocks": 128},
                 performance={},
                 master_config={},
-                mock_formula_config={},
+                actual_master_config={"schemaVersion": 1},
+                configuration_sha256="config",
                 client_environment={},
                 trace={"sha256": "trace"},
                 files={"/mock/flexlb-mock-engine-test.jar": "mock"},
-                historical_master={"source_commit": str(i) * 40},
+                master_artifact={"source_commit": str(i) * 40,
+                                 "source_commit_origin": "declared",
+                                 "jar_sha256": str(i) * 64},
             )
         with tempfile.TemporaryDirectory() as d:
             a, b = Path(d) / "a.json", Path(d) / "b.json"
@@ -206,6 +210,42 @@ class CacheGateTest(unittest.TestCase):
             b.write_text(json.dumps(new))
             result = compare(a, b, Path(d) / "report")
             self.assertTrue(result["expected_control_observed"])
+            self.assertEqual(result["decision"], "CONTROL_OBSERVED")
+            self.assertEqual(result["versions"]["new"]["source_commit"], "1" * 40)
+            old_dir, new_dir = Path(d) / "old-run", Path(d) / "new-run"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            (old_dir / "cache-gate-evidence.json").write_text(json.dumps(old))
+            (new_dir / "cache-gate-evidence.json").write_text(json.dumps(new))
+            from_dirs = compare(old_dir, new_dir, Path(d) / "from-dirs")
+            self.assertEqual(from_dirs["decision"], "CONTROL_OBSERVED")
+            report_spec = json.loads((Path(d) / "from-dirs/reports/comparison/cache-scale-in-ab/report-spec.json").read_text())
+            self.assertEqual(report_spec["panels"][0]["id"], "ab-overlay")
+            self.assertEqual(len(report_spec["panels"]), 3)
+            runs = report_spec["run_meta"]["runs"]
+            self.assertEqual(set(runs), {"old", "new"})
+            self.assertEqual(runs["old"]["implementation"]["master"]["source_commit"], "0" * 40)
+            self.assertEqual(runs["new"]["implementation"]["master"]["source_commit"], "1" * 40)
+            overlay = report_spec["panels"][0]
+            expected_core = {
+                f"{side} · {metric}"
+                for side in ("old", "new")
+                for metric in ("P Waiting / engine", "P engine count", "P cache hit ratio")
+            }
+            present = {s["name"] for s in overlay["series"]}
+            self.assertEqual(set(overlay["presets"]["核心"]), expected_core & present)
+            self.assertEqual(
+                {s["name"] for s in overlay["series"] if not s["hidden"]},
+                expected_core & present,
+            )
+            self.assertEqual(compare(a, b, Path(d) / "report-only", mode="none")["decision"], "REPORT_ONLY")
+            self.assertEqual(compare(a, b, Path(d) / "weak", mode="weak")["decision"], "ALIGNED")
+            new["provenance"].pop("actual_master_config")
+            b.write_text(json.dumps(new))
+            missing = compare(a, b, Path(d) / "missing", mode="weak")
+            self.assertEqual(missing["control_comparison"]["status"], "UNKNOWN")
+            self.assertIn("/actual_master_config", missing["control_comparison"]["missing"])
+            new["provenance"]["actual_master_config"] = {"schemaVersion": 1}
             new["provenance"]["trace"]["sha256"] = "other"
             b.write_text(json.dumps(new))
             result = compare(a, b, Path(d) / "unaligned")

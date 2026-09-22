@@ -23,7 +23,7 @@ execution:
   stage_timeout_s: 60
   cleanup_timeout_s: 120
 metadata:
-  description: Small orchestration smoke; use scale_cases/cache_scale_in_online.yaml
+  description: Small orchestration smoke; use scale_cases/cache_scale_in_lineage.yaml
     for production-scale execution.
   category: kv
 variants:

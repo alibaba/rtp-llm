@@ -33,7 +33,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Callable, Optional
 
-from runtime.historical_master import MANIFEST as HISTORICAL_MASTER, adapt_env
+from runtime.master_artifact import configure_master
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -49,11 +49,10 @@ MOCK_JAR = (
     / "target"
     / "flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar"
 )
-API_JAR = (
-    Path(HISTORICAL_MASTER["jar"])
-    if HISTORICAL_MASTER
-    else FLEXLB_DIR / "flexlb-api" / "target" / "flexlb-api-1.0.0-SNAPSHOT.jar"
-)
+API_JAR = Path(os.environ.get(
+    "FLEXLB_FT_MASTER_JAR",
+    str(FLEXLB_DIR / "flexlb-api" / "target" / "flexlb-api-1.0.0-SNAPSHOT.jar"),
+))
 
 # ---------------------------------------------------------------------------
 # FLEXLB_CONFIG SSOT — flexlb_cfg (re-exported)
@@ -1340,7 +1339,7 @@ class EnvManager:
                     separators=(",", ":"),
                 )
             menv.update(mspec.extra_env)  # per-instance overrides come last
-        return adapt_env(env, menv)
+        return menv
 
     def _master_ports_in_use(self, env: FlexEnv) -> list[int]:
         """Master's fixed ports: HTTP / management / gRPC (= http + 2)."""
@@ -1443,7 +1442,8 @@ class EnvManager:
             env.pv_log_offset = pv_log.stat().st_size
         except OSError:
             env.pv_log_offset = 0
-        proc = ProcessOps.start(argv, self._master_env(env), env.run_dir / log_name)
+        master_env = configure_master(env, self._master_env(env), API_JAR)
+        proc = ProcessOps.start(argv, master_env, env.run_dir / log_name)
         env.master = proc
         env.master_incarnations.append(
             dict(
@@ -1668,7 +1668,7 @@ class EnvManager:
         argv.extend(spec.master_extra_args)
         argv.extend(mspec.extra_args)
         proc = ProcessOps.start(
-            argv, self._master_env(env, mspec), env.run_dir / log_name
+            argv, configure_master(env, self._master_env(env, mspec), API_JAR), env.run_dir / log_name
         )
         env.masters[mspec.name] = proc
         env.master_specs[mspec.name] = mspec
