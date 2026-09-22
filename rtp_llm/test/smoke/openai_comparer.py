@@ -949,18 +949,17 @@ class OpenaiComparer(BaseComparer):
                 "first_token_cost_time",
                 "role_addrs.http_port",
                 "role_addrs.grpc_port",
+                # MTP accept splits can flip ([2,2,0] vs [2,1,1]) while the
+                # generated tokens stay identical. Never lock this vector.
+                "speculative_accepted_tokens_per_pos",
             ]
         )
         # Goldens recorded before the speculative counters existed have no such
-        # keys in their raw JSON; only compare once a golden records the field.
+        # keys in their raw JSON; only compare draft_rounds once recorded.
         raw_result = self.qr_info.get("result")
         raw_aux = raw_result.get("aux_info") if isinstance(raw_result, dict) else None
-        for spec_field in (
-            "speculative_draft_rounds",
-            "speculative_accepted_tokens_per_pos",
-        ):
-            if not isinstance(raw_aux, dict) or spec_field not in raw_aux:
-                ignore_fields.add(spec_field)
+        if not isinstance(raw_aux, dict) or "speculative_draft_rounds" not in raw_aux:
+            ignore_fields.add("speculative_draft_rounds")
         top_level_ignore = set()
         nested_ignore: Dict[str, set] = {}
         for field in ignore_fields:
