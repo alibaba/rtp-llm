@@ -1,25 +1,6 @@
 test_envs = {}
 
 py_test(
-    name = "kimi_k3_remaining_small_kernels_test",
-    srcs = ["kimi_k3_remaining_small_kernels_test.py"],
-    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "B300", "gpu_count": "1"},
-    tags = ["manual", "B300"],
-)
-
-py_test(
-    name = "kimi_k3_fp8_decode_ag_gpu_test",
-    srcs = ["kimi_k3_fp8_decode_ag_gpu_test.py"],
-    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "8"},
-    exec_properties = {"gpu": "B300", "gpu_count": "8"},
-    tags = ["manual", "B300"],
-    timeout = "long",
-)
-
-py_test(
     name = "kimi_k3_cache_geometry_test",
     srcs = ["kimi_k3_cache_geometry_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

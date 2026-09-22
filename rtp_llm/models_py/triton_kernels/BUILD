@@ -45,6 +45,7 @@ py_library(
 py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
+    deps = [":common"],
     visibility = ["//visibility:public"]
 )
 
@@ -52,6 +53,13 @@ py_library(
     name = "common",
     srcs = glob(["common/*.py"]),
     visibility = ["//visibility:public"]
+)
+
+py_library(
+    name = "kimi_k3",
+    srcs = glob(["kimi_k3/*.py"]),
+    deps = [":common"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -80,6 +88,7 @@ py_library(
         ":sparse_mla",
         ":autotune_cache",
         ":kimi_kda",
+        ":kimi_k3",
         ":linear_replay",
         ":mla_decode_metadata",
         ":zigzag_permute",

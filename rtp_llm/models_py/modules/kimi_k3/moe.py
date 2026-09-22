@@ -684,7 +684,7 @@ class KimiK3LatentMoE(nn.Module):
             routed_output = self.routed_norm(routed_output.contiguous())
         routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
         shared_output = self._shared_expert_forward(hidden_states)
-        from rtp_llm.models_py.triton_kernels.kimi_kda.moe_decode import add_moe_output
+        from rtp_llm.models_py.triton_kernels.moe.output_add import add_moe_output
 
         return add_moe_output(routed_output, shared_output, residual)
 

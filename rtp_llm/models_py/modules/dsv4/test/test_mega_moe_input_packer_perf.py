@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import unittest
 from types import SimpleNamespace
 
 import torch
+from dsv4_source_loader import load_source_module
 
-_KERNEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..",
-    "moe",
-    "_mega_input_pack_triton.py",
+_MOE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "moe")
 )
-_SPEC = importlib.util.spec_from_file_location("_mega_input_pack_triton", _KERNEL_PATH)
-_KERNEL = importlib.util.module_from_spec(_SPEC)
-assert _SPEC.loader is not None
-_SPEC.loader.exec_module(_KERNEL)
+_KERNEL_PATH = os.path.join(_MOE_DIR, "_mega_input_pack_triton.py")
+_KERNEL = load_source_module(
+    "_dsv4_moe_input_pack_perf_sources",
+    "_mega_input_pack_triton",
+    _KERNEL_PATH,
+    [_MOE_DIR],
+)
 fused_pack_mega_moe_inputs_legacy = _KERNEL.fused_pack_mega_moe_inputs_legacy
 fused_pack_mega_moe_inputs_optimized = _KERNEL.fused_pack_mega_moe_inputs_optimized
 
@@ -55,7 +55,9 @@ class MegaMoeInputPackerPerfTest(unittest.TestCase):
         torch.manual_seed(tokens)
         x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16) * 0.3
         weights = torch.randn(tokens, topk, device="cuda", dtype=torch.float32)
-        indices = torch.randint(0, 256, (tokens, topk), device="cuda", dtype=torch.int64)
+        indices = torch.randint(
+            0, 256, (tokens, topk), device="cuda", dtype=torch.int64
+        )
         ref = _make_buf(tokens, dim, topk, "cuda")
         got = _make_buf(tokens, dim, topk, "cuda")
 
@@ -72,7 +74,9 @@ class MegaMoeInputPackerPerfTest(unittest.TestCase):
         run_legacy()
         run_optimized()
         torch.cuda.synchronize()
-        self.assertTrue(torch.equal(ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu()))
+        self.assertTrue(
+            torch.equal(ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu())
+        )
         self.assertTrue(torch.equal(ref.x_sf.cpu(), got.x_sf.cpu()))
         self.assertTrue(torch.equal(ref.topk_idx.cpu(), got.topk_idx.cpu()))
         self.assertTrue(torch.equal(ref.topk_weights.cpu(), got.topk_weights.cpu()))
@@ -100,7 +104,9 @@ class MegaMoeInputPackerPerfTest(unittest.TestCase):
                     f"T={tokens}: optimized={optimized_ms * 1000:.2f}us, "
                     f"legacy={legacy_ms * 1000:.2f}us"
                 )
-        self.assertFalse(failures, "MegaMoE packer perf gate failed: " + "; ".join(failures))
+        self.assertFalse(
+            failures, "MegaMoE packer perf gate failed: " + "; ".join(failures)
+        )
 
 
 if __name__ == "__main__":

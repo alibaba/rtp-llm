@@ -12,7 +12,7 @@ import triton
 
 class CachedLaunchCompatibilityTest(unittest.TestCase):
     def test_no_knobs_module_keeps_import_and_reference_launch_working(self):
-        name = "rtp_llm.models_py.triton_kernels.kimi_kda.cached_launch"
+        name = "rtp_llm.models_py.triton_kernels.common.cached_launch"
         source = importlib.util.find_spec(name).origin
         original_import = builtins.__import__
 
@@ -40,7 +40,7 @@ class CachedLaunchCompatibilityTest(unittest.TestCase):
         self.assertEqual(y.tolist(), [2.0, -6.0])
 
     def test_unverified_triton_version_does_not_enable_compiled_cache(self):
-        from rtp_llm.models_py.triton_kernels.kimi_kda.cached_launch import CachedLaunch
+        from rtp_llm.models_py.triton_kernels.common.cached_launch import CachedLaunch
 
         @triton.jit
         def kernel():

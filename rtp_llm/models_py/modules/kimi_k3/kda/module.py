@@ -158,7 +158,7 @@ class KimiK3KDA(nn.Module):
                 self.add_module(
                     "fp8_" + name.replace(".", "_"), self._fp8_projections[name]
                 )
-        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+        from rtp_llm.models_py.modules.kimi_k3.producers import (
             Fp8KdaOutputNorm,
             KdaOutputNorm,
         )

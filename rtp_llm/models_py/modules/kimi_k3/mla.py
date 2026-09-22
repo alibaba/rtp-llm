@@ -144,7 +144,7 @@ class KimiK3MLA(MlaAttention):
         self._packed_qkv_gate_w = weights[W.mla_fusedqkrope_w]
         # These are only the two small MLA latent norms; decoder-wide norms keep
         # the framework kernel.
-        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+        from rtp_llm.models_py.modules.kimi_k3.producers import (
             Bf16RMSNorm,
             Fp8RMSNorm,
             Fp8SigmoidGate,
@@ -241,7 +241,7 @@ class KimiK3MLA(MlaAttention):
         return norm(latent)
 
     def _prepare_output_layout(self, attn_output, input_shape, output_gate):
-        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import SigmoidGate
+        from rtp_llm.models_py.modules.kimi_k3.producers import SigmoidGate
 
         if (
             self.use_output_gate

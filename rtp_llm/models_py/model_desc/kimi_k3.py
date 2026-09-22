@@ -186,7 +186,7 @@ class KimiK3DecoderLayer(nn.Module):
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
         ]
-        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+        from rtp_llm.models_py.modules.kimi_k3.producers import (
             Fp8AttentionResidual,
             Fp8RMSNorm,
         )

@@ -3,7 +3,7 @@
 from torch import nn
 
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
-from rtp_llm.models_py.triton_kernels.kimi_kda import decode_bf16_producers as bf16
+from rtp_llm.models_py.triton_kernels.kimi_k3 import bf16_producers as bf16
 from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res_fp8 import kimi_k3_attn_res_fp8
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import (
     rmsnorm_fp8,

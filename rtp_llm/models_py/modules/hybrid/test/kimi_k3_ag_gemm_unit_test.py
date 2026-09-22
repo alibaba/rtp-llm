@@ -18,7 +18,7 @@ from rtp_llm.models_py.model_desc.kimi_k3 import (
     KimiK3MLA,
     KimiK3Model,
 )
-from rtp_llm.models_py.modules.dsv4.moe.input_packer import mask_pack_routes
+from rtp_llm.models_py.modules.dsv4.moe.input_pack_options import mask_pack_routes
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,

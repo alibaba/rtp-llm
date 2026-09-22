@@ -10,28 +10,39 @@ The candidate writes the same final MegaMoE buffer fields directly.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import unittest
 from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
+from dsv4_source_loader import load_source_module
+
+_TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+_DSV4_DIR = os.path.abspath(os.path.join(_TEST_DIR, ".."))
+_MOE_DIR = os.path.join(_DSV4_DIR, "moe")
+_SOURCE_PACKAGE = "_dsv4_moe_gate_pack_sources"
+_PACKAGE_PATHS = [_DSV4_DIR, _MOE_DIR]
 
 
-def _load_module(name: str, rel_path: str):
-    here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.abspath(os.path.join(here, rel_path))
-    spec = importlib.util.spec_from_file_location(name, src)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_GATE = _load_module("_v4_gate_fused", "../_gate_fused_triton.py")
-_PACK = _load_module("_mega_input_pack_triton", "../moe/_mega_input_pack_triton.py")
-_GATE_PACK = _load_module("_mega_gate_pack_triton", "../moe/_mega_gate_pack_triton.py")
+_GATE = load_source_module(
+    _SOURCE_PACKAGE,
+    "_gate_fused_triton",
+    os.path.join(_DSV4_DIR, "_gate_fused_triton.py"),
+    _PACKAGE_PATHS,
+)
+_PACK = load_source_module(
+    _SOURCE_PACKAGE,
+    "_mega_input_pack_triton",
+    os.path.join(_MOE_DIR, "_mega_input_pack_triton.py"),
+    _PACKAGE_PATHS,
+)
+_GATE_PACK = load_source_module(
+    _SOURCE_PACKAGE,
+    "_mega_gate_pack_triton",
+    os.path.join(_MOE_DIR, "_mega_gate_pack_triton.py"),
+    _PACKAGE_PATHS,
+)
 
 
 def _make_buf(tokens: int, dim: int, topk: int, device: str):
@@ -54,7 +65,9 @@ def _pack_reference(x: torch.Tensor, weights: torch.Tensor, indices: torch.Tenso
 
 
 def _assert_buf_equal(test: unittest.TestCase, ref, got) -> None:
-    test.assertTrue(torch.equal(ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu()))
+    test.assertTrue(
+        torch.equal(ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu())
+    )
     test.assertTrue(torch.equal(ref.x_sf.cpu(), got.x_sf.cpu()))
     test.assertTrue(torch.equal(ref.topk_idx.cpu(), got.topk_idx.cpu()))
     diff = (ref.topk_weights - got.topk_weights).abs()
@@ -69,7 +82,9 @@ class MegaMoeGatePackTest(unittest.TestCase):
         torch.manual_seed(11)
         torch.cuda.set_device(0)
 
-    def _case_nonhash(self, tokens: int, dim: int = 512, experts: int = 256, topk: int = 6):
+    def _case_nonhash(
+        self, tokens: int, dim: int = 512, experts: int = 256, topk: int = 6
+    ):
         x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16) * 0.3
         scores_bf16 = torch.randn(tokens, experts, device="cuda", dtype=torch.bfloat16)
         bias = torch.randn(experts, device="cuda", dtype=torch.float32) * 0.1

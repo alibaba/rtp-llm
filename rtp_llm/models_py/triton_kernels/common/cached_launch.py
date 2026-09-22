@@ -1,4 +1,4 @@
-"""Bounded warm-launch cache for K3's fixed-signature CUDA layout kernels.
+"""Bounded warm-launch cache for fixed-signature CUDA layout kernels.
 
 Only tensor pointers followed by fixed-type numeric scalars are supported.
 Every scalar (including strides/constexprs), pointer dtype/alignment, grid and

@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from ._mega_input_pack_triton import mask_pack_routes, validate_pack_options
+from .input_pack_options import mask_pack_routes, validate_pack_options
 from .quant_layouts import _per_token_cast_to_fp8_packed_ue8m0
 from .shared_expert import strict_fused_moe_enabled
 

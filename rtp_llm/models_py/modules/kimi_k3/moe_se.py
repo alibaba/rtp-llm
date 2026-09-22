@@ -391,7 +391,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             routed_output,
             self.weights[K3W.MOE_ROUTED_UP],
         )
-        from rtp_llm.models_py.triton_kernels.kimi_kda.moe_decode import add_moe_output
+        from rtp_llm.models_py.triton_kernels.moe.output_add import add_moe_output
 
         return add_moe_output(routed_output, shared_output, residual)
 

@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.moe.input_packer import (
+from rtp_llm.models_py.modules.dsv4.moe.input_pack_options import (
     mask_pack_routes,
     validate_pack_options,
 )

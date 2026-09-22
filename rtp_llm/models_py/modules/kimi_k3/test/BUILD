@@ -18,14 +18,85 @@ py_test(
 )
 
 py_test(
-    name = "moe_decode_small_test",
-    srcs = ["test_moe_decode_small.py"],
-    main = "test_moe_decode_small.py",
+    name = "moe_residual_gpu_test",
+    srcs = ["test_moe_residual_gpu.py"],
+    main = "test_moe_residual_gpu.py",
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1", "DSV4_MOE_STRICT_FUSED": "0"},
     timeout = "short",
     tags = ["manual", "H20"],
     exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "moe_input_packer_gpu_test",
+    srcs = ["test_moe_input_packer_gpu.py"],
+    main = "test_moe_input_packer_gpu.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1", "DSV4_MOE_STRICT_FUSED": "0"},
+    timeout = "short",
+    tags = ["manual", "H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "producers_gpu_test",
+    srcs = ["test_producers_gpu.py"],
+    main = "test_producers_gpu.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300", "gpu_count": "1"},
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "mtp_gpu_test",
+    srcs = ["test_mtp_gpu.py"],
+    main = "test_mtp_gpu.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300", "gpu_count": "1"},
+)
+
+py_test(
+    name = "projection_ktp_gpu_test",
+    srcs = ["test_projection_ktp_gpu.py"],
+    main = "test_projection_ktp_gpu.py",
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+    visibility = ["//visibility:public"],
+)
+
+[
+    py_test(
+        name = "projection_ktp_nccl_%d_test" % ranks,
+        srcs = ["test_projection_ktp_nccl.py"],
+        main = "test_projection_ktp_nccl.py",
+        deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+        env = {"GPU_COUNT": str(ranks)},
+        exec_properties = {"gpu": "H20", "gpu_count": str(ranks)},
+        tags = ["manual", "H20"],
+        timeout = "long",
+    )
+    for ranks in [1, 2, 4, 8]
+]
+
+py_test(
+    name = "fp8_decode_ag_gpu_test",
+    srcs = ["test_fp8_decode_ag_gpu.py"],
+    main = "test_fp8_decode_ag_gpu.py",
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "B300", "gpu_count": "8"},
+    tags = ["manual", "B300"],
+    timeout = "long",
 )
 
 py_test(

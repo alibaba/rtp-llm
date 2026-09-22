@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
-from rtp_llm.models_py.triton_kernels.kimi_kda.cached_launch import CachedLaunch
+from rtp_llm.models_py.triton_kernels.common.cached_launch import CachedLaunch
 
 
 def _bf16_cuda_pair(x, other):

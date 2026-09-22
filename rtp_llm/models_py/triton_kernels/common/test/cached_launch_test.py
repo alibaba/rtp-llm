@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.triton_kernels.kimi_kda.cached_launch import CachedLaunch, knobs
+from rtp_llm.models_py.triton_kernels.common.cached_launch import CachedLaunch, knobs
 
 
 @triton.jit

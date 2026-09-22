@@ -95,6 +95,11 @@ py_library(
     srcs = ["dsv4_kernel_perf_utils.py"],
 )
 
+py_library(
+    name = "dsv4_source_loader",
+    srcs = ["dsv4_source_loader.py"],
+)
+
 py_test(
     name = "test_cp_async",
     srcs = ["test_cp_async.py"],
@@ -186,9 +191,21 @@ py_test(
 py_test(
     name = "test_mega_moe_gate_pack",
     srcs = ["test_mega_moe_gate_pack.py"],
-    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
+    deps = [
+        ":dsv4_source_loader",
+        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
+    ],
     tags = ["SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_input_pack_options",
+    srcs = ["test_input_pack_options.py"],
+    deps = [
+        ":dsv4_source_loader",
+        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
+    ],
 )
 
 py_test(
@@ -212,7 +229,10 @@ py_test(
 py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
-    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
+    deps = [
+        ":dsv4_source_loader",
+        "//rtp_llm/models_py:dsv4_fused_kernel_sources",
+    ],
 )
 
 py_test(

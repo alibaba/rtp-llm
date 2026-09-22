@@ -2,18 +2,26 @@
 
 import unittest
 from functools import partial
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import triton.language as tl
 from torch import nn
 
 from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
-from rtp_llm.models_py.modules.kimi_k3 import fp8_producers as producers
+from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
+    QuantizedActivation,
+)
+from rtp_llm.models_py.modules.kimi_k3 import producers
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
-from rtp_llm.models_py.triton_kernels.kimi_kda import decode_bf16_producers as kernels
+from rtp_llm.models_py.triton_kernels.kimi_k3 import bf16_producers as kernels
 from rtp_llm.models_py.triton_kernels.kimi_kda.rms_norm_gate import (
     kimi_kda_rms_norm_sigmoid_gate,
 )
+from rtp_llm.ops import RoleType
+from rtp_llm.utils.model_weight import W
 
 assert_exact = partial(torch.testing.assert_close, rtol=0, atol=0)
 assert_near = partial(torch.testing.assert_close, rtol=1e-2, atol=1e-3)
@@ -31,6 +39,44 @@ def mla_fixture():
     module.use_output_gate = True
     module.output_gate_op = producers.SigmoidGate()
     return module
+
+
+def mla_fixture_for_role(role):
+    config = SimpleNamespace(
+        attn_config=SimpleNamespace(
+            head_num=96,
+            nope_head_dim=128,
+            rope_head_dim=64,
+            q_lora_rank=1536,
+            kv_lora_rank=512,
+            v_head_dim=128,
+            kernel_tokens_per_block=64,
+            is_sparse=False,
+        ),
+        k3_attention_quant_config=object(),
+        quant_config=None,
+        k3_runtime_config=SimpleNamespace(mla_use_nope=True, mla_use_output_gate=True),
+    )
+    parallel = SimpleNamespace(
+        get_attn_tp_size=lambda: 8,
+        decode_cp_q_replicated=False,
+        role_type=role,
+    )
+    weights = {
+        W.mla_q_a_ln_gamma: torch.ones(1536, device="cuda", dtype=torch.bfloat16),
+        W.mla_kv_a_ln_gamma: torch.ones(512, device="cuda", dtype=torch.bfloat16),
+        W.mla_fusedqkrope_w: torch.empty(0, device="cuda"),
+        W.mla_fusedqkrope_s: torch.empty(0, device="cuda"),
+        W.attn_gate_s: torch.empty(0, device="cuda"),
+    }
+    # Projection weights are irrelevant here: keep the real constructor and
+    # native/Triton norms, replacing only the unused GEMM factory boundary.
+    with patch.object(
+        LinearFactory,
+        "create_linear_from_weights",
+        side_effect=lambda *a, **kw: nn.Identity(),
+    ):
+        return KimiK3MLA(config, parallel, weights)
 
 
 def capture(call, stream):
@@ -197,6 +243,52 @@ class DecodeBf16ProducersCudaTest(unittest.TestCase):
         for stream, graph, *_ in cases:
             stream.synchronize()
             graph.reset()
+
+    def test_fp8_decode_kv_norm_consumes_strided_latent_without_staging(self):
+        optimized = mla_fixture_for_role(RoleType.DECODE)
+        native_norm = RMSNorm(optimized._kv_a_norm, 1e-6)
+        for rows in (1, 2, 4, 8, 16, 32):
+            with self.subTest(rows=rows):
+                latent = torch.randn(
+                    rows, 1536 + 512 + 64, device="cuda", dtype=torch.bfloat16
+                )[:, 1536:2048]
+                reference = native_norm(latent.contiguous())
+                call = lambda: optimized._normalize_latent(
+                    optimized.kv_a_layernorm, latent
+                )
+                result = call()
+                self.assertIsInstance(result, torch.Tensor)
+                self.assertEqual(result.dtype, torch.bfloat16)
+                torch.testing.assert_close(result, reference, rtol=1e-2, atol=1e-3)
+                if rows == 32:
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = call()
+                    for _ in range(3):
+                        latent.normal_()
+                        graph.replay()
+                        torch.testing.assert_close(captured, call(), rtol=0, atol=0)
+                        reference = native_norm(latent.contiguous())
+                        torch.testing.assert_close(
+                            captured, reference, rtol=1e-2, atol=1e-3
+                        )
+
+    def test_fp8_prefill_keeps_quantized_and_retained_bf16_kv(self):
+        module = mla_fixture_for_role(RoleType.PREFILL)
+        latent = torch.randn(32, 576, device="cuda", dtype=torch.bfloat16)[:, :512]
+        actual = module._normalize_latent(module.kv_a_layernorm, latent)
+        expected = module.kv_a_layernorm(latent.contiguous())
+        self.assertIsInstance(actual, QuantizedActivation)
+        torch.testing.assert_close(
+            actual.values.view(torch.uint8),
+            expected.values.view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            actual.scale_wire, expected.scale_wire, rtol=0, atol=0
+        )
+        torch.testing.assert_close(actual.bf16, expected.bf16, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

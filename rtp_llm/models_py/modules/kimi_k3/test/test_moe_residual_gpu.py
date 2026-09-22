@@ -3,12 +3,12 @@ import unittest
 import torch
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
-from rtp_llm.models_py.modules.dsv4.moe.input_packer import mask_pack_routes
+from rtp_llm.models_py.modules.dsv4.moe.input_pack_options import mask_pack_routes
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
-class MoeDecodeSmallTest(unittest.TestCase):
+class MoeResidualGpuTest(unittest.TestCase):
     def test_forward_keeps_route_validity_and_residual(self):
         module = KimiK3LatentMoE.__new__(KimiK3LatentMoE)
         torch.nn.Module.__init__(module)

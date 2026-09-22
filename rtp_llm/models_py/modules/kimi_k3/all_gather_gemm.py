@@ -29,7 +29,7 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
     QuantizedActivation,
 )
 from rtp_llm.models_py.modules.kimi_k3._collective_gemm import collective_gemm_state_key
-from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_scale_layout import (
+from rtp_llm.models_py.triton_kernels.common.fp8_scale_layout import (
     repack_ag_scale_wire,
 )
 

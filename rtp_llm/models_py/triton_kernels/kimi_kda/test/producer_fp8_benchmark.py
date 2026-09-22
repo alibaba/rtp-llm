@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fp8_kernels i
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_prefix_fp8_producer import (
     Fp8MlaPrefixGather,
 )
-from rtp_llm.models_py.modules.kimi_k3.fp8_producers import KdaOutputNorm
+from rtp_llm.models_py.modules.kimi_k3.producers import KdaOutputNorm
 from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res import kimi_k3_attn_res
 from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res_fp8 import kimi_k3_attn_res_fp8
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import (
