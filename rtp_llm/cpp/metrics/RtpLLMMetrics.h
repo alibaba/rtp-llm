@@ -1264,16 +1264,16 @@ public:
 
 class RtpLLMMemoryCacheCopyMetricsCollector final {
 public:
-    bool    failed     = false;
-    int64_t latency_us = 0;
-    bool    from_gpu   = false;
+    bool    failed           = false;
+    int64_t latency_us       = 0;
+    int64_t bytes_per_second = 0;
+    bool    from_gpu         = false;
 };
 
 class RtpLLMMemoryCacheCopyTaskMetricsCollector final {
 public:
     bool    from_gpu      = false;
     int64_t queue_wait_us = 0;
-    int64_t bytes         = 0;
 };
 
 class RtpLLMMemoryCacheCopyPoolMetricsCollector final {
@@ -1281,6 +1281,7 @@ public:
     int64_t active_threads = 0;
     int64_t pending_tasks  = 0;
     bool    submit_failed  = false;
+    bool    from_gpu       = false;
 };
 
 class RtpLLMMemoryCache3DCopyMetricsCollector final {
@@ -1341,11 +1342,11 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
 
-    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_queue_wait_us_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_bytes_metric             = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_active_threads_metric    = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_pending_tasks_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_submit_failed_qps_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_queue_wait_us_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_throughput_bytes_per_second_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_active_threads_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_pending_tasks_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_pool_submit_failed_qps_metric      = nullptr;
 
     kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_qps_metric         = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_failed_qps_metric  = nullptr;

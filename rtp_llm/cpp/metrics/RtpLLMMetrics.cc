@@ -890,8 +890,8 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_memory_cache_copy_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_queue_wait_us_metric,
                                   "rtp_llm_kv_cache_memory_cache_copy_task_queue_wait_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_bytes_metric,
-                                  "rtp_llm_kv_cache_memory_cache_copy_task_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_throughput_bytes_per_second_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_throughput_bytes_per_second");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_active_threads_metric,
                                   "rtp_llm_kv_cache_memory_cache_copy_pool_active_threads");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_pending_tasks_metric,
@@ -986,6 +986,7 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tag
     // 总是上报 QPS 指标
     kv_cache_memory_cache_copy_qps_metric->Report(&copy_tag, 1);
     kv_cache_memory_cache_copy_latency_metric->Report(&copy_tag, collector->latency_us);
+    kv_cache_memory_cache_copy_throughput_bytes_per_second_metric->Report(&copy_tag, collector->bytes_per_second);
 
     // 如果失败，上报失败 QPS
     if (collector->failed) {
@@ -997,15 +998,15 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*              
                                       RtpLLMMemoryCacheCopyTaskMetricsCollector* collector) {
     kmonitor::MetricsTags copy_tag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
     kv_cache_memory_cache_copy_task_queue_wait_us_metric->Report(&copy_tag, collector->queue_wait_us);
-    kv_cache_memory_cache_copy_task_bytes_metric->Report(&copy_tag, collector->bytes);
 }
 
 void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*               tags,
                                       RtpLLMMemoryCacheCopyPoolMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_active_threads_metric, collector->active_threads);
-    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_copy_pool_pending_tasks_metric, collector->pending_tasks);
+    kmonitor::MetricsTags copy_tag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
+    kv_cache_memory_cache_copy_pool_active_threads_metric->Report(&copy_tag, collector->active_threads);
+    kv_cache_memory_cache_copy_pool_pending_tasks_metric->Report(&copy_tag, collector->pending_tasks);
     if (collector->submit_failed) {
-        REPORT_MUTABLE_QPS(kv_cache_memory_cache_copy_pool_submit_failed_qps_metric);
+        kv_cache_memory_cache_copy_pool_submit_failed_qps_metric->Report(&copy_tag, 1);
     }
 }
 
