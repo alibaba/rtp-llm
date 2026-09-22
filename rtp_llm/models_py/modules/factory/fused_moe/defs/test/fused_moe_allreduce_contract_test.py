@@ -118,6 +118,21 @@ class FusedMoeSkipAllreduceTest(TestCase):
             _extract_extra_finalize_args(router.finalize)[SKIP_TP_ALLREDUCE_ARG]
         )
 
+    def test_forward_passes_router_context_to_finalize(self):
+        fused_moe, router, _, hidden_states, topk_weights, topk_ids = (
+            self._make_fused_moe(False)
+        )
+        router_context = object()
+        router.prepare.return_value.router_context = router_context
+
+        fused_moe(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+
+        self.assertIs(router.finalize.call_args.args[0].router_context, router_context)
+
     def test_forward_rejects_skip_tp_allreduce_for_unsupported_router(self):
         fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
             self._make_fused_moe(False)

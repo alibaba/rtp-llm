@@ -201,6 +201,10 @@ class TestCudaGraphPrefill(unittest.TestCase):
         attention_inputs.cu_kv_seqlens_device = cu_seqlens.clone()
         attention_inputs.context_total_kv_length = total_seq_len
         attention_inputs.total_tokens = total_seq_len
+        block_count = (max_seq_len + seq_size_per_block - 1) // seq_size_per_block
+        block_ids = torch.zeros((batch_size, block_count), dtype=torch.int32)
+        attention_inputs.kv_cache_kernel_block_id = block_ids.pin_memory()
+        attention_inputs.kv_cache_kernel_block_id_device = block_ids.cuda()
         if not use_max_padded_mode:
             attention_inputs.padding_offset = self._calculate_padding_offset(
                 attention_inputs.input_lengths, cu_seqlens

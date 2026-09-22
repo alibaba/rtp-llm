@@ -87,16 +87,18 @@ def get_layer_cache_for_tag(
     return matches[0]
 
 
-def get_layer_caches_for_tags(
+def get_layer_caches_for_groups(
     kv_cache: LayeredKVCache | None,
     local_layer_idx: int,
-    tags: Sequence[str],
-) -> dict[str, LayerKVCache]:
+    groups: Sequence[str],
+) -> dict[str, LayerKVCache | None]:
+    if kv_cache is None:
+        return {group: None for group in groups}
     layer_caches = cast(LayeredKVCache, kv_cache).get_layer_cache_groups(
         local_layer_idx
     )
     by_tag = {str(cache.tag): cache for cache in layer_caches}
-    return {tag: by_tag[tag] for tag in tags}
+    return {group: by_tag[group] for group in groups}
 
 
 def get_group_tags_for_layers(

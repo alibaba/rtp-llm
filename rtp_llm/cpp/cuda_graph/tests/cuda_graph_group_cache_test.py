@@ -378,6 +378,27 @@ class TestCudaGraphGroupCache(unittest.TestCase):
                     )
                 self.assertFalse(runner.canRun(inputs))
 
+        missing_row = _build_decode_inputs([], {}, block_count=1)
+        missing_row.attention_inputs.kv_cache_kernel_block_id = (
+            missing_row.attention_inputs.kv_cache_kernel_block_id[:1]
+        )
+        missing_row.attention_inputs.kv_cache_kernel_block_id_device = (
+            missing_row.attention_inputs.kv_cache_kernel_block_id_device[:1]
+        )
+        self.assertFalse(runner.canRun(missing_row))
+
+        extra_row = _build_decode_inputs([], {}, block_count=1)
+        extra_host = torch.zeros((3, 1), dtype=torch.int32).pin_memory()
+        extra_row.attention_inputs.kv_cache_kernel_block_id = extra_host
+        extra_row.attention_inputs.kv_cache_kernel_block_id_device = extra_host.cuda()
+        self.assertFalse(runner.canRun(extra_row))
+
+        empty = _build_decode_inputs([], {}, block_count=1)
+        empty_host = torch.empty((2, 0), dtype=torch.int32).pin_memory()
+        empty.attention_inputs.kv_cache_kernel_block_id = empty_host
+        empty.attention_inputs.kv_cache_kernel_block_id_device = empty_host.cuda()
+        self.assertFalse(runner.canRun(empty))
+
     def test_group_block_table_capacity_is_checked_before_replay(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(

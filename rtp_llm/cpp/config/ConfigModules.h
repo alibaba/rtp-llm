@@ -3,6 +3,7 @@
 #include <string>
 #include <sstream>
 #include <map>
+#include <utility>
 #include <vector>
 #include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -107,6 +108,10 @@ struct ParallelismConfig {
     }
     std::string to_string() const;
 };
+
+// Returns the effective cache CP geometry as {cp_rank, cp_size}.
+// Resolve local cache sharding only; decode reads peer geometry from prefill_cp_size.
+std::pair<int, int> resolveCacheCpRankAndSize(const ParallelismConfig& parallelism_config);
 
 struct ConcurrencyConfig {
     bool        concurrency_with_block = false;

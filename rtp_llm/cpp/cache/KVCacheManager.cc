@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -186,15 +187,28 @@ void KVCacheManager::initialize(bool warmup) {
         allocateAndSync();
     }
 
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
-        cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
-                                                         static_cast<int>(parallelism_config_.tp_size),
-                                                         static_cast<int>(config_.seq_size_per_block));
+    const auto [cp_rank, cp_size] = resolveCacheCpRankAndSize(parallelism_config_);
+    SpecBuildContext spec_context;
+    spec_context.parallelism_config = &parallelism_config_;
+    const auto layout_cp_size       = effectiveCacheCpSize(spec_context);
+    for (const auto& group : config_.groups()) {
+        if (group.policy.cp_mapping != CpBlockMappingMode::COMPACT_LAST_RANK) {
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(group.seqSizePerBlock() == config_.seq_size_per_block * layout_cp_size,
+                                "compact cache CP geometry mismatch: tag=%s physical_span=%zu base_span=%zu cp_size=%d",
+                                group.tag.c_str(),
+                                group.seqSizePerBlock(),
+                                config_.seq_size_per_block,
+                                layout_cp_size);
+    }
+    if (cp_size > 1) {
+        cp_slot_mapper_ =
+            std::make_shared<CPSlotMapper>(cp_rank, cp_size, static_cast<int>(config_.seq_size_per_block));
         RTP_LLM_LOG_INFO("CP sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, "
                          "virtual_block_size=%d",
-                         (int)parallelism_config_.tp_rank,
-                         (int)parallelism_config_.tp_size,
+                         cp_rank,
+                         cp_size,
                          config_.seq_size_per_block,
                          cp_slot_mapper_->virtualBlockSize());
     }

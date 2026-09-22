@@ -16,6 +16,7 @@ TEST(FastTopKSamplerTest, TopKOneReturnsArgmaxIndex) {
     ASSERT_EQ(out.token_ids.size(0), 1);
     ASSERT_EQ(out.token_ids.size(1), 1);
     EXPECT_EQ(out.token_ids[0][0].item<int64_t>(), 2);
+    EXPECT_TRUE(torch::equal(out.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}})));
 }
 
 TEST(FastTopKSamplerTest, TopKGreaterThanOneReturnsTopKIndices) {

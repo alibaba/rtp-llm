@@ -20,10 +20,16 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 BlockIdxType CudaGraphRunner::safeKernelBlockIdForGroup(std::string_view tag) const {
+    if (!cache_config_) {
+        return 0;
+    }
     return cudaGraphSafeKernelBlockId(cache_config_->group(tag));
 }
 
 BlockIdxType CudaGraphRunner::safeKernelBlockIdForFlatTable() const {
+    if (!cache_config_) {
+        return 0;
+    }
     RTP_LLM_CHECK_WITH_INFO(kv_cache_group_tags_.size() == 1,
                             "flat CUDA graph block table requires one cache group, got %zu",
                             kv_cache_group_tags_.size());
@@ -31,6 +37,9 @@ BlockIdxType CudaGraphRunner::safeKernelBlockIdForFlatTable() const {
 }
 
 BlockIdxType CudaGraphRunner::safeKernelBlockIdForPrimaryTable() const {
+    if (!cache_config_) {
+        return 0;
+    }
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_group_tags_.empty(), "CUDA graph cache requires at least one group");
     return safeKernelBlockIdForGroup(kv_cache_group_tags_.front());
 }
@@ -839,29 +848,44 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
     }
 
     const auto& captured_inputs = graph_it->second.mem_hold_.py_model_inputs_;
-    auto        compatible =
-        [this,
-         graph_key](const torch::Tensor& src, const torch::Tensor& dst, std::string_view tag, const char* location) {
-            std::string reason;
-            if (isStridedCopyCompatible(src, dst, &reason)) {
-                return true;
-            }
-            const uint64_t fallback_count = block_table_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-            if ((fallback_count & (fallback_count - 1)) == 0) {
-                RTP_LLM_LOG_WARNING(
-                    "CUDA graph block table is incompatible with graph key %d: tag=%.*s location=%s src_shape=%s "
-                    "dst_shape=%s reason=%s; fallback to normal run (fallback_count=%llu)",
-                    graph_key,
-                    static_cast<int>(tag.size()),
-                    tag.data(),
-                    location,
-                    tensorShapeForLog(src).c_str(),
-                    tensorShapeForLog(dst).c_str(),
-                    reason.c_str(),
-                    static_cast<unsigned long long>(fallback_count));
-            }
-            return false;
-        };
+    // Cacheless graphs do not consume a page table and retain the pre-existing
+    // no-op copy behavior.
+    if (!cache_config_) {
+        return true;
+    }
+
+    auto compatible = [this,
+                       graph_key,
+                       &state](const torch::Tensor& src,
+                               const torch::Tensor& dst,
+                               std::string_view     tag,
+                               const char*          location) {
+        std::string reason;
+        if (!src.defined() || src.numel() == 0) {
+            reason = "source block table is undefined or empty";
+        } else if (src.dim() != 2) {
+            reason = "source block table must be 2-D";
+        } else if (src.size(0) != state.current_batch_size) {
+            reason = "source block-table rows do not match current batch";
+        } else if (isStridedCopyCompatible(src, dst, &reason)) {
+            return true;
+        }
+        const uint64_t fallback_count = block_table_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((fallback_count & (fallback_count - 1)) == 0) {
+            RTP_LLM_LOG_WARNING(
+                "CUDA graph block table is incompatible with graph key %d: tag=%.*s location=%s src_shape=%s "
+                "dst_shape=%s reason=%s; fallback to normal run (fallback_count=%llu)",
+                graph_key,
+                static_cast<int>(tag.size()),
+                tag.data(),
+                location,
+                tensorShapeForLog(src).c_str(),
+                tensorShapeForLog(dst).c_str(),
+                reason.c_str(),
+                static_cast<unsigned long long>(fallback_count));
+        }
+        return false;
+    };
 
     if (inputs.attention_inputs_by_group.empty()) {
         return compatible(inputs.attention_inputs.kv_cache_kernel_block_id,
@@ -880,7 +904,10 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
             || dst_it == captured_inputs.attention_inputs_by_group.end()) {
             return false;
         }
-        if (!compatible(src_it->second.kv_cache_kernel_block_id, dst_it->second.kv_cache_kernel_block_id, tag, "host")
+        if (!compatible(src_it->second.kv_cache_kernel_block_id,
+                        dst_it->second.kv_cache_kernel_block_id,
+                        tag,
+                        "host")
             || !compatible(src_it->second.kv_cache_kernel_block_id_device,
                            dst_it->second.kv_cache_kernel_block_id_device,
                            tag,
@@ -991,7 +1018,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs - 1);
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
 
-    const auto logical_tokens_per_block = cache_config_->seq_size_per_block;
+    const auto logical_tokens_per_block = cache_config_ ? cache_config_->seq_size_per_block :
+                                                           static_cast<size_t>(seq_size_per_block_);
     RTP_LLM_CHECK_WITH_INFO(max_seq_len_ >= 0 && sp_steps_ >= 0,
                             "CUDA graph requires non-negative max_seq_len/sp_steps, got %d/%d",
                             max_seq_len_,
@@ -1003,9 +1031,17 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     RTP_LLM_CHECK_WITH_INFO(base_logical_blocks <= std::numeric_limits<size_t>::max() - static_cast<size_t>(sp_steps_),
                             "CUDA graph logical block slack overflow");
     const size_t logical_blocks  = base_logical_blocks + static_cast<size_t>(sp_steps_);
-    size_t       max_group_ratio = 1;
-    for (const auto& group : cache_config_->groups()) {
-        max_group_ratio = std::max(max_group_ratio, group.storedKernelBlocksPerKvBlock());
+    size_t max_group_ratio = 1;
+    if (cache_config_) {
+        for (const auto& group : cache_config_->groups()) {
+            max_group_ratio = std::max(max_group_ratio, group.storedKernelBlocksPerKvBlock());
+        }
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block_ % kernel_seq_size_per_block_ == 0,
+                                "CUDA graph block sizes must be divisible: logical=%d kernel=%d",
+                                seq_size_per_block_,
+                                kernel_seq_size_per_block_);
+        max_group_ratio = static_cast<size_t>(seq_size_per_block_ / kernel_seq_size_per_block_);
     }
     RTP_LLM_CHECK_WITH_INFO(logical_blocks <= std::numeric_limits<size_t>::max() / max_group_ratio,
                             "CUDA graph kernel block capacity overflow: logical_blocks=%zu ratio=%zu",

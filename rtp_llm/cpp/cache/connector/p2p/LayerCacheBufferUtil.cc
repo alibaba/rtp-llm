@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "rtp_llm/cpp/cache/CacheBlockMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -28,20 +29,8 @@ void validateGroupPacking(const CacheConfig&     config,
                           std::string_view       tag) {
     RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "P2P transfer requires a non-empty cache group tag");
     const auto& group = config.groupForLayer(layer_id, tag);
-    RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block > 0 && group.seqSizePerBlock() > 0
-                                && group.seqSizePerBlock() % config.seq_size_per_block == 0,
-                            "P2P transfer tag=%.*s has invalid global/physical spans=%zu/%zu",
-                            static_cast<int>(tag.size()),
-                            tag.data(),
-                            config.seq_size_per_block,
-                            group.seqSizePerBlock());
-    RTP_LLM_CHECK_WITH_INFO(group.kernelSeqSizePerBlock() > 0
-                                && group.seqSizePerBlock() % group.kernelSeqSizePerBlock() == 0,
-                            "P2P transfer tag=%.*s has invalid physical/kernel spans=%zu/%zu",
-                            static_cast<int>(tag.size()),
-                            tag.data(),
-                            group.seqSizePerBlock(),
-                            group.kernelSeqSizePerBlock());
+    (void)CacheBlockMapper::cacheKeysPerPhysicalBlock(config, tag);
+    (void)group.kernelBlocksPerKvBlock();
 
     // Validate layer/tag ownership without duplicating group geometry in the
     // request-owned physical binding sequence.
@@ -82,9 +71,11 @@ bool visitSelectedBlocks(const CacheConfig&     config,
     }
 
     const CPSlotMapper mapper(effective_rank, effective_size, static_cast<int>(config.seq_size_per_block));
-    const size_t       keys_per_physical_block = mapper.cacheKeysPerPhysicalBlock(config, tag);
-    const size_t       available_key_count = std::min(cache_keys.size(), physical_capacity * keys_per_physical_block);
-    const size_t       key_begin           = static_cast<size_t>(start_key_ordinal);
+    const size_t       keys_per_physical_block = CacheBlockMapper::cacheKeysPerPhysicalBlock(config, tag);
+    const size_t       available_key_count =
+        std::min(cache_keys.size(),
+                 CacheBlockMapper::cacheKeyCapacityForPhysicalBlocks(physical_capacity, keys_per_physical_block));
+    const size_t key_begin = static_cast<size_t>(start_key_ordinal);
     if (key_begin >= available_key_count) {
         return false;
     }
@@ -94,10 +85,11 @@ bool visitSelectedBlocks(const CacheConfig&     config,
         return false;
     }
 
-    const size_t key_end        = key_begin + count;
-    const size_t physical_begin = key_begin / keys_per_physical_block;
-    const size_t physical_end   = (key_end + keys_per_physical_block - 1) / keys_per_physical_block;
-    bool         found          = false;
+    const size_t key_end = key_begin + count;
+    const size_t physical_begin =
+        CacheBlockMapper::physicalBlockPositionForCacheKeyPosition(key_begin, keys_per_physical_block);
+    const size_t physical_end = CacheBlockMapper::physicalBlockCapacityForCacheKeys(key_end, keys_per_physical_block);
+    bool         found        = false;
 
     const bool use_hybrid = group.policy.group_type != CacheGroupType::FULL;
     const auto plan       = mapper.buildStorePlan(group.policy, physical_end, physical_begin, use_hybrid);
@@ -115,8 +107,8 @@ bool visitSelectedBlocks(const CacheConfig&     config,
                                 block_ids.blocks().size());
         // A physical block has one stable wire identity. The selection window
         // chooses blocks, but must not change the key assigned to a selected block.
-        const size_t global_key =
-            std::min((physical_position + 1) * keys_per_physical_block - 1, available_key_count - 1);
+        const size_t global_key = CacheBlockMapper::representativeCacheKeyPosition(
+            physical_position, available_key_count, keys_per_physical_block);
         RTP_LLM_CHECK_WITH_INFO(global_key < cache_keys.size(),
                                 "P2P transfer key ordinal=%zu is past request cache keys=%zu",
                                 global_key,

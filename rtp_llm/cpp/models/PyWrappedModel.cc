@@ -363,7 +363,16 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     RTP_LLM_PROFILE_SCOPE("py_model.setupKVCacheForAttentionInputs");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model setupKVCacheForAttentionInputs");
     if (!inputs.kv_cache_kernel_block_id.defined()) {
-        return {};
+        torch_ext::AttnInputsByGroup inputs_by_group;
+        if (!inputs.warmup || kv_cache_group_tags_.size() <= 1) {
+            return inputs_by_group;
+        }
+        for (const auto& tag : kv_cache_group_tags_) {
+            const auto [it, inserted] = inputs_by_group.emplace(tag, py_attn_inputs);
+            (void)it;
+            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate cacheless attention input tag=%s", tag.c_str());
+        }
+        return inputs_by_group;
     }
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 2 || inputs.kv_cache_kernel_block_id.dim() == 3,
                             "kv_cache_kernel_block_id must be [batch, blocks] or [group, batch, blocks]");

@@ -252,7 +252,7 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
             [this]() { step_profiler_.startStep(); },
             [this]() { step_profiler_.finishStep(); },
             propose_params_.get()));
-    } else if (sp_config.type != SP_TYPE_NONE) {
+    } else if (sp_config.type != SP_TYPE_NONE && propose_params_) {
         executor_.reset(new MtpExecutor(
             params, propose_params_, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {

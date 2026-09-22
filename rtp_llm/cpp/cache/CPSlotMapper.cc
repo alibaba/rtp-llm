@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <limits>
-#include <numeric>
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -136,20 +135,7 @@ CPSlotMapper::localCacheKeys(const CacheConfig& config, std::string_view tag, co
 }
 
 size_t CPSlotMapper::cacheKeysPerPhysicalBlock(const CacheConfig& config, std::string_view tag) const {
-    const size_t logical_block_size  = config.seq_size_per_block;
-    const size_t physical_block_size = config.group(tag).seqSizePerBlock();
-    RTP_LLM_CHECK_WITH_INFO(logical_block_size > 0,
-                            "cache-key projection requires positive logical block size for tag=%.*s",
-                            static_cast<int>(tag.size()),
-                            tag.data());
-    RTP_LLM_CHECK_WITH_INFO(physical_block_size >= logical_block_size && physical_block_size % logical_block_size == 0,
-                            "cache-key projection requires tag=%.*s physical block size=%zu to be a positive "
-                            "multiple of logical block size=%zu",
-                            static_cast<int>(tag.size()),
-                            tag.data(),
-                            physical_block_size,
-                            logical_block_size);
-    return physical_block_size / logical_block_size;
+    return CacheBlockMapper::cacheKeysPerPhysicalBlock(config, tag);
 }
 
 size_t CPSlotMapper::reuseScanAlignmentKeyBlocks(const CacheConfig& config) const {
@@ -162,14 +148,7 @@ size_t CPSlotMapper::reuseScanAlignmentKeyBlocks(const CacheConfig& config) cons
         const size_t group_key_blocks = usesCpCanonicalKeys(config, group.tag) ?
                                             static_cast<size_t>(cp_size_) :
                                             cacheKeysPerPhysicalBlock(config, group.tag);
-        const size_t common_divisor   = std::gcd(unit_key_blocks, group_key_blocks);
-        RTP_LLM_CHECK_WITH_INFO(unit_key_blocks / common_divisor
-                                    <= std::numeric_limits<size_t>::max() / group_key_blocks,
-                                "reuse cache-key unit LCM overflow: current=%zu group=%zu tag=%s",
-                                unit_key_blocks,
-                                group_key_blocks,
-                                group.tag.c_str());
-        unit_key_blocks = unit_key_blocks / common_divisor * group_key_blocks;
+        unit_key_blocks = CacheBlockMapper::checkedLeastCommonMultiple(unit_key_blocks, group_key_blocks, group.tag);
     }
     return unit_key_blocks;
 }
@@ -200,45 +179,20 @@ size_t CPSlotMapper::physicalBlocksForCacheKeyPrefix(const CacheConfig& config,
     }
     const size_t keys_per_physical =
         usesCpCanonicalKeys(config, tag) ? static_cast<size_t>(cp_size_) : cacheKeysPerPhysicalBlock(config, tag);
-    RTP_LLM_CHECK_WITH_INFO(cache_key_blocks % keys_per_physical == 0,
-                            "cache-key prefix=%zu is not aligned to tag=%.*s physical span=%zu",
-                            cache_key_blocks,
-                            static_cast<int>(tag.size()),
-                            tag.data(),
-                            keys_per_physical);
-    return cache_key_blocks / keys_per_physical;
+    return CacheBlockMapper::physicalBlocksForCacheKeyPrefix(cache_key_blocks, keys_per_physical, tag);
 }
 
 std::vector<CacheStoreBlockPair> CPSlotMapper::buildCacheKeyBlockPlan(const CacheConfig& config,
                                                                       std::string_view   tag,
                                                                       size_t             total_cache_key_blocks,
                                                                       size_t             physical_block_count) const {
-    std::vector<CacheStoreBlockPair> plan;
     if (total_cache_key_blocks == 0 || physical_block_count == 0) {
-        return plan;
+        return {};
     }
-    const bool   canonical         = usesCpCanonicalKeys(config, tag);
-    const size_t keys_per_physical = canonical ? static_cast<size_t>(cp_size_) : cacheKeysPerPhysicalBlock(config, tag);
-    const size_t max_physical_blocks = (total_cache_key_blocks + keys_per_physical - 1) / keys_per_physical;
-    RTP_LLM_CHECK_WITH_INFO(physical_block_count <= max_physical_blocks,
-                            "cache-key projection tag=%.*s physical blocks=%zu exceed key capacity=%zu",
-                            static_cast<int>(tag.size()),
-                            tag.data(),
-                            physical_block_count,
-                            max_physical_blocks);
-    RTP_LLM_CHECK_WITH_INFO(total_cache_key_blocks - 1 <= static_cast<size_t>(std::numeric_limits<int>::max()),
-                            "cache-key projection ordinal exceeds int range: %zu",
-                            total_cache_key_blocks - 1);
-    RTP_LLM_CHECK_WITH_INFO(physical_block_count - 1 <= static_cast<size_t>(std::numeric_limits<int>::max()),
-                            "cache-key projection physical slot exceeds int range: %zu",
-                            physical_block_count - 1);
-
-    plan.reserve(physical_block_count);
-    for (size_t offset = 0; offset < physical_block_count; ++offset) {
-        const size_t key_index = std::min((offset + 1) * keys_per_physical - 1, total_cache_key_blocks - 1);
-        plan.push_back({static_cast<int>(key_index), static_cast<int>(offset)});
-    }
-    return plan;
+    const size_t keys_per_physical =
+        usesCpCanonicalKeys(config, tag) ? static_cast<size_t>(cp_size_) : cacheKeysPerPhysicalBlock(config, tag);
+    return CacheBlockMapper::buildCacheKeyBlockPlan(
+        total_cache_key_blocks, physical_block_count, keys_per_physical, tag);
 }
 
 std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig& config,

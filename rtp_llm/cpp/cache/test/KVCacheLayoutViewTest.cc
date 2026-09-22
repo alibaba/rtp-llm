@@ -368,7 +368,8 @@ TEST(KVCacheLayoutViewTest, Dsv4Fp8CompressedPhysicalBlocksPreserveAlignedKernel
     ModelConfig model_config;
     model_config.num_layers                   = 1;
     model_config.data_type                    = DataType::TYPE_BF16;
-    model_config.attn_config.tokens_per_block = kKernelTokensPerBlock;
+    model_config.attn_config.tokens_per_block        = kPhysicalTokensPerBlock;
+    model_config.attn_config.kernel_tokens_per_block = kKernelTokensPerBlock;
     const auto make_desc                      = [](const std::string& tag, uint32_t compression_ratio) {
         KVCacheSpecDesc desc;
         desc.tag                          = tag;

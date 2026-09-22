@@ -156,6 +156,20 @@ cc_test(
 )
 
 cc_test(
+    name = "cache_block_mapper_test",
+    srcs = ["CacheBlockMapperTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_block_mapper",
+        "//rtp_llm/cpp/cache:cache_config",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "cp_slot_mapper_test",
     srcs = [
         "CPSlotMapperTest.cc",

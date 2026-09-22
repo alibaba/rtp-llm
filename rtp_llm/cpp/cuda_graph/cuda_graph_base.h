@@ -39,6 +39,8 @@ struct GraphParams {
     bool                               is_target_verify             = false;
     int                                max_seq_len                  = 0;
     std::shared_ptr<const CacheConfig> cache_config;
+    int                                tokens_per_block             = 0;
+    int                                kernel_tokens_per_block      = 0;
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     int              sp_steps               = 0;
     size_t           max_context_batch_size = 128;

@@ -3,11 +3,23 @@
 #include <map>
 #include <sstream>
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <cctype>
 #include <regex>
 
 namespace rtp_llm {
+
+std::pair<int, int> resolveCacheCpRankAndSize(const ParallelismConfig& parallelism_config) {
+    const auto& cp_config = parallelism_config.prefill_cp_config;
+    if (!cp_config.kv_cache_sharded) {
+        return {0, 1};
+    }
+    if (parallelism_config.tp_size > 1) {
+        return {static_cast<int>(parallelism_config.tp_rank), static_cast<int>(parallelism_config.tp_size)};
+    }
+    return {0, 1};
+}
 
 // NcclCommConfig
 std::string NcclCommConfig::to_string() const {

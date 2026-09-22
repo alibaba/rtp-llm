@@ -116,22 +116,34 @@ uint32_t computeLocalBlockNum(const KVCacheBlockBudget&                        b
     return maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget, linear_step);
 }
 
-std::pair<uint32_t, uint32_t> resolveSeqSizes(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config) {
+std::pair<int, int> resolveSeqSizes(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config) {
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block >= 0,
                             "cache seq_size_per_block must be non-negative before resolution");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.kernel_seq_size_per_block >= 0,
                             "cache kernel_seq_size_per_block must be non-negative before resolution");
-    const auto seq_size_per_block        = kv_cache_config.seq_size_per_block > 0 ?
-                                               static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
-                                               static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    const auto kernel_seq_size_per_block = kv_cache_config.kernel_seq_size_per_block > 0 ?
-                                               static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
-                                               seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.tokens_per_block
+                                <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                            "model tokens_per_block=%zu exceeds int range",
+                            model_config.attn_config.tokens_per_block);
+    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.kernel_tokens_per_block
+                                <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                            "model kernel_tokens_per_block=%zu exceeds int range",
+                            model_config.attn_config.kernel_tokens_per_block);
+
+    const int model_seq_size_per_block        = static_cast<int>(model_config.attn_config.tokens_per_block);
+    const int model_kernel_seq_size_per_block = static_cast<int>(model_config.attn_config.kernel_tokens_per_block);
+    const int seq_size_per_block =
+        model_seq_size_per_block > 0 ? model_seq_size_per_block : kv_cache_config.seq_size_per_block;
+    const int kernel_seq_size_per_block =
+        model_kernel_seq_size_per_block > 0 ?
+            model_kernel_seq_size_per_block :
+            (kv_cache_config.kernel_seq_size_per_block > 0 ? kv_cache_config.kernel_seq_size_per_block :
+                                                             seq_size_per_block);
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "cache seq_size_per_block must be > 0");
     RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0, "cache kernel_seq_size_per_block must be > 0");
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block >= kernel_seq_size_per_block
                                 && seq_size_per_block % kernel_seq_size_per_block == 0,
-                            "cache seq_size_per_block=%u must be >= kernel_seq_size_per_block=%u and divisible by it",
+                            "cache seq_size_per_block=%d must be >= kernel_seq_size_per_block=%d and divisible by it",
                             seq_size_per_block,
                             kernel_seq_size_per_block);
     return {seq_size_per_block, kernel_seq_size_per_block};
@@ -706,7 +718,11 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     const ModelConfig scoped_model_config = stageScopedModelConfig(model_config, parallelism_config);
     const auto [seq_size_per_block, kernel_seq_size_per_block] = resolveSeqSizes(scoped_model_config, kv_cache_config);
     const auto ctx                                             = makeSpecBuildContext(
-        scoped_model_config, parallelism_config, seq_size_per_block, kernel_seq_size_per_block, gen_num_per_cycle);
+        scoped_model_config,
+        parallelism_config,
+        static_cast<uint32_t>(seq_size_per_block),
+        static_cast<uint32_t>(kernel_seq_size_per_block),
+        gen_num_per_cycle);
     auto config        = createConfigFromDescs(scoped_model_config, ctx);
     config.linear_step = std::max(1, kv_cache_config.linear_step);
     return config;
@@ -727,13 +743,13 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                               warm_up_result,
                                               sp_config,
                                               config.linear_step);
+    if (kv_cache_config.test_block_num <= 0) {
+        block_num = clampAutomaticBlockNum(block_num, config);
+    }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
                             static_cast<long>(config.totalGroupBlockSizeBytes() / 1024 / 1024));
-    if (kv_cache_config.test_block_num <= 0) {
-        block_num = clampAutomaticBlockNum(block_num, config);
-    }
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.finalizeBlockNums(block_num, runtime_config);
@@ -772,13 +788,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     const auto [seq_size_per_block, kernel_seq_size_per_block] = resolveSeqSizes(score_config_source, kv_cache_config);
     const auto score_ctx                                       = makeSpecBuildContext(score_config_source,
                                                 parallelism_config,
-                                                seq_size_per_block,
-                                                kernel_seq_size_per_block,
+                                                static_cast<uint32_t>(seq_size_per_block),
+                                                static_cast<uint32_t>(kernel_seq_size_per_block),
                                                 sp_config.gen_num_per_cycle);
     const auto propose_ctx                                     = makeSpecBuildContext(propose_model_config,
                                                   parallelism_config,
-                                                  seq_size_per_block,
-                                                  kernel_seq_size_per_block,
+                                                  static_cast<uint32_t>(seq_size_per_block),
+                                                  static_cast<uint32_t>(kernel_seq_size_per_block),
                                                   sp_config.gen_num_per_cycle);
     auto       score_data   = buildConfigDataFromDescs(score_config_source, score_ctx);
     auto       propose_data = buildConfigDataFromDescs(propose_model_config, propose_ctx);

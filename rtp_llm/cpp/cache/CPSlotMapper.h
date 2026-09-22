@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/CacheBlockMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 

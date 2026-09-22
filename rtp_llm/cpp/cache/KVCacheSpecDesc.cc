@@ -8,20 +8,18 @@
 namespace rtp_llm {
 
 uint32_t effectiveCacheCpSize(const SpecBuildContext& ctx) {
-    if (ctx.parallelism_config == nullptr || !ctx.parallelism_config->prefill_cp_config.kv_cache_sharded) {
+    if (ctx.parallelism_config == nullptr) {
         return 1;
     }
     const auto& parallelism_config = *ctx.parallelism_config;
-    if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
-        return static_cast<uint32_t>(parallelism_config.tp_size);
+    const auto& cp_config          = parallelism_config.prefill_cp_config;
+    if (cp_config.kv_cache_sharded && parallelism_config.role_type == RoleType::DECODE
+        && cp_config.is_prefill_enabled()) {
+        RTP_LLM_CHECK_WITH_INFO(cp_config.prefill_cp_size > 1,
+                                "decode PREFILL_CP cache layout requires explicit PREFILL_CP_SIZE");
+        return static_cast<uint32_t>(cp_config.prefill_cp_size);
     }
-    if (parallelism_config.role_type == RoleType::DECODE && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-        RTP_LLM_CHECK_WITH_INFO(
-            parallelism_config.prefill_cp_config.prefill_cp_size > 1,
-            "compact CP decode requires explicit prefill_cp_size when PREFILL_CP and kv_cache_sharded are enabled");
-        return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
-    }
-    return 1;
+    return static_cast<uint32_t>(resolveCacheCpRankAndSize(parallelism_config).second);
 }
 
 namespace {

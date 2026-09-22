@@ -120,9 +120,7 @@ CacheConfig createFinalConfig(const ModelConfig& model_config) {
 std::string runtimeErrorMessage(const std::function<void()>& operation) {
     try {
         operation();
-    } catch (const std::runtime_error& error) {
-        return error.what();
-    }
+    } catch (const std::runtime_error& error) { return error.what(); }
     return {};
 }
 
@@ -189,7 +187,10 @@ TEST(CacheConfigCreatorTest, BasicConfigMaterializesResolvedGeometryAndExplicitR
     kv_cache_config.seq_size_per_block        = 256;
     kv_cache_config.kernel_seq_size_per_block = 128;
 
-    const auto config = CacheConfigCreator::createBasicConfig(makeDsv4Model(), ParallelismConfig{}, kv_cache_config, 0);
+    auto model                                = makeDsv4Model();
+    model.attn_config.tokens_per_block        = 256;
+    model.attn_config.kernel_tokens_per_block = 128;
+    const auto config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache_config, 0);
 
     EXPECT_EQ(config.block_num, 0);
     EXPECT_EQ(config.seq_size_per_block, 256u);
@@ -204,7 +205,9 @@ TEST(CacheConfigCreatorTest, BasicSingleConfigUsesTheUnifiedPhysicalAndKernelOve
     kv_cache_config.seq_size_per_block        = 256;
     kv_cache_config.kernel_seq_size_per_block = 128;
 
-    auto       model  = makeMhaModel();
+    auto model                                = makeMhaModel();
+    model.attn_config.tokens_per_block        = 256;
+    model.attn_config.kernel_tokens_per_block = 128;
     const auto config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache_config, 0);
 
     ASSERT_EQ(config.groupNums(), 1);
@@ -214,7 +217,7 @@ TEST(CacheConfigCreatorTest, BasicSingleConfigUsesTheUnifiedPhysicalAndKernelOve
     EXPECT_EQ(config.group("default").block_num, 0u);
 }
 
-TEST(CacheConfigCreatorTest, ZeroIsTheOnlyUnsetSequenceBlockSize) {
+TEST(CacheConfigCreatorTest, FinalModelGeometryPrecedesKvConfigFallback) {
     auto model                         = makeMhaModel();
     model.attn_config.tokens_per_block = 128;
 
@@ -225,14 +228,20 @@ TEST(CacheConfigCreatorTest, ZeroIsTheOnlyUnsetSequenceBlockSize) {
 
     kv_cache.seq_size_per_block = 64;
     auto explicit_64            = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
-    EXPECT_EQ(explicit_64.seq_size_per_block, 64u);
-    EXPECT_EQ(explicit_64.group("default").kernelSeqSizePerBlock(), 64u);
+    EXPECT_EQ(explicit_64.seq_size_per_block, 128u);
+    EXPECT_EQ(explicit_64.group("default").kernelSeqSizePerBlock(), 128u);
 
     kv_cache.seq_size_per_block        = 32;
     kv_cache.kernel_seq_size_per_block = 16;
     auto explicit_32                   = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
-    EXPECT_EQ(explicit_32.seq_size_per_block, 32u);
+    EXPECT_EQ(explicit_32.seq_size_per_block, 128u);
     EXPECT_EQ(explicit_32.group("default").kernelSeqSizePerBlock(), 16u);
+
+    model.attn_config.tokens_per_block        = 0;
+    model.attn_config.kernel_tokens_per_block = 0;
+    auto fallback = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
+    EXPECT_EQ(fallback.seq_size_per_block, 32u);
+    EXPECT_EQ(fallback.group("default").kernelSeqSizePerBlock(), 16u);
 
     kv_cache.seq_size_per_block = -1;
     EXPECT_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0), std::runtime_error);
@@ -251,18 +260,22 @@ TEST(CacheConfigCreatorTest, CompressedDescriptorEnforcesKernelBlockAlignment) {
     compressed.kernel_tokens_per_block_alignment = 128;
 
     KVCacheConfig kv_cache;
-    kv_cache.seq_size_per_block        = 64;
-    kv_cache.kernel_seq_size_per_block = 64;
-    const auto error                   = runtimeErrorMessage(
+    kv_cache.seq_size_per_block               = 64;
+    kv_cache.kernel_seq_size_per_block        = 64;
+    model.attn_config.tokens_per_block        = 64;
+    model.attn_config.kernel_tokens_per_block = 64;
+    const auto error                          = runtimeErrorMessage(
         [&]() { (void)CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0); });
     EXPECT_NE(error.find("must be >= 128 and a multiple of 128"), std::string::npos) << error;
 
-    kv_cache.seq_size_per_block        = 128;
-    kv_cache.kernel_seq_size_per_block = 128;
+    kv_cache.seq_size_per_block               = 128;
+    kv_cache.kernel_seq_size_per_block        = 128;
+    model.attn_config.tokens_per_block        = 128;
+    model.attn_config.kernel_tokens_per_block = 128;
     EXPECT_NO_THROW((void)CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0));
 }
 
-TEST(CacheConfigCreatorTest, ExplicitSequenceBlockSizeIsSharedBySpeculativeConfigs) {
+TEST(CacheConfigCreatorTest, FinalModelSequenceBlockSizeIsSharedBySpeculativeConfigs) {
     auto score                           = makeMhaModel(/*layer_num=*/2, /*tag=*/"default");
     auto propose                         = makeMhaModel(/*layer_num=*/1, /*tag=*/"default");
     score.attn_config.tokens_per_block   = 128;
@@ -283,12 +296,12 @@ TEST(CacheConfigCreatorTest, ExplicitSequenceBlockSizeIsSharedBySpeculativeConfi
                                                            /*is_mtp=*/true,
                                                            /*is_eagle=*/false);
 
-    EXPECT_EQ(config.seq_size_per_block, 64u);
+    EXPECT_EQ(config.seq_size_per_block, 128u);
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
-        EXPECT_EQ(sub_config->seq_size_per_block, 64u);
-        EXPECT_EQ(sub_config->group("default").seqSizePerBlock(), 64u);
+        EXPECT_EQ(sub_config->seq_size_per_block, 128u);
+        EXPECT_EQ(sub_config->group("default").seqSizePerBlock(), 128u);
     }
 }
 
@@ -405,10 +418,68 @@ TEST(CacheConfigCreatorTest, SpecBuilderDerivesPhysicalSpanFromCpMapping) {
     EXPECT_EQ(round_robin->kernel_seq_size_per_block, 64u);
     EXPECT_EQ(compact->kernel_seq_size_per_block, 64u);
 
+    parallelism_config.role_type = RoleType::PDFUSION;
+    const auto pdfusion_compact  = SpecBuilder::build(compact_desc, ctx).spec;
+    EXPECT_EQ(pdfusion_compact->seq_size_per_block, 256u);
+    EXPECT_EQ(pdfusion_compact->kernel_seq_size_per_block, 64u);
+
     parallelism_config.prefill_cp_config.kv_cache_sharded = false;
     const auto inactive_compact                           = SpecBuilder::build(compact_desc, ctx).spec;
     EXPECT_EQ(inactive_compact->seq_size_per_block, 128u);
     EXPECT_EQ(inactive_compact->kernel_seq_size_per_block, 64u);
+}
+
+TEST(CacheConfigCreatorTest, ResolveCacheCpRankAndSizeUsesLocalGeometry) {
+    ParallelismConfig config;
+    config.tp_rank = 2;
+    config.tp_size = 4;
+
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(0, 1));
+
+    config.prefill_cp_config.kv_cache_sharded = true;
+    config.role_type                          = RoleType::PDFUSION;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(2, 4));
+
+    config.role_type = RoleType::PREFILL;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(2, 4));
+
+    config.role_type = RoleType::DECODE;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(2, 4));
+
+    config.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
+    config.prefill_cp_config.prefill_cp_size = 2;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(2, 4));
+
+    config.tp_rank = 0;
+    config.tp_size = 1;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(0, 1));
+    config.prefill_cp_config.prefill_cp_size = 1;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(0, 1));
+}
+
+TEST(CacheConfigCreatorTest, DecodeCompactSpecUsesPrefillGeometryWithoutLocalSharding) {
+    auto              model_config = makeMhaModel(/*layer_num=*/1);
+    ParallelismConfig parallelism_config;
+    parallelism_config.role_type                          = RoleType::DECODE;
+    parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    parallelism_config.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    parallelism_config.prefill_cp_config.prefill_cp_size  = 2;
+
+    SpecBuildContext ctx;
+    ctx.dtype                     = DataType::TYPE_FP16;
+    ctx.seq_size_per_block        = 128;
+    ctx.kernel_seq_size_per_block = 64;
+    ctx.attn_config               = &model_config.attn_config;
+    ctx.parallelism_config        = &parallelism_config;
+    auto desc                     = model_config.kv_cache_spec_descs[0][0];
+    EXPECT_EQ(SpecBuilder::build(desc, ctx).spec->seq_size_per_block, 128u);
+    desc.cp          = CacheCpPolicyDesc{};
+    desc.cp->mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
+    EXPECT_EQ(SpecBuilder::build(desc, ctx).spec->seq_size_per_block, 256u);
+    EXPECT_EQ(resolveCacheCpRankAndSize(parallelism_config), std::make_pair(0, 1));
+
+    parallelism_config.prefill_cp_config.prefill_cp_size = 0;
+    EXPECT_THROW(SpecBuilder::build(desc, ctx), std::exception);
 }
 
 TEST(CacheConfigCreatorTest, SpecFingerprintIncludesKernelGeometry) {

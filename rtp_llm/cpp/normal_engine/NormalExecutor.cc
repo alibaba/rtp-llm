@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -169,6 +170,20 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
+
+    if (!cache_manager && warm_up_) {
+        const int cache_gen_num_per_cycle =
+            params.sp_config.type != SP_TYPE_NONE ? static_cast<int>(params.sp_config.gen_num_per_cycle) : 0;
+        const auto warmup_cache_config = CacheConfigCreator::createBasicConfig(
+            params.model_config_, params.parallelism_config, params.kv_cache_config, cache_gen_num_per_cycle);
+        std::vector<std::string> warmup_group_tags;
+        warmup_group_tags.reserve(warmup_cache_config.groups().size());
+        for (const auto& group : warmup_cache_config.groups()) {
+            warmup_group_tags.push_back(group.tag);
+        }
+        model_init_params.kv_cache_group_tags =
+            sortedCacheGroupTags(warmup_group_tags, "cacheless warm-up KV cache");
+    }
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");

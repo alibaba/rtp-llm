@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/CacheBlockMapper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -1117,10 +1118,9 @@ int CoordinatorCacheManager::reuseCache(const CacheKeysType&                 ful
         return 0;
     }
 
-    const CPSlotMapper passthrough_mapper;
-    const auto&        mapper                    = cp_mapper ? *cp_mapper : passthrough_mapper;
-    const size_t       alignment_unit_key_blocks = mapper.reuseScanAlignmentKeyBlocks(config_);
-    const size_t       candidate_units =
+    const size_t alignment_unit_key_blocks = cp_mapper ? cp_mapper->reuseScanAlignmentKeyBlocks(config_) :
+                                                         CacheBlockMapper::reuseScanAlignmentKeyBlocks(config_);
+    const size_t candidate_units =
         full_cache_keys.empty() ? 0 : (full_cache_keys.size() - 1) / alignment_unit_key_blocks;
     if (candidate_units == 0) {
         return 0;
@@ -1133,8 +1133,13 @@ int CoordinatorCacheManager::reuseCache(const CacheKeysType&                 ful
     const bool                              has_tail_groups   = !linear_group_tags_.empty() || !swa_group_tags_.empty();
 
     auto plan_for_prefix = [&](std::string_view tag, size_t prefix_key_blocks) {
-        const size_t physical_blocks = mapper.physicalBlocksForCacheKeyPrefix(config_, tag, prefix_key_blocks);
-        return mapper.buildCacheKeyBlockPlan(config_, tag, full_cache_keys.size(), physical_blocks);
+        if (cp_mapper) {
+            const size_t physical_blocks = cp_mapper->physicalBlocksForCacheKeyPrefix(config_, tag, prefix_key_blocks);
+            return cp_mapper->buildCacheKeyBlockPlan(config_, tag, full_cache_keys.size(), physical_blocks);
+        }
+        const size_t physical_blocks =
+            CacheBlockMapper::physicalBlocksForCacheKeyPrefix(config_, tag, prefix_key_blocks);
+        return CacheBlockMapper::buildCacheKeyBlockPlan(config_, tag, full_cache_keys.size(), physical_blocks);
     };
     auto match_pair = [&](std::string_view tag, const CacheStoreBlockPair& pair) {
         RTP_LLM_CHECK_WITH_INFO(pair.key_index >= 0 && static_cast<size_t>(pair.key_index) < full_cache_keys.size(),
@@ -1181,12 +1186,15 @@ int CoordinatorCacheManager::reuseCache(const CacheKeysType&                 ful
         bool                                    all_tail_groups_matched = true;
         std::map<std::string, BlockIndicesType> candidate_tail_matches;
         auto                                    match_tail = [&](const std::string& tag, bool skip) {
-            const auto       plan = plan_for_prefix(tag, prefix_key_blocks);
-            BlockIndicesType blocks(plan.size(), NULL_BLOCK_IDX);
             if (skip) {
-                candidate_tail_matches.emplace(tag, std::move(blocks));
+                // A skipped group must not receive NULL tail entries: SWA validates
+                // its active tail before allocation. Leave it empty so normal
+                // group allocation creates the required tail blocks.
+                candidate_tail_matches.emplace(tag, BlockIndicesType{});
                 return true;
             }
+            const auto       plan = plan_for_prefix(tag, prefix_key_blocks);
+            BlockIndicesType blocks(plan.size(), NULL_BLOCK_IDX);
             if (plan.empty()) {
                 return false;
             }
@@ -1464,7 +1472,6 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
         const auto& full_dependencies = kv_cache_resource->cacheResource(batch_id).blockDependencies();
 
         if (!cp_active) {
-            const CPSlotMapper                      passthrough_mapper;
             std::map<std::string, BlockIndicesType> blocks_by_key;
             for (const auto& group : config_.groups()) {
                 auto& keyed_blocks = blocks_by_key[group.tag];
@@ -1472,10 +1479,11 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
                 if (skipReuseCacheGroup(group.tag)) {
                     continue;
                 }
-                const auto&  blocks              = kv_cache_resource->blocks(batch_id, group.tag);
-                const size_t keys_per_physical   = passthrough_mapper.cacheKeysPerPhysicalBlock(config_, group.tag);
-                const size_t max_physical_blocks = (full_keys.size() + keys_per_physical - 1) / keys_per_physical;
-                const auto   plan                = passthrough_mapper.buildCacheKeyBlockPlan(
+                const auto&  blocks            = kv_cache_resource->blocks(batch_id, group.tag);
+                const size_t keys_per_physical = CacheBlockMapper::cacheKeysPerPhysicalBlock(config_, group.tag);
+                const size_t max_physical_blocks =
+                    CacheBlockMapper::physicalBlockCapacityForCacheKeys(full_keys.size(), keys_per_physical);
+                const auto plan = CacheBlockMapper::buildCacheKeyBlockPlan(
                     config_, group.tag, full_keys.size(), std::min(blocks.size(), max_physical_blocks));
                 for (const auto& pair : plan) {
                     keyed_blocks[static_cast<size_t>(pair.key_index)] = blocks[static_cast<size_t>(pair.offset_index)];
@@ -1830,6 +1838,10 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
             fork_resource.setCacheKeysAndBlockDependencies(source_resource.cacheKeys(),
                                                            source_resource.blockDependencies());
             fork_resource.setCacheKeysAreCpCanonical(source_resource.cacheKeysAreCpCanonical());
+            fork_resource.setLastBlockAligned(source_resource.lastBlockAligned());
+            fork_resource.setDeviceReuseBlockNum(source_resource.deviceReuseBlockNum());
+            fork_resource.setMemoryReuseBlockNum(source_resource.memoryReuseBlockNum());
+            fork_resource.setRemoteReuseBlockNum(source_resource.remoteReuseBlockNum());
             for (const auto& group : config_.groups()) {
                 const auto& tag       = group.tag;
                 auto&       block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);

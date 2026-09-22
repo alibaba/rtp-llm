@@ -64,12 +64,33 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         0,
         parallelism_config,
     });
+    model_init_params.hw_kernel_config                = params.hw_kernel_config;
+    model_init_params.profile_debug_logging_config   = params.profiling_debug_logging_config;
+    model_init_params.runtime_config                 = params.runtime_config;
+    model_init_params.concurrency_config             = params.concurrency_config;
+    model_init_params.device_resource_config         = params.device_resource_config;
+    model_init_params.max_seq_len                    = model_config_.max_seq_len;
+    model_init_params.hidden_size                    = model_config_.hidden_size;
+    model_init_params.tokens_per_block               = model_config_.attn_config.tokens_per_block;
+    model_init_params.kernel_tokens_per_block        = model_config_.attn_config.kernel_tokens_per_block > 0 ?
+                                                           model_config_.attn_config.kernel_tokens_per_block :
+                                                           model_config_.attn_config.tokens_per_block;
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");
     // Model-input dumps target autoregressive Normal/MTP replay. Embedding and
     // rerank use a different input contract and intentionally do not need it.
-    model_.reset(new PyWrappedModel(model_init_params, params.py_model, true));
+    // Embedding is cacheless, so keep CUDA graph capture disabled here even when
+    // the shared hardware config enables it for cache-backed executors. This
+    // preserves the cacheless embedding path and avoids planning a paged
+    // FlashInfer workspace for a model with no KV-cache layout.
+    constexpr bool kAllowCudaGraph = false;
+    model_.reset(new PyWrappedModel(model_init_params,
+                                    params.py_model,
+                                    /*is_prefill_cuda_graph_mode=*/true,
+                                    /*use_spec_decoding=*/false,
+                                    DSparkModelRole::NONE,
+                                    kAllowCudaGraph));
 
     init_position_ids(model_config_.max_seq_len);
     std::vector<std::string> handler_args;

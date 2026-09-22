@@ -114,6 +114,93 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
     EXPECT_EQ(info.available_kv_cache, mgr->availableTokensNum());
 }
 
+TEST_F(KVCacheManagerCPSlotMapperTest, DecodePrefillCp_KeepsFullTargetBlocks) {
+    auto config = makeTestConfig();
+    ParallelismConfig par;
+    par.role_type                          = RoleType::DECODE;
+    par.tp_rank                            = 0;
+    par.tp_size                            = 1;
+    par.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    par.prefill_cp_config.kv_cache_sharded = true;
+    par.prefill_cp_config.prefill_cp_size  = 2;
+
+    auto mgr = makeManagerWithoutBlockSync(std::move(config), KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+
+    EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
+    EXPECT_EQ(mgr->coordinator_cache_manager_->cpSlotMapper(), nullptr);
+    auto       resource  = makeResource(1, mgr->cacheConfig());
+    auto       token_ids = makeTokenIds(1, /*seq_len=*/33, /*block_size=*/4);
+    MallocInfo info{resource, token_ids};
+    info.enable_device_cache = false;
+    for (int seq_len : {31, 32, 33}) {
+        token_ids->setSeqLength(seq_len);
+        ASSERT_TRUE(mgr->malloc(info).success);
+        EXPECT_EQ(resource->blocksNum(0, kDefaultTag), (seq_len + 3) / 4);
+    }
+    mgr->free(FreeInfo{resource, token_ids});
+}
+
+TEST_F(KVCacheManagerCPSlotMapperTest, DecodePrefillCp_KeepsCompactPhysicalSpan) {
+    auto full      = makeTestConfig();
+    auto compact   = makeTestConfig(/*block_num=*/20, /*seq_size_per_block=*/8).groups().front();
+    compact.tag    = "compact";
+    compact.policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    CacheConfig config({full.groups().front(), compact}, {{"default", "compact"}, {"default", "compact"}}, 2);
+    copyCacheConfigScalars(full, config);
+
+    ParallelismConfig par;
+    par.role_type                          = RoleType::DECODE;
+    par.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    par.prefill_cp_config.kv_cache_sharded = true;
+    par.prefill_cp_config.prefill_cp_size  = 2;
+    auto mgr                               = makeManagerWithoutBlockSync(std::move(config), KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+    EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
+    EXPECT_EQ(mgr->cacheConfig().group("compact").seqSizePerBlock(), 8u);
+
+    auto       resource  = makeResource(1, mgr->cacheConfig());
+    auto       token_ids = makeTokenIds(1, /*seq_len=*/32, /*block_size=*/4);
+    MallocInfo info{resource, token_ids};
+    info.enable_device_cache = false;
+    ASSERT_TRUE(mgr->malloc(info).success);
+    EXPECT_EQ(resource->blocksNum(0, "default"), 8);
+    EXPECT_EQ(resource->blocksNum(0, "compact"), 4);
+    mgr->free(FreeInfo{resource, token_ids});
+}
+
+TEST_F(KVCacheManagerCPSlotMapperTest, PdfusionUsesTpCacheGeometry) {
+    auto              config = makeTestConfig();
+    ParallelismConfig par;
+    par.role_type                          = RoleType::PDFUSION;
+    par.tp_rank                            = 1;
+    par.tp_size                            = 2;
+    par.prefill_cp_config.kv_cache_sharded = true;
+
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+
+    ASSERT_NE(mgr->cpSlotMapper(), nullptr);
+    EXPECT_EQ(mgr->cpSlotMapper()->cpRank(), 1);
+    EXPECT_EQ(mgr->cpSlotMapper()->cpSize(), 2);
+}
+
+TEST_F(KVCacheManagerCPSlotMapperTest, CompactGroupRejectsMismatchedPhysicalSpan) {
+    auto config                      = makeTestConfig(/*block_num=*/20, /*seq_size_per_block=*/4);
+    auto groups                      = config.groups();
+    groups.front().policy.cp_mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
+    CacheConfig malformed(std::move(groups), config.layers(), config.layer_num);
+    copyCacheConfigScalars(config, malformed);
+
+    ParallelismConfig par;
+    par.role_type                          = RoleType::PDFUSION;
+    par.tp_size                            = 2;
+    par.prefill_cp_config.kv_cache_sharded = true;
+
+    EXPECT_THROW(std::make_shared<KVCacheManager>(std::move(malformed), /*warmup=*/true, nullptr, KVCacheConfig{}, par),
+                 std::exception);
+}
+
 // When kv_cache_sharded is true and tp_size > 1, cpSlotMapper() should return a valid mapper.
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     const int seq_size_per_block = 4;

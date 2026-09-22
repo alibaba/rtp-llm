@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -88,6 +89,31 @@ static CacheConfig makePerGroupBlockSizeConfig() {
     setGroupBlockLayout(config,
                         {config.block_num, config.block_num},
                         {full_spec->block_size_bytes(), compact_spec->block_size_bytes()},
+                        {0, 0});
+    config.finalizeBlockNums(config.block_num, RuntimeConfig{});
+    return config;
+}
+
+static CacheConfig makeHeterogeneousFullSwaConfig(bool enable_swa_prefix_reuse) {
+    CacheConfig config;
+    config.dtype              = DataType::TYPE_FP16;
+    config.block_num          = 10;
+    config.seq_size_per_block = 4;
+
+    auto full_spec = makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1);
+    auto swa_spec  = makeMhaSpec("swa", 8, DataType::TYPE_FP16, 1, 1);
+    auto swa_policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.enable_prefix_reuse = enable_swa_prefix_reuse;
+    assignCacheConfigFromGroupedSpecs(config,
+                                      /*main_layer_num=*/2,
+                                      {full_spec, swa_spec},
+                                      {{0}, {1}},
+                                      {CacheGroupType::FULL, CacheGroupType::SWA},
+                                      {"full", "swa"},
+                                      {defaultCacheGroupPolicy(CacheGroupType::FULL), swa_policy});
+    setGroupBlockLayout(config,
+                        {config.block_num, config.block_num},
+                        {full_spec->block_size_bytes(), swa_spec->block_size_bytes()},
                         {0, 0});
     config.finalizeBlockNums(config.block_num, RuntimeConfig{});
     return config;
@@ -1222,6 +1248,76 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, JointReuseUsesFullPrefixAndLinearT
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));  // allocated tail for common length
 }
 
+TEST_F(CoordinatorCacheManagerHybridPathTest, DisabledSwaReuseSkipsUnalignedTailMatch) {
+    auto config                    = makeHeterogeneousFullSwaConfig(/*enable_swa_prefix_reuse=*/false);
+    auto coordinator_cache_manager = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
+    auto shared_cache              = std::make_shared<SharedBlockCache>();
+    coordinator_cache_manager->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(coordinator_cache_manager->init());
+
+    // The FULL group reuses one logical key block. The disabled SWA group has a
+    // two-key physical span, so this prefix is intentionally unaligned for SWA.
+    auto full_blocks = allocateAndCache(coordinator_cache_manager->blockPool("full"),
+                                        shared_cache,
+                                        "full",
+                                        CacheKeysType{100});
+    ASSERT_EQ(full_blocks.size(), 1u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+
+    MallocResult result;
+    ASSERT_NO_THROW(result = coordinator_cache_manager->malloc(info));
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 4);
+
+    const auto& swa_blocks = batch_res->blocks(0, "swa");
+    ASSERT_EQ(swa_blocks.size(), 1u);
+    EXPECT_FALSE(isNullBlockIdx(swa_blocks.front()));
+}
+
+TEST_F(CoordinatorCacheManagerHybridPathTest, EnabledSwaReuseMatchesAlignedTail) {
+    auto config                    = makeHeterogeneousFullSwaConfig(/*enable_swa_prefix_reuse=*/true);
+    auto coordinator_cache_manager = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
+    auto shared_cache              = std::make_shared<SharedBlockCache>();
+    coordinator_cache_manager->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(coordinator_cache_manager->init());
+
+    auto full_blocks = allocateAndCache(coordinator_cache_manager->blockPool("full"),
+                                        shared_cache,
+                                        "full",
+                                        CacheKeysType{100, 101});
+    auto swa_blocks = allocateAndCache(coordinator_cache_manager->blockPool("swa"),
+                                       shared_cache,
+                                       "swa",
+                                       CacheKeysType{101});
+    ASSERT_EQ(full_blocks.size(), 2u);
+    ASSERT_EQ(swa_blocks.size(), 1u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+
+    MallocResult result;
+    ASSERT_NO_THROW(result = coordinator_cache_manager->malloc(info));
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 8);
+
+    const auto& full_out = batch_res->blocks(0, "full");
+    ASSERT_EQ(full_out.size(), 2u);
+    EXPECT_EQ(full_out[0], full_blocks[0]);
+    EXPECT_EQ(full_out[1], full_blocks[1]);
+
+    const auto& swa_out = batch_res->blocks(0, "swa");
+    ASSERT_EQ(swa_out.size(), 1u);
+    EXPECT_EQ(swa_out.front(), swa_blocks.front());
+}
+
 TEST_F(CoordinatorCacheManagerHybridPathTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) {
     auto config                    = makeTinyHybridConfig();
     auto coordinator_cache_manager = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
@@ -1312,6 +1408,10 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockForksSharedBlocksAcro
     batch_res->cacheResource(0).setCacheKeysAndBlockDependencies(
         CacheKeysType{100, 101}, BlockDependenciesType{{true, 900, 7}, {true, 777, 34}});
     batch_res->cacheResource(0).setCacheKeysAreCpCanonical(true);
+    batch_res->cacheResource(0).setLastBlockAligned(true);
+    batch_res->cacheResource(0).setDeviceReuseBlockNum(3);
+    batch_res->cacheResource(0).setMemoryReuseBlockNum(5);
+    batch_res->cacheResource(0).setRemoteReuseBlockNum(7);
     batch_res->mutableBlockIds(/*batch_id=*/0, kTinyLinearTag)
         .assign({linear_blocks[0], NULL_BLOCK_IDX, linear_blocks[1]});
     batch_res->mutableBlockIds(/*batch_id=*/0, kTinyFullTag).assign({full_blocks[0], full_blocks[1]});
@@ -1340,6 +1440,10 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockForksSharedBlocksAcro
         EXPECT_EQ(resource.blockDependencies()[1].parent_key, 777);
         EXPECT_EQ(resource.blockDependencies()[1].ordinal, 34u);
         EXPECT_TRUE(resource.cacheKeysAreCpCanonical());
+        EXPECT_TRUE(resource.lastBlockAligned());
+        EXPECT_EQ(resource.deviceReuseBlockNum(), 3u);
+        EXPECT_EQ(resource.memoryReuseBlockNum(), 5u);
+        EXPECT_EQ(resource.remoteReuseBlockNum(), 7u);
     }
     EXPECT_EQ(batch_res->blocks(0, kTinyLinearTag),
               (BlockIndicesType{linear_blocks[0], NULL_BLOCK_IDX, linear_blocks[1]}));
@@ -1350,6 +1454,65 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockForksSharedBlocksAcro
 
     coordinator_cache_manager->free(FreeInfo{batch_res, nullptr});
     EXPECT_EQ(coordinator_cache_manager->freeBlocksNum(), free_before);
+}
+
+TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockForkPreservesMetadataForImmediateUpdateAndInsert) {
+    auto config                    = makeTinyHybridConfig();
+    auto coordinator_cache_manager = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
+    auto shared_cache              = std::make_shared<SharedBlockCache>();
+    coordinator_cache_manager->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(coordinator_cache_manager->init());
+
+    auto         linear_blocks = coordinator_cache_manager->blockPool(kTinyLinearTag)->malloc(2);
+    auto         full_blocks   = coordinator_cache_manager->blockPool(kTinyFullTag)->malloc(2);
+    ASSERT_EQ(linear_blocks.size(), 2u);
+    ASSERT_EQ(full_blocks.size(), 2u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101});
+    auto& source   = batch_res->cacheResource(0);
+    source.setCacheKeysAndBlockDependencies(
+        CacheKeysType{100, 101}, BlockDependenciesType{{true, 900, 7}, {true, 777, 34}});
+    source.setCacheKeysAreCpCanonical(true);
+    source.setLastBlockAligned(true);
+    source.setDeviceReuseBlockNum(3);
+    source.setMemoryReuseBlockNum(5);
+    source.setRemoteReuseBlockNum(7);
+    batch_res->mutableBlockIds(0, kTinyLinearTag).assign(linear_blocks);
+    batch_res->mutableBlockIds(0, kTinyFullTag).assign(full_blocks);
+
+    std::vector<TaggedBlockIdPair> update_mapping;
+    ASSERT_TRUE(coordinator_cache_manager->updateKVBlock(batch_res, {0, 0}, /*previous_seq_len=*/8, update_mapping));
+    EXPECT_TRUE(update_mapping.empty());
+
+    for (int batch_id = 0; batch_id < 2; ++batch_id) {
+        const auto& resource = batch_res->cacheResource(batch_id);
+        EXPECT_TRUE(resource.lastBlockAligned());
+        EXPECT_EQ(resource.deviceReuseBlockNum(), 3u);
+        EXPECT_EQ(resource.memoryReuseBlockNum(), 5u);
+        EXPECT_EQ(resource.remoteReuseBlockNum(), 7u);
+    }
+
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    updateCacheKeys(batch_res, token_ids, /*seq_size_per_block=*/4);
+    EXPECT_EQ(batch_res->cacheKeys(0), (CacheKeysType{100, 101}));
+    EXPECT_EQ(batch_res->cacheKeys(1), (CacheKeysType{100, 101}));
+
+    coordinator_cache_manager->insertIntoCache(InsertInfo{batch_res, token_ids, /*is_resident=*/false});
+    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(100, kTinyFullTag)));
+    EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(101, kTinyFullTag)));
+
+    ASSERT_TRUE(coordinator_cache_manager->updateKVBlock(
+        batch_res, std::vector<int>{0, 0, 1, 1}, /*previous_seq_len=*/8, update_mapping));
+    ASSERT_EQ(batch_res->batchSize(), 4);
+    for (int batch_id = 0; batch_id < 4; ++batch_id) {
+        const auto& resource = batch_res->cacheResource(batch_id);
+        EXPECT_TRUE(resource.lastBlockAligned());
+        EXPECT_EQ(resource.deviceReuseBlockNum(), 3u);
+        EXPECT_EQ(resource.memoryReuseBlockNum(), 5u);
+        EXPECT_EQ(resource.remoteReuseBlockNum(), 7u);
+    }
+
+    coordinator_cache_manager->free(FreeInfo{batch_res, nullptr});
 }
 
 TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockCopiesTailsPerGroupPhysicalBoundary) {

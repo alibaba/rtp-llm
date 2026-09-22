@@ -210,6 +210,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     model_id_               = params.model_id;
     kv_cache_layer_layout_  = params.kv_cache_layer_layout;
     mtp_cache_config_index_ = params.mtp_cache_config_index;
+    if (!params.kv_cache_group_tags.empty()) {
+        kv_cache_group_tags_ = sortedCacheGroupTags(params.kv_cache_group_tags, "model KV cache routing");
+    }
     if (kv_cache_layer_layout_.has_value()) {
         std::vector<std::string> tags;
         RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "KV cache layout requires a cache manager");
@@ -220,7 +223,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         for (const auto& group : cache_config.groups()) {
             tags.push_back(group.tag);
         }
-        kv_cache_group_tags_ = sortedCacheGroupTags(tags, "model KV cache");
+        auto layout_group_tags = sortedCacheGroupTags(tags, "model KV cache");
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_group_tags_.empty() || kv_cache_group_tags_ == layout_group_tags,
+                                "explicit KV cache routing tags do not match the cache layout");
+        kv_cache_group_tags_ = std::move(layout_group_tags);
     }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
@@ -270,9 +276,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
-    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
+    const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
+    const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
+                                             || py_model_class_name == "DeepSeekV4MtpModel"
+                                             || py_model_class_name == "DeepSeekV4DSparkModel";
+    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !is_prefill_cuda_graph_mode) {
         RTP_LLM_LOG_WARNING(
             "CUDA graph enabled but kv_cache_layer_layout not available (warmup?), skipping graph capture");
+        enable_cuda_graph_ = false;
+    } else if (enable_cuda_graph_ && is_deepseek_v4_python_model && !params.kv_cache_layer_layout.has_value()) {
+        RTP_LLM_LOG_WARNING(
+            "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
+            "CacheManager is initialized.");
         enable_cuda_graph_ = false;
     }
     if (enable_cuda_graph_) {
@@ -285,12 +300,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;
-        RTP_LLM_CHECK_WITH_INFO(params.kv_cache_layer_layout.has_value(),
-                                "CUDA graph requires model-local cache layout");
-        const CacheConfig* cache_config = mtp_cache_config_index_.has_value() ?
-                                              &cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index_) :
-                                              &cache_manager_->cacheConfig();
-        graph_params.cache_config       = std::shared_ptr<const CacheConfig>(cache_manager_, cache_config);
+        graph_params.tokens_per_block        = static_cast<int>(params.tokens_per_block);
+        graph_params.kernel_tokens_per_block = static_cast<int>(params.kernel_tokens_per_block > 0 ?
+                                                                     params.kernel_tokens_per_block :
+                                                                     params.tokens_per_block);
+        if (params.kv_cache_layer_layout.has_value()) {
+            RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "KV cache layout requires a cache manager");
+            const CacheConfig* cache_config = mtp_cache_config_index_.has_value() ?
+                                                  &cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index_) :
+                                                  &cache_manager_->cacheConfig();
+            graph_params.cache_config = std::shared_ptr<const CacheConfig>(cache_manager_, cache_config);
+        }
         graph_params.hidden_size        = params.hidden_size;
         graph_params.hc_mult            = params.hc_mult;
         // Default input_hiddens row width for MTP: hc_mult * hidden_size. DSpARK

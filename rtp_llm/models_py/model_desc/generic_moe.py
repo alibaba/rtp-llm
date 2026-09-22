@@ -10,7 +10,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
-    get_layer_caches_for_tags,
+    get_layer_caches_for_groups,
     select_fmha_impl_for_layer,
     select_fmha_impl_for_tag,
 )
@@ -175,7 +175,6 @@ class GenericMoeLayer(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
@@ -201,7 +200,7 @@ class GenericMoeLayer(nn.Module):
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                scores=router_logits_fp32,
+                scores=router_logits,
                 correction_bias=self.correction_bias,
                 n_group=self.num_expert_group,
                 topk_group=self.topk_group,
@@ -210,8 +209,7 @@ class GenericMoeLayer(nn.Module):
                 routed_scaling_factor=self.routed_scaling_factor,
             )
         else:
-            # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            self.select_topk(router_logits, topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
@@ -348,7 +346,8 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         fmha_impl: Any,
-        kv_cache: Optional[LayerKVCache] | Mapping[str, LayerKVCache] = None,
+        kv_cache: Optional[LayerKVCache]
+        | Mapping[str, Optional[LayerKVCache]] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -470,8 +469,12 @@ class GenericMoeModel(GptModelBase):
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             if is_sparse_mla:
                 layer_fmha_impl = sparse_fmha_impl
-                layer_kv_cache = get_layer_caches_for_tags(
-                    self.kv_cache, i, ("default", "indexer_kv")
+                layer_kv_cache = (
+                    get_layer_caches_for_groups(
+                        self.kv_cache, i, ("default", "indexer_kv")
+                    )
+                    if self.kv_cache is not None
+                    else None
                 )
             else:
                 layer_fmha_impl = select_fmha_impl_for_layer(

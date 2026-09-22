@@ -196,6 +196,36 @@ class SparseMlaRoutingTest(TestCase):
             indexer_inputs.cache_store_inputs, self.indexer_cache
         )
 
+    def test_sparse_forward_skips_indexer_for_cacheless_warmup(self):
+        attention, _ = make_sparse_routing_attention()
+        default_inputs = SimpleNamespace(
+            is_prefill=True, cache_store_inputs=None, cache_store_writer=None
+        )
+        indexer_cache_store_writer = Mock()
+        indexer_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=object(),
+            cache_store_writer=indexer_cache_store_writer,
+        )
+        default_impl = RecordingSparseMlaImpl(
+            default_inputs, torch.tensor([[[9.0, 10.0]], [[11.0, 12.0]]])
+        )
+        indexer_impl = RecordingSparseMlaImpl(indexer_inputs, torch.empty(0))
+
+        output = attention(
+            torch.zeros((2, 4), dtype=torch.float32),
+            {"default": default_impl, "indexer_kv": indexer_impl},
+            None,
+        )
+
+        self.assertTrue(
+            torch.equal(output, torch.tensor([[9.0, 10.0], [11.0, 12.0]]))
+        )
+        self.assertIs(default_impl.calls[0][3], None)
+        self.assertIs(default_impl.calls[0][5], None)
+        attention.indexer.assert_not_called()
+        indexer_cache_store_writer.write.assert_not_called()
+
 
 class MLATest(TestCase):
     NUM_TOKENS = [7]

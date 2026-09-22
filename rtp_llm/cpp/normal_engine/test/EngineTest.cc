@@ -23,6 +23,39 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
+TEST_F(NormalEngineTest, testPrefillWarmUpPreservesCachelessGroupTags) {
+    CustomConfig config;
+    config.warm_up = true;
+
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+
+    const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
+    const KVCacheSpecDesc indexer_desc{"indexer_kv", KVCacheSpecType::MultiHeadAttention};
+    params.model_config_.kv_cache_spec_descs.assign(static_cast<size_t>(params.model_config_.num_layers),
+                                                     {default_desc, indexer_desc});
+
+    std::vector<std::string> warmup_group_tags;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init_params) {
+        if (init_params.cache_manager == nullptr) {
+            EXPECT_FALSE(init_params.kv_cache_layer_layout.has_value());
+            warmup_group_tags = init_params.kv_cache_group_tags;
+        }
+        return std::make_unique<MockModel>(model_config.vocab_size);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+
+    EXPECT_EQ(warmup_group_tags, (std::vector<std::string>{"default", "indexer_kv"}));
+}
+
 TEST_F(NormalEngineTest, testDecodeWarmUpUsesHybridCacheTagsAndGeometry) {
     CustomConfig config;
     config.warm_up          = true;
