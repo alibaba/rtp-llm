@@ -11,6 +11,14 @@
 5. 在 Master Pod 核对运行时 master-source-config、performance、发现文件和实际逻辑引擎数量。保存配置摘要与哈希，避免归档凭据。
 6. 单独标记发布、冷启动和预热区间；预热后才开始正式对照。观察实际缓存命中、排队与容量是否稳定，不能仅以固定等待秒数判定预热完成。
 
+### 寄生部署的 frontend 健康检查
+
+Carbon 的 `health_checker_config` 和 VIPServer 域名的 `clusters[].healthChecker` 是两套配置，两处均须核对。寄生模式不注册独立 P/D Pod，frontend 原生 `/health` 仍检查 P/D VIP，可能返回 503；此模式按运行验收约定使用 `/frontend_health`。只修改 Carbon 的 `CHECK_PATH` 不会同步修改 VIPServer 的 `curlPath`，会出现 `HT_ALIVE/WT_READY` 但 `SVT_UNAVAILABLE`、ready 为零、发布一直进行的状态。
+
+VIPServer 调整只限测试部署实际引用的域名，保留其他注册参数。先读回域名配置，确认平台 API 对已有域名的行为后再执行；部署发布白名单不意味着域名注册 API 也在白名单。工具拒绝时保留原配置及具体未执行请求，不绕过确认。探针恢复后仍须独立验证 Master、Mock 240 个逻辑引擎（本次 48P/192D）及完整请求成功率；frontend 存活不等于性能门禁通过。
+
+切换模型时同时核查 zone 的 `MODEL_TYPE`、`TOKENIZER_PATH`、`CHECKPOINT_PATH`。只清理前两项仍可能加载旧模型 config，例如 Flash 使用 GLM checkpoint 导致缺失 `compress_ratios`。清除旧覆盖后，检查最终 Carbon plan 与进程环境实际加载的资源，不仅查看 biz 快照。
+
 ## 每次必须对齐的配置
 
 | 项目 | 对齐内容与验证方法 |
