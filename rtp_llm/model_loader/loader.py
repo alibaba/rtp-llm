@@ -95,6 +95,15 @@ class ModelLoader:
         device: str,
         global_weight_aliases: Optional[Mapping[str, torch.Tensor]] = None,
     ):
+        if self.model_config.enable_w4a16_sm120_dense_ffn:
+            from rtp_llm.models_py.kernels.cuda.w4a16_sm120 import support
+
+            support(self.model_config)
+            support(torch.device(device))
+            if self._load_config.is_ft_style_weight:
+                raise ValueError("SM120 W4A16 requires source checkpoint loading")
+            self._load_config.enable_w4a16_sm120_dense_ffn = True
+            self._load_config.w4a16_device = str(device)
         self._global_weight_aliases = dict(global_weight_aliases or {})
         descriptor_names = {weight.name for weight in self._model_weights_info.weights}
         unknown_aliases = set(self._global_weight_aliases) - descriptor_names

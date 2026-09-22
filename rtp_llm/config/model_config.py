@@ -228,6 +228,17 @@ class ModelConfig(CppModelConfig):
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
 
+        if self.enable_w4a16_sm120_dense_ffn:
+            ffn_weights = 3 if self.isGatedActivation() else 2
+            # INT4 values and one byte of scale per eight weights.
+            model_size += (
+                self.num_layers
+                * self.inter_size
+                * self.hidden_size
+                * ffn_weights
+                * 0.625
+            )
+
         if self.mm_model_config.is_multimodal:
             model_size += get_multimodal_mixin_cls(self.model_type).eval_mm_model_size(
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
@@ -567,19 +578,6 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
-
-    def validate_w4a16_sm120_dense_ffn(self) -> None:
-        """Validate model-level options before enabling W4A16 dense FFNs."""
-        if self.moe_style != 0 or self.expert_num > 0:
-            raise ValueError("SM120 W4A16 dense FFN does not support MoE models")
-        if self.quant_config is not None or self.quantization:
-            raise ValueError(
-                "SM120 W4A16 dense FFN cannot be combined with weight quantization"
-            )
-        if self.lora_infos:
-            raise ValueError("SM120 W4A16 dense FFN does not support LoRA")
-        if self.compute_dtype != torch.bfloat16:
-            raise ValueError("SM120 W4A16 dense FFN requires BF16 compute dtype")
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.

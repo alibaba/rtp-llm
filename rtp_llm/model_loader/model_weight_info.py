@@ -13,7 +13,7 @@ from rtp_llm.config.quant_config import (
     QuantizationConfig,
 )
 from rtp_llm.model_loader.attn_weight import AttnConfig
-from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight
+from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -354,6 +354,9 @@ class ModelDeployWeightInfo:
         logging.info("fix merge_w13")
         weight_info = self._fix_merge_w1_w3(weight_info)
 
+        if self.model_config.enable_w4a16_sm120_dense_ffn:
+            self._enable_w4a16_ffn_weights(weight_info)
+
         if self.gen_dummy_reciprocal:
             weight_info = self._add_attention_output_static_quant_reciprocal(
                 weight_info
@@ -569,6 +572,25 @@ class ModelDeployWeightInfo:
             f"fix weight config when need_merge_w13 {origin_weight_info.layer_weights[0]}"
         )
         return origin_weight_info
+
+    def _enable_w4a16_ffn_weights(self, weight_info: ModelWeightInfo):
+        # Mark before quant conversion: clones share the FfnConfig reference,
+        # so the mark propagates to the quantized descriptors.
+
+        def __mark(weight: WeightModule):
+            if isinstance(weight, FfnWeight):
+                for sub_weight in weight.sub_weights.values():
+                    __mark(sub_weight)
+            elif isinstance(weight, FfnAtomicWeight) and isinstance(
+                weight.config, FfnConfig
+            ):
+                weight.config.enable_w4a16_sm120 = True
+
+        for weights in weight_info.layer_weights:
+            for weight in weights:
+                __mark(weight)
+        for weight in weight_info.weights:
+            __mark(weight)
 
     def _fix_fp32_lm_head(self, origin_weight_info: ModelWeightInfo) -> ModelWeightInfo:
         for weight in origin_weight_info.weights:

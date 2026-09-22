@@ -188,7 +188,9 @@ class BaseModel(object):
                 raise ValueError(
                     "SM120 W4A16 dense FFN does not support FFN disaggregation"
                 )
-            self.model_config.validate_w4a16_sm120_dense_ffn()
+            from rtp_llm.models_py.kernels.cuda.w4a16_sm120 import support
+
+            support(self.model_config)
         if (
             self.hw_kernel_config.enable_cuda_graph
             and self.support_cuda_graph() is False
@@ -236,7 +238,7 @@ class BaseModel(object):
             enabled_count = sum(module.w4a16 is not None for module in requested_ffns)
             if enabled_count == 0:
                 raise ValueError(
-                    "All FFNs requested for SM120 W4A16 fell back to BF16 "
+                    "All FFNs requested for SM120 W4A16 use the default path "
                     "because their local weight shapes are unsupported"
                 )
             logging.info(
