@@ -1,3 +1,4 @@
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -51,6 +52,41 @@ class FlashAttn3SupportTest(unittest.TestCase):
                     self._make_config(need_rope_kv_cache=True), self._make_inputs()
                 )
             )
+
+
+class FusedRopeKernelImportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        fused_rope_kvcache_op._get_fused_rope_kvcache.cache_clear()
+
+    def tearDown(self) -> None:
+        fused_rope_kvcache_op._get_fused_rope_kvcache.cache_clear()
+
+    def test_optional_package_import_failure_uses_standalone_wrapper(self) -> None:
+        standalone_wrapper = mock.Mock()
+        with (
+            mock.patch.dict(sys.modules, {"rtp_kernel": None}),
+            mock.patch.object(
+                fused_rope_kvcache_op,
+                "_load_fused_rope_kvcache_without_package_init",
+                return_value=standalone_wrapper,
+            ) as loader,
+        ):
+            result = fused_rope_kvcache_op._get_fused_rope_kvcache()
+
+        self.assertIs(result, standalone_wrapper)
+        loader.assert_called_once_with()
+
+    def test_standalone_wrapper_failure_preserves_package_error(self) -> None:
+        with (
+            mock.patch.dict(sys.modules, {"rtp_kernel": None}),
+            mock.patch.object(
+                fused_rope_kvcache_op,
+                "_load_fused_rope_kvcache_without_package_init",
+                side_effect=ImportError("standalone wrapper is unavailable"),
+            ),
+            self.assertRaisesRegex(ModuleNotFoundError, "rtp_kernel"),
+        ):
+            fused_rope_kvcache_op._get_fused_rope_kvcache()
 
 
 class FlashAttn3GraphGeometryTest(unittest.TestCase):
