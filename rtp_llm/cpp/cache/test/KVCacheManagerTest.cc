@@ -18,6 +18,9 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
@@ -31,6 +34,7 @@
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace test {
@@ -800,6 +804,57 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     std::fill(expected_layer0.begin() + k_bytes, expected_layer0.end(), 2);
     assertBlockBytesEq(cache_manager, /*layer_id=*/0, block_dst, expected_layer0);
     assertBlockBytesEq(cache_manager, /*layer_id=*/1, block_dst, expected_block);
+}
+
+TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanup) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    // Inject the publication path without starting an RPC server or a transport backend.
+    P2PConnectorConfig connector_config;
+    connector_config.role_type                   = RoleType::PREFILL;
+    connector_config.worker_config.tp_size       = 1;
+    connector_config.worker_config.tp_rank       = 0;
+    connector_config.worker_config.layer_all_num = 1;
+    connector_config.worker_config.topology      = cache_config.topologyPtr();
+    auto worker = std::make_shared<P2PConnectorWorkerPrefill>(
+        connector_config.worker_config, nullptr, nullptr, nullptr);
+    ASSERT_TRUE(worker->init());
+    auto connector = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);
+    connector->prefill_ = std::make_unique<P2PConnectorPrefill>(connector_config, nullptr, nullptr);
+    connector->prefill_->worker_ = worker;
+    manager->p2p_connector_ = connector;
+
+    const auto free_before = manager->freeBlocksNum();
+    auto resource = makeDSV4BatchResource(cache_config);
+    auto tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/2, /*max_seq_len=*/2, /*seq_size_per_block=*/2);
+    MallocInfo allocation{resource, tokens};
+    allocation.reuse_cache         = false;
+    allocation.enable_cache_lookup = false;
+    ASSERT_TRUE(manager->malloc(allocation).success);
+    const auto blocks = resource->blocks(0, 0);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto& pool = manager->blockTreeCache()->groupSets().front()->devicePools().front();
+    EXPECT_EQ(pool->refCount(blocks.front()), 1u);
+
+    const int64_t request_id  = 7010;
+    const int64_t deadline_ms = currentTimeMs() + 10000;
+    ASSERT_TRUE(
+        manager->writeP2PLayer(0, 0, cache_config.tagForGroup(0), {7001}, blocks, request_id, nullptr, deadline_ms));
+    EXPECT_EQ(pool->refCount(blocks.front()), 2u);
+    EXPECT_NE(worker->getComputedBuffersStore()->getBuffer(request_id, deadline_ms), nullptr);
+
+    manager->free(FreeInfo{resource, tokens});
+    ASSERT_TRUE(pool->isAllocated(blocks.front()));
+    EXPECT_EQ(pool->refCount(blocks.front()), 1u);
+    EXPECT_EQ(manager->freeBlocksNum(), free_before - 1);
+
+    worker->completeNoTransfer(request_id, deadline_ms, deadline_ms);
+    EXPECT_EQ(worker->getComputedBuffersStore()->getBuffer(request_id, deadline_ms), nullptr);
+    EXPECT_FALSE(pool->isAllocated(blocks.front()));
+    EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
 TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {

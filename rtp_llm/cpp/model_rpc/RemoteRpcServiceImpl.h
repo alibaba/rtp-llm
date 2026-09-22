@@ -4,6 +4,9 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -18,12 +21,30 @@ public:
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        if (!prefill_server_) {
-            auto error_msg = "server not implement GenerateStreamCall";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        switch (generateStreamTarget()) {
+            case GenerateStreamTarget::kPrefill:
+                return prefill_server_->GenerateStreamCall(context, request, writer);
+            case GenerateStreamTarget::kDecodeNew2:
+                return decode_server_new2_->GenerateStreamCall(context, request, writer);
+            case GenerateStreamTarget::kPrefillNew2:
+                return prefill_server_new2_->GenerateStreamCall(context, request, writer);
+            case GenerateStreamTarget::kUnsupported:
+            default: {
+                auto error_msg = "server not implement GenerateStreamCall";
+                RTP_LLM_LOG_ERROR(error_msg);
+                return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+            }
         }
-        return prefill_server_->GenerateStreamCall(context, request, writer);
+    }
+
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override {
+        if (decode_entrance_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                                "/batch_infer is not supported with decode_entrance");
+        }
+        return LocalRpcServiceImpl::BatchGenerateCall(context, request, response);
     }
 
     grpc::Status
@@ -39,6 +60,9 @@ public:
     grpc::Status EnqueueBatch(grpc::ServerContext*         context,
                               const EnqueueBatchRequestPB* request,
                               EnqueueBatchResponsePB*      response) override {
+        if (prefill_server_new2_) {
+            return prefill_server_new2_->EnqueueBatch(context, request, response);
+        }
         if (!prefill_server_) {
             auto error_msg = "server not implement EnqueueBatch";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -99,27 +123,26 @@ public:
         return decode_server_->RemoteGenerate(context, stream);
     }
 
-    grpc::Status RemoteGenerateNew(grpc::ServerContext*              context,
-                                   const RemoteGenerateRequestPBNew* request,
-                                   RemoteGenerateResponsePBNew*      response) override {
-        auto error_msg = "server not implement RemoteGenerateNew";
+    grpc::Status StartLoad(grpc::ServerContext*                  context,
+                           const P2PConnectorStartLoadRequestPB* request,
+                           P2PConnectorStartLoadResponsePB*      response) override {
+        if (prefill_server_new2_) {
+            return prefill_server_new2_->StartLoad(context, request, response);
+        }
+        auto error_msg = "server not implement StartLoad";
         RTP_LLM_LOG_ERROR(error_msg);
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
 
-    grpc::Status RemoteStore(grpc::ServerContext*        context,
-                             const RemoteStoreRequestPB* request,
-                             RemoteStoreResponsePB*      response) override {
-        auto error_msg = "server not implement RemoteStore";
+    grpc::Status GetPeerInfo(grpc::ServerContext*        context,
+                             const GetPeerInfoRequestPB* request,
+                             GetPeerInfoResponsePB*      response) override {
+        if (prefill_server_new2_) {
+            return prefill_server_new2_->GetPeerInfo(context, request, response);
+        }
+        auto error_msg = "server not implement GetPeerInfo";
         RTP_LLM_LOG_ERROR(error_msg);
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
-    }
-
-    grpc::Status
-    RemoteFinishNew(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
-        auto error_msg = "server not implement RemoteFinishNew";
-        RTP_LLM_LOG_ERROR(error_msg);
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
 
     void beginShutdown() override {
@@ -132,14 +155,47 @@ public:
         if (prefill_server_) {
             prefill_server_->beginShutdown();
             prefill_server_->stop();
-        } else {
+        }
+        if (decode_server_) {
             decode_server_->stop();
+        }
+        if (prefill_server_new2_) {
+            prefill_server_new2_->stop();
+        }
+        if (decode_server_new2_) {
+            decode_server_new2_->stop();
         }
     }
 
 private:
+    enum class GenerateStreamTarget {
+        kPrefill,
+        kDecodeNew2,
+        kPrefillNew2,
+        kUnsupported,
+    };
+
+    GenerateStreamTarget generateStreamTarget() const {
+        if (decode_entrance_) {
+            if (decode_server_new2_) {
+                return GenerateStreamTarget::kDecodeNew2;
+            }
+            if (prefill_server_new2_) {
+                return GenerateStreamTarget::kPrefillNew2;
+            }
+            return GenerateStreamTarget::kUnsupported;
+        }
+        if (prefill_server_) {
+            return GenerateStreamTarget::kPrefill;
+        }
+        return GenerateStreamTarget::kUnsupported;
+    }
+
     std::shared_ptr<PrefillBatchRpcServer> prefill_server_;
-    std::shared_ptr<DecodeRpcServer>       decode_server_;
+    std::shared_ptr<DecodeRpcServer>      decode_server_;
+    bool                                  decode_entrance_ = false;
+    std::shared_ptr<PrefillRpcServerNew2> prefill_server_new2_;
+    std::shared_ptr<DecodeRpcServerNew2>  decode_server_new2_;
 };
 
 }  // namespace rtp_llm

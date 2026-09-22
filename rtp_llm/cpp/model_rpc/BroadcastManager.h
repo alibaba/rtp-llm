@@ -9,6 +9,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <utility>
 #include <vector>
 
@@ -29,7 +31,7 @@ public:
         ResponsePB                           response;
         grpc::Status                         status;
         std::string                          server_addr;
-        int                                  timeout_ms;
+        int                                  timeout_ms{0};
     };
 
 public:
@@ -86,8 +88,26 @@ public:
         }
     }
 
+    FirstError::Snapshot firstError() const {
+        return first_error_.snapshot();
+    }
+
+    void setProgressCallback(DoneCallback callback) {
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            progress_callback_ = callback;
+        }
+        if (callback) {
+            callback();
+        }
+    }
+
     std::vector<ResponsePB> responses() const {
         std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        // gRPC may still be writing response buffers before Finish.
+        if (!already_done_.load(std::memory_order_acquire)) {
+            return {};
+        }
         std::vector<ResponsePB>      responses;
         responses.reserve(worker_contexts_.size());
         for (const auto& worker_rpc_context : worker_contexts_) {
@@ -98,6 +118,7 @@ public:
 
     void finishRank(size_t rank, bool cq_event_ok) {
         std::vector<DoneCallback> callbacks;
+        DoneCallback progress;
         {
             std::lock_guard<std::mutex> lock(wait_done_mutex_);
             if (already_done_.load(std::memory_order_relaxed)) {
@@ -128,12 +149,38 @@ public:
                                         ctx->server_addr.c_str());
                     grpc_status_failure_seen_ = true;
                 }
+                ErrorInfo         error;
+                const std::string location =
+                    "ExecuteFunction rank=" + std::to_string(rank) + " peer=" + (ctx ? ctx->server_addr : "<null>");
+                if (ctx && !ctx->status.ok()) {
+                    error = errorInfoFromGrpcStatus(ctx->status, location);
+                } else if (!cq_event_ok || !ctx) {
+                    error = ErrorInfo(ErrorCode::RPC_FINISH_FAILED, location + ": Finish event failed");
+                } else if constexpr (std::is_same_v<ResponsePB, FunctionResponsePB>) {
+                    if (ctx->request.has_p2p_request() || ctx->response.has_p2p_response()) {
+                        if (!ctx->response.has_p2p_response()) {
+                            error = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                              location + ": missing p2p_response");
+                        } else if (ctx->response.p2p_response().error_code() != ErrorCodePB::NONE_ERROR) {
+                            const auto& response = ctx->response.p2p_response();
+                            error                = ErrorInfo(transRPCErrorCode(response.error_code()),
+                                              location + " key=" + ctx->request.p2p_request().unique_key() + ": "
+                                                  + response.error_message());
+                        }
+                    }
+                }
+                first_error_.record(error);
+                grpc_status_failure_seen_ = grpc_status_failure_seen_ || !error.ok();
                 if (finished_count_ == static_cast<int>(worker_contexts_.size())) {
                     finishLocked(callbacks);
                 }
             }
+            progress = progress_callback_;
         }
         wait_done_cv_.notify_all();
+        if (progress) {
+            progress();
+        }
         for (auto& callback : callbacks) {
             callback();
         }
@@ -159,6 +206,8 @@ private:
     mutable std::mutex                             wait_done_mutex_;
     std::condition_variable                        wait_done_cv_;
     std::vector<DoneCallback>                      callbacks_;
+    DoneCallback                                  progress_callback_;
+    FirstError                                    first_error_;
 };
 
 class BroadcastManager {

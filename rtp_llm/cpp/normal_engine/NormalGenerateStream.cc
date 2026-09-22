@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 
 #include <algorithm>
 #include <chrono>
@@ -207,7 +209,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
     if (generate_outputs_.size() >= kOutputCapacity) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
-        reportEventWithoutLock(StreamEvents::Error, ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
+        reportErrorWithoutLock(ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
         generate_outputs_.push_back(std::move(generate_results));
         consumer_cv_->notify_all();
@@ -241,7 +243,94 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
-    finished_ = needFinish();
+    // PD handoff must happen before finished_ assignment.
+    // Old remote-connector PD flow and new decode-entrance(P2P) flow have different
+    // handoff semantics, so keep them in separate branches.
+    if (!finished_ && queryPdSep() && update_info.update_remote_generate
+        && resourceContext().role_type == RoleType::PREFILL) {
+        auto& rc = resourceContext();
+
+        if (rc.decode_entrance) {
+            reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+
+            // Publish local Prefill output for the StartLoad handler to return to Decode.
+            if (rc.cache_manager && rc.cache_manager->hasP2PConnector()) {
+                P2PConnectorResourceEntry::SideChannelData side_data;
+                auto                                       tokens = currentExecuteTokens(0);
+                if (!tokens.empty()) {
+                    side_data.has_first_token = true;
+                    side_data.first_token_id  = tokens.back();
+                }
+                side_data.total_reuse_len  = reuseLength();
+                side_data.local_reuse_len  = localReuseLength();
+                side_data.remote_reuse_len = remoteReuseLength();
+                side_data.memory_reuse_len = hostReuseLength();
+                side_data.disk_reuse_len   = diskReuseLength();
+                // Publish owned CPU snapshots. Decode applies these through its normal output path.
+                const auto& config      = *generate_input_->generate_config;
+                const auto  save_output = [&](const char* name, const torch::Tensor& tensor, bool requested) {
+                    if (requested && tensor.defined()) {
+                        side_data.first_token_tensors.emplace(name, tensor.to(torch::kCPU, false, true).contiguous());
+                    }
+                };
+                save_output("first_token_logits", update_info.logits, config.return_logits);
+                save_output("first_token_hidden_states", update_info.hidden_states, config.return_hidden_states);
+                save_output(
+                    "first_token_all_hidden_states", update_info.all_hidden_states, config.return_all_hidden_states);
+                save_output("first_token_loss", loss_, config.calculate_loss != 0);
+                save_output("first_token_softmax_probs",
+                            update_info.softmax_probs,
+                            config.aux_info && config.return_softmax_probs);
+                save_output("first_token_cum_log_probs", update_info.cum_log_probs, config.aux_info);
+                save_output("first_token_all_probs",
+                            update_info.all_probs,
+                            config.aux_info && config.return_all_probs != ReturnAllProbsMode::NONE);
+                if (!getProposeToken().empty()) {
+                    side_data.propose_tokens = getProposeToken();
+                }
+                auto sp_output_buffer = getSPOutputBuffer();
+                if (sp_output_buffer) {
+                    auto propose_probs_cpu =
+                        sp_output_buffer->all_probs.defined() ?
+                            (sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() :
+                                                                     sp_output_buffer->all_probs) :
+                            torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+                    auto propose_hidden_cpu =
+                        sp_output_buffer->hidden_states.defined() ?
+                            (sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
+                                                                         sp_output_buffer->hidden_states) :
+                            torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+                    // Keep D2H at publication time; the store must not retain GPU storage.
+                    side_data.propose_probs  = propose_probs_cpu.contiguous();
+                    side_data.propose_hidden = propose_hidden_cpu.contiguous();
+                    const size_t probs_bytes  = side_data.propose_probs.nbytes();
+                    const size_t hidden_bytes = side_data.propose_hidden.nbytes();
+                    // Tensor payload only; excludes protobuf metadata and transport framing.
+                    RTP_LLM_LOG_INFO("[MTP_PD_TENSOR_BYTES] unique_key=%s propose_hidden_bytes=%zu "
+                                     "propose_probs_bytes=%zu total_bytes=%zu",
+                                     uniqueKey().c_str(),
+                                     hidden_bytes,
+                                     probs_bytes,
+                                     hidden_bytes + probs_bytes);
+                }
+                auto pos_ids = getContextPositionIds();
+                if (pos_ids.defined() && pos_ids.numel() > 0) {
+                    auto pos_cpu = pos_ids.to(torch::kCPU).contiguous();
+                    side_data.position_ids.assign(pos_cpu.data_ptr<int32_t>(),
+                                                  pos_cpu.data_ptr<int32_t>() + pos_cpu.numel());
+                }
+                rc.cache_manager->publishPrefillPayload(uniqueKey(), deadlineMs(), std::move(side_data));
+            }
+            // DP inversion prefill has already produced the only token it is responsible for.
+            // Mark it finished here so the state machine can release resources and persist
+            // local cache for later prefill-side reuse.
+            fillSubGenerateStatus(StreamState::FINISHED);
+            finished_ = true;
+        }
+    }
+
+    bool need_finish_result = finished_ || needFinish();
+    finished_               = need_finish_result;
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
@@ -261,7 +350,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (queryPdSep() && update_info.update_remote_generate) {
+    if (queryPdSep() && update_info.update_remote_generate && !resourceContext().decode_entrance) {
         // Hold KV cache even when the stream already finished in prefill
         // (e.g. stop words hit): the decode role still issues RemoteLoad for
         // these blocks and would hang if they were freed here.

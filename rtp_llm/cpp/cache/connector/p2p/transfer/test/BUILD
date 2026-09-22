@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 
-load("//bazel:device_defs.bzl", "device_impl_target")
+load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",

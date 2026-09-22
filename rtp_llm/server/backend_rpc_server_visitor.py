@@ -102,6 +102,7 @@ class BackendRPCServerVisitor:
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
         max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
         decode_entrance = pd_sep_config.decode_entrance
+        self.decode_entrance = decode_entrance
 
         # Get client_config from grpc_config if provided, otherwise use empty dict
         if grpc_config is not None:
@@ -216,9 +217,15 @@ class BackendRPCServerVisitor:
 
         config_role_type = pd_sep_config.role_type
 
-        if config_role_type == RoleType.PREFILL and not pd_sep_config.decode_entrance:
+        if config_role_type == RoleType.PREFILL:
             role_list.append(RoleType.DECODE)
-            logging.info("Added DECODE role for PREFILL type")
+            if pd_sep_config.decode_entrance:
+                role_list.append(RoleType.PREFILL)
+                logging.info(
+                    "Added DECODE and PREFILL roles for PREFILL type in decode_entrance mode"
+                )
+            else:
+                logging.info("Added DECODE role for PREFILL type")
         elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
             role_list.append(RoleType.PREFILL)
             logging.info("Added PREFILL role for DECODE type")
@@ -235,6 +242,17 @@ class BackendRPCServerVisitor:
             if host_args.pdfusion_domain:
                 role_list.append(RoleType.PDFUSION)
                 logging.info("Added PDFUSION role for FRONTEND type")
+            if pd_sep_config.decode_entrance:
+                if RoleType.DECODE not in role_list:
+                    role_list.append(RoleType.DECODE)
+                    logging.info(
+                        "Added DECODE role for FRONTEND type as decode_entrance fallback"
+                    )
+                if RoleType.PREFILL not in role_list:
+                    role_list.append(RoleType.PREFILL)
+                    logging.info(
+                        "Added PREFILL role for FRONTEND type as decode_entrance requirement"
+                    )
 
         logging.info(f"configured backend role list: {role_list}")
         return role_list
@@ -339,6 +357,12 @@ class BackendRPCServerVisitor:
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
+        if not missing_roles:
+            route_logger.debug(
+                "skip domain routing, request_id=%s, no missing backend roles",
+                input.request_id,
+            )
+            return
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles
         )
@@ -461,7 +485,9 @@ class BackendRPCServerVisitor:
                 route_logger.debug("routing to master done")
 
             kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
-            if not input.generate_config.role_addrs:
+            final_roles = {addr.role for addr in input.generate_config.role_addrs}
+            missing_roles = [role for role in self.backend_role_list if role not in final_roles]
+            if missing_roles:
                 route_error = FtRuntimeException(
                     ExceptionType.ROUTE_ERROR,
                     "request_id=%s no backend role addresses found after routing"
@@ -703,6 +729,13 @@ class BackendRPCServerVisitor:
 
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        if not inputs:
+            return []
+        if self.decode_entrance:
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "/batch_infer is not supported with decode_entrance",
+            )
         for input in inputs:
             self.fill_request_info(input)
             self._validate_input(input)

@@ -14,7 +14,7 @@ def h20_oss_suites():
     #                                                     this file; lost only for
     #                                                     the MLA kernel path.
     #   --absorb_opt_len 1       MLA absorb path          no carrier left
-    #   --decode_entrance 1      decode-entrance routing  no carrier left
+    # Decode-entrance MLA coverage is provided by p2p_cp2_sharded_to_dp2_decode_entrance.
     #   --redundant_expert 24    non-zero EPLB redundancy no carrier left
     #   --hack_layer_num 1       truncated-layer load     no carrier left
     # The internal cuda13 DSv4 suites exercise graph capture and cache reuse on
@@ -31,6 +31,20 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_mla",
         tests = [
+            smoke_test(
+                name="p2p_cp2_sharded_to_dp2_decode_entrance",
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --seq_size_per_block 64 --tp_size 2 --dp_size 1 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
+                    "decode": "--warm_up 0 --reuse_cache 1 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
+                },
+            ),
             smoke_test(
                 name="mla_kernel_block_size",
                 task_info="data/model/glm5/glm_5_fp8_q_r_h20.json",
@@ -167,6 +181,229 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_dense",
         tests = [
+            # Paired Prefill/Decode cases: legacy controls and P2P transfer paths.
+            # Dense models cover asymmetric TP, DP routing and prefix reuse.
+            smoke_test(
+                name="dense_dp_sep_tp2",
+                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": [
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                    "decode": [
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                },
+                enable_decode_entrance=False,
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="dense_dp_sep_tp2_decode_entrance",
+                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                    "decode": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="dense_dp_sep_tp1_to_tp2",
+                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": [
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                    "decode": [
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                },
+                enable_decode_entrance=False,
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="dense_dp_sep_tp1_to_tp2_decode_entrance",
+                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                    "decode": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="dense_dp_sep_tp2_to_tp1",
+                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": [
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                    "decode": [
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                },
+                enable_decode_entrance=False,
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="dense_dp_sep_tp2_to_tp1_decode_entrance",
+                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                    "decode": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="dense_dp_sep_tp2_to_tp1_decode_entrance_reuse",
+                task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                    "decode": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            # P2P TransferPlan asymmetric topology matrix. Keep each topology
+            # as a standalone target so every run has an unambiguous log and
+            # a dedicated validation document.
+            smoke_test(
+                name="p2p_cp2_to_tp2_decode_entrance",
+                task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_cp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --dp_size 1 --world_size 2 --cp_rotate_method ALL_GATHER --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --dp_size 1 --world_size 2 --cp_rotate_method PREFILL_CP --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="p2p_tp2_to_tp2_bf16_decode_entrance",
+                task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_cp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --dp_size 1 --world_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --dp_size 1 --world_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="p2p_tp2_to_dp2_decode_entrance",
+                task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_dp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --dp_size 1 --world_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 1 --dp_size 2 --world_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="p2p_tp1_to_dp2_tp2_decode_entrance",
+                task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_dp2.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 1 --dp_size 1 --world_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --dp_size 2 --world_size 4 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
+                name="p2p_tp2_to_dp3_decode_entrance",
+                task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse_dp3.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["DECODE_ENTRANCE=1", "PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --dp_size 1 --world_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 1 --dp_size 3 --world_size 3 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
             smoke_test(
                 name="dense_generation_prefill_cuda_graph",
                 task_info="data/model/qwen25/q_r_generation_prefill_cuda_graph.json",
@@ -301,6 +538,14 @@ def h20_oss_suites():
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16",
                 gpu_type=["H20"],
             ),
+            # Single-service counterpart: decode-entrance flag with speculative decoding.
+            smoke_test(
+                name="next_mtp_basic_decode_entrance",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp_decode_entrance.json",
+                enable_decode_entrance=True,
+                smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16",
+                gpu_type=["H20"],
+            ),
             smoke_test(
                 name="next_mtp_reuse",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp_reuse_cache.json",
@@ -415,6 +660,21 @@ def h20_oss_suites():
             smoke_test(
                 name="next_pd",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_pd_sep.json",
+                smoke_args={
+                    "prefill": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
+                    "decode": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32"
+                },
+                gpu_type=["H20"],
+            ),
+            # Paired P2P counterpart to the legacy PD case.
+            smoke_test(
+                name="next_pd_decode_entrance",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2_pd_sep_decode_entrance.json",
+                enable_decode_entrance=True,
+                envs={
+                    "prefill": ["DECODE_ENTRANCE=1"],
+                    "decode": ["DECODE_ENTRANCE=1"],
+                },
                 smoke_args={
                     "prefill": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
                     "decode": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32"
@@ -561,6 +821,17 @@ def h20_oss_suites():
                 data=["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
                 kvcm_envs=["KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr=20,
+                smoke_args="--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                gpu_type=["H20"],
+            ),
+            # Single-service counterpart: decode-entrance flag with speculative decoding.
+            smoke_test(
+                name="eagle_remote_cache_tp2_decode_entrance",
+                task_info="data/model/qwen_sp/q_r_remote_cache_sp_tpsize2_decode_entrance.json",
+                data=["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+                kvcm_envs=["KVCM_LOG_LEVEL=DEBUG"],
+                sleep_time_qr=20,
+                enable_decode_entrance=True,
                 smoke_args="--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 gpu_type=["H20"],
             ),

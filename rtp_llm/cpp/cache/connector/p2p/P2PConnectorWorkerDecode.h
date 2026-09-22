@@ -4,15 +4,19 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
-#include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerRoute.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace rtp_llm {
@@ -23,29 +27,51 @@ public:
                              const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                              const kmonitor::MetricsReporterPtr&         metrics_reporter,
                              const transfer::IKVCacheReceiverPtr&        receiver);
-    ~P2PConnectorWorkerDecode() = default;
+    ~P2PConnectorWorkerDecode();
 
 public:
-    ErrorInfo read(int64_t                                               request_id,
-                   const std::string&                                    unique_key,
-                   int64_t                                               deadline_ms,
-                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                   int                                                   remote_tp_size = 1);
+    bool initialized() const {
+        return receiver_ != nullptr;
+    }
 
-    bool cancelRead(const std::string& unique_key);
+    /// @brief 按编排层下发的 route 注册 recv task。worker 不再推导 partition 数或键集。
+    ErrorInfo read(int64_t                   request_id,
+                   const std::string&        unique_key,
+                   int64_t                   deadline_ms,
+                   const P2PWorkerRoutePlan& worker_plan);
 
-private:
-    int calculateRecvPartitionCount(int remote_tp_size) const;
+    bool cancelRead(const std::string& unique_key, int64_t request_deadline_ms = 0);
+
+    // Query the local lease state for a given unique_key (called by QUERY_LEASE_STATUS handler).
+    // Returns false if no lease is found (lease already cleaned up = transfers done).
+    bool
+    queryLeaseStatus(const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
+
+    // Read-only observation hook for the retained lease of a unique_key. Returns nullptr when
+    // no lease is registered; used by tests instead of reaching into lease_map_ directly.
+    std::shared_ptr<DecodeTargetWriteLease> leaseFor(const std::string& unique_key) const;
 
 private:
     struct ReadTaskGroup {
+        FirstError                                 first_error;
         std::vector<std::string>                   partition_keys;
         std::vector<transfer::IKVCacheRecvTaskPtr> tasks;
         std::atomic<bool>                          cancelled{false};
+        std::shared_ptr<DecodeTargetWriteLease>    lease;
+        // Completion/cancellation notifications share this mutex with waiters,
+        // including completion before the request is published in lease_map_.
+        std::mutex              completion_mutex;
+        std::condition_variable completion_cv;
+        // Maps are immutable after preparation except pending counts, protected by completion_mutex.
+        std::unordered_map<std::string, int64_t>     task_start_time_us;
+        std::unordered_map<std::string, std::string> task_buffer_keys;
+        std::unordered_map<std::string, size_t>      pending_buffer_tasks;
+        std::atomic<int64_t>                         first_layer_done_time_us{-1};
     };
 
     enum class ReadWaitOutcome {
         AllDone,
+        Failed,
         Cancelled,
         ReturnDeadlineIncomplete
     };
@@ -56,15 +82,13 @@ private:
         std::string error_msg;
     };
 
-    ErrorInfo buildRecvTasks(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                             int                                                   recv_partition_count,
-                             const std::string&                                    unique_key,
-                             int64_t                                               deadline_ms,
-                             const std::shared_ptr<ReadTaskGroup>&                 task_group,
-                             int&                                                  total_block_count) const;
+    ErrorInfo buildRecvTasks(const P2PWorkerRoutePlan&             worker_plan,
+                             const std::string&                    unique_key,
+                             int64_t                               deadline_ms,
+                             const std::shared_ptr<ReadTaskGroup>& task_group,
+                             int&                                  total_block_count);
 
-    /// 等待 recv 完成、cancel，或到达 return_deadline_ms（D - return_before）；到达 steal 时刻时从 store steal 各
-    /// partition key。
+    /// 等待 recv 完成、cancel，或到达 D；到 D 时一次性 steal、seal 并取消未完成任务。
     ReadWaitOutcome waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                         int64_t                               deadline_ms,
                                                         int64_t                               request_id,
@@ -72,7 +96,25 @@ private:
 
     RecvResultInfo aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const;
 
-    void reportReadMetrics(int total_block_count, bool success, int64_t read_start_time_us) const;
+    void reportReadMetrics(P2PConnectorMetricsCollector&         collector,
+                           bool                                  success,
+                           int64_t                               read_start_time_us,
+                           const std::shared_ptr<ReadTaskGroup>& task_group) const;
+
+    void cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group, bool cancel_pending_tasks) const;
+
+    struct CompletionCallbackState {
+        std::mutex                 mutex;
+        P2PConnectorWorkerDecode* owner{nullptr};
+    };
+
+    void registerTaskCompletionCallback(const transfer::IKVCacheRecvTaskPtr& task,
+                                        const std::string&                    unique_key,
+                                        const std::shared_ptr<ReadTaskGroup>& task_group);
+    void onRecvTaskDone(const std::string& unique_key, const std::weak_ptr<ReadTaskGroup>& task_group);
+
+    void runPendingCancelExpiryLoop();
+    void schedulePendingCancelExpiryLocked();
 
 private:
     P2PConnectorWorkerConfig             config_;
@@ -82,6 +124,24 @@ private:
 
     mutable std::mutex                                              read_tasks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<ReadTaskGroup>> read_tasks_;
+    std::unordered_set<std::string>                                 building_read_keys_;
+    // Cancellation can overtake READ because they are independent RPCs.
+    // Keep a bounded terminal marker so a late READ cannot start transfers.
+    std::unordered_map<std::string, int64_t>                         pending_cancel_keys_;
+    std::condition_variable                                            pending_cancel_cv_;
+    std::thread                                                        pending_cancel_expiry_thread_;
+    bool                                                               stopping_{false};
+    uint64_t                                                           pending_cancel_generation_{0};
+
+    // Leases kept after read() returns so QUERY_LEASE_STATUS can observe physical completion.
+    // recv task completion callbacks advance the counters; queries only read them.
+    struct LeaseMapEntry {
+        std::shared_ptr<ReadTaskGroup> task_group;
+    };
+
+    mutable std::mutex                             lease_map_mutex_;
+    std::unordered_map<std::string, LeaseMapEntry> lease_map_;
+    std::shared_ptr<CompletionCallbackState>       completion_callback_state_;
 };
 
 }  // namespace rtp_llm

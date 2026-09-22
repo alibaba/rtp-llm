@@ -146,27 +146,35 @@ void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
 
 void GenerateContext::stopStream() {
     if (stream_) {
+        constexpr const char* kContextCleanupReason = "context cleanup before stream finished";
+        const bool            context_has_error     = error_info.hasError();
+        const bool            request_cancelled     = cancelled() || isRequestCancelled();
         if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
-            if (error_info.hasError()) {
+            if (context_has_error) {
                 RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=context_error, code=%d, err=%s",
                                     request_key.c_str(),
                                     static_cast<int>(error_info.code()),
                                     error_info.ToString().c_str());
                 stream_->reportError(error_info.code(), error_info.ToString());
-            } else if (cancelled() || isRequestCancelled()) {
+            } else if (request_cancelled) {
                 RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=client_cancel",
                                     request_key.c_str());
                 stream_->reportError(ErrorCode::CANCELLED, "request cancelled by client");
-            } else {
-                RTP_LLM_LOG_WARNING("request [%s] stopping unfinished stream with terminal source=context_cleanup",
-                                    request_key.c_str());
-                stream_->reportError(ErrorCode::CANCELLED, "context cleanup before stream finished");
             }
         }
-        if (!stream_->finishOrCancel(kStopStreamWaitTimeoutMs, "cancel stream")) {
+        const char* cancel_reason = !context_has_error && !request_cancelled ? kContextCleanupReason : "cancel stream";
+        if (!stream_->finishOrCancel(kStopStreamWaitTimeoutMs, cancel_reason)) {
             RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
                                 kStopStreamWaitTimeoutMs,
                                 stream_->generateInput()->request_id);
+        }
+        if (!context_has_error && !request_cancelled) {
+            const auto stream_error = stream_->statusInfo();
+            if (stream_error.code() == ErrorCode::CANCELLED
+                && stream_error.ToString().rfind(kContextCleanupReason, 0) == 0) {
+                RTP_LLM_LOG_WARNING("request [%s] stopped unfinished stream with terminal source=context_cleanup",
+                                    request_key.c_str());
+            }
         }
         // RuntimeMeta snapshots the stream's terminal status during dequeue.
         // Capture only after reportError/finishOrCancel have committed it so

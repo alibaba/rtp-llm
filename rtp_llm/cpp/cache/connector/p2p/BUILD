@@ -1,28 +1,13 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//rtp_llm/cpp/cache/connector/p2p:__subpackages__"])
-
-cc_library(
-    name = "legacy_support",
-    hdrs = [
-        "support/AsyncContext.h",
-        "support/KVCacheConnector.h",
-        "support/KVCacheConnectorLayerContext.h",
-        "support/Meta.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
-        "//rtp_llm/cpp/utils:error_code",
-    ] + torch_deps(),
-)
 
 cc_library(
     name = "p2p_connector_config",
     hdrs = ["P2PConnectorConfig.h"],
     deps = [
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_config",
         "//rtp_llm/cpp/config:config_modules",
     ],
@@ -41,9 +26,12 @@ cc_library(
     ],
     deps = [
         ":layer_block_converter",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@havenask//aios/autil:thread",
     ],
@@ -83,16 +71,15 @@ cc_library(
     name = "components",
     srcs = [
         "P2PBroadcastClient.cc",
-        "PrefillLoadCaller.cc",
-        "AsymmetricTpUtil.cc",
+        "DecodeLoadHelper.cc",
         "ComputedLayerCacheBuffer.cc",
         "P2PConnectorResourceStore.cc",
         "StoreWaitContext.cc",
     ],
     hdrs = [
         "P2PBroadcastClient.h",
-        "PrefillLoadCaller.h",
-        "AsymmetricTpUtil.h",
+        "P2PNotification.h",
+        "DecodeLoadHelper.h",
         "ComputedLayerCacheBuffer.h",
         "P2PConnectorResourceStore.h",
         "StoreWaitContext.h",
@@ -100,16 +87,19 @@ cc_library(
     deps = [
         ":layer_cache_buffer",
         ":metrics",
-        ":legacy_support",
+        "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:rpc_completion_queue",
+        "//rtp_llm/cpp/utils:grpc_address_util",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",
-    ],
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
 )
 
@@ -117,39 +107,56 @@ cc_library(
     name = "connector",
     srcs = [
         "P2PConnectorAsyncContext.cc",
-        "P2PConnectorScheduler.cc",
         "P2PConnectorSchedulerPrefill.cc",
         "P2PConnectorSchedulerDecode.cc",
-        "P2PConnectorWorker.cc",
         "P2PConnectorWorkerPrefill.cc",
         "P2PConnectorWorkerDecode.cc",
+        "P2PConnectorBackend.cc",
         "P2PConnector.cc",
+        "P2PConnectorPrefill.cc",
+        "P2PConnectorDecode.cc",
     ],
     hdrs = [
+        "DecodeTargetWriteLease.h",
         "P2PConnectorAsyncContext.h",
+        "P2PConnectorBackend.h",
         "P2PConnectorConfig.h",
-        "P2PConnectorScheduler.h",
+        "P2PConnectorDecode.h",
+        "P2PConnectorPrefill.h",
         "P2PConnectorSchedulerPrefill.h",
         "P2PConnectorSchedulerDecode.h",
-        "P2PConnectorWorker.h",
         "P2PConnectorWorkerPrefill.h",
         "P2PConnectorWorkerDecode.h",
+        "P2PWorkerRoute.h",
         "P2PConnector.h",
-        "P2PKeyUtil.h",
     ],
     deps = [
         ":components",
+        ":p2p_key_util",
         ":layer_block_converter",
         ":layer_cache_buffer",
         ":metrics",
         ":p2p_connector_config",
-        ":legacy_support",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
+        "//rtp_llm/cpp/cache:cache_async_context",
+        "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
+        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",
         "@havenask//aios/autil:net",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:backend_factory",
     ],
+    visibility = ["//visibility:public"],
+)
+
+# 无依赖的纯头：传输 key 的唯一生成点。独立成 target，让只需要它的测试
+# 不必链接整个 connector（后者会拖入 device / transfer backend）。
+cc_library(
+    name = "p2p_key_util",
+    hdrs = ["P2PKeyUtil.h"],
+    copts = copts(),
     visibility = ["//visibility:public"],
 )

@@ -5,6 +5,7 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -18,6 +19,19 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+
+// Per-layer P2P publication hook carried with the model write inputs.
+namespace rtp_llm {
+
+using P2PLayerWriteCallback = std::function<bool(size_t,
+                                                 int,
+                                                 const std::string&,
+                                                 const std::vector<int64_t>&,
+                                                 const std::vector<int32_t>&,
+                                                 int64_t,
+                                                 const std::shared_ptr<torch::Event>&,
+                                                 int64_t)>;
+}  // namespace rtp_llm
 
 namespace torch_ext {
 
@@ -257,6 +271,8 @@ struct PyCacheStoreInputs {
     torch::Tensor request_id;             // int64, [context]
     torch::Tensor request_pd_separation;  // bool, [context]
     torch::Tensor cache_keys;             // int64, [context, global key width]
+    torch::Tensor                  request_deadline_ms;
+    rtp_llm::P2PLayerWriteCallback p2p_layer_write;
 };
 
 struct PyPrefillCudaGaphCopyParams {

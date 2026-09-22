@@ -25,6 +25,7 @@
 #include <atomic>
 #include <stdexcept>
 #include <string>
+#include <limits>
 #include <utility>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
@@ -181,7 +182,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     requireHostTensor(param.request_pd_separation, "request_pd_separation", 1, torch::kBool);
     requireHostTensor(param.cache_keys, "cache_keys", 2, torch::kInt64);
 
-    if (!cache_store) {
+    if (!cache_store && !param.p2p_layer_write) {
         RTP_LLM_CHECK_WITH_INFO(!register_store_completion,
                                 "writeCacheStore has tracked publication but cache_store is null; "
                                 "refusing to silently drop the KV transfer");
@@ -275,6 +276,15 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             layer_kv.tag.c_str(),
                             param.cache_keys.size(0),
                             context_batch_size);
+
+    if (param.p2p_layer_write) {
+        RTP_LLM_CHECK_WITH_INFO(param.cache_keys.size(1) > 0, "P2P cache keys must not be empty");
+        if (param.request_deadline_ms.defined()) {
+            requireHostTensor(param.request_deadline_ms, "request_deadline_ms", 1, torch::kInt64);
+            RTP_LLM_CHECK_WITH_INFO(param.request_deadline_ms.numel() == static_cast<int64_t>(context_batch_size),
+                                    "P2P deadline count mismatch");
+        }
+    }
 
     const size_t decoder_batch_size = total_batch_size - context_batch_size;
     // cache_keys is laid out [batch, global_max_blocks]; this logical width is INDEPENDENT
@@ -469,7 +479,25 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             addBlock(pair.key_index, pair.offset_index);
         }
 
-        if (request_blocks->getBlocksCount() > 0) {
+        if (param.p2p_layer_write) {
+            RTP_LLM_CHECK_WITH_INFO(!publication_lease_keys.empty() || (cp_size > 1 && block_plan.empty()),
+                                    "P2P layer write has no valid blocks for %ld",
+                                    request_id);
+            const int64_t deadline_ms = param.request_deadline_ms.defined() ?
+                param.request_deadline_ms.data_ptr<int64_t>()[batch_id] : std::numeric_limits<int64_t>::max();
+            if (!param.p2p_layer_write(cache_model_id,
+                                       layer_kv.layer_id,
+                                       layer_kv.tag,
+                                       publication_lease_keys,
+                                       publication_lease_blocks,
+                                       request_id,
+                                       event,
+                                       deadline_ms)) {
+                throw std::runtime_error("P2P layer publication failed for " + std::to_string(request_id));
+            }
+        }
+
+        if (cache_store && request_blocks->getBlocksCount() > 0) {
             CacheStoreCompletionCallback store_completion;
             if (register_store_completion) {
                 store_completion = register_store_completion(publication_lease_keys,
@@ -548,6 +576,17 @@ torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
 
 void cudaSyncAndCheck() {
     runtimeSyncAndCheck();
+}
+
+void cudaCurrentStreamSyncAndCheck() {
+    // Finish this forward without waiting for independent P2P transfer streams.
+#if USING_CUDA
+    check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
+    check_cuda_error();
+#elif USING_ROCM
+    ROCM_CHECK(hipStreamSynchronize(at::cuda::getCurrentCUDAStream()));
+    ROCM_CHECK_ERROR();
+#endif
 }
 
 void cudaCheckLastError() {

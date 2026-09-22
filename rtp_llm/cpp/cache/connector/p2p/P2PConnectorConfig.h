@@ -1,30 +1,55 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace rtp_llm {
 
+inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
+    // Reuse the reserved per-worker slot right after cache_store_listen_port.
+    // Keep port 0 unchanged so tests can still request an ephemeral port.
+    return cache_store_listen_port > 0 ? cache_store_listen_port + 1 : cache_store_listen_port;
+}
+
 struct P2PConnectorSchedulerConfig {
+    int64_t load_cache_timeout_ms = 5000;
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
-    int64_t                  p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
+    int64_t                  p2p_lease_query_timeout_ms                   = 20 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
+    int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
+    std::shared_ptr<const CacheTopology> topology;
+    int                                  cp_rank = 0;
+    int                                  cp_size = 1;
 
-    static P2PConnectorSchedulerConfig create(const RuntimeConfig&    runtime_config,
-                                              const CacheStoreConfig& cache_store_config,
-                                              const PDSepConfig&      pd_sep_config) {
+    // 编排层（KVCacheTransferPlanner）需要完整的并行度与角色来构造本端 ShardLayout，
+    // 并由 ShardLayoutFactory::peerOf 推导对端布局 —— 这是「跨端协议零改动」的前提。
+    // cp_rank / cp_size 是它的投影，保留是为了旧执行路径。
+    ParallelismConfig parallelism_config;
+    RoleType          role_type = RoleType::PDFUSION;
+
+    static P2PConnectorSchedulerConfig create(const RuntimeConfig&     runtime_config,
+                                              const CacheStoreConfig&  cache_store_config,
+                                              const ParallelismConfig& parallelism_config,
+                                              const PDSepConfig&       pd_sep_config) {
         P2PConnectorSchedulerConfig config;
+        config.parallelism_config                     = parallelism_config;
+        config.role_type                              = pd_sep_config.role_type;
+        config.load_cache_timeout_ms                  = pd_sep_config.load_cache_timeout_ms;
         config.worker_grpc_addrs                      = runtime_config.worker_grpc_addrs;
         config.worker_addrs                           = runtime_config.worker_addrs;
-        config.p2p_transfer_not_done_resource_hold_ms = cache_store_config.p2p_transfer_not_done_resource_hold_ms;
+        config.p2p_lease_query_timeout_ms = cache_store_config.p2p_lease_query_timeout_ms;
         config.p2p_resource_store_timeout_check_interval_ms =
             cache_store_config.p2p_resource_store_timeout_check_interval_ms;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
+        config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
         return config;
     }
 };
@@ -32,47 +57,58 @@ struct P2PConnectorSchedulerConfig {
 struct P2PConnectorWorkerConfig {
     transfer::TransferBackendConfig transfer_backend_config;
 
-    int64_t p2p_read_steal_before_deadline_ms       = 250;
-    int64_t p2p_read_return_before_deadline_ms      = 100;
-    int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
+    int p2p_prefill_sender_thread_count = 4;
+    int p2p_prefill_sender_queue_size   = 10000;
+
+    int64_t p2p_cancelled_keys_ttl_ms                = 3600 * 1000;
+    int64_t load_cache_timeout_ms = 5000;
 
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
-    // Prefill page-RR shard geometry. cp_size==1 disables RR remap (legacy path);
-    // cp_size>1 makes LayerCacheBufferUtil register cache_keys[cp_rank + i*cp_size]
-    // for the i-th rank-local owned block (Stage 4 fix).
-    int  cp_rank          = 0;
-    int  cp_size          = 1;
-    bool kv_cache_sharded = false;
+    bool     is_mla        = false;
+
+    std::shared_ptr<const CacheTopology> topology;
+    int                                  cp_size = 1;
 
     static P2PConnectorWorkerConfig create(const CacheStoreConfig&  cache_store_config,
                                            const PDSepConfig&       pd_sep_config,
                                            const ParallelismConfig& parallelism_config,
-                                           uint32_t                 layer_all_num) {
+                                           uint32_t                 layer_all_num,
+                                           bool                     is_mla,
+                                           size_t                   llm_kv_block_size_bytes) {
         P2PConnectorWorkerConfig config;
-        config.transfer_backend_config.cache_store_rdma_mode         = cache_store_config.cache_store_rdma_mode;
-        config.transfer_backend_config.rdma_transfer_wait_timeout_ms = cache_store_config.rdma_transfer_wait_timeout_ms;
+        config.load_cache_timeout_ms = pd_sep_config.load_cache_timeout_ms;
+        config.p2p_prefill_sender_thread_count = cache_store_config.p2p_prefill_sender_thread_count;
+        config.p2p_prefill_sender_queue_size   = cache_store_config.p2p_prefill_sender_queue_size;
+        config.transfer_backend_config.cache_store_rdma_mode         = pd_sep_config.cache_store_rdma_mode;
         config.transfer_backend_config.messager_io_thread_count      = cache_store_config.messager_io_thread_count;
         config.transfer_backend_config.messager_worker_thread_count  = cache_store_config.messager_worker_thread_count;
         config.transfer_backend_config.rdma_max_block_pairs_per_connection =
             cache_store_config.rdma_max_block_pairs_per_connection;
-        config.transfer_backend_config.cache_store_listen_port = pd_sep_config.cache_store_listen_port;
+        config.transfer_backend_config.cache_store_listen_port =
+            getP2PTransferListenPort(pd_sep_config.cache_store_listen_port);
         config.transfer_backend_config.cache_store_tcp_anet_rpc_thread_num =
             cache_store_config.cache_store_tcp_anet_rpc_thread_num;
         config.transfer_backend_config.cache_store_tcp_anet_rpc_queue_num =
             cache_store_config.cache_store_tcp_anet_rpc_queue_num;
-        config.p2p_layer_cache_buffer_store_timeout_ms = cache_store_config.p2p_layer_cache_buffer_store_timeout_ms;
-        config.p2p_read_steal_before_deadline_ms       = cache_store_config.p2p_read_steal_before_deadline_ms;
-        config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;
+        config.transfer_backend_config.cache_store_tcp_worker_queue_size =
+            cache_store_config.cache_store_tcp_worker_queue_size;
+        config.transfer_backend_config.rdma_transfer_worker_thread_count =
+            cache_store_config.rdma_transfer_worker_thread_count;
+        config.transfer_backend_config.rdma_transfer_worker_queue_size =
+            cache_store_config.rdma_transfer_worker_queue_size;
+        config.transfer_backend_config.p2p_rdma_enable_h2d_copy = cache_store_config.p2p_rdma_enable_h2d_copy;
+        config.transfer_backend_config.p2p_rdma_staging_total_bytes =
+            cache_store_config.p2p_rdma_staging_total_bytes;
+        config.transfer_backend_config.llm_kv_block_size_bytes = llm_kv_block_size_bytes;
+        config.transfer_backend_config.rdma_disconnect_after_deadline_ms =
+            cache_store_config.p2p_transfer_not_done_resource_hold_ms;
+        config.p2p_cancelled_keys_ttl_ms                = cache_store_config.p2p_cancelled_keys_ttl_ms;
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
         config.layer_all_num                           = layer_all_num;
-        config.kv_cache_sharded                        = parallelism_config.prefill_cp_config.kv_cache_sharded;
-        if (config.kv_cache_sharded && parallelism_config.tp_size > 1) {
-            config.cp_size = static_cast<int>(parallelism_config.tp_size);
-            config.cp_rank = static_cast<int>(parallelism_config.tp_rank);
-        }
+        config.is_mla                                  = is_mla;
         return config;
     }
 };
@@ -88,14 +124,21 @@ struct P2PConnectorConfig {
                                      const CacheStoreConfig&  cache_store_config,
                                      const ParallelismConfig& parallelism_config,
                                      const PDSepConfig&       pd_sep_config,
-                                     uint32_t                 layer_all_num) {
+                                     uint32_t                 layer_all_num,
+                                     bool                     is_mla,
+                                     size_t                   llm_kv_block_size_bytes) {
         P2PConnectorConfig config;
         config.role_type = pd_sep_config.role_type;
         config.tp_rank   = parallelism_config.tp_rank;
         config.scheduler_config =
-            P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, pd_sep_config);
-        config.worker_config =
-            P2PConnectorWorkerConfig::create(cache_store_config, pd_sep_config, parallelism_config, layer_all_num);
+            P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, parallelism_config, pd_sep_config);
+        config.worker_config = P2PConnectorWorkerConfig::create(
+            cache_store_config,
+            pd_sep_config,
+            parallelism_config,
+            layer_all_num,
+            is_mla,
+            llm_kv_block_size_bytes);
         return config;
     }
 };

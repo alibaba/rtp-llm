@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -28,6 +29,8 @@ class CacheStore;
 class BroadcastManager;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
+class P2PConnector;
+class KVCacheConnectorReadWriteContext;
 
 class KVCacheManager {
 public:
@@ -70,6 +73,7 @@ public:
     // miss a release racing with that attempt.
     uint64_t allocationGeneration() const;
     bool     waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms, int64_t minimum_wait_ms = 0);
+    void cancelP2PLoad(const std::shared_ptr<AsyncContext>& context);
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
@@ -137,11 +141,35 @@ public:
     void                        setCacheStore(std::shared_ptr<CacheStore> cache_store);
     std::shared_ptr<CacheStore> getCacheStore() const;
 
+    // 异步连接器操作
+    // async load cache from connector to gpu, for all rank
+    std::shared_ptr<AsyncContext>
+    asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+
     // for every single rank
     // Returns whether a trustworthy mem_response was formed, not whether the transfer
     // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
+    // Handle a decode-side StartLoad RPC directly through P2PConnector.
+    void handleRead(const P2PConnectorStartLoadRequestPB& request,
+                    P2PConnectorStartLoadResponsePB&      response,
+                    std::function<bool()>                 is_cancelled = nullptr);
+
+    bool hasActiveConnectors() const;
+    bool hasP2PConnector() const;
+    int64_t prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms);
+    void              publishPrefillPayload(const std::string&                           unique_key,
+                                             int64_t                                      deadline_ms,
+                                             P2PConnectorResourceEntry::SideChannelData&& data);
+    bool              writeP2PLayer(size_t                               model_id,
+                                    int                                  local_layer_id,
+                                    const std::string&                   tag,
+                                    const std::vector<int64_t>&          cache_keys,
+                                    const std::vector<int32_t>&          block_ids,
+                                    int64_t                              request_id,
+                                    const std::shared_ptr<torch::Event>& event,
+                                    int64_t                              deadline_ms);
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }
@@ -176,6 +204,7 @@ private:
     void                  reportMetricsLoop();
     bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    bool initP2PConnector();
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
@@ -213,6 +242,7 @@ private:
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+    std::shared_ptr<P2PConnector> p2p_connector_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

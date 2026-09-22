@@ -5,12 +5,13 @@ import json
 import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
-from unittest import IsolatedAsyncioTestCase, main
+from unittest import IsolatedAsyncioTestCase, main, skip
 
 import torch
 from typing_extensions import override
 
-from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode, RoleAddr, RoleType
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -53,6 +54,7 @@ from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
 )
 from rtp_llm.ops import FfnDisAggregateConfig, PDSepConfig, SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.host_service import HostServiceArgs
 from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
@@ -2995,6 +2997,251 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             sorted(self.endpoint.stop_words_str_list),
             sorted(["<|user|>", "<|observation|>"]),
         )
+
+    def test_frontend_decode_entrance_fallback_backend_role(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = True
+        host_args = HostServiceArgs()
+
+        roles = BackendRPCServerVisitor.get_backend_role_list(pd_sep_config, host_args)
+
+        self.assertEqual(roles, [RoleType.DECODE, RoleType.PREFILL])
+
+    def test_prefill_decode_entrance_routes_to_decode_backend(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.PREFILL
+        pd_sep_config.decode_entrance = True
+        host_args = HostServiceArgs()
+
+        roles = BackendRPCServerVisitor.get_backend_role_list(pd_sep_config, host_args)
+
+        self.assertEqual(roles, [RoleType.DECODE, RoleType.PREFILL])
+
+    async def test_domain_routing_skips_when_no_missing_roles(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = True
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+        )
+        visitor.backend_role_list = []
+
+        called = False
+
+        def _unexpected_call(_roles, refresh=False):
+            nonlocal called
+            called = True
+            return []
+
+        visitor.host_service.get_backend_role_addrs = _unexpected_call
+        input_obj = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        await visitor.get_domain_route_addrs(input_obj)
+
+        self.assertFalse(called)
+
+    async def test_route_ips_fail_fast_when_decode_entrance_frontend_lacks_prefill(
+        self,
+    ):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = True
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+        )
+
+        visitor.host_service.get_master_addr = lambda: ""
+        visitor.host_service.service_available = True
+        visitor.host_service.get_queue_length = lambda: 0
+        visitor.host_service.get_backend_role_addrs = lambda roles, refresh=False: (
+            [
+                RoleAddr(
+                    role=RoleType.DECODE,
+                    ip="127.0.0.1",
+                    http_port=10000,
+                    grpc_port=10001,
+                )
+            ]
+            if RoleType.DECODE in roles
+            else []
+        )
+
+        input_obj = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with self.assertRaisesRegex(Exception, "missing backend role addresses"):
+            await visitor.route_ips(input_obj)
+
+    def _decode_batch_visitor_and_inputs(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.FRONTEND
+        config.decode_entrance = True
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=config,
+            addresses=["localhost:8080"],
+        )
+        visitor.host_service.service_available = False
+        inputs = [
+            GenerateInput(
+                request_id=i,
+                token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                mm_inputs=[],
+                generate_config=GenerateConfig(),
+            )
+            for i in (11, 12)
+        ]
+        return visitor, inputs
+
+    async def test_batch_enqueue_decode_entrance_is_unsupported(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        with self.assertRaisesRegex(
+            FtRuntimeException, "/batch_infer is not supported with decode_entrance"
+        ):
+            await visitor.batch_enqueue(inputs)
+
+    @skip("decode-entrance /batch_infer support was removed")
+    async def test_batch_enqueue_decode_entrance_uses_one_batch_rpc(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        calls = []
+        outputs = [GenerateOutputs(), GenerateOutputs()]
+
+        async def batch_enqueue(batch):
+            calls.append(batch)
+            return outputs
+
+        def unexpected_enqueue(_input):
+            raise AssertionError("batch must not be split into stream RPCs")
+
+        visitor.model_rpc_client.enqueue = unexpected_enqueue
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        self.assertIs(await visitor.batch_enqueue(inputs), outputs)
+        self.assertEqual(calls, [inputs])
+
+    @skip("decode-entrance /batch_infer support was removed")
+    async def test_batch_enqueue_decode_entrance_routes_once(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        visitor.host_service.service_available = True
+        routed = []
+
+        async def route(input_obj):
+            routed.append(input_obj.request_id)
+
+        async def batch_enqueue(batch):
+            return []
+
+        visitor.route_ips = route
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        await visitor.batch_enqueue(inputs)
+        self.assertEqual(routed, [11])
+
+    @skip("decode-entrance /batch_infer support was removed")
+    async def test_batch_enqueue_decode_entrance_propagates_batch_error(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+
+        async def batch_enqueue(batch):
+            raise RuntimeError("batch item 1 failed")
+
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        with self.assertRaisesRegex(RuntimeError, "batch item 1 failed"):
+            await visitor.batch_enqueue(inputs)
+
+    @skip("decode-entrance /batch_infer support was removed")
+    async def test_batch_enqueue_decode_entrance_cancels_batch_rpc(self):
+        visitor, inputs = self._decode_batch_visitor_and_inputs()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def batch_enqueue(batch):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        task = asyncio.create_task(visitor.batch_enqueue(inputs))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(cancelled.is_set())
+
+    async def test_batch_enqueue_decode_entrance_empty(self):
+        visitor, _ = self._decode_batch_visitor_and_inputs()
+        self.assertEqual(await visitor.batch_enqueue([]), [])
+
+    async def test_batch_enqueue_routes_each_request_for_batch_infer(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = False
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["10.0.0.10:10101", "10.0.0.11:10111"],
+        )
+        visitor.host_service.service_available = True
+
+        route_calls = []
+
+        async def _fake_route(input_obj: GenerateInput):
+            route_calls.append(input_obj.request_id)
+            input_obj.generate_config.role_addrs = [
+                RoleAddr(
+                    role=RoleType.PREFILL,
+                    ip="10.0.0.10",
+                    http_port=10100,
+                    grpc_port=10101,
+                )
+            ]
+
+        async def _fake_batch_enqueue(inputs: list[GenerateInput]):
+            self.assertEqual(route_calls, [41, 42])
+            self.assertEqual(len(inputs[0].generate_config.role_addrs), 1)
+            self.assertEqual(inputs[0].generate_config.role_addrs[0].ip, "10.0.0.10")
+            self.assertEqual(len(inputs[1].generate_config.role_addrs), 1)
+            self.assertEqual(inputs[1].generate_config.role_addrs[0].ip, "10.0.0.10")
+            return []
+
+        visitor.route_ips = _fake_route
+        visitor.model_rpc_client.batch_enqueue = _fake_batch_enqueue
+
+        results = await visitor.batch_enqueue(
+            [
+                GenerateInput(
+                    request_id=41,
+                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(),
+                ),
+                GenerateInput(
+                    request_id=42,
+                    token_ids=torch.tensor([4, 5, 6], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(),
+                ),
+            ]
+        )
+
+        self.assertEqual(results, [])
 
     async def test_think_label_real_situation_union(self):
         tokenizer = TokenizerFactory.create(

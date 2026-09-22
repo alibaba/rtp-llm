@@ -476,6 +476,22 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(config_.topologyPtr());
 
+    if (is_connector && cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cache_keys == resource_keys) {
+        // The connector projects the full logical key namespace per worker later.
+        // Keep the CP-local table intact, including holes and reserved slots;
+        // indexing it by logical key position would truncate the transfer range.
+        const auto&      blocks = kvcache_resource.blocks(0);
+        BlockIndicesType valid_blocks;
+        for (auto block : blocks) {
+            if (!isNullBlockIdx(block)) {
+                valid_blocks.push_back(block);
+            }
+        }
+        full_kv_cache_group_->reference(valid_blocks);
+        selected_resource->mutableBlockIds(0).assign(blocks);
+        return selected_resource;
+    }
+
     CacheKeysType    selected_cache_keys;
     BlockIndicesType selected_blocks;
 

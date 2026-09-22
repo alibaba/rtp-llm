@@ -202,3 +202,72 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "p2p_model_rpc_test",
+    srcs = [
+        "DecodeRpcServerNew2Test.cc",
+        "PrefillRpcServerNew2Test.cc",
+        "PrefillRpcServerTest.cc",
+        "PrefillServerCallerTest.cc",
+        "PDRequestUtilsTest.cc",
+        "RpcTimeoutUtilsTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/normal_engine",
+        "@havenask//aios/autil:net",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+# Two exec processes with real GPU caches and P2P transport; only model execution is stubbed.
+# RDMA is opt-in through P2P_SMOKE_TRANSPORT=rdma and P2P_SMOKE_HOST=<interface IP>.
+cc_test(
+    name = "p2p_generate_stream_smoke_test",
+    srcs = ["P2PGenerateStreamSmokeTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/normal_engine",
+        "@havenask//aios/autil:net",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+    tags = ["manual"],
+    timeout = "moderate",
+)
+
+# Manual two-host TCP/GPU connector integration suite. Each host runs two
+# logical ranks; see docs/backend/p2p_multi_rank_transfer_tests.md for setup.
+cc_test(
+    name = "p2p_multi_rank_transfer_test",
+    srcs = ["P2PMultiRankTransferTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p/test:mock_generate_stream",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "@havenask//aios/autil:net",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+    tags = ["manual"],
+    timeout = "long",
+)

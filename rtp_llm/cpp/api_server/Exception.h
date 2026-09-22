@@ -5,6 +5,7 @@
 
 #include "autil/legacy/jsonizable.h"
 
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
@@ -68,7 +69,6 @@ public:
             std::string source     = getSource(body);
             int         error_code = -1;
             if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
-                RTP_LLM_LOG_WARNING("dynamic_cast succ");
                 error_code = he->getType();
             }
             metric_reporter->reportErrorQpsMetric(source, error_code);
@@ -88,7 +88,6 @@ public:
             std::string source     = getSource(body);
             int         error_code = Type::UNKNOWN_ERROR;
             if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
-                RTP_LLM_LOG_WARNING("dynamic_cast succ");
                 error_code = he->getType();
             }
             std::map<std::string, std::string> tag_map;
@@ -117,6 +116,7 @@ inline HttpApiServerException streamErrorToHttpException(const ErrorInfo& status
     }
     return HttpApiServerException(http_error, status.ToString());
 }
+HttpApiServerException::Type transErrorCodeToHttpExceptionType(ErrorCode code);
 
 template<typename T>
 inline std::string formatException(const T& e) {

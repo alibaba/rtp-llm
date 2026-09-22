@@ -593,6 +593,10 @@ class OpenaiComparer(BaseComparer):
                 "role_addrs.grpc_port",
             ]
         )
+        # Per-query exceptions must not weaken comparison for the legacy suites.
+        ignore_fields.update(
+            self.qr_info.get("compare_config", {}).get("ignore_aux_info_fields", [])
+        )
         # Goldens recorded before the speculative counters existed have no such
         # keys in their raw JSON; only compare once a golden records the field.
         raw_result = self.qr_info.get("result")
@@ -634,9 +638,9 @@ class OpenaiComparer(BaseComparer):
                         )
                         continue
                     for idx, (item1, item2) in enumerate(zip(value1, value2)):
-                        if hasattr(item1, "__dict__") and hasattr(item2, "__dict__"):
-                            dict1 = item1.__dict__.copy()
-                            dict2 = item2.__dict__.copy()
+                        if isinstance(item1, BaseModel) and isinstance(item2, BaseModel):
+                            dict1 = item1.model_dump(mode="json")
+                            dict2 = item2.model_dump(mode="json")
                             for ignore_field in nested_ignore[field]:
                                 dict1.pop(ignore_field, None)
                                 dict2.pop(ignore_field, None)
