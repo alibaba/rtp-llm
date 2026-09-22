@@ -717,6 +717,9 @@ class MMProcessEngine:
         )
 
         self.mm_part = mm_part
+        self.supports_precomputed_embedding = bool(
+            getattr(mm_part, "supports_inline_embedding", False)
+        )
 
         self._remote_embedding_cache = None
         if vit_config.mm_remote_cache_enable:
@@ -1399,6 +1402,30 @@ class MMProcessEngine:
             raise
         return res
 
+    def mm_embedding_precomputed_cpp(
+        self, tensors: List[torch.Tensor]
+    ) -> MMEmbeddingRes:
+        """Fast path for models whose ARPC payload is already preprocessed.
+
+        Unlike ``mm_embedding_cpp``, this avoids rebuilding one Python
+        ``MultimodalInput`` and preprocess-config object per batch item. Models
+        must explicitly opt in through ``supports_inline_embedding``.
+        """
+        if not self.supports_precomputed_embedding:
+            raise RuntimeError(
+                "multimodal model does not support precomputed fast path"
+            )
+        with torch.inference_mode(), torch.cuda.device(self.device):
+            result = self.mm_part.embedding(tensors)
+        embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
+        position_ids = maybe_tensor_to_list(result[1], ndim_threshold=2)
+        extra_input = (
+            maybe_tensor_to_list(result[2], ndim_threshold=1)
+            if len(result) > 2
+            else []
+        )
+        return MMEmbeddingRes(embeddings, position_ids, extra_input)
+
     def mm_embedding_impl(
         self, mm_inputs: List[MultimodalInput], request_id: int = 0
     ) -> MMEmbeddingRes:
@@ -1443,30 +1470,58 @@ class MMProcessEngine:
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_query_access(mm_inputs, request_id)
 
-                with torch.profiler.record_function("preprocess"):
-                    work_items = self._create_work_items(
-                        mm_inputs,
-                        cache_claim=cache_claim,
-                        defer_cache_complete=defer_cache_complete,
-                        defer_feature_hashes=defer_feature_hashes,
-                        deadline=deadline,
-                    )
-                    self._wait_for_preprocessing(work_items)
-
-                with torch.profiler.record_function("compute_embeddings"):
-                    emb_res, pos_res, extra_input_res = self._compute_embeddings(
-                        work_items, deadline=deadline
-                    )
-                    if report_embedding_length:
-                        kmonitor.report(
-                            GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
-                            _embedding_token_length(emb_res),
+                inline_embedding = getattr(self.mm_part, "supports_inline_embedding", False)
+                if inline_embedding:
+                    # Some embedding-only models receive already-materialized
+                    # feature tensors and do not benefit from cross-request VIT
+                    # batching. Keep those explicitly opted-in models on the
+                    # caller thread to avoid scheduler submit/future/wakeup cost.
+                    with torch.profiler.record_function("preprocess"):
+                        data = self.mm_part.preprocess_input(
+                            mm_inputs,
+                            self.vit_config,
+                            **self.mm_part.get_preprocess_params(),
                         )
+                    with torch.profiler.record_function("compute_embeddings"):
+                        with torch.cuda.device(self.device):
+                            result = self.mm_part.embedding(data)
+                        emb_res = maybe_tensor_to_list(result[0], ndim_threshold=2)
+                        pos_res = maybe_tensor_to_list(result[1], ndim_threshold=2)
+                        extra_input_res = (
+                            maybe_tensor_to_list(result[2], ndim_threshold=1)
+                            if len(result) > 2
+                            else []
+                        )
+                else:
+                    with torch.profiler.record_function("preprocess"):
+                        work_items = self._create_work_items(
+                            mm_inputs,
+                            cache_claim=cache_claim,
+                            defer_cache_complete=defer_cache_complete,
+                            defer_feature_hashes=defer_feature_hashes,
+                            deadline=deadline,
+                        )
+                        self._wait_for_preprocessing(work_items)
+
+                    # The GPU forward runs on the MMScheduler's executor thread and is
+                    # profiled there, per forward/batch, via the forward_profiler hook
+                    # handed to the scheduler (torch.profiler's RecordFunction callbacks
+                    # don't span threads, so it must be armed on that thread). This
+                    # calling-thread marker only covers the submit/wait wall time.
+                    with torch.profiler.record_function("compute_embeddings"):
+                        emb_res, pos_res, extra_input_res = self._compute_embeddings(
+                            work_items, deadline=deadline
+                        )
+                if report_embedding_length:
+                    kmonitor.report(
+                        GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
+                        _embedding_token_length(emb_res),
+                    )
 
                 with torch.profiler.record_function("postprocess"):
                     hashes = (
                         None
-                        if defer_feature_hashes
+                        if defer_feature_hashes or inline_embedding
                         else [h for wi in work_items for h in wi.feature_hashes or []]
                     )
                     result = MMEmbeddingRes(emb_res, pos_res, extra_input_res, hashes)
