@@ -1036,6 +1036,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
+    spec_sampler_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
@@ -1931,9 +1932,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // guards all_probs cloning. They stay null when stream-async is off.
     std::shared_ptr<torch::Event> rejection_event;
     std::shared_ptr<torch::Event> draft_event;
-    bool                          prev_bookkeeping_synced_for_spec_logits = false;
-    bool                          spec_logits_async_launched              = false;
-    bool                          spec_logits_processor_present           = false;
+    bool                          prev_bookkeeping_synced_for_host_consumers = false;
+    bool                          spec_sampler_prepare_async_launched        = false;
+    bool                          spec_logits_async_launched                 = false;
+    bool                          spec_logits_processor_present              = false;
+    auto                          prepared_spec_sampler_input = std::make_shared<std::optional<SamplerInputs>>();
 
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
@@ -2088,6 +2091,63 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
+    const bool launch_spec_logits_async =
+        spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined();
+    const bool launch_spec_sampler_prepare = isTpRank0() && !model_input.is_fake_stream;
+    if ((launch_spec_logits_async || launch_spec_sampler_prepare) && join_bookkeeping_before_host_consumers) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+            "executor.mtp.decode_step(wait_prev_bookkeeping_pre_host_prepare,stream_count=%zu)", streams.size());
+        spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+        stream_groups                              = StreamGroups(streams);
+        prev_bookkeeping_synced_for_host_consumers = true;
+    }
+
+    // Start host-side packed-mask construction as soon as draft tokens are
+    // ready. Its D2H/CPU/H2D work then overlaps target verification instead of
+    // being paid entirely by wait_spec_logits_verify_async afterward.
+    if (launch_spec_logits_async) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
+
+        auto spec_streams = streams;
+        auto draft_tokens = draft_token_ids_t;
+        spec_logits_verify_async_runner_.launch([this,
+                                                 spec_streams = std::move(spec_streams),
+                                                 draft_tokens,
+                                                 draft_tokens_ready_event,
+                                                 spec_logits_result]() mutable {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_async_worker)");
+            try {
+                *spec_logits_result =
+                    buildSpecLogitsVerifyInline(spec_streams, draft_tokens, std::move(draft_tokens_ready_event));
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("spec logits async worker failed: %s", e.what());
+                throw;
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("spec logits async worker failed with unknown exception");
+                throw;
+            }
+        });
+        spec_logits_async_launched = true;
+    }
+
+    // Token-history staging and logits-processor state construction are CPU-only
+    // and do not depend on target logits. Run them while target verify owns the
+    // main thread/GPU, then attach the target outputs immediately before sampling.
+    if (launch_spec_sampler_prepare) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_sampler_prepare_async)");
+        auto* processor = batch_stream_processor_.get();
+        auto  groups    = stream_groups;
+        spec_sampler_prepare_runner_.launch(
+            [processor, groups = std::move(groups), prepared_spec_sampler_input]() mutable {
+                prepared_spec_sampler_input->emplace(processor->prepareSpecSamplerInputHost(groups));
+            });
+        spec_sampler_prepare_async_launched = true;
+    }
+
+    // Attention metadata does not depend on target hidden states or rejection
+    // output, so prepare it in parallel with target verify as main does.
+    launchDraftPrefillPrepareAsync(model_input);
+
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.linear_replay = target_linear_replay;
@@ -2145,46 +2205,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
-    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
-        if (join_bookkeeping_before_host_consumers) {
-            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
-                "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-            stream_groups                           = StreamGroups(streams);
-            prev_bookkeeping_synced_for_spec_logits = true;
-        }
-
-        auto spec_streams = streams;
-        auto draft_tokens = draft_token_ids_t;
-        spec_logits_verify_async_runner_.launch([this,
-                                                 spec_streams = std::move(spec_streams),
-                                                 draft_tokens,
-                                                 draft_tokens_ready_event,
-                                                 spec_logits_result]() mutable {
-            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_async_worker)");
-            try {
-                *spec_logits_result =
-                    buildSpecLogitsVerifyInline(spec_streams, draft_tokens, std::move(draft_tokens_ready_event));
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_ERROR("spec logits async worker failed: %s", e.what());
-                throw;
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("spec logits async worker failed with unknown exception");
-                throw;
-            }
-        });
-        spec_logits_async_launched = true;
-    }
-
     if (spec_logits_processor_present && !spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_inline)");
         if (join_bookkeeping_before_host_consumers) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
             spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-            stream_groups                           = StreamGroups(streams);
-            prev_bookkeeping_synced_for_spec_logits = true;
+            stream_groups                              = StreamGroups(streams);
+            prev_bookkeeping_synced_for_host_consumers = true;
         }
         std::shared_ptr<torch::Event> draft_tokens_ready_event;
         if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.is_cuda()) {
@@ -2224,7 +2252,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         } else {
             // Replay no longer joins the worker to repair LINEAR pages before verify.
             // Sampler/logits processors still consume its committed host token state.
-            if (join_bookkeeping_before_host_consumers && !prev_bookkeeping_synced_for_spec_logits) {
+            if (join_bookkeeping_before_host_consumers && !prev_bookkeeping_synced_for_host_consumers) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
                 spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -2234,9 +2262,20 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            CHECK_AND_RETURN_REF(sampler_input,
-                                 batch_stream_processor_->gatherSpecSamplerInput(
-                                     stream_groups, model_input, model_output, *spec_logits_result));
+            std::optional<SamplerInputs> sampler_input_storage;
+            if (spec_sampler_prepare_async_launched) {
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_spec_sampler_prepare_async)");
+                spec_sampler_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+                RTP_LLM_CHECK(prepared_spec_sampler_input->has_value());
+                sampler_input_storage.emplace(batch_stream_processor_->finalizeSpecSamplerInput(
+                    stream_groups, std::move(prepared_spec_sampler_input->value()), model_output, *spec_logits_result));
+            } else {
+                auto sampler_input_status = batch_stream_processor_->gatherSpecSamplerInput(
+                    stream_groups, model_input, model_output, *spec_logits_result);
+                RETURN_IF_STATUS_OR_ERROR(sampler_input_status);
+                sampler_input_storage.emplace(std::move(sampler_input_status.value()));
+            }
+            auto& sampler_input = sampler_input_storage.value();
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = sampler_output.all_probs.reshape(
@@ -2310,12 +2349,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input);
 
-    // Projection-KTP pads target verification to one common batch across its
-    // DP ranks. The following draft-update model is KTP1 but may still use EP,
-    // so it must inherit that exact physical batch before attention metadata is
-    // prepared. Preparing it from each rank's local logical batch would make
-    // EP collectives enter with different row counts (for example 2 vs 1).
-    launchDraftPrefillPrepareAsync(model_input);
+    // The prepare launched before target verify has completed by this join;
+    // model_input mutations below affect hidden/output tensors, not attention
+    // geometry captured by prepareAttentionInputs.
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     {

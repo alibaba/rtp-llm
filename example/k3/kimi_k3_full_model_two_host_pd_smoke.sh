@@ -754,7 +754,6 @@ expected = {
     "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "30000",
     "RDMA_CONNECT_RETRY_TIMES": "3",
     "RESERVE_BLOCK_RATIO": "5",
-    "RTP_LLM_MTP_ASYNC_PREPARE": "0",
     "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
@@ -783,6 +782,7 @@ if accl_use_nics:
 else:
     absent.append("ACCL_USE_NICS")
 if role == "prefill":
+    expected["RTP_LLM_MTP_ASYNC_PREPARE"] = "0"
     expected.update({
         "CONCURRENCY_LIMIT": "32",
         "MAX_SEQ_LEN": "1258294",
@@ -800,8 +800,10 @@ if role == "prefill":
     })
     expected["PREFILL_CP_KV_CACHE_SHARDED"] = "1"
     absent.extend(["PREFILL_CP_SIZE", "DECODE_CP_KV_CACHE_SHARDED"])
-    absent.extend(["DECODE_CAPTURE_CONFIG", "MOE_STRATEGY", "NCCL_GRAPH_REGISTER"])
+    absent.extend(["DECODE_CAPTURE_CONFIG", "MOE_STRATEGY", "NCCL_GRAPH_REGISTER", "ENABLE_SP_PREFILL_CUDA_GRAPH"])
 else:
+    expected["RTP_LLM_MTP_ASYNC_PREPARE"] = "1"
+    expected["ENABLE_SP_PREFILL_CUDA_GRAPH"] = "1"
     expected.update({
         "CONCURRENCY_LIMIT": "8",
         "MAX_SEQ_LEN": "1468006",
@@ -947,6 +949,7 @@ apply_validated_prefill_profile() {
     export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${smoke_shared_expert_shard}"
     export KIMI_K3_PREFILL_CHUNK_TOKENS="${smoke_chunk_tokens}"
     export ENABLE_CUDA_GRAPH=0
+    unset ENABLE_SP_PREFILL_CUDA_GRAPH
     unset NCCL_GRAPH_REGISTER
     export ENABLE_MEMORY_CACHE=1
     export MEMORY_CACHE_SIZE_MB=65536
@@ -975,6 +978,8 @@ apply_validated_decode_profile() {
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
     unset ENABLE_MEMORY_CACHE MEMORY_CACHE_SIZE_MB MM_CACHE_GPU_MAX_BYTES
     export ENABLE_CUDA_GRAPH=1
+    export ENABLE_SP_PREFILL_CUDA_GRAPH=1
+    export RTP_LLM_MTP_ASYNC_PREPARE=1
     # Exercise the DCP group with several public Graph buckets.
     export DECODE_CAPTURE_CONFIG=1,2,4,8
     export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"

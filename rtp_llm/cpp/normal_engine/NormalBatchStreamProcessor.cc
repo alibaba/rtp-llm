@@ -66,9 +66,10 @@ NormalBatchStreamProcessor::gatherMtpLinearKvCacheKernelBlockId(const StreamGrou
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,
                                                                 size_t              total_batch_size_in,
                                                                 size_t              total_batch_size_out,
-                                                                size_t              propose_step) const {
+                                                                size_t              propose_step,
+                                                                bool                compact_token_ids) const {
     return sampler_input_gatherer_->allocateSamplerInputs(
-        stream_groups, total_batch_size_in, total_batch_size_out, propose_step);
+        stream_groups, total_batch_size_in, total_batch_size_out, propose_step, compact_token_ids);
 }
 
 void NormalBatchStreamProcessor::fillSamplerCommonInputs(SamplerInputs&                sampler_inputs,

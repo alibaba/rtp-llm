@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -9,6 +11,9 @@
 
 namespace rtp_llm {
 
+// Builds compact packed allow-masks for MTP target verification. The runner is
+// single-flight: result tensors are views into reusable scratch buffers, and
+// the next build waits for the consumer event before reusing them.
 class SpecLogitsVerifyRunner {
 public:
     struct ActiveProcessor {
@@ -25,48 +30,46 @@ public:
         size_t                       total_streams = 0;
         int                          propose_step  = 0;
         size_t                       vocab_size    = 0;
-
-        // Shape [B, P], dtype int32/int64, CPU or CUDA.
-        torch::Tensor                 draft_tokens;
+        torch::Tensor                draft_tokens;  // [B, P] or [B, P + 1]
         std::shared_ptr<torch::Event> draft_tokens_ready_event;
     };
 
     struct LaunchResult {
-        // Bool vocab mask, shape [B * (P + 1), vocab_size], CUDA when active.
-        // true means masked. This keeps the generic sampler path independent
-        // from grammar-specific packed bitmask kernels.
-        torch::Tensor                      spec_vocab_mask_gpu;
-        torch::Tensor                      spec_cap_gpu;  // [B] int32 CUDA
+        // Each int32 word covers 32 vocabulary entries (bit=1 means allowed).
+        torch::Tensor packed_allow_mask_gpu;
+        torch::Tensor logits_row_indices_gpu;
+        torch::Tensor spec_cap_gpu;  // [B] int32 CUDA
+
         std::shared_ptr<torch::Event>      ready_event;
         std::shared_ptr<torch::Event>      consumed_event;
         bool                               has_active_processor = false;
         std::vector<SpecLogitsProcessorId> applied_processors;
 
-        // Keep H2D sources alive until ready_event has completed. The runner
-        // reuses scratch buffers across decode rounds, while these tensors own
-        // the actual async transfer source for this result.
-        torch::Tensor spec_vocab_mask_cpu_owner;
-        torch::Tensor spec_cap_cpu_owner;
+        torch::Tensor packed_allow_mask_cpu_lifetime;
+        torch::Tensor logits_row_indices_cpu_lifetime;
+        torch::Tensor spec_cap_cpu_lifetime;
     };
 
     SpecLogitsVerifyRunner();
 
     LaunchResult buildInline(const LaunchTask& task);
+    static void applyMaskToLogits(const torch::Tensor& logits, const LaunchResult& result, size_t vocab_size);
 
 private:
-    void ensureBuffersFit(size_t total_streams, int propose_step, size_t vocab_size, size_t bitmask_words);
+    void ensureBuffersFit(size_t total_streams, int propose_step, size_t bitmask_words, size_t compact_rows);
     void materializeDraftTokensToCpu(const LaunchTask& task);
-    void unpackMergedBitmaskToVocabMask(const torch::Tensor& mask_cpu,
-                                        size_t               rows,
-                                        size_t               vocab_size,
-                                        size_t               bitmask_words);
 
 private:
     torch::Stream copy_stream_;
     torch::Tensor draft_tokens_cpu_;
     torch::Tensor processor_bitmask_cpu_;
     torch::Tensor merged_bitmask_cpu_;
+    torch::Tensor merged_bitmask_gpu_;
+    torch::Tensor logits_row_indices_cpu_;
+    torch::Tensor logits_row_indices_gpu_;
     torch::Tensor spec_cap_cpu_;
+    torch::Tensor spec_cap_gpu_;
+    std::shared_ptr<torch::Event> last_consumed_event_;
 };
 
 }  // namespace rtp_llm

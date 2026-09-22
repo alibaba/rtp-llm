@@ -338,6 +338,23 @@ void copyScoreSamplerTokenIds(torch::Tensor&       token_ids,
     dst.copy_(src);
 }
 
+bool requiresScoreSamplerTokenHistory(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        const auto& config = stream->generateConfig();
+        if (stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1 || config->repetition_penalty != 1.0f
+            || config->presence_penalty != 0.0f || config->frequency_penalty != 0.0f
+            || config->no_repeat_ngram_size.value_or(0) != 0) {
+            return true;
+        }
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor && processor->requiresTokenHistory()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 const char* missingMtpStateReason(const GenerateStreamPtr& stream) {
     if (!stream->getAcceptTokensGpu().defined()) {
         return "accept_tokens_gpu_missing";
@@ -627,24 +644,62 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                                 const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     (void)model_inputs;
+    return finalizeSpecSamplerInput(
+        stream_groups, prepareSpecSamplerInputHost(stream_groups), model_output, spec_logits_result);
+}
+
+SamplerInputs MtpBatchStreamProcessor::prepareSpecSamplerInputHost(const StreamGroups& stream_groups) const {
+    RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.prepare_spec_sampler_input_host");
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams      = stream_groups.allStreams();
-    bool return_all_probs = stream_groups.needReturnAllProbs();
+    auto all_streams = stream_groups.allStreams();
 
     for (auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");
     }
 
-    size_t score_len        = propose_step_ + 1;
-    size_t total_batch_size = stream_groups.size() * score_len;
+    size_t     score_len              = propose_step_ + 1;
+    size_t     total_batch_size       = stream_groups.size() * score_len;
+    const bool requires_token_history = requiresScoreSamplerTokenHistory(all_streams);
 
-    SamplerInputs sampler_inputs =
-        allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
+    SamplerInputs sampler_inputs = allocateSamplerInputs(
+        stream_groups, total_batch_size, total_batch_size, propose_step_, !requires_token_history);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
     setLogitsProcessorInputs(sampler_inputs, all_streams, true);
     sampler_inputs.phase = LogitsProcessorPhase::MTP_VERIFY;
+
+    if (requires_token_history) {
+        int64_t batch_idx = 0;
+        for (auto& stream : all_streams) {
+            auto complete_token_ids = stream->completeTokenIds();
+            auto seq_len            = static_cast<int64_t>(stream->seqLength());
+
+            copyScoreSamplerTokenIds(
+                sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+            batch_idx += static_cast<int64_t>(score_len);
+            RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
+                              stream->streamLogTag().c_str(),
+                              tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        }
+    }
+
+    return sampler_inputs;
+}
+
+SamplerInputs MtpBatchStreamProcessor::finalizeSpecSamplerInput(
+    const StreamGroups&                         stream_groups,
+    SamplerInputs                               sampler_inputs,
+    const GptModelOutputs&                      model_output,
+    const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
+    RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.finalize_spec_sampler_input");
+    const size_t total_batch_size = stream_groups.size() * (propose_step_ + 1);
+
     if (spec_logits_result.has_active_processor) {
-        sampler_inputs.spec_vocab_mask_gpu      = spec_logits_result.spec_vocab_mask_gpu;
+        sampler_inputs.spec_packed_allow_mask_gpu = spec_logits_result.packed_allow_mask_gpu.defined() ?
+                                                        spec_logits_result.packed_allow_mask_gpu :
+                                                        spec_logits_result.packed_allow_mask_cpu_lifetime;
+        sampler_inputs.spec_logits_row_indices_gpu = spec_logits_result.logits_row_indices_gpu.defined() ?
+                                                         spec_logits_result.logits_row_indices_gpu :
+                                                         spec_logits_result.logits_row_indices_cpu_lifetime;
         sampler_inputs.spec_cap_gpu             = spec_logits_result.spec_cap_gpu;
         sampler_inputs.spec_mask_ready_event    = spec_logits_result.ready_event;
         sampler_inputs.spec_mask_consumed_event = spec_logits_result.consumed_event;
@@ -652,22 +707,9 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         sampler_inputs.spec_propose_step        = propose_step_;
     }
 
-    int64_t batch_idx = 0;
-    for (auto& stream : all_streams) {
-        auto complete_token_ids = stream->completeTokenIds();
-        auto seq_len            = static_cast<int64_t>(stream->seqLength());
-
-        copyScoreSamplerTokenIds(
-            sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
-        batch_idx += static_cast<int64_t>(score_len);
-        RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
-                          stream->streamLogTag().c_str(),
-                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
-    }
-
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs) {
+    if (stream_groups.needReturnAllProbs()) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
@@ -683,7 +725,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                       tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
-    return std::move(sampler_inputs);
+    return sampler_inputs;
 }
 
 void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&                stream_groups,

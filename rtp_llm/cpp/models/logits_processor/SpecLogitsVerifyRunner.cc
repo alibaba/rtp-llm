@@ -1,10 +1,15 @@
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 
 #include <algorithm>
+#include <limits>
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
+#endif
 
 namespace rtp_llm {
 
@@ -22,35 +27,56 @@ void bitwiseAndInplace(int32_t* dst, const int32_t* src, size_t words) {
     }
 }
 
+bool has1DCapacity(const torch::Tensor& tensor, int64_t size) {
+    return tensor.defined() && tensor.dim() == 1 && tensor.size(0) >= size;
+}
+
+bool has2DCapacity(const torch::Tensor& tensor, int64_t rows, int64_t cols) {
+    return tensor.defined() && tensor.dim() == 2 && tensor.size(0) >= rows && tensor.size(1) == cols;
+}
+
 }  // namespace
 
 SpecLogitsVerifyRunner::SpecLogitsVerifyRunner(): copy_stream_(cuda_graph::graphGetStreamFromPool(true)) {}
 
 void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
                                               int    propose_step,
-                                              size_t vocab_size,
-                                              size_t bitmask_words) {
+                                              size_t bitmask_words,
+                                              size_t compact_rows) {
     const int64_t B    = static_cast<int64_t>(total_streams);
     const int64_t P    = static_cast<int64_t>(propose_step);
-    const int64_t rows = B * (P + 1);
+    const int64_t rows = static_cast<int64_t>(compact_rows);
     const int64_t W    = static_cast<int64_t>(bitmask_words);
-    (void)vocab_size;
+    auto cpu_i32       = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    auto pinned_i32    = cpu_i32.pinned_memory(true);
 
-    auto cpu_i32     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-    auto pinned_i32  = cpu_i32.pinned_memory(true);
-
-    if (!draft_tokens_cpu_.defined() || draft_tokens_cpu_.numel() < B * P) {
+    if (!has2DCapacity(draft_tokens_cpu_, B, P)) {
         draft_tokens_cpu_ = torch::empty({B, P}, pinned_i32);
     }
-    if (!processor_bitmask_cpu_.defined() || processor_bitmask_cpu_.numel() < (P + 1) * W) {
+    if (!has2DCapacity(processor_bitmask_cpu_, P + 1, W)) {
         processor_bitmask_cpu_ = torch::empty({P + 1, W}, cpu_i32);
     }
-    if (!merged_bitmask_cpu_.defined() || merged_bitmask_cpu_.numel() < rows * W) {
-        merged_bitmask_cpu_ = torch::empty({rows, W}, cpu_i32);
+    if (!has2DCapacity(merged_bitmask_cpu_, rows, W)) {
+        merged_bitmask_cpu_ = torch::empty({rows, W}, pinned_i32);
     }
-    if (!spec_cap_cpu_.defined() || spec_cap_cpu_.numel() < B) {
+    if (!has1DCapacity(logits_row_indices_cpu_, rows)) {
+        logits_row_indices_cpu_ = torch::empty({rows}, pinned_i32);
+    }
+    if (!has1DCapacity(spec_cap_cpu_, B)) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
+#if USING_CUDA
+    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (!has2DCapacity(merged_bitmask_gpu_, rows, W)) {
+        merged_bitmask_gpu_ = torch::empty({rows, W}, cuda_i32);
+    }
+    if (!has1DCapacity(logits_row_indices_gpu_, rows)) {
+        logits_row_indices_gpu_ = torch::empty({rows}, cuda_i32);
+    }
+    if (!has1DCapacity(spec_cap_gpu_, B)) {
+        spec_cap_gpu_ = torch::empty({B}, cuda_i32);
+    }
+#endif
 }
 
 void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task) {
@@ -61,11 +87,11 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
     }
 
     RTP_LLM_CHECK_WITH_INFO(task.draft_tokens.defined(), "spec logits runner requires draft tokens");
-    RTP_LLM_CHECK_WITH_INFO(task.draft_tokens.numel() >= B * P && task.draft_tokens.numel() % B == 0,
-                            "spec logits runner draft token shape mismatch");
-    const int64_t draft_cols = task.draft_tokens.numel() / B;
-    const int64_t draft_offset = draft_cols > P ? 1 : 0;
-    RTP_LLM_CHECK_WITH_INFO(draft_cols >= draft_offset + P, "spec logits runner draft token columns mismatch");
+    RTP_LLM_CHECK_WITH_INFO(task.draft_tokens.numel() % B == 0, "spec logits runner draft token shape mismatch");
+    const int64_t draft_cols   = task.draft_tokens.numel() / B;
+    const int64_t draft_offset = draft_cols == P + 1 ? 1 : 0;
+    RTP_LLM_CHECK_WITH_INFO(draft_cols == P || draft_cols == P + 1,
+                            "spec logits runner draft token columns must be P or P+1");
     auto draft = task.draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
     auto dst   = draft_tokens_cpu_.narrow(0, 0, B).narrow(1, 0, P);
     if (!draft.is_cuda()) {
@@ -84,20 +110,42 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
     copy_stream_.synchronize();
 }
 
-void SpecLogitsVerifyRunner::unpackMergedBitmaskToVocabMask(const torch::Tensor& mask_cpu,
-                                                            size_t               rows,
-                                                            size_t               vocab_size,
-                                                            size_t               bitmask_words) {
-    const auto* merged = merged_bitmask_cpu_.data_ptr<int32_t>();
-    auto*       mask   = mask_cpu.data_ptr<bool>();
-    for (size_t row = 0; row < rows; ++row) {
-        const auto* row_bits = merged + row * bitmask_words;
-        auto*       row_mask = mask + row * vocab_size;
+void SpecLogitsVerifyRunner::applyMaskToLogits(const torch::Tensor& logits,
+                                               const LaunchResult& result,
+                                               size_t              vocab_size) {
+#if USING_CUDA
+    if (result.packed_allow_mask_gpu.defined() && result.packed_allow_mask_gpu.is_cuda()) {
+        cudaApplyPackedMaskLogits(logits,
+                                  result.packed_allow_mask_gpu,
+                                  result.logits_row_indices_gpu,
+                                  vocab_size,
+                                  at::cuda::getCurrentCUDAStream(logits.device().index()).stream());
+        return;
+    }
+#endif
+    const auto& packed_cpu = result.packed_allow_mask_cpu_lifetime.defined() ?
+                                 result.packed_allow_mask_cpu_lifetime :
+                                 result.packed_allow_mask_gpu;
+    const auto& rows_cpu = result.logits_row_indices_cpu_lifetime.defined() ?
+                               result.logits_row_indices_cpu_lifetime :
+                               result.logits_row_indices_gpu;
+    if (!packed_cpu.defined()) {
+        return;
+    }
+    auto mask = packed_cpu;
+    auto rows = rows_cpu;
+    RTP_LLM_CHECK_WITH_INFO(!logits.is_cuda() && !mask.is_cuda() && !rows.is_cuda(),
+                            "packed mask CPU fallback requires CPU tensors");
+    for (int64_t compact_row = 0; compact_row < mask.size(0); ++compact_row) {
+        const int32_t logits_row = rows[compact_row].item<int32_t>();
+        auto          dense_mask = torch::empty({static_cast<int64_t>(vocab_size)}, torch::kBool);
+        auto*         dense_ptr  = dense_mask.data_ptr<bool>();
+        const auto*   bits       = mask[compact_row].data_ptr<int32_t>();
         for (size_t token = 0; token < vocab_size; ++token) {
-            const uint32_t word    = static_cast<uint32_t>(row_bits[token / 32]);
-            const bool     allowed = (word & (1u << (token % 32))) != 0u;
-            row_mask[token]        = !allowed;
+            dense_ptr[token] = (static_cast<uint32_t>(bits[token / 32]) & (1u << (token % 32))) == 0u;
         }
+        logits[logits_row].narrow(0, 0, static_cast<int64_t>(vocab_size)).masked_fill_(
+            dense_mask, -std::numeric_limits<float>::max());
     }
 }
 
@@ -107,29 +155,56 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     if (task.active.empty()) {
         return result;
     }
+    if (last_consumed_event_) {
+        last_consumed_event_->synchronize();
+        last_consumed_event_.reset();
+    }
 
-    const size_t B    = task.total_streams;
-    const int    P    = task.propose_step;
-    const size_t V    = task.vocab_size;
-    const size_t W    = SpecLogitsProcessor::bitmaskWordCount(V);
-    const size_t rows = B * static_cast<size_t>(P + 1);
+    const size_t B = task.total_streams;
+    const int    P = task.propose_step;
+    const size_t V = task.vocab_size;
     RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid spec logits runner task");
+    RTP_LLM_CHECK_WITH_INFO(P < std::numeric_limits<int32_t>::max(), "spec logits propose step exceeds int32");
+    RTP_LLM_CHECK_WITH_INFO(V <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+                            "spec logits vocab exceeds int32");
 
-    ensureBuffersFit(B, P, V, W);
+    std::vector<int32_t> compact_slot_by_stream(B, -1);
+    std::vector<size_t>  active_stream_indices;
+    active_stream_indices.reserve(task.active.size());
+    for (const auto& item : task.active) {
+        RTP_LLM_CHECK_WITH_INFO(item.processor != nullptr, "spec logits active processor is null");
+        RTP_LLM_CHECK_WITH_INFO(item.stream_idx < B, "spec logits stream index out of range");
+        if (compact_slot_by_stream[item.stream_idx] < 0) {
+            compact_slot_by_stream[item.stream_idx] = static_cast<int32_t>(active_stream_indices.size());
+            active_stream_indices.push_back(item.stream_idx);
+        }
+    }
+
+    const size_t W               = SpecLogitsProcessor::bitmaskWordCount(V);
+    const size_t rows_per_stream = static_cast<size_t>(P + 1);
+    const size_t compact_rows    = active_stream_indices.size() * rows_per_stream;
+    ensureBuffersFit(B, P, W, compact_rows);
     materializeDraftTokensToCpu(task);
 
-    auto merged = merged_bitmask_cpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(W));
+    auto merged = merged_bitmask_cpu_.narrow(0, 0, static_cast<int64_t>(compact_rows))
+                      .narrow(1, 0, static_cast<int64_t>(W));
     fillAllAllow(merged);
     std::fill_n(spec_cap_cpu_.data_ptr<int32_t>(), B, P);
 
+    auto* row_indices = logits_row_indices_cpu_.data_ptr<int32_t>();
+    for (size_t compact_stream = 0; compact_stream < active_stream_indices.size(); ++compact_stream) {
+        const size_t stream_idx = active_stream_indices[compact_stream];
+        for (int offset = 0; offset <= P; ++offset) {
+            const size_t compact_row = compact_stream * rows_per_stream + static_cast<size_t>(offset);
+            row_indices[compact_row] = static_cast<int32_t>(stream_idx * rows_per_stream + offset);
+        }
+    }
+
     auto proc_mask = processor_bitmask_cpu_.narrow(0, 0, P + 1).narrow(1, 0, static_cast<int64_t>(W));
-    bool applied_processor = false;
     for (const auto& item : task.active) {
-        if (!item.processor || !item.processor->isSpecVerifyEligible()) {
+        if (!item.processor->isSpecVerifyEligible()) {
             return {};
         }
-        applied_processor = true;
-
         fillAllAllow(proc_mask);
         SpecLogitsProcessorRequest request;
         request.draft_tokens       = draft_tokens_cpu_.data_ptr<int32_t>() + item.stream_idx * P;
@@ -143,45 +218,39 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
 
         int cap = item.processor->tryAcceptAndFillBitmask(request);
         cap     = std::max(0, std::min(cap, P));
-
-        auto* merged_row = merged_bitmask_cpu_.data_ptr<int32_t>() + item.stream_idx * (P + 1) * W;
-        bitwiseAndInplace(merged_row, proc_mask.data_ptr<int32_t>(), static_cast<size_t>(P + 1) * W);
-        auto* cap_ptr            = spec_cap_cpu_.data_ptr<int32_t>();
-        cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
+        const size_t compact_slot = static_cast<size_t>(compact_slot_by_stream[item.stream_idx]);
+        auto* merged_row = merged_bitmask_cpu_.data_ptr<int32_t>() + compact_slot * rows_per_stream * W;
+        bitwiseAndInplace(merged_row, proc_mask.data_ptr<int32_t>(), rows_per_stream * W);
+        spec_cap_cpu_.data_ptr<int32_t>()[item.stream_idx] =
+            std::min<int32_t>(spec_cap_cpu_.data_ptr<int32_t>()[item.stream_idx], cap);
         result.applied_processors.push_back({item.stream_id, item.processor_idx});
     }
 
-    if (!applied_processor) {
-        return {};
-    }
-
-    auto pinned_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU).pinned_memory(true);
-    auto pinned_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
-    auto cuda_bool   = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
-    auto cuda_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-
-    auto mask_cpu = torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, pinned_bool);
-    auto cap_cpu  = torch::empty({static_cast<int64_t>(B)}, pinned_i32);
-    auto mask_gpu = torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool);
-    auto cap_gpu  = torch::empty({static_cast<int64_t>(B)}, cuda_i32);
-
-    unpackMergedBitmaskToVocabMask(mask_cpu, rows, V, W);
-    cap_cpu.copy_(spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B)));
-
+    auto packed_cpu = merged_bitmask_cpu_.narrow(0, 0, static_cast<int64_t>(compact_rows))
+                          .narrow(1, 0, static_cast<int64_t>(W));
+    auto rows_cpu = logits_row_indices_cpu_.narrow(0, 0, static_cast<int64_t>(compact_rows));
+    auto cap_cpu  = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
+#if USING_CUDA
+    auto packed_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(compact_rows))
+                          .narrow(1, 0, static_cast<int64_t>(W));
+    auto rows_gpu = logits_row_indices_gpu_.narrow(0, 0, static_cast<int64_t>(compact_rows));
+    auto cap_gpu  = spec_cap_gpu_.narrow(0, 0, static_cast<int64_t>(B));
     cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(copy_stream_));
-    mask_gpu.copy_(mask_cpu, /*non_blocking=*/true);
+    packed_gpu.copy_(packed_cpu, /*non_blocking=*/true);
+    rows_gpu.copy_(rows_cpu, /*non_blocking=*/true);
     cap_gpu.copy_(cap_cpu, /*non_blocking=*/true);
-    auto ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    ready->record(copy_stream_);
-    auto consumed = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-
-    result.spec_vocab_mask_gpu  = mask_gpu;
-    result.spec_cap_gpu         = cap_gpu;
-    result.ready_event          = ready;
-    result.consumed_event       = consumed;
-    result.has_active_processor = true;
-    result.spec_vocab_mask_cpu_owner = mask_cpu;
-    result.spec_cap_cpu_owner        = cap_cpu;
+    result.packed_allow_mask_gpu  = packed_gpu;
+    result.logits_row_indices_gpu = rows_gpu;
+    result.spec_cap_gpu           = cap_gpu;
+    result.ready_event            = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    result.ready_event->record(copy_stream_);
+    result.consumed_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    last_consumed_event_  = result.consumed_event;
+#endif
+    result.packed_allow_mask_cpu_lifetime  = packed_cpu;
+    result.logits_row_indices_cpu_lifetime = rows_cpu;
+    result.spec_cap_cpu_lifetime           = cap_cpu;
+    result.has_active_processor            = true;
     return result;
 }
 

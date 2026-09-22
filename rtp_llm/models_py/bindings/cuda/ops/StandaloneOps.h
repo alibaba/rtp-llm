@@ -18,4 +18,11 @@ void cudaSoftmaxInplace(torch::Tensor& input, cudaStream_t stream);
 // Modifies logits in-place: sets masked positions to -inf.
 void cudaMaskLogits(torch::Tensor& logits, const torch::Tensor& mask, cudaStream_t stream);
 
+// Applies an int32 packed allow-mask (bit=1 means allowed) to selected rows.
+void cudaApplyPackedMaskLogits(const torch::Tensor& logits,
+                               const torch::Tensor& packed_allow_mask,
+                               const torch::Tensor& row_indices,
+                               size_t               vocab_size,
+                               cudaStream_t         stream);
+
 }  // namespace rtp_llm

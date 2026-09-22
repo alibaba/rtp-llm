@@ -48,6 +48,13 @@ public:
                            const GptModelOutputs&                      model_output,
                            const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {}) const;
 
+    SamplerInputs prepareSpecSamplerInputHost(const StreamGroups& stream_groups) const;
+
+    SamplerInputs finalizeSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                           SamplerInputs                               sampler_inputs,
+                                           const GptModelOutputs&                      model_output,
+                                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {}) const;
+
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
                                       TensorHolder&       host_holder);

@@ -67,6 +67,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
     SamplerInputs inputs{
         logits.clone(),
         output_token_ids.clone(),
+        true,  // token_ids_include_history
         input_lengths,
         sequence_lengths,
         state_ptr,

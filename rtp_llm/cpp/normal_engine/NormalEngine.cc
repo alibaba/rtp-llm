@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -199,6 +200,8 @@ NormalEngine::~NormalEngine() {
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
+    c10::InferenceMode inference_guard(true);
+
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          runtime_config,
@@ -498,6 +501,7 @@ absl::Status NormalEngine::stop() {
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
+    c10::InferenceMode inference_guard(true);
     cudaPreRun(getDeviceId());
     while (running_) {
         auto status = step();

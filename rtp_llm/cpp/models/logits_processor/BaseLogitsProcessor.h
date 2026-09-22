@@ -30,6 +30,12 @@ public:
     virtual bool supportsNormalAsyncDeviceState() const {
         return false;
     }
+    // Override when process()/processSpeculative() reads SamplerInputs::token_ids.
+    // MTP target verification can otherwise use a compact sampled-token output
+    // buffer instead of materializing every request's complete token history.
+    virtual bool requiresTokenHistory() const {
+        return false;
+    }
     virtual void prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
         (void)new_tokens;
         (void)num_new_tokens;

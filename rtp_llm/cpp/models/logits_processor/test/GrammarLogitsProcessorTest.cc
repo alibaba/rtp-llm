@@ -300,9 +300,11 @@ TEST(GrammarLogitsProcessorTest, SpecArtifactSkipsOnlyAppliedProcessorId) {
     auto processor = std::make_shared<MaskAllSpecProcessor>();
 
     SamplerInputs inputs;
-    inputs.phase               = LogitsProcessorPhase::MTP_VERIFY;
-    inputs.logits              = torch::zeros({1, 4}, torch::kFloat32);
-    inputs.spec_vocab_mask_gpu = torch::zeros({1, 4}, torch::kBool);
+    inputs.phase                       = LogitsProcessorPhase::MTP_VERIFY;
+    inputs.logits                      = torch::zeros({1, 4}, torch::kFloat32);
+    inputs.vocab_size                  = 4;
+    inputs.spec_packed_allow_mask_gpu  = torch::full({1, 1}, -1, torch::kInt32);
+    inputs.spec_logits_row_indices_gpu = torch::tensor({0}, torch::kInt32);
     inputs.spec_applied_processors.push_back({7, 3});
 
     LogitsProcessorStates states;

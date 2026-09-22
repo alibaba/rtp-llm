@@ -59,6 +59,31 @@ public:
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
 
+    void init_draft_prefill(py::object py_instance,
+                            int64_t    max_context_batch_size,
+                            int64_t    max_seq_len,
+                            int64_t    tokens_per_block,
+                            int64_t    kernel_tokens_per_block,
+                            int64_t    num_tokens_per_bs,
+                            int64_t    hidden_size) {
+        reset_runner();
+        GraphParams params;
+        params.enable_cuda_graph_debug_mode = false;
+        params.is_prefill_cuda_graph_mode   = true;
+        params.is_mtp_draft_update          = true;
+        params.max_seq_len                  = static_cast<int>(max_seq_len);
+        params.tokens_per_block             = static_cast<int>(tokens_per_block);
+        params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
+        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
+        params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
+        params.hidden_size                  = static_cast<size_t>(hidden_size);
+        params.model_data_type              = c10::ScalarType::BFloat16;
+        params.kv_cache_layer_to_group      = {};
+        params.kv_cache_group_num           = 0;
+
+        runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
+    }
+
     void init_decode(py::object       py_instance,
                      int64_t          hidden_size,
                      int64_t          max_seq_len,
@@ -138,6 +163,15 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
+             py::arg("hidden_size"))
+        .def("init_draft_prefill",
+             &CudaGraphTestRunner::init_draft_prefill,
+             py::arg("py_instance"),
+             py::arg("max_context_batch_size"),
+             py::arg("max_seq_len"),
+             py::arg("tokens_per_block"),
+             py::arg("kernel_tokens_per_block"),
+             py::arg("num_tokens_per_bs"),
              py::arg("hidden_size"))
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,

@@ -1,5 +1,6 @@
 
 #pragma once
+#include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -261,6 +262,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan),
     model_inputs_logger_(std::move(model_inputs_logger)) {
+    c10::InferenceMode inference_guard(true);
+
     RTP_LLM_CHECK_WITH_INFO(
         ktp_size_ <= 1 || params.parallelism_config.tp_size == 1,
         "Tensor parallelism and Projection-KTP cannot be enabled together: tp_size=%ld ktp_size=%ld",

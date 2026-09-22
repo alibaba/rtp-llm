@@ -71,15 +71,15 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         target_token_ids_d_t = target_token_ids_d_t.to(target_device, true);
     }
 
-    torch::Tensor do_sample =
-        torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
-    int stream_idx = 0;
+    auto do_sample =
+        torch::empty({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    auto* do_sample_ptr = do_sample.data_ptr<bool>();
+    int   stream_idx    = 0;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = !stream->generateConfig()->top1();
-        stream_idx++;
+        do_sample_ptr[stream_idx++] = !stream->generateConfig()->top1();
     }
     buffer_holder_.hold_host(do_sample);
-    auto do_sample_d = do_sample.to(target_device, true);
+    auto do_sample_d = do_sample.to(target_device, /*non_blocking=*/true);
 
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
     torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);

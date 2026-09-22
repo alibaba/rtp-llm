@@ -551,6 +551,34 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
     ASSERT_EQ(output_token_ids_host[23], 7);
 }
 
+TEST_F(CudaSamplerTest, testFlashinferKernelTopK1WithAllProbsDoesNotAdvanceGenerator) {
+    auto generator           = torch::make_generator<at::CUDAGeneratorImpl>();
+    auto reference_generator = torch::make_generator<at::CUDAGeneratorImpl>();
+    generator.set_current_seed(1234);
+    reference_generator.set_current_seed(1234);
+
+    GreedyParams params{};
+    params.logits           = cudaTensor({1, 2, 4, 3}, {1, 4});
+    params.token_ids        = cudaIntTensor({0, 0}, {1, 2});
+    params.input_lengths    = pinnedIntTensor({1});
+    params.sequence_lengths = pinnedIntTensor({1});
+    params.step             = 1;
+    params.top_k            = pinnedIntTensor({1});
+    params.top_p            = pinnedFloatTensor({1});
+    params.temperature      = pinnedFloatTensor({1});
+    params.output_all_probs = torch::empty_like(params.logits);
+    params.generator        = {generator};
+
+    execSampleGreedy(params);
+    check_cuda_error();
+
+    auto [actual_seed, actual_offset]     = get_seed_and_offset(1, generator);
+    auto [expected_seed, expected_offset] = get_seed_and_offset(1, reference_generator);
+    EXPECT_EQ(actual_seed, expected_seed);
+    EXPECT_EQ(actual_offset, expected_offset);
+    EXPECT_EQ(toHostInt(params.token_ids)[1], 2);
+}
+
 TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(

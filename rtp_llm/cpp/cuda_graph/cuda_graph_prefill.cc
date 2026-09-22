@@ -28,20 +28,27 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_seqlens.copy_(inputs.attention_inputs.cu_seqlens_host, false);
             inputs.attention_inputs.input_lengths[0] = seq_len;
         } else {
-            // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get the largest legal prefix to ensure buffer allocation covers worst-case replay.
-            int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
-            int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
+            // Draft-prefill capture executes a fixed Bmax*q rectangle. The
+            // graph key can be smaller than that physical shape, but every
+            // capture-time metadata view must still describe the full shape.
+            const int capture_tokens = inputs.attention_inputs.total_tokens;
+            int       active_bs      = (capture_tokens + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
+            int       prefix_len     = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
 
             // Active batches must satisfy prefix_len + input_len <= max_seq_len_;
             // DSv4 decode metadata derives position_ids from prefix_lengths.
             // Active batches get real input tokens, inactive batches get 0 input tokens.
             inputs.attention_inputs.input_lengths.fill_(0);
+            inputs.attention_inputs.input_lengths_host.fill_(0);
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
-            auto& input_lengths = inputs.attention_inputs.input_lengths;
+            inputs.attention_inputs.prefix_lengths_host.fill_(prefix_len);
+            auto& input_lengths      = inputs.attention_inputs.input_lengths;
+            auto& input_lengths_host = inputs.attention_inputs.input_lengths_host;
             for (int b = 0; b < active_bs; b++) {
-                int tokens           = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
-                input_lengths[b] = tokens;
+                int tokens           = (b < active_bs - 1) ? num_tokens_per_bs_ :
+                                                              (capture_tokens - b * num_tokens_per_bs_);
+                input_lengths[b]      = tokens;
+                input_lengths_host[b] = tokens;
             }
 
             // Build cu_seqlens and cu_kv_seqlens as cumulative sums
@@ -53,7 +60,9 @@ void CudaGraphRunner::capturePrefill() {
             cu_kv_seqlens_host[0]     = 0;
             for (int b = 0; b < max_bs_; b++) {
                 cu_seqlens_host[b + 1]    = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
-                cu_kv_seqlens_host[b + 1] = cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
+                cu_kv_seqlens_host[b + 1] = cu_kv_seqlens_host[b].item<int>()
+                                              + input_lengths[b].item<int>()
+                                              + prefix_lengths[b].item<int>();
             }
 
             inputs.attention_inputs.cu_seqlens.copy_(cu_seqlens_host);

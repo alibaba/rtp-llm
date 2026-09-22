@@ -189,6 +189,58 @@ class _MetadataProbeModel:
         return PyModelOutputs(inputs.input_hiddens + 1)
 
 
+class _K3DraftPrefillPostCheckProbeModel:
+    """Exercise K3's rectangular MLA metadata validation for every bucket."""
+
+    def __init__(self) -> None:
+        self.unprepared_forward_calls = 0
+        self.capture_metadata = []
+        self.replay_metadata = []
+
+    def prepare_fmha_impl(self, inputs, _is_cuda_graph):
+        attention = inputs.attention_inputs
+        query_length = decode_query_length(attention)
+        self.capture_metadata.append(
+            (
+                attention.context_total_kv_length,
+                attention.total_tokens,
+                inputs.input_ids.numel(),
+                attention.input_lengths.numel(),
+                attention.input_lengths_host.tolist(),
+                attention.input_lengths.cpu().tolist(),
+                attention.padding_offset.numel(),
+                inputs.ktp_valid_row_mask.numel(),
+                attention.cu_seqlens_host[-1].item(),
+                query_length,
+            )
+        )
+        def prepare_cuda_graph(current_attention):
+            self.replay_metadata.append(
+                (
+                    current_attention.input_lengths_host.tolist(),
+                    current_attention.input_lengths.cpu().tolist(),
+                    current_attention.cu_seqlens_host.tolist(),
+                    current_attention.cu_seqlens.cpu().tolist(),
+                    current_attention.prefix_lengths.cpu().tolist(),
+                    current_attention.logical_request_count,
+                    current_attention.physical_request_count,
+                    current_attention.logical_token_count,
+                    current_attention.physical_token_count,
+                )
+            )
+
+        return SimpleNamespace(prepare_cuda_graph=prepare_cuda_graph)
+
+    def forward(self, inputs, fmha_impl=None):
+        if fmha_impl is None:
+            self.unprepared_forward_calls += 1
+            # Before the fix, initCapture's embedding-style post-check slices
+            # the device input_lengths to BS=1 but leaves this host mirror at
+            # BS=64. This is the same validation that aborts K3 startup.
+            decode_query_length(inputs.attention_inputs)
+        return PyModelOutputs(inputs.input_hiddens + 1)
+
+
 class _DevicePlannerProbeModel:
     def __init__(self):
         self.metadata_by_batch = {}
@@ -340,6 +392,70 @@ class _DraftPageTableProbeModel:
 
 
 class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
+    def test_k3_draft_prefill_uses_rectangular_metadata_for_every_bucket(self):
+        model = _K3DraftPrefillPostCheckProbeModel()
+        runner = CudaGraphRunner()
+        runner.init_draft_prefill(
+            model,
+            max_context_batch_size=64,
+            max_seq_len=384,
+            tokens_per_block=64,
+            kernel_tokens_per_block=64,
+            num_tokens_per_bs=4,
+            hidden_size=16,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(model.unprepared_forward_calls, 0)
+        bucket_metadata = [
+            metadata for metadata in model.capture_metadata if metadata[0] > 0
+        ]
+        self.assertEqual(len(bucket_metadata), 64)
+        self.assertEqual(
+            sorted(metadata[0] for metadata in bucket_metadata),
+            list(range(4, 257, 4)),
+        )
+        for metadata in bucket_metadata:
+            self.assertEqual(
+                metadata[1:],
+                (
+                    256,
+                    256,
+                    64,
+                    [4] * 64,
+                    [4] * 64,
+                    256,
+                    256,
+                    256,
+                    4,
+                ),
+            )
+
+        replay_inputs = self._build_draft_prefill_replay_inputs(
+            batch_size=63, q_len=4
+        )
+        self.assertTrue(runner.canRun(replay_inputs))
+        outputs = runner.forward(replay_inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(outputs.hidden_states.shape, (252, 16))
+        torch.testing.assert_close(
+            outputs.hidden_states, torch.ones_like(outputs.hidden_states)
+        )
+        self.assertEqual(
+            model.replay_metadata[-1],
+            (
+                [4] * 64,
+                [4] * 64,
+                list(range(0, 257, 4)),
+                list(range(0, 257, 4)),
+                [380] * 63 + [0],
+                63,
+                64,
+                252,
+                256,
+            ),
+        )
+
     @classmethod
     def _draft_inputs(cls, draft_first_page=50):
         inputs = cls._build_decode_replay_inputs([70])
@@ -583,6 +699,64 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
         attention.is_target_verify = True
         attention.total_tokens = total_tokens
         attention.context_total_kv_length = int((prefixes + q_len).sum())
+        inputs.attention_inputs = attention
+        return inputs
+
+    @staticmethod
+    def _build_draft_prefill_replay_inputs(
+        batch_size: int, q_len: int
+    ) -> PyModelInputs:
+        inputs = PyModelInputs()
+        attention = PyAttentionInputs()
+        total_tokens = batch_size * q_len
+        inputs.input_ids = torch.arange(
+            total_tokens, dtype=torch.int32, device="cuda"
+        )
+        inputs.input_hiddens = torch.zeros(
+            (total_tokens, 16), dtype=torch.bfloat16, device="cuda"
+        )
+        attention.input_lengths = torch.full(
+            (batch_size,), q_len, dtype=torch.int32, device="cuda"
+        )
+        attention.input_lengths_host = torch.full(
+            (batch_size,), q_len, dtype=torch.int32
+        ).pin_memory()
+        attention.prefix_lengths = torch.full(
+            (batch_size,), 380, dtype=torch.int32, device="cuda"
+        )
+        attention.prefix_lengths_host = torch.full(
+            (batch_size,), 380, dtype=torch.int32
+        ).pin_memory()
+        attention.cu_seqlens_host = (
+            torch.arange(batch_size + 1, dtype=torch.int32) * q_len
+        ).pin_memory()
+        attention.cu_seqlens = attention.cu_seqlens_host.cuda()
+        attention.cu_kv_seqlens = (
+            torch.arange(batch_size + 1, dtype=torch.int32, device="cuda")
+            * (380 + q_len)
+        )
+        attention.decode_cu_seqlens_d = attention.cu_seqlens
+        attention.sequence_lengths_plus_1_d = torch.ones(
+            batch_size, dtype=torch.int32, device="cuda"
+        )
+        block_table = torch.arange(
+            batch_size * 6, dtype=torch.int32, device="cuda"
+        ).reshape(batch_size, 6)
+        attention.kv_cache_kernel_block_id_device = block_table
+        attention.kv_cache_kernel_block_id_host = block_table.cpu().pin_memory()
+        attention.kv_cache_block_id_device = block_table
+        attention.kv_cache_block_id_host = attention.kv_cache_kernel_block_id_host
+        attention.padding_offset = torch.zeros(
+            total_tokens, dtype=torch.int32, device="cuda"
+        )
+        attention.is_prefill = True
+        attention.is_mtp_draft_update = True
+        attention.total_tokens = total_tokens
+        attention.context_total_kv_length = total_tokens
+        attention.logical_request_count = batch_size
+        attention.physical_request_count = batch_size
+        attention.logical_token_count = total_tokens
+        attention.physical_token_count = total_tokens
         inputs.attention_inputs = attention
         return inputs
 

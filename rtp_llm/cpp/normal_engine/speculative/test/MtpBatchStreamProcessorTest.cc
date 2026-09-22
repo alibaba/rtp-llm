@@ -13,6 +13,7 @@
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
@@ -168,7 +169,7 @@ TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMe
               << " torch_copy_us=" << torch_us << " speedup=" << (memcpy_us / torch_us) << std::endl;
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTokenIds) {
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputUsesCompactTokenIdsWithoutHistoryFeatures) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -184,8 +185,10 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
 
     ResourceContext resource_context;
 
-    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
-    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    GenerateStreamPtr stream1        = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2        = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    stream1->generateConfig()->top_k = 1;
+    stream2->generateConfig()->top_k = 1;
     stream1->setScoreLen(sp_config.gen_num_per_cycle + 1);
     stream2->setScoreLen(sp_config.gen_num_per_cycle + 1);
 
@@ -193,24 +196,68 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     auto processor     = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
-    GptModelInputs  model_inputs;
     GptModelOutputs model_output;
-    const int64_t logical_score_rows =
-        static_cast<int64_t>(stream_groups.size() * (sp_config.gen_num_per_cycle + 1));
-    model_output.logits = torch::arange(
-                              0,
-                              (logical_score_rows + 4) * 4,
-                              torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+    const int64_t   logical_score_rows = static_cast<int64_t>(stream_groups.size() * (sp_config.gen_num_per_cycle + 1));
+    model_output.logits                = torch::arange(0,
+                                        (logical_score_rows + 4) * 4,
+                                        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
                               .reshape({logical_score_rows + 4, 4});
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output);
-    ASSERT_TRUE(sampler_inputs_status.ok());
+    auto sampler_inputs = processor.prepareSpecSamplerInputHost(stream_groups);
+    EXPECT_FALSE(sampler_inputs.logits.defined());
+    EXPECT_FALSE(sampler_inputs.all_probs.defined());
+    EXPECT_EQ(sampler_inputs.phase, LogitsProcessorPhase::MTP_VERIFY);
 
-    const auto& sampler_inputs = sampler_inputs_status.value();
-    auto        token_ids      = sampler_inputs.token_ids;
-    auto stride    = token_ids.size(1);
-    auto* data     = token_ids.data_ptr<int32_t>();
+    EXPECT_FALSE(sampler_inputs.token_ids_include_history);
+    ASSERT_EQ(sampler_inputs.token_ids.dim(), 2);
+    EXPECT_EQ(sampler_inputs.token_ids.size(0), logical_score_rows);
+    EXPECT_EQ(sampler_inputs.token_ids.size(1), 1);
 
+    sampler_inputs = processor.finalizeSpecSamplerInput(stream_groups, std::move(sampler_inputs), model_output);
+    EXPECT_EQ(sampler_inputs.logits.size(0), logical_score_rows);
+    EXPECT_EQ(sampler_inputs.logits[-1][-1].item<float>(), 31.0f);
+    EXPECT_TRUE(sampler_inputs.all_probs.defined());
+
+    Sampler sampler(SamplerInitParams{});
+    auto    sampler_output = sampler.forward(sampler_inputs);
+    ASSERT_EQ(sampler_output.token_ids.dim(), 2);
+    EXPECT_EQ(sampler_output.token_ids.size(0), logical_score_rows);
+    EXPECT_EQ(sampler_output.token_ids.size(1), 1);
+    EXPECT_EQ(toVec<int32_t>(sampler_output.token_ids), std::vector<int32_t>(logical_score_rows, 3));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputKeepsHistoryForPenalty) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+
+    ResourceContext resource_context;
+    auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    stream1->generateConfig()->repetition_penalty = 1.1f;
+    stream1->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    stream2->setScoreLen(sp_config.gen_num_per_cycle + 1);
+
+    StreamGroups            stream_groups({stream1, stream2});
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    auto sampler_inputs = processor.prepareSpecSamplerInputHost(stream_groups);
+    ASSERT_TRUE(sampler_inputs.token_ids_include_history);
+    ASSERT_GT(sampler_inputs.token_ids.size(1), 1);
+
+    const auto  token_ids = sampler_inputs.token_ids;
+    const auto  stride    = token_ids.size(1);
+    const auto* data      = token_ids.data_ptr<int32_t>();
     for (int64_t row = 0; row < 4; ++row) {
         EXPECT_EQ(5, data[row * stride]);
     }
@@ -218,8 +265,6 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
         EXPECT_EQ(6, data[row * stride]);
         EXPECT_EQ(7, data[row * stride + 1]);
     }
-    EXPECT_EQ(sampler_inputs.logits.size(0), logical_score_rows);
-    EXPECT_EQ(sampler_inputs.logits[-1][-1].item<float>(), 31.0f);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
@@ -271,7 +316,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     ASSERT_FALSE(verify_task.active.empty());
     auto verify_result = verify_runner.buildInline(verify_task);
     ASSERT_TRUE(verify_result.has_active_processor);
-    ASSERT_TRUE(verify_result.spec_vocab_mask_gpu.defined());
+    ASSERT_TRUE(verify_result.packed_allow_mask_gpu.defined());
 
     auto sampler_inputs_status =
         processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, verify_result);
