@@ -529,9 +529,11 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     }
 }
 
-absl::Status NormalEngine::initSystemPrompt() {
+void NormalEngine::initCacheConfigForSystemPrompt() {
     resource_context_.initCacheConfig(kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
+}
 
+absl::Status NormalEngine::buildAndInstallSystemPrompt() {
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(
@@ -542,6 +544,11 @@ absl::Status NormalEngine::initSystemPrompt() {
     }
 
     return absl::OkStatus();
+}
+
+absl::Status NormalEngine::initSystemPrompt() {
+    initCacheConfigForSystemPrompt();
+    return buildAndInstallSystemPrompt();
 }
 
 KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {

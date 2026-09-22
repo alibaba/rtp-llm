@@ -58,6 +58,8 @@ private:
     void                            loop();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();
+    void                            initCacheConfigForSystemPrompt();
+    absl::Status                    buildAndInstallSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
