@@ -1242,9 +1242,8 @@ def metrics_to_json(payload):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description="A/B differential regression gate: every metric compared, "
-        "three-tier classification (significant+critical / "
-        "significant+secondary / critical+unchanged)."
+        description="A/B comparison: Prometheus stress archives get a descriptive "
+        "comparison only; legacy aggregates retain the calibrated regression gate."
     )
     ap.add_argument(
         "--run-a", required=True, help="baseline run dir or aggregate.json path"
@@ -1291,6 +1290,10 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    from analysis.compare_monitor_runs import is_monitor_run, compare_monitor_runs
+
+    if is_monitor_run(args.run_a) or is_monitor_run(args.run_b):
+        return compare_monitor_runs(args)
     if args.archive and args.out == "-":
         print("ERROR: --archive requires a file --out", file=sys.stderr)
         return 2

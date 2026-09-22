@@ -10,7 +10,7 @@
 | `scripts/parallel_runner.py`、根层 `parallel_runner.py` | `scripts/pipeline/execute_cases.py` | `run_cases.py` import、端口锁和并行执行测试 |
 | `scripts/aggregate_run.py` | `scripts/pipeline/calculate_metrics.py` | 内部聚合入口；指标由 `src/analysis/aggregate.py` 唯一计算 |
 | `scripts/consolidate_run.py` | `scripts/pipeline/organize_evidence.py` | 内部文件归位入口；不负责统计计算 |
-| `scripts/compare_ab.py` | `scripts/commands/compare_runs.py` | 压测 runbook、CLI 可达性测试；比较两次运行及配置 |
+| `scripts/compare_ab.py` | `scripts/commands/compare_runs.py` | 压测 runbook、CLI 可达性测试；Prometheus 归档仅做描述性对照，旧格式沿用原门禁 |
 | `scripts/compare_twin.py` | `scripts/probes/check_mock_fidelity.py` | CLI 可达性测试；比较 mock/real 分布，不用于迁移前后等价判定 |
 | `scripts/render_report.py` | `scripts/commands/render_stress_report.py` | 压测 runbook、CLI 可达性测试；产出 HTML |
 | `scripts/materialize_traffic.py` | `scripts/pipeline/materialize_traffic.py` | 压测 Python 编排及交通模型测试；模型维护工具 |

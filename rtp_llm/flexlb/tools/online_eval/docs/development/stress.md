@@ -73,4 +73,4 @@ python3 tools/online_eval/scripts/commands/compare_runs.py \
   --out /path/to/comparison.json --html
 ```
 
-以 `compare_runs.py --help` 为当前参数契约。比较结果用于指出变化；如果输入 provenance 不一致，停止比较并重新跑。指标单位、聚合和误判边界见[结果与指标](../reference/results.md)。
+以 `compare_runs.py --help` 为当前参数契约。Prometheus 归档必须两边 `test_valid=true`、无采集错误或缺口，且流量 SHA、Master 配置、模式计划和有效客户端参数一致；该入口输出逐曲线稳态均值差及可选 HTML，结论固定为 `DESCRIPTIVE_ONLY`，不能当性能版本门禁。无效样本或 provenance 不一致时退出 2，需先修复采集并重跑。旧格式仍走原有门禁。指标单位、聚合和误判边界见[结果与指标](../reference/results.md)。
