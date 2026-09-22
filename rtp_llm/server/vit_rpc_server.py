@@ -6,6 +6,7 @@ import threading
 import time
 from array import array
 from concurrent import futures
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import grpc
 import torch
@@ -431,10 +432,33 @@ def _create_rpc_server(service, concurrency):
     return server, executor
 
 
-def _serve_rpc_server(server, engine, executor, shutdown_timeout):
+def _create_health_server(port, is_ready):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/health":
+                self.send_error(404)
+                return
+            ready = is_ready()
+            body = b"ok" if ready else b"unavailable"
+            self.send_response(200 if ready else 503)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    return ThreadingHTTPServer(("0.0.0.0", port), Handler)
+
+
+def _serve_rpc_server(server, engine, executor, shutdown_timeout, health_port=None):
     timeout = ProcessManager.normalize_shutdown_timeout_seconds(shutdown_timeout)
     shutdown_deadline = None
     previous_handlers = {}
+    health_server = None
+    health_thread = None
+    rpc_started = False
 
     def request_shutdown(signum, frame):
         nonlocal shutdown_deadline
@@ -447,11 +471,26 @@ def _serve_rpc_server(server, engine, executor, shutdown_timeout):
         for signum in (signal.SIGTERM, signal.SIGINT):
             previous_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, request_shutdown)
+        if health_port is not None:
+            health_server = _create_health_server(
+                health_port, lambda: rpc_started and shutdown_deadline is None
+            )
         server.start()
+        rpc_started = True
+        if health_server is not None:
+            health_thread = threading.Thread(
+                target=health_server.serve_forever,
+                kwargs={"poll_interval": 0.1},
+                name="vit-health",
+                daemon=True,
+            )
+            health_thread.start()
+            logging.info("ViT health server listening on port %s", health_port)
         while shutdown_deadline is None:
             if not server.wait_for_termination(timeout=0.1):
                 break
     finally:
+        rpc_started = False
         graceful = shutdown_deadline is not None
         deadline = shutdown_deadline if graceful else time.monotonic() + timeout
         remaining = max(0.0, deadline - time.monotonic())
@@ -462,6 +501,11 @@ def _serve_rpc_server(server, engine, executor, shutdown_timeout):
         watchdog.daemon = True
         watchdog.start()
         try:
+            if health_server is not None:
+                if health_thread is not None and health_thread.is_alive():
+                    health_server.shutdown()
+                    health_thread.join()
+                health_server.server_close()
             logging.info(
                 "Stopping ViT RPC server: drain=%s budget=%.3fs", graceful, remaining
             )
@@ -549,7 +593,11 @@ def vit_start_server(py_env_configs=None):
     logging.info(f"rpc_server_port: {py_env_configs.server_config.rpc_server_port}")
     server.add_insecure_port(f"0.0.0.0:{py_env_configs.server_config.rpc_server_port}")
     _serve_rpc_server(
-        server, engine, executor, py_env_configs.server_config.shutdown_timeout
+        server,
+        engine,
+        executor,
+        py_env_configs.server_config.shutdown_timeout,
+        health_port=py_env_configs.server_config.server_port,
     )
 
 

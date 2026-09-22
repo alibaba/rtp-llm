@@ -4,6 +4,8 @@ import signal
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from array import array
 from concurrent import futures
 from contextlib import contextmanager
@@ -28,6 +30,7 @@ from rtp_llm.ops import get_multimodal_feature_hash
 from rtp_llm.server.vit_rpc_server import (
     MultimodalRpcServer,
     _create_rpc_server,
+    _create_health_server,
     _serve_rpc_server,
     trans_output,
 )
@@ -38,6 +41,65 @@ from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 
 class Aborted(Exception):
     pass
+
+
+class VitHealthServerTest(unittest.TestCase):
+    def test_rpc_lifecycle_controls_health_and_closes_port(self):
+        server, engine, executor = mock.Mock(), mock.Mock(), mock.Mock()
+        http = []
+        create = _create_health_server
+
+        def create_http(port, ready):
+            http.append(create(port, ready))
+            return http[0]
+
+        def running(timeout):
+            server.start.assert_called_once()
+            url = f"http://127.0.0.1:{http[0].server_port}/health"
+            with urllib.request.urlopen(url, timeout=2) as response:
+                self.assertEqual(response.status, 200)
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(url, timeout=2)
+            self.assertEqual(error.exception.code, 503)
+            return False
+
+        server.wait_for_termination.side_effect = running
+        with mock.patch(
+            "rtp_llm.server.vit_rpc_server._create_health_server",
+            side_effect=create_http,
+        ):
+            _serve_rpc_server(server, engine, executor, 5, health_port=0)
+        self.assertEqual(http[0].fileno(), -1)
+        server.stop.assert_called_once()
+        engine.stop.assert_called_once()
+        executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+
+    def test_health_tracks_readiness_and_rejects_unknown_paths(self):
+        ready = False
+        server = _create_health_server(0, lambda: ready)
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            for ready in (False, True, False):
+                if ready:
+                    with urllib.request.urlopen(url + "/health", timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.read(), b"ok")
+                else:
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(url + "/health", timeout=2)
+                    self.assertEqual(error.exception.code, 503)
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(url + "/unknown", timeout=2)
+            self.assertEqual(error.exception.code, 404)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
 
 
 class Context:
@@ -117,14 +179,10 @@ def _shutdown_test_worker(connection, stuck):
         connection.send(("draining", grace))
         return event
 
-    previous = {
-        sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
-    }
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
     with mock.patch.object(
         server, "start", side_effect=start_and_report
-    ), mock.patch.object(
-        server, "stop", side_effect=stop_and_report
-    ):
+    ), mock.patch.object(server, "stop", side_effect=stop_and_report):
         _serve_rpc_server(
             server, SimpleNamespace(stop=stop_engine), executor, 1 if stuck else 5
         )
@@ -181,9 +239,7 @@ class VitRpcShutdownTest(unittest.TestCase):
                 self.assertFalse(response.done())
                 with self.assertRaises(grpc.RpcError) as rejected:
                     rpc(b"new", timeout=1)
-                self.assertEqual(
-                    rejected.exception.code(), grpc.StatusCode.UNAVAILABLE
-                )
+                self.assertEqual(rejected.exception.code(), grpc.StatusCode.UNAVAILABLE)
                 connection.send("release")
                 self.assertEqual(response.result(timeout=3), b"complete")
                 self.receive(connection, "engine_stopped")
