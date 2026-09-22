@@ -7,13 +7,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from flexlb_eval.scenario import compile_scenarios
-from flexlb_eval.scenario.contracts import (
+from scenario import compile_scenarios
+from scenario.contracts import (
     CheckResult,
     StageHandler,
     StageOutput,
 )
-from flexlb_eval.scenario.runtime import (
+from scenario.runtime import (
     Deadline,
     RuntimeContext,
     StageTimeout,

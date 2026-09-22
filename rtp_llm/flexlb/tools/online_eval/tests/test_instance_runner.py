@@ -17,8 +17,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import parallel_runner as ports
-from flexlb_eval.runtime import instance_runner as runner
-from flexlb_eval.runtime.instance_plan import parse_catalog
+from runtime import instance_runner as runner
+from runtime.instance_plan import parse_catalog
 from test_instance_plan import catalog
 
 
@@ -143,8 +143,8 @@ class InstanceRunnerTest(unittest.TestCase):
             + """
 from types import SimpleNamespace, ModuleType
 import scenario_runner as child
-import flexlb_eval.scenario.backend as backend
-from flexlb_eval.scenario.contracts import StageHandler, StageOutput, CheckResult
+import scenario.backend as backend
+from scenario.contracts import StageHandler, StageOutput, CheckResult
 class FixtureBackend:
     def __init__(self, lease): pass
     def setup(self, ctx, environment, deadline): return SimpleNamespace(), None
@@ -156,7 +156,7 @@ def evaluate(ctx, params, deadline):
     status = 'FAIL' if grade == 'strict' else 'PASS'
     return StageOutput({'observed': grade}, [CheckResult('selected', status, actual=grade)])
 child.handlers = lambda: {'grade_probe': StageHandler('grade_probe', validate, evaluate, {'observed': 'string'}, checks=frozenset({'selected'}))}
-from flexlb_eval.cases.programs import PROGRAMS
+from cases.programs import PROGRAMS
 fixture = ModuleType('grade_protocol_fixture')
 fixture.__file__ = __file__
 def build(case):

@@ -13,8 +13,8 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 from typing import IO
 
-from flexlb_eval.runtime.harness import PROBE_BIND_HOST, port_in_use
-from flexlb_eval.runtime.resource_plan import (
+from runtime.harness import PROBE_BIND_HOST, port_in_use
+from runtime.resource_plan import (
     MOCK_WINDOW_LAST,
     child_port_env,
     port_intervals,
@@ -723,7 +723,7 @@ def main() -> int:
             f"mock base {mbase}, master base {mabase})"
         )
 
-    from flexlb_eval.runtime.instance_runner import run_structured
+    from runtime.instance_runner import run_structured
 
     return run_structured(args, sys.modules[__name__])
 

@@ -10,22 +10,22 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_eval.analysis.calibrate_cache_storm import calibrate, poisson_upper, wilson_lower
-from flexlb_eval.scenario import compile_scenarios, load_scenarios
-from flexlb_eval.scenario.actions.cache_storm import (
+from analysis.calibrate_cache_storm import calibrate, poisson_upper, wilson_lower
+from scenario import compile_scenarios, load_scenarios
+from scenario.actions.cache_storm import (
     HANDLERS,
     Storm,
     _window,
     recovery_window,
     summarize,
 )
-from flexlb_eval.scenario.catalog import handlers
-from flexlb_eval.scenario.contracts import (
+from scenario.catalog import handlers
+from scenario.contracts import (
     CheckResult,
     StageHandler,
     StageOutput,
 )
-from flexlb_eval.scenario.runtime import execute_instance
+from scenario.runtime import execute_instance
 from scenario_runner import summarize as suite_summary
 from test_scenario_runtime import Backend, Clock, source
 
@@ -47,7 +47,7 @@ class StormTest(unittest.TestCase):
             "decode-0": dict(grpc_addr="D:20", http_addr="D:21"),
         }
         with patch(
-            "flexlb_eval.scenario.actions.cache_storm._snapshot",
+            "scenario.actions.cache_storm._snapshot",
             return_value=engines,
         ):
             with self.assertRaisesRegex(RuntimeError, "seed disconnected"):
@@ -64,7 +64,7 @@ class StormTest(unittest.TestCase):
         from concurrent.futures import Future
         from unittest.mock import Mock
 
-        from flexlb_eval.scenario.runtime import Deadline
+        from scenario.runtime import Deadline
 
         clock = Clock()
         storm = Storm.__new__(Storm)
@@ -95,7 +95,7 @@ class StormTest(unittest.TestCase):
             storm.sample_async(Deadline(1, clock, clock.sleep))
 
     def test_actual_emission_miss_still_invalidates_window(self):
-        from flexlb_eval.scenario.runtime import Deadline
+        from scenario.runtime import Deadline
 
         clock = Clock()
         state = dict(time_s=clock(), engines={})

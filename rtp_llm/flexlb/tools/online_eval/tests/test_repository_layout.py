@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import parallel_runner
-from flexlb_eval.runtime import instance_runner
+from runtime import instance_runner
 
 
 class RepositoryLayoutTest(unittest.TestCase):
@@ -62,8 +62,8 @@ class RepositoryLayoutTest(unittest.TestCase):
                     self.assertTrue(result.stdout.strip())
 
     def test_inventory_stays_complete_without_retired_modules(self):
-        from flexlb_eval.scenario import compile_scenarios, load_scenarios
-        from flexlb_eval.scenario.catalog import handlers
+        from scenario import compile_scenarios, load_scenarios
+        from scenario.catalog import handlers
 
         plans = compile_scenarios(
             load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
@@ -90,8 +90,8 @@ class RepositoryLayoutTest(unittest.TestCase):
             "monitoring", "traffic", "runtime", "cases", "scenario",
             "workload", "analysis", "reporting", "artifacts",
         }
-        self.assertEqual(expected, {p.name for p in (ROOT / "src/flexlb_eval").iterdir() if p.is_dir()})
-        for old_package in ("online_eval", "flexlb_test_framework", "stress"):
+        self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir()})
+        for old_package in ("online_eval", "flexlb_test_framework", "stress", "flexlb_eval"):
             self.assertFalse((ROOT / "src" / old_package).exists(), old_package)
 
     def test_stress_shell_resolves_roots_before_starting_services(self):

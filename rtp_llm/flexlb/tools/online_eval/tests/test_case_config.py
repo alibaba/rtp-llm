@@ -10,14 +10,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_eval.cases.config import configure_program
-from flexlb_eval.scenario import (
+from cases.config import configure_program
+from scenario import (
     ScenarioError,
     compile_scenarios,
     load_scenarios,
 )
-from flexlb_eval.scenario.catalog import handlers
-from flexlb_eval.scenario.loader import load_document
+from scenario.catalog import handlers
+from scenario.loader import load_document
 
 
 class CaseConfigTest(unittest.TestCase):
@@ -228,7 +228,7 @@ class CaseConfigTest(unittest.TestCase):
             self.assertTrue(plan["stages"][3]["params"]["expected"])
 
     def test_programs_do_not_declare_configuration_tables_or_defaults(self):
-        for path in (ROOT / "src/flexlb_eval/cases/programs").glob("*.py"):
+        for path in (ROOT / "src/cases/programs").glob("*.py"):
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Assign):

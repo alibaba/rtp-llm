@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from flexlb_eval.scenario.runtime import Deadline
-from flexlb_eval.runtime.java_flow import JavaFlowGroup
-from flexlb_eval.traffic.realistic import write_trace
+from scenario.runtime import Deadline
+from runtime.java_flow import JavaFlowGroup
+from traffic.realistic import write_trace
 
 
 class JavaFlowTest(unittest.TestCase):

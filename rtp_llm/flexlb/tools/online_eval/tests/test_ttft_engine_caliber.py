@@ -27,12 +27,12 @@ import unittest
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
-AGGREGATE = TOOLS_DIR / "src/flexlb_eval/analysis/aggregate.py"
-CANVAS = TOOLS_DIR / "src/flexlb_eval/reporting/stress_report.py"
+AGGREGATE = TOOLS_DIR / "src/analysis/aggregate.py"
+CANVAS = TOOLS_DIR / "src/reporting/stress_report.py"
 T0 = 1_788_283_848_000  # epoch ms 锚点（与 client_events 首发送同拍）
 
 sys.path.insert(0, str(TOOLS_DIR))
-from flexlb_eval.analysis import compare_twin  # noqa: E402  (module under test; __main__ guarded)
+from analysis import compare_twin  # noqa: E402  (module under test; __main__ guarded)
 
 
 def _run(cmd, cwd):

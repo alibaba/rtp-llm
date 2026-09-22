@@ -7,10 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from flexlb_eval.scenario import compile_scenarios, load_scenarios
-from flexlb_eval.scenario.actions import master
-from flexlb_eval.scenario.catalog import handlers
-from flexlb_eval.scenario.runtime import (
+from scenario import compile_scenarios, load_scenarios
+from scenario.actions import master
+from scenario.catalog import handlers
+from scenario.runtime import (
     Deadline,
     RuntimeContext,
     StageTimeout,

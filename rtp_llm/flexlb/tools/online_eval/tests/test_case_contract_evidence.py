@@ -6,15 +6,15 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
-from flexlb_eval.runtime.engine_ops import EngineOps
-from flexlb_eval.scenario.actions import status_protocol
-from flexlb_eval.scenario.actions.execution_evidence import (
+from runtime.engine_ops import EngineOps
+from scenario.actions import status_protocol
+from scenario.actions.execution_evidence import (
     avoidance,
     execution_batches,
     partial_outcome_bounds,
     rotation,
 )
-from flexlb_eval.scenario.actions.master import (
+from scenario.actions.master import (
     decode_residual_bound,
     owner_clean,
 )
@@ -34,7 +34,7 @@ def event(rid, batch, engine, arrival=0, start=1, end=10):
 
 class ExecutionEvidenceTests(unittest.TestCase):
     def test_recovery_under_other_owner_load_is_not_a_distribution_oracle(self):
-        from flexlb_eval.scenario.actions import master_observation as obs
+        from scenario.actions import master_observation as obs
 
         rows = [
             dict(
@@ -75,7 +75,7 @@ class ExecutionEvidenceTests(unittest.TestCase):
                 )
 
     def test_capacity_uses_distinct_batches_and_half_open_intervals(self):
-        from flexlb_eval.scenario.actions.admission import execution_capacity
+        from scenario.actions.admission import execution_capacity
 
         rows = [
             event(1, 1, "P0", 0, 1, 10),
@@ -171,7 +171,7 @@ class ExecutionEvidenceTests(unittest.TestCase):
         with patch.object(status_protocol, "_terminal_records"), patch.object(
             status_protocol, "_artifact", return_value="fixture"
         ), patch(
-            "flexlb_eval.scenario.actions.elastic.request_success",
+            "scenario.actions.elastic.request_success",
             return_value=True,
         ):
             result = status_protocol.execute_outcomes(ctx, p, NS(check=lambda: None))
@@ -199,7 +199,7 @@ class ExecutionEvidenceTests(unittest.TestCase):
         old.close.assert_called_once()
         engine.close.assert_not_called()
         with patch(
-            "flexlb_eval.runtime.engine_ops.grpc.insecure_channel", return_value=new
+            "runtime.engine_ops.grpc.insecure_channel", return_value=new
         ):
             self.assertIs(new, ops._channel("master"))
         self.assertIs(engine, ops._channel("engine"))

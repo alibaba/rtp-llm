@@ -3,7 +3,7 @@
 ```text
 config/scenarios/*.yaml       用例数据、拓扑、阈值和时间预算
         ↓
-src/flexlb_eval/cases/programs/*.py     步骤、分支和断言
+src/cases/programs/*.py     步骤、分支和断言
         ↓
 scenario compiler      类型检查并生成执行计划
         ↓

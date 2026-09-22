@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_eval.analysis.consolidate import parse_grouped_prometheus_timeseries
+from analysis.consolidate import parse_grouped_prometheus_timeseries
 from test_cache_hit_metrics import _write_full_run, _run, AGGREGATE, T0
 
 

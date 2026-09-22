@@ -9,11 +9,11 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_eval.cases.config import configure_program
-from flexlb_eval.scenario import compile_scenarios, load_scenarios
-from flexlb_eval.scenario.actions.decode_scale_out import assess, sample
-from flexlb_eval.scenario.catalog import handlers
-from flexlb_eval.scenario.loader import load_document
+from cases.config import configure_program
+from scenario import compile_scenarios, load_scenarios
+from scenario.actions.decode_scale_out import assess, sample
+from scenario.catalog import handlers
+from scenario.loader import load_document
 
 
 class DecodeScaleOutTest(unittest.TestCase):
@@ -130,10 +130,10 @@ class DecodeScaleOutTest(unittest.TestCase):
         del row["running"]
         ctx = SimpleNamespace(clock=lambda: 1)
         with patch(
-            "flexlb_eval.scenario.actions.decode_scale_out._snapshot",
+            "scenario.actions.decode_scale_out._snapshot",
             return_value={"decode-2": row},
         ), patch(
-            "flexlb_eval.scenario.actions.decode_scale_out._master_json",
+            "scenario.actions.decode_scale_out._master_json",
             return_value={},
         ):
             with self.assertRaisesRegex(ValueError, "invalid Decode counters"):

@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from flexlb_eval.scenario.actions.observation import (
+from scenario.actions.observation import (
     CaptureDeadline,
     DebugUnavailable,
     Observer,
@@ -106,7 +106,7 @@ class ObservationTest(unittest.TestCase):
                 {"sources": ["engine_snapshot"], "required": required}, Plan()
             )
             with patch(
-                "flexlb_eval.scenario.actions.observation._read_json",
+                "scenario.actions.observation._read_json",
                 side_effect=OSError("offline"),
             ):
                 result = execute_snapshot(self.ctx, p, deadline())
@@ -120,7 +120,7 @@ class ObservationTest(unittest.TestCase):
     def test_partial_master_never_complete(self):
         p = validate_snapshot({"sources": ["master_debug"]}, Plan())
         with patch(
-            "flexlb_eval.scenario.actions.observation.DebugClient"
+            "scenario.actions.observation.DebugClient"
         ) as client:
             client.return_value.snapshot.return_value.payload = {
                 "instanceId": "a",
@@ -136,7 +136,7 @@ class ObservationTest(unittest.TestCase):
         )
         self.ctx.env_epoch += 1
         with patch(
-            "flexlb_eval.scenario.actions.observation._read_json"
+            "scenario.actions.observation._read_json"
         ) as read:
             result = source.capture(deadline()).to_dict()
         read.assert_not_called()
@@ -152,7 +152,7 @@ class ObservationTest(unittest.TestCase):
             ),
         )
         with patch(
-            "flexlb_eval.scenario.actions.observation._read_json",
+            "scenario.actions.observation._read_json",
             side_effect=[{"engines": [{"name": "p1"}]}, {"engines": [{"name": "p2"}]}],
         ):
             source.capture(deadline())
@@ -263,9 +263,9 @@ class ObservationTest(unittest.TestCase):
 
 
     def test_core_optional_source_and_required_finding_semantics(self):
-        from flexlb_eval.scenario.actions.observation import HANDLERS
-        from flexlb_eval.scenario.compiler import compile_scenarios
-        from flexlb_eval.scenario.runtime import execute_instance
+        from scenario.actions.observation import HANDLERS
+        from scenario.compiler import compile_scenarios
+        from scenario.runtime import execute_instance
 
         class Backend:
             def setup(inner, ctx, environment, limit):
@@ -299,7 +299,7 @@ class ObservationTest(unittest.TestCase):
                 doc["findings"] = ["capture.sources"]
             plan = compile_scenarios([("coverage.json", doc)], handlers=handlers)[0]
             with patch(
-                "flexlb_eval.scenario.actions.observation._read_json",
+                "scenario.actions.observation._read_json",
                 side_effect=OSError("missing"),
             ):
                 result = execute_instance(
@@ -313,7 +313,7 @@ class ObservationTest(unittest.TestCase):
             self.ctx, validate_snapshot({"sources": ["engine_snapshot"]}, Plan())
         )
         with patch(
-            "flexlb_eval.scenario.actions.observation._read_json"
+            "scenario.actions.observation._read_json"
         ) as read:
             with self.assertRaises(TimeoutError):
                 source.capture(deadline(0))

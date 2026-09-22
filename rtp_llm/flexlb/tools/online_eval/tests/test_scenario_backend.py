@@ -11,10 +11,10 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flexlb_eval.scenario.backend import BoundedOps, RequestBatch
-from flexlb_eval.scenario.lease import validate_lease
-from flexlb_eval.scenario.loader import ScenarioError
-from flexlb_eval.scenario.runtime import (
+from scenario.backend import BoundedOps, RequestBatch
+from scenario.lease import validate_lease
+from scenario.loader import ScenarioError
+from scenario.runtime import (
     Deadline,
     RuntimeContext,
     StageTimeout,

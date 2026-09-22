@@ -4,14 +4,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from flexlb_eval.scenario.actions.master import OwnedHaClient
-from flexlb_eval.workload.compare import main
-from flexlb_eval.workload.evidence_analysis import analyze_report
+from scenario.actions.master import OwnedHaClient
+from workload.compare import main
+from workload.evidence_analysis import analyze_report
 
 
 class EvidenceIntegrityTest(unittest.TestCase):
     def test_failed_scrape_is_attributed_at_observed_completion(self):
-        from flexlb_eval.workload.evidence_analysis import (
+        from workload.evidence_analysis import (
             classify_gaps,
             collection_gaps,
             journal_rows,
@@ -41,7 +41,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertTrue(journal_rows(p)[1])
 
     def test_collector_lifetime_requires_start_and_tail_coverage(self):
-        from flexlb_eval.workload.evidence_analysis import audit_journals
+        from workload.evidence_analysis import audit_journals
 
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d) / "telemetry/1"
@@ -255,8 +255,8 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertEqual([x["x"] for x in series[1]["points"]], [1.2, 2.2, 12.2])
 
     def test_failed_sample_breaks_curve_and_disables_window_comparison(self):
-        from flexlb_eval.workload.compare import compare
-        from flexlb_eval.workload.evidence_analysis import read_series
+        from workload.compare import compare
+        from workload.evidence_analysis import read_series
 
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "telemetry/1"
@@ -280,7 +280,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertIsNone(row["rank_score"])
 
     def test_outage_exemption_is_source_and_window_specific(self):
-        from flexlb_eval.workload.evidence_analysis import classify_gaps
+        from workload.evidence_analysis import classify_gaps
 
         evidence = dict(
             clock_anchor={"epoch_s": 100},
@@ -297,7 +297,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
     def test_stress_aggregator_never_promotes_unknown_terminal_status(self):
         import ast
 
-        source = Path(__file__).resolve().parents[1] / "src/flexlb_eval/analysis/aggregate.py"
+        source = Path(__file__).resolve().parents[1] / "src/analysis/aggregate.py"
         tree = ast.parse(source.read_text())
         fn = next(
             n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "is_ok"
@@ -321,7 +321,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
         self.assertFalse(predicate(dict(status="ok", error="business failure")))
 
     def test_raw_samples_without_matching_rounds_are_incomplete(self):
-        from flexlb_eval.workload.evidence_analysis import audit_journals
+        from workload.evidence_analysis import audit_journals
 
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d) / "telemetry/1"
@@ -341,7 +341,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertTrue(audit_journals(d, ["1/mock"]))
 
     def test_invalid_evidence_is_not_ranked_even_with_visible_samples(self):
-        from flexlb_eval.workload.compare import compare
+        from workload.compare import compare
 
         report = dict(
             id="same",
@@ -356,7 +356,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
         self.assertIsNone(row["rank_score"])
 
     def test_silent_sampling_pause_breaks_curve_without_fabricating_zero(self):
-        from flexlb_eval.workload.evidence_analysis import (
+        from workload.evidence_analysis import (
             audit_journals,
             read_series,
         )

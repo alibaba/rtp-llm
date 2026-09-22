@@ -8,22 +8,22 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from flexlb_eval.runtime.resource_plan import (
+from runtime.resource_plan import (
     JavaMockBudget,
     ResourcePlanError,
     plan_lane_leases,
 )
-from flexlb_eval.scenario import compile_scenarios
-from flexlb_eval.scenario.backend import (
+from scenario import compile_scenarios
+from scenario.backend import (
     BoundedOps,
     JavaMockBackend,
     make_env_spec,
 )
-from flexlb_eval.scenario.catalog import handlers
-from flexlb_eval.scenario.compiler import environment
-from flexlb_eval.scenario.contracts import StageHandler
-from flexlb_eval.scenario.lease import validate_lease
-from flexlb_eval.scenario.runtime import Deadline, RuntimeContext
+from scenario.catalog import handlers
+from scenario.compiler import environment
+from scenario.contracts import StageHandler
+from scenario.lease import validate_lease
+from scenario.runtime import Deadline, RuntimeContext
 from test_scenario_runtime import source
 
 
@@ -132,7 +132,7 @@ class EnvironmentBudgetTest(unittest.TestCase):
             mock_base=55000,
         )[0].to_manifest()
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "flexlb_eval.runtime.harness.EnvManager.ensure"
+            "runtime.harness.EnvManager.ensure"
         ) as ensure:
             ctx = RuntimeContext(instance, None, tmp, time.monotonic, time.sleep)
             ctx.env_epoch = 1

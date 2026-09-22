@@ -1,8 +1,8 @@
 # Python case 配置目录
 
 每份 YAML 只声明环境、profile、Python 变体选择和参数，格式版本为 `schema_version: 2`。
-编排与断言位于 [`case_programs/`](../../src/flexlb_eval/cases/programs)；
-公共 action 位于 `src/flexlb_eval/scenario/actions/`。已删除的扩展功能 case 仍可通过 Git 历史追溯。
+编排与断言位于 [`case_programs/`](../../src/cases/programs)；
+公共 action 位于 `src/scenario/actions/`。已删除的扩展功能 case 仍可通过 Git 历史追溯。
 
 先读 [框架结构](../../docs/reference/architecture.md) 了解执行和资源模型；
 新增用例按 [如何添加新 case](../../docs/reference/adding-cases.md) 操作。
@@ -32,4 +32,4 @@ python3 rtp_llm/flexlb/tools/online_eval/scripts/scenario_runner.py \
 `config/scale_cases/` 保存未来接入的在线规模实验，其中包括 codex13 的分阶段缓存缩容场景；
 它不进入默认功能回归。
 
-更多配置及资源语义见 [执行器说明](../../src/flexlb_eval/scenario/README.md)。
+更多配置及资源语义见 [执行器说明](../../src/scenario/README.md)。

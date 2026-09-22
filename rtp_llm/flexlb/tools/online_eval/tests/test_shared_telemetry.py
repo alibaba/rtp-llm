@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch
-from flexlb_eval.monitoring import telemetry
+from monitoring import telemetry
 
 
 class SharedTelemetryTest(unittest.TestCase):

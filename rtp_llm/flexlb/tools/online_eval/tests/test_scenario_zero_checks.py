@@ -4,8 +4,8 @@ import copy
 import tempfile
 import unittest
 
-from flexlb_eval.scenario import ScenarioError, compile_scenarios
-from flexlb_eval.scenario.runtime import execute_instance
+from scenario import ScenarioError, compile_scenarios
+from scenario.runtime import execute_instance
 from test_scenario_runtime import Backend, Clock, source
 
 

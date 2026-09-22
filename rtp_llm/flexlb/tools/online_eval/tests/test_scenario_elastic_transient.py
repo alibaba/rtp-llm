@@ -16,13 +16,13 @@ from environment_expectations import environment as expected_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_eval.scenario import compile_scenarios
-from flexlb_eval.scenario.actions import elastic as e
-from flexlb_eval.scenario.actions import elastic_transient as tr
-from flexlb_eval.scenario.actions import engine_control as control
-from flexlb_eval.scenario.catalog import handlers as builtin_handlers
-from flexlb_eval.scenario.loader import load_scenarios
-from flexlb_eval.scenario.runtime import execute_instance
+from scenario import compile_scenarios
+from scenario.actions import elastic as e
+from scenario.actions import elastic_transient as tr
+from scenario.actions import engine_control as control
+from scenario.catalog import handlers as builtin_handlers
+from scenario.loader import load_scenarios
+from scenario.runtime import execute_instance
 
 
 class Clock:
@@ -233,7 +233,7 @@ class TransientTests(unittest.TestCase):
             )
 
     def test_actual_master_sampler_retains_errors_and_exits(self):
-        from flexlb_eval.scenario.contracts import StageOutput
+        from scenario.contracts import StageOutput
 
         for payload, valid in [
             (
@@ -305,7 +305,7 @@ class TransientTests(unittest.TestCase):
 
     def test_birth_spec_preserves_expected_performance_topology_and_config(self):
         from flexlb_cfg import render_env
-        from flexlb_eval.scenario.backend import make_env_spec
+        from scenario.backend import make_env_spec
 
         handlers = builtin_handlers()
         plan = next(
@@ -482,7 +482,7 @@ class TransientTests(unittest.TestCase):
             ), patch.object(e, "_http", http), patch.object(
                 tr.urllib.request, "urlopen", urlopen
             ), patch(
-                "flexlb_eval.runtime.harness.http_post_json", master
+                "runtime.harness.http_post_json", master
             ):
                 result = execute_instance(
                     plan,

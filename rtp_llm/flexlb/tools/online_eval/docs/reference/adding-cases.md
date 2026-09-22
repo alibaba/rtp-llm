@@ -6,7 +6,7 @@
 
 ## 新增业务流程
 
-在 `src/flexlb_eval/cases/programs/` 增加 Python program，并在显式目录中注册。Python 通过 `CaseBuilder` 读取 YAML 数据，声明步骤、输出引用和检查；公共动作不足时才在 `src/flexlb_eval/scenario/actions/` 增加有类型的 handler。
+在 `src/cases/programs/` 增加 Python program，并在显式目录中注册。Python 通过 `CaseBuilder` 读取 YAML 数据，声明步骤、输出引用和检查；公共动作不足时才在 `src/scenario/actions/` 增加有类型的 handler。
 
 ## 分类
 

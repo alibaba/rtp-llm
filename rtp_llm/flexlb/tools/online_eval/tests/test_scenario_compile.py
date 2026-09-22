@@ -12,12 +12,12 @@ TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 
 from flexlb_cfg import render_env
-from flexlb_eval.scenario import (
+from scenario import (
     ScenarioError,
     compile_scenarios,
     load_scenarios,
 )
-from flexlb_eval.scenario.loader import load_document
+from scenario.loader import load_document
 
 
 def scenario():
@@ -64,7 +64,7 @@ class CompileTest(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import sys; from flexlb_eval.scenario import compile_scenarios; assert not any(x in sys.modules for x in ['flexlb_eval.runtime.harness','flexlb_eval.runtime.engine_ops','grpc'])",
+                "import sys; from scenario import compile_scenarios; assert not any(x in sys.modules for x in ['runtime.harness','runtime.engine_ops','grpc'])",
             ],
             cwd=TOOLS,
             capture_output=True,
@@ -284,7 +284,7 @@ class LoaderTest(unittest.TestCase):
             doc["profiles"] = ["single-batch"]
             p.write_text(json.dumps(doc))
             result = subprocess.run(
-                [sys.executable, "-m", "flexlb_eval.scenario", str(p)],
+                [sys.executable, "-m", "scenario", str(p)],
                 cwd=TOOLS,
                 capture_output=True,
                 text=True,
@@ -295,7 +295,7 @@ class LoaderTest(unittest.TestCase):
                 [
                     sys.executable,
                     "-m",
-                    "flexlb_eval.scenario",
+                    "scenario",
                     str(p),
                     "--profile",
                     "single-nonbatch",

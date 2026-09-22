@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from flexlb_eval.runtime.debug_client import (
+from runtime.debug_client import (
     Capture,
     DebugClient,
     DebugUnavailable,

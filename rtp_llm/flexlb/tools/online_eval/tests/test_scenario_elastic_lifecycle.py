@@ -13,13 +13,13 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from flexlb_eval.scenario import compile_scenarios
-from flexlb_eval.scenario.actions import elastic as e
-from flexlb_eval.scenario.actions import elastic_lifecycle as life
-from flexlb_eval.scenario.actions import engine_control as control
-from flexlb_eval.scenario.catalog import handlers as builtin_handlers
-from flexlb_eval.scenario.loader import load_scenarios
-from flexlb_eval.scenario.runtime import execute_instance
+from scenario import compile_scenarios
+from scenario.actions import elastic as e
+from scenario.actions import elastic_lifecycle as life
+from scenario.actions import engine_control as control
+from scenario.catalog import handlers as builtin_handlers
+from scenario.loader import load_scenarios
+from scenario.runtime import execute_instance
 
 
 class Clock:
@@ -430,7 +430,7 @@ class LifecycleTests(unittest.TestCase):
             ), patch.object(
                 life, "_master_get", side_effect=accounting
             ), patch(
-                "flexlb_eval.runtime.harness.http_post_json", side_effect=master
+                "runtime.harness.http_post_json", side_effect=master
             ):
                 result = execute_instance(
                     plan,

@@ -11,10 +11,10 @@ sys.path.insert(0, str(ROOT))
 import test_scenario_elastic_concurrent as original
 from environment_expectations import environment as expected_environment
 from flexlb_cfg import render_env
-from flexlb_eval.scenario import compile_scenarios
-from flexlb_eval.scenario.actions import elastic as e
-from flexlb_eval.scenario.backend import make_env_spec
-from flexlb_eval.scenario.loader import load_scenarios
+from scenario import compile_scenarios
+from scenario.actions import elastic as e
+from scenario.backend import make_env_spec
+from scenario.loader import load_scenarios
 
 
 class ProfileTests(unittest.TestCase):

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from flexlb_eval.reporting import (
+from reporting import (
     write_bundle,
     read_bundle,
     load_analysis,
@@ -16,8 +16,8 @@ from flexlb_eval.reporting import (
     details,
     table,
 )
-from flexlb_eval.reporting.statistics import select_window, counter_delta
-from flexlb_eval.workload.report import write_report
+from reporting.statistics import select_window, counter_delta
+from workload.report import write_report
 
 
 class ReportBundleTest(unittest.TestCase):
@@ -111,7 +111,7 @@ class ReportBundleTest(unittest.TestCase):
         )
         original = copy.deepcopy(payload)
         with tempfile.TemporaryDirectory() as d, patch(
-            "flexlb_eval.workload.evidence_analysis.read_series",
+            "workload.evidence_analysis.read_series",
             side_effect=AssertionError("renderer read telemetry"),
         ):
             result = write_report(d, payload)

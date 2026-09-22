@@ -305,7 +305,7 @@ cleanup() {
   if [[ -n "${EXPERIMENT_ARCHIVE_PATH}" && -d "${RUN_DIR}" ]]; then
     local archive_status=incomplete
     [[ "${run_exit_status}" -eq 0 && -s "${RUN_DIR}/aggregate.json" ]] && archive_status=complete
-    if PYTHONPATH="${ONLINE_EVAL_DIR}/src:${ONLINE_EVAL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m flexlb_eval.artifacts.archive create \
+    if PYTHONPATH="${ONLINE_EVAL_DIR}/src:${ONLINE_EVAL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m artifacts.archive create \
       --kind stress --status "${archive_status}" \
       --source "run=${RUN_DIR}" --out "${EXPERIMENT_ARCHIVE_PATH}" \
       >/dev/null; then
@@ -510,7 +510,7 @@ start_monitoring() {
   if [[ "${START_FLEXLB}" == 1 ]]; then
     targets+=(--target "master-single=http://127.0.0.1:${FLEXLB_MANAGEMENT_PORT}/prometheus")
   fi
-  PYTHONPATH="${ONLINE_EVAL_DIR}/src:${ONLINE_EVAL_DIR}" python3 -m flexlb_eval.monitoring.session serve \
+  PYTHONPATH="${ONLINE_EVAL_DIR}/src:${ONLINE_EVAL_DIR}" python3 -m monitoring.session serve \
     --run-dir "${RUN_DIR}" --interval "${SECONDARY_POLL_INTERVAL_S}" --clients "${LOAD_CLIENT_WORKERS}" "${targets[@]}" \
     >"${RUN_DIR}/monitor.log" 2>&1 &
   MONITOR_PID=$!
@@ -1031,7 +1031,7 @@ echo "monitoring=${RUN_DIR}/telemetry/0"
 consolidate_run_outputs_now
 
 # Standard monitor query archive is the only source of performance curves.
-PYTHONPATH="${ONLINE_EVAL_DIR}/src:${ONLINE_EVAL_DIR}" python3 -m flexlb_eval.monitoring.session report --run-dir "${RUN_DIR}"
+PYTHONPATH="${ONLINE_EVAL_DIR}/src:${ONLINE_EVAL_DIR}" python3 -m monitoring.session report --run-dir "${RUN_DIR}"
 
 # TEST_VERDICT: read test_valid from the aggregate summary (the merge
 # heredoc's old summary.json verdict is gone). A missing aggregate.json or

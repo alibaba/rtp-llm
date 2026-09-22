@@ -5,12 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from flexlb_eval.scenario import ScenarioError, compile_scenarios
-from flexlb_eval.scenario.backend import (
+from scenario import ScenarioError, compile_scenarios
+from scenario.backend import (
     configure_master_sync_log,
     make_env_spec,
 )
-from flexlb_eval.scenario.contracts import StageHandler
+from scenario.contracts import StageHandler
 from test_scenario_compile import scenario
 
 
@@ -44,7 +44,7 @@ class VariantProgramsTest(unittest.TestCase):
             compile_scenarios([("dual.yaml", doc)])
 
     def test_startup_prefill_budget_preserves_disabled_zero_and_variant_values(self):
-        from flexlb_eval.runtime.harness import default_perf
+        from runtime.harness import default_perf
 
         doc = scenario()
         disabled = dict(

@@ -9,13 +9,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from flexlb_eval.traffic.traffic_source import materialize
-from flexlb_eval.traffic.prefix_lineage import decode
+from traffic.traffic_source import materialize
+from traffic.prefix_lineage import decode
 
 
 class FrontendPrefixFitTest(unittest.TestCase):
     def test_capture_fit_roundtrip_and_checksum_guard(self):
-        scripts = Path(__file__).resolve().parents[1] / "src/flexlb_eval/traffic"
+        scripts = Path(__file__).resolve().parents[1] / "src/traffic"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "logs").mkdir()

@@ -4,9 +4,9 @@ import json
 import unittest
 from pathlib import Path
 
-from flexlb_eval.runtime.harness import OMIT, ConfigOverride, render_env
-from flexlb_eval.scenario import compile_scenarios, load_scenarios
-from flexlb_eval.scenario.catalog import handlers
+from runtime.harness import OMIT, ConfigOverride, render_env
+from scenario import compile_scenarios, load_scenarios
+from scenario.catalog import handlers
 
 
 class MasterConfigTests(unittest.TestCase):

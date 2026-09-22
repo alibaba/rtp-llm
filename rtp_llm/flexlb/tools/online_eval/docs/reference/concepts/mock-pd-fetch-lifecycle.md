@@ -86,7 +86,7 @@ NON_BATCH 的 `GenerateStreamCall` 本身已经建立客户端输出流，不存
 
 - 真实引擎：`rtp_llm/cpp/model_rpc/PrefillRpcServer.cc`、`PrefillBatchRpcServer.cc`、`DecodeRpcServer.cc`。
 - Mock：`flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPrefillSession.java`、`JavaMockEngineCluster.java`、`MockLruBlockCache.java`。
-- Python：`src/flexlb_eval/cases/programs/request_completion.py`、`src/flexlb_eval/scenario/actions/client_fetch.py`。
+- Python：`src/cases/programs/request_completion.py`、`src/scenario/actions/client_fetch.py`。
 - YAML：`config/scenarios/core/request_completion.yaml`。
 
 ## 旧用例迁移时需要区分的状态

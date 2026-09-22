@@ -36,10 +36,10 @@ SHA、token 调整统计。输出长度从独立的 `output_tokens` 指定，不
 截断为零的采集结果推断。不存在 source `qps` 参数。
 
 ```sh
-python3 -m flexlb_eval.traffic.fit_frontend_prefix --source CAPTURE_DIR --out FIT_DIR \
+python3 -m traffic.fit_frontend_prefix --source CAPTURE_DIR --out FIT_DIR \
   --expected-pods 20 --output-tokens 420
 # 旧模型的一次性迁移入口；运行时注册表不支持 v1：
-python3 -m flexlb_eval.traffic.prefix_lineage old-model.json.gz \
+python3 -m traffic.prefix_lineage old-model.json.gz \
   --fit-report fit-report.json --out lineage-model.xz
 ```
 
@@ -60,7 +60,7 @@ session_growth_blocks。取消 128 块上限，所有生成输入都使用紧凑
 经验长度分布、族集中度拟合、冷比例、共享深度。可通过如下命令重建参数：
 
 ```sh
-python3 -m flexlb_eval.traffic.calibrate_traffic --model lineage-model.xz \
+python3 -m traffic.calibrate_traffic --model lineage-model.xz \
   --fit-report fit-report.json --out profile.json
 ```
 

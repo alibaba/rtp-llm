@@ -7,7 +7,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flexlb_eval.scenario.actions import engine_control as ec
+from scenario.actions import engine_control as ec
 
 
 class EngineControlTests(unittest.TestCase):

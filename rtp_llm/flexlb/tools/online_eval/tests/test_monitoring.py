@@ -10,13 +10,13 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
-from flexlb_eval.monitoring.session import (
+from monitoring.session import (
     PrometheusSession,
     archived_series,
     engine_sample,
     ENGINE_FIELDS,
 )
-from flexlb_eval.monitoring.telemetry import http_text, shared_samples_since
+from monitoring.telemetry import http_text, shared_samples_since
 
 
 class ContractTest(unittest.TestCase):
@@ -29,11 +29,11 @@ class ContractTest(unittest.TestCase):
             for field, metric in ENGINE_FIELDS.items()
         )
         body += "\nmock_engine_running{" + labels + "} 130\n"
-        with patch("flexlb_eval.monitoring.telemetry.http_text", return_value=body):
+        with patch("monitoring.telemetry.http_text", return_value=body):
             sample = engine_sample("http://test/metrics")["P0"]
         self.assertEqual((sample["running"], sample["waiting"]), (2, 128))
         with patch(
-            "flexlb_eval.monitoring.telemetry.http_text",
+            "monitoring.telemetry.http_text",
             return_value=body.replace(',engine_incarnation="one"', ""),
         ):
             with self.assertRaisesRegex(ValueError, "incarnation"):
@@ -62,7 +62,7 @@ class ContractTest(unittest.TestCase):
             }])
 
     def test_legacy_gate_rejects_monitor_contract(self):
-        from flexlb_eval.analysis.compare_ab import PrecheckError, resolve_run
+        from analysis.compare_ab import PrecheckError, resolve_run
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "aggregate.json").write_text(

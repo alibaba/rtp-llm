@@ -2,10 +2,10 @@
 
 import unittest
 
-from flexlb_eval.scenario import compile_scenarios
-from flexlb_eval.scenario.backend import make_env_spec
-from flexlb_eval.scenario.catalog import handlers
-from flexlb_eval.scenario.compiler import environment
+from scenario import compile_scenarios
+from scenario.backend import make_env_spec
+from scenario.catalog import handlers
+from scenario.compiler import environment
 from test_scenario_runtime import source
 
 

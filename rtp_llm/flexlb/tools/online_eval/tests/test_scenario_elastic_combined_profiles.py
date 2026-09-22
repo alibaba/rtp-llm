@@ -14,9 +14,9 @@ sys.path.insert(0, str(ROOT))
 import test_scenario_elastic_lifecycle as original
 from environment_expectations import environment as expected_environment
 from flexlb_cfg import render_env
-from flexlb_eval.scenario.actions import elastic_combined as combined
-from flexlb_eval.scenario.actions import elastic_lifecycle as life
-from flexlb_eval.scenario.backend import make_env_spec
+from scenario.actions import elastic_combined as combined
+from scenario.actions import elastic_lifecycle as life
+from scenario.backend import make_env_spec
 
 
 class ProfileTests(unittest.TestCase):

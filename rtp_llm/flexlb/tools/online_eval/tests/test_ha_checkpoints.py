@@ -7,10 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from flexlb_eval.runtime.ha import LiveClientEvents
-from flexlb_eval.runtime.harness import ClientOps
-from flexlb_eval.scenario.actions import master_observation as obs
-from flexlb_eval.scenario.runtime import Deadline, RuntimeContext
+from runtime.ha import LiveClientEvents
+from runtime.harness import ClientOps
+from scenario.actions import master_observation as obs
+from scenario.runtime import Deadline, RuntimeContext
 
 
 class Clock:
