@@ -93,6 +93,8 @@ class RepositoryLayoutTest(unittest.TestCase):
         self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir()})
         for old_package in ("online_eval", "flexlb_test_framework", "stress", "flexlb_eval"):
             self.assertFalse((ROOT / "src" / old_package).exists(), old_package)
+        self.assertFalse((ROOT / "scenarios").exists())
+        self.assertTrue((ROOT / "config/scenarios").is_dir())
 
     def test_stress_shell_resolves_roots_before_starting_services(self):
         # Stop before sourcing the Java helper, after the real path assignments.
