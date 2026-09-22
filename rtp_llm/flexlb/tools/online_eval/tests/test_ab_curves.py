@@ -6,9 +6,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from analysis.compare_ab import build_curve_spec
 from reporting.renderer import render
+from workload.cache_gate_ab import load_comparison_policy
 
 
 class AbCurvesTest(unittest.TestCase):
+    def test_scale_in_analysis_policy_from_runnable_scenario(self):
+        policy = load_comparison_policy(ROOT / "config/scenarios/workload/cache_scale_in.yaml")
+        self.assertEqual(policy["mode"], "strong")
+        self.assertEqual(policy["expected_verdicts"], {"old": "FAIL", "new": "PASS"})
+
     def test_shared_axis_missing_sample_is_gap(self):
         a = {"label": "a", "aggregate": {"per_second": [
             {"t": 1, "success": 2}, {"t": 3, "success": 4}]}}

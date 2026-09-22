@@ -1,8 +1,0 @@
-# Downstream analysis only. Both sides are ordinary completed lineage runs.
-schema_version: 1
-comparison: cache_scale_in
-mode: strong
-alignment_event: withdraw_start
-expected_verdicts:
-  old: FAIL
-  new: PASS

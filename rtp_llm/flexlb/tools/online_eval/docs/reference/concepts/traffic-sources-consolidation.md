@@ -126,8 +126,8 @@ REPLAY_UNIQUE_PREFIX 不再用于修改首个 key，场景应使用 playback.ide
 ## 迁移与验证边界
 
 trace_scale_out 改为 realistic，原有执行节奏移入 playback。
-小型 cache_scale_in 保留原有显式实验形状和判据；两个规模场景改用校准
-profile。`config/scale_cases/cache_scale_in_lineage.yaml` 为 v2 实测模型入口。
+cache_scale_in 使用 125P/536D 真实流量门禁；规模场景采用校准
+profile。`config/scenarios/workload/cache_scale_in.yaml` 为 v2 实测模型入口。
 源码和模型 SHA 一并更新，历史实验归档保持不变。
 
 规模场景更换长度/前缀分布后，不能要求门禁结论天然保持：旧 working_set

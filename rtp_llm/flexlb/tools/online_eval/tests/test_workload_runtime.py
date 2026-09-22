@@ -4,11 +4,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 from scenario.runtime import execute_instance
-from scenario.suites import classify
+from scenario.suites import classify, preselect_documents
 from workload.runtime import execute_workload
 from test_scenario_runtime import Backend, Clock, source
 
@@ -16,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkloadRuntimeTests(unittest.TestCase):
+    def test_core_inventory_does_not_compile_large_workload(self):
+        documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "core")
+        self.assertNotIn("cache_scale_in", {doc["id"] for _, doc in documents})
+        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "core")), 5)
+
     def run_plan(
         self, workload, observation=True, setup_error=False, cleanup_error=False
     ):
@@ -78,9 +84,10 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertTrue(any(c["status"] != "PASS" for c in r["cleanup"]))
 
     def test_catalog_is_disjoint_and_complete(self):
-        plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
-        )
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(
+                load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
+            )
         f = {p["id"] for p in classify(plans, "functional")}
         w = {p["id"] for p in classify(plans, "workload")}
         self.assertFalse(f & w)
@@ -104,9 +111,10 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertIn("cache_scale_in::step::single-nonbatch", w)
 
     def test_core_suite_is_five_stable_contracts_for_every_master_profile(self):
-        plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
-        )
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(
+                load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
+            )
         expected = {
             "request_completion::immediate",
             "cache_capacity_recovery::pool_saturation_evict_reject_recover",

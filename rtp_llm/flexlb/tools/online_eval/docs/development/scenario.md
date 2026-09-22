@@ -61,14 +61,14 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.compare \
 
 ## Cache 缩容的单 run 与 A/B
 
-`config/scale_cases/cache_scale_in_lineage.yaml` 是真实前端前缀谱系流量的单 run 缩容门禁。分别使用普通启动路径运行旧、新 Master；可用 `FLEXLB_FT_MASTER_JAR` 指定 JAR，`FLEXLB_FT_MASTER_CONFIG_FILE` 指定实际配置。`FLEXLB_FT_MASTER_SOURCE_COMMIT` 只声明源码来源；每轮证据独立记录实际 JAR 哈希与生效配置，不要求事前 manifest。
+`config/scenarios/workload/cache_scale_in.yaml` 是真实前端前缀谱系流量的单 run 缩容门禁。运行大型 125P/536D 拓扑前须设置 `FLEXLB_FT_WORKER_PORT_CAPACITY=700`。分别使用普通启动路径运行旧、新 Master；可用 `FLEXLB_FT_MASTER_JAR` 指定 JAR，`FLEXLB_FT_MASTER_CONFIG_FILE` 指定实际配置。`FLEXLB_FT_MASTER_SOURCE_COMMIT` 只声明源码来源；每轮证据独立记录实际 JAR 哈希与生效配置，不要求事前 manifest。
 
-两轮完成后，再用只读的分析策略生成 A/B 报告：
+两轮完成后，再读取同一场景 YAML 中的 `analysis` 策略生成 A/B 报告：
 
 ```bash
 PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.cache_gate_ab \
   OLD_RUN_DIR NEW_RUN_DIR \
-  --config tools/online_eval/config/scale_cases/cache_scale_in_historical_ab.yaml \
+  --config tools/online_eval/config/scenarios/workload/cache_scale_in.yaml \
   --output AB_DIR
 ```
 

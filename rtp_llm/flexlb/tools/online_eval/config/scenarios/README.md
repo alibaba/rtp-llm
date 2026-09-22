@@ -29,7 +29,10 @@ python3 rtp_llm/flexlb/tools/online_eval/scripts/commands/list_cases.py \
 | master | [client_fallback_failback.yaml](master/client_fallback_failback.yaml), [master_ha_failover.yaml](master/master_ha_failover.yaml), [master_lifecycle.yaml](master/master_lifecycle.yaml) |
 | workload | [cache_scale_in.yaml](workload/cache_scale_in.yaml), [trace_scale_out.yaml](workload/trace_scale_out.yaml) |
 
-`config/scale_cases/` 保存 lineage 单 run 规模实验与其下游 A/B 分析策略；
-它不进入默认功能回归。
+`workload/cache_scale_in.yaml` 是 125P/536D 的真实前缀谱系缩容门禁；
+同一文件的 `analysis` 字段只供已完成 run 的 A/B 对比读取，不参与编排。
+该 workload 不进入默认功能回归。
+列出或运行此 661-worker 拓扑前设置 `FLEXLB_FT_WORKER_PORT_CAPACITY=700`；
+core/functional 列表不会编译未选中的大型 workload。
 
 更多配置及资源语义见 [执行器说明](../../src/scenario/README.md)。

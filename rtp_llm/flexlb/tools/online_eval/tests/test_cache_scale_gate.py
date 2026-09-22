@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from traffic.traffic_source import materialize
 from traffic.workload_profile import profile
@@ -293,10 +294,11 @@ class CacheGateTest(unittest.TestCase):
         )
 
     def test_real_scenario_compiles_and_preserves_cache_policy(self):
-        plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/workload/cache_scale_in.yaml"),
-            handlers=handlers(),
-        )
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(
+                load_scenarios(ROOT / "config/scenarios/workload/cache_scale_in.yaml"),
+                handlers=handlers(),
+            )
         self.assertEqual(len(plans), 1)
         self.assertEqual(
             plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False
@@ -310,24 +312,25 @@ class CacheGateTest(unittest.TestCase):
             (ROOT / "config/scenarios/workload/cache_scale_in.yaml").read_text()
         )
         gate = case["parameters"]["gate"]
-        gate.update(intermediate_p=6, intermediate_hold_s=30)
+        gate.update(intermediate_p=72, intermediate_hold_s=60)
         flow = case["parameters"]["flow"]
-        flow["source"]["parameters"]["count"] = 30000
-        flow["client"]["DURATION_S"] = "360"
+        flow["source"]["parameters"]["count"] = 170000
+        flow["client"]["DURATION_S"] = "700"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "staircase.yaml"
 
             def compile_case(value):
                 path.write_text(yaml.safe_dump(value))
-                return compile_scenarios(
-                    load_scenarios(path), handlers=handlers()
-                )
+                with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+                    return compile_scenarios(
+                        load_scenarios(path), handlers=handlers()
+                    )
 
             self.assertEqual(len(compile_case(case)), 1)
             for key, value in (
-                ("intermediate_p", 4),
-                ("intermediate_p", 8),
-                ("intermediate_hold_s", 29),
+                ("intermediate_p", 64),
+                ("intermediate_p", 125),
+                ("intermediate_hold_s", 59),
             ):
                 invalid = copy.deepcopy(case)
                 invalid["parameters"]["gate"][key] = value

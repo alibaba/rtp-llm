@@ -39,7 +39,7 @@ class DataCatalogTest(unittest.TestCase):
         from scenario.loader import load_document
         config_roots = {path.name for path in (ROOT / "config").iterdir()}
         self.assertEqual({"README.md", "load_client_env.txt", "mode_profiles.yaml",
-                          "perf_presets", "report_views", "scale_cases", "scenarios", "suites.yaml"},
+                          "perf_presets", "report_views", "scenarios", "suites.yaml"},
                          config_roots, "config contains an unclassified input")
         data_roots = {path.name for path in (ROOT / "data").iterdir()}
         self.assertEqual({"README.md", "catalog.json", "calibration", "performance",
@@ -82,7 +82,7 @@ class DataCatalogTest(unittest.TestCase):
                 for value in node:
                     yield from sources(value)
 
-        for case in (ROOT / "config/scale_cases").glob("*.yaml"):
+        for case in (ROOT / "config/scenarios").rglob("*.yaml"):
             for source in sources(load_document(case)):
                 params = source["parameters"]
                 model_path = (case.parent / params["path"]).resolve()
@@ -93,7 +93,7 @@ class DataCatalogTest(unittest.TestCase):
                                  f"{case}: trace SHA differs from its manifest")
                 self.assertEqual(manifest["count"], params["count"],
                                  f"{case}: trace count differs from its manifest")
-        # Every catalog entry is selectable by run_stress; scale cases may also
+        # Every catalog entry is selectable by run_stress; workload scenarios may also
         # pin a model, but admitting a capture does not require a new case.
 
     def test_unregistered_capture_is_ignored_at_stage_boundary(self):

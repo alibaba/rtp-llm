@@ -154,6 +154,7 @@ def configure_program(config, source):
             "variants",
             "metadata",
             "parameter_schema",
+            "analysis",
         },
         source,
     )
@@ -162,6 +163,8 @@ def configure_program(config, source):
             f"{source}: only data-only schema_version 2 is accepted; move orchestration into Python"
         )
     name = config.get("case")
+    if "analysis" in config and not isinstance(config["analysis"], dict):
+        raise ScenarioError(f"{source}.analysis: expected mapping")
     if not isinstance(name, str) or name not in PROGRAMS:
         raise ScenarioError(f"{source}: unknown registered Python case {name!r}")
     # The module path is code-owned. Configuration cannot import arbitrary modules.

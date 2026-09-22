@@ -10,6 +10,28 @@ KINDS = ("functional", "workload")
 SUITES = ("core", *KINDS, "all")
 
 
+def preselect_documents(documents, suite="all", catalog=CATALOG):
+    """Avoid compiling unrelated large workloads for functional listings/runs."""
+    if suite not in SUITES:
+        raise ScenarioError("unknown suite: " + suite)
+    if suite in ("all", "workload"):
+        return documents
+    data = load_document(catalog)
+    if data.get("schema_version") != 1 or not isinstance(data.get("cases"), dict) or not isinstance(data.get("core_cases"), dict):
+        raise ScenarioError("invalid suite catalog")
+    selected = []
+    for path, document in documents:
+        keys = [document["id"] + "::" + variant["id"] for variant in document["variants"]]
+        if any(
+            key not in data["cases"]
+            or (suite == "core" and key in data["core_cases"])
+            or (suite == "functional" and data["cases"][key].get("kind") == "functional")
+            for key in keys
+        ):
+            selected.append((path, document))
+    return selected
+
+
 def classify(plans, suite="all", catalog=CATALOG):
     if suite not in SUITES:
         raise ScenarioError("unknown suite: " + suite)

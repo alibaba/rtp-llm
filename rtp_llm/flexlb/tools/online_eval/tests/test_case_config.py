@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -246,7 +247,8 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_shipped_inventory_is_data_only_and_keeps_all_checks(self):
         documents = load_scenarios(ROOT / "config/scenarios")
-        plans = compile_scenarios(documents, handlers=handlers())
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(documents, handlers=handlers())
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
         self.assertEqual(sorted(p["id"] for p in plans), expected)
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))

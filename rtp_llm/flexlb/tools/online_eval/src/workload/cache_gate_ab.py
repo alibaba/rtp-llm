@@ -178,6 +178,27 @@ def compare(old_path, new_path, output, *, mode="strong"):
     return summary
 
 
+def load_comparison_policy(path: Path) -> dict:
+    import yaml
+
+    config = yaml.safe_load(path.read_text())
+    if not isinstance(config, dict):
+        raise ValueError("comparison config must be a mapping")
+    if "analysis" in config:
+        if config.get("schema_version") != 2 or config.get("case") != "cache_scale_in":
+            raise ValueError("comparison policy must belong to a cache_scale_in scenario")
+        policy = config["analysis"]
+    else:
+        policy = config
+    if not isinstance(policy, dict):
+        raise ValueError("comparison policy must be a mapping")
+    if policy.get("comparison") != "cache_scale_in" or policy.get("alignment_event") != "withdraw_start":
+        raise ValueError("unsupported cache scale-in comparison policy")
+    if policy.get("expected_verdicts") != {"old": "FAIL", "new": "PASS"}:
+        raise ValueError("unsupported strong-control verdict pair")
+    return policy
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("old", type=Path)
@@ -186,14 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=Path, help="optional downstream comparison policy YAML")
     parser.add_argument("--mode", choices=("strong", "weak", "none"))
     args = parser.parse_args()
-    policy = {}
-    if args.config:
-        import yaml
-        policy = yaml.safe_load(args.config.read_text())
-        if policy.get("comparison") != "cache_scale_in" or policy.get("alignment_event") != "withdraw_start":
-            raise ValueError("unsupported cache scale-in comparison policy")
-        if policy.get("expected_verdicts") != {"old": "FAIL", "new": "PASS"}:
-            raise ValueError("unsupported strong-control verdict pair")
+    policy = load_comparison_policy(args.config) if args.config else {}
     result = compare(args.old, args.new, args.output, mode=args.mode or policy.get("mode", "strong"))
     print(json.dumps({k: v for k, v in result.items() if k not in ("old", "new")}))
     raise SystemExit(

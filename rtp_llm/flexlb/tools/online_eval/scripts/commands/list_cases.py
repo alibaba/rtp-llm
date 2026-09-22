@@ -17,7 +17,7 @@ from scenario import (
     compile_scenarios,
     load_scenarios,
 )
-from scenario.suites import classify
+from scenario.suites import classify, preselect_documents
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
 from scenario.lease import validate_lease
@@ -120,7 +120,7 @@ def main(argv=None):
         plans = select(
             classify(
                 compile_scenarios(
-                    load_scenarios(args.source),
+                    preselect_documents(load_scenarios(args.source), args.suite),
                     args.profile,
                     registry,
                     grade=args.grade,

@@ -68,9 +68,10 @@ class RepositoryLayoutTest(unittest.TestCase):
         from scenario import compile_scenarios, load_scenarios
         from scenario.catalog import handlers
 
-        plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
-        )
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(
+                load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
+            )
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
         self.assertEqual(expected, sorted(p["id"] for p in plans))
         for path in [
