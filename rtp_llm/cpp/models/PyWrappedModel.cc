@@ -468,6 +468,18 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 2 || inputs.kv_cache_kernel_block_id.dim() == 3,
                             "kv_cache_kernel_block_id must be [batch, blocks] or [group, batch, blocks]");
 
+    const auto publication_block_table = [&](const torch::Tensor& table) {
+        auto rows = table;
+        if (sequence_parallel_padding_enabled_ && inputs.sp_logical_requests > 0) {
+            RTP_LLM_CHECK_WITH_INFO(inputs.sp_logical_requests <= table.size(0),
+                                    "SP publication requires all logical block-table rows");
+            // Compute consumes the padded table, while prepareWriteCacheParams
+            // retains the original request metadata. Never publish dummy rows.
+            rows = table.narrow(0, 0, inputs.sp_logical_requests);
+        }
+        return rows.is_cuda() ? rows.cpu() : rows;
+    };
+
     if (inputs.kv_cache_kernel_block_id.dim() == 2) {
         py_attn_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id;
         py_attn_inputs.kv_cache_kernel_block_id_device =
@@ -480,9 +492,8 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
             if (py_attn_inputs.cache_store_inputs.has_value()) {
                 // Async writer reads via raw host pointers; MTP device-state
                 // paths may carry CUDA block tables here.
-                py_attn_inputs.cache_store_inputs->host_kv_cache_offset = py_attn_inputs.kv_cache_block_id.is_cuda() ?
-                                                                              py_attn_inputs.kv_cache_block_id.cpu() :
-                                                                              py_attn_inputs.kv_cache_block_id;
+                py_attn_inputs.cache_store_inputs->host_kv_cache_offset =
+                    publication_block_table(py_attn_inputs.kv_cache_block_id);
             }
         }
         return {};
@@ -508,9 +519,8 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
             group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
             if (group_inputs.cache_store_inputs.has_value()) {
-                group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
-                                                                            group_inputs.kv_cache_block_id.cpu() :
-                                                                            group_inputs.kv_cache_block_id;
+                group_inputs.cache_store_inputs->host_kv_cache_offset =
+                    publication_block_table(group_inputs.kv_cache_block_id);
             }
         }
         const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));

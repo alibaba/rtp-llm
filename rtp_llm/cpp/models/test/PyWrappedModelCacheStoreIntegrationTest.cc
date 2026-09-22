@@ -28,6 +28,11 @@ namespace py = pybind11;
 namespace rtp_llm::test {
 
 struct PyWrappedModelTestPeer {
+    static void enableSequenceParallelPadding(PyWrappedModel& model) {
+        // The fake model performs no collectives; exercise TP8 metadata on one GPU.
+        model.sequence_parallel_padding_enabled_ = true;
+    }
+
     static void replaceContextParallelProcessor(PyWrappedModel&                            model,
                                                 std::unique_ptr<IContextParallelProcessor> processor) {
         model.context_parallel_processor_ = std::move(processor);
@@ -447,6 +452,16 @@ Scenario makeScenario(const std::string& name) {
     if (name == "multi_tag") {
         return makeMultiTagScenario();
     }
+    if (name == "sp_padded_multi_tag" || name == "sp_padded_single_tag") {
+        auto scenario = makeMultiTagScenario();
+        if (name == "sp_padded_single_tag") {
+            scenario = makeMtpScenario();
+            scenario.inputs.kv_cache_block_id = scenario.inputs.kv_cache_block_id[0];
+            scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id[0];
+        }
+        scenario.parallelism.tp_size = 8;
+        return scenario;
+    }
     if (name == "micro_batch") {
         return makeMicroBatchScenario();
     }
@@ -549,6 +564,9 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     {
         PyWrappedModel model(params, std::move(py_model));
+        if (scenario_name == "sp_padded_multi_tag" || scenario_name == "sp_padded_single_tag") {
+            PyWrappedModelTestPeer::enableSequenceParallelPadding(model);
+        }
         if (scenario.replace_cp_processor) {
             PyWrappedModelTestPeer::replaceContextParallelProcessor(
                 model, std::make_unique<TestContextParallelProcessor>(scenario.parallelism));
