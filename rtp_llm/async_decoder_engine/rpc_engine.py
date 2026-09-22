@@ -75,6 +75,9 @@ class LanguageCppEngine(BaseEngine):
             )
             self._service_started = True
 
+    def gpu_cache_tensors(self):
+        return self.rtp_llm_op_.gpu_cache_tensors()
+
     def start_service(self) -> None:
         """Release the deferred backend RPC/HTTP listeners after SCR arrival."""
         if not self.defer_service_start or self._service_started:
