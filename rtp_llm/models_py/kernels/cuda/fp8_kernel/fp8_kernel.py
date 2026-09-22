@@ -116,6 +116,7 @@ def sgl_per_token_group_quant_fp8(
     scale_ue8m0: bool = False,
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
+    quant_kernel: Optional[str] = None,
 ):
     assert (
         x.shape[-1] % group_size == 0
@@ -133,7 +134,10 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.shape[0] > 0:
-        quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        explicit_kernel = quant_kernel is not None
+        quant_kernel = quant_kernel or os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        if explicit_kernel and quant_kernel == "legacy" and (masked_m is not None or fuse_silu_and_mul):
+            raise ValueError("legacy quantization does not support masked or fused inputs")
 
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):
