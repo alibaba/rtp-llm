@@ -103,3 +103,25 @@ def test_cpu_tp_socket_fits_actual_full_model_run_directory():
 def test_cpu_tp_socket_rejects_oversize_run_path():
     with pytest.raises(ValueError, match="too long"):
         launcher.cpu_tp_socket_environment("/data7/" + "x" * 100)
+
+
+@pytest.mark.parametrize("output,code", [
+    ("No IB devices found\n", 1),
+    ("0 HCAs found:\n", 0),
+    ("state: PORT_DOWN (1)\n", 0),
+    ("state: PORT_ACTIVE (4)\n", 1),
+])
+def test_rdma_probe_rejects_unusable_container(monkeypatch, tmp_path, output, code):
+    monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **kw:
+                        SimpleNamespace(stdout=output, returncode=code))
+    with pytest.raises(RuntimeError, match="No active RDMA"):
+        launcher.require_rdma_device(tmp_path)
+    assert (tmp_path / "rdma-preflight.txt").read_text() == output
+
+
+def test_rdma_probe_records_active_port(monkeypatch, tmp_path):
+    output = "hca_id: mlx5_bond_0\n\tstate: PORT_ACTIVE (4)\n"
+    monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **kw:
+                        SimpleNamespace(stdout=output, returncode=0))
+    launcher.require_rdma_device(tmp_path)
+    assert (tmp_path / "rdma-preflight.txt").read_text() == output

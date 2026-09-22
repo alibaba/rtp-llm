@@ -1,6 +1,7 @@
 """Launch one full-model BF16 PD endpoint after local preflight.
 
-Run inside lhc_GPU as luohaocheng.lhc after a fresh same-cluster fleet selection.
+Run as luohaocheng.lhc in a verified, same-image RDMA runtime container after
+a fresh same-cluster fleet selection. Compile independently inside lhc_GPU.
 This launcher does not select hosts or certify runtime precision/Graph/RDMA.
 """
 
@@ -120,6 +121,25 @@ def cpu_tp_socket_environment(run):
     }
 
 
+def require_rdma_device(run):
+    """Reject missing container devices before loading the full checkpoint.
+
+    This proves local device visibility only; real PD transfer is a separate gate.
+    """
+    evidence = Path(run) / "rdma-preflight.txt"
+    try:
+        result = subprocess.run(
+            ["ibv_devinfo"], text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        evidence.write_text(f"RDMA device probe failed: {exc}\n")
+        raise RuntimeError("Cannot verify RDMA devices in this runtime container") from exc
+    evidence.write_text(result.stdout)
+    if result.returncode or not re.search(r"\bstate:\s+PORT_ACTIVE\s*\(4\)", result.stdout):
+        raise RuntimeError("No active RDMA port in this runtime container")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
@@ -140,12 +160,13 @@ def main():
         print(json.dumps({"environment": environment, "command": command}, indent=2))
         return
     if pwd.getpwuid(os.getuid()).pw_name != "luohaocheng.lhc":
-        raise ValueError("Must run as luohaocheng.lhc inside lhc_GPU")
+        raise ValueError("Must run as luohaocheng.lhc inside the verified runtime container")
     run = Path(args.run_dir).resolve()
     require_local(run.parent)
     environment.update(cpu_tp_socket_environment(run))
     run.mkdir(exist_ok=False)
     (run / "uds").mkdir(mode=0o700)
+    require_rdma_device(run)
     # Reject potentially inherited experimental settings instead of trusting
     # a shell left over from a DCP/FP8/synthetic-acceptance experiment.
     forbidden = ("CP_ROTATE_METHOD", "QUANTIZATION", "SP_QUANTIZATION")
