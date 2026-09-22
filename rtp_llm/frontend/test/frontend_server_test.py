@@ -23,9 +23,10 @@ from rtp_llm.frontend.frontend_worker import (
     PipelineResponse,
 )
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.multimodal_util import MMUrlType
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, FinisheReason
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import RoleType, SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.base_model_datatypes import (
@@ -240,20 +241,24 @@ class BatchFrontendWorkerTest(TestCase):
         self.assertTrue(worker._inference.call_args.args[0].is_streaming)
         worker._yield_batch_generate.assert_not_called()
 
-    def test_root_inference_preserves_generate_config_alias_precedence(self):
+    def test_inference_preserves_generate_config_alias_precedence(self):
         worker = FrontendWorker.__new__(FrontendWorker)
         worker._inference = MagicMock()
+        worker._can_use_batch_rpc = MagicMock(return_value=False)
         for ignored in (None, 17, {"yield_generator": True}):
-            with self.subTest(ignored=ignored):
-                worker.inference(
-                    prompt="hello",
-                    generate_config={"max_new_tokens": 37},
-                    generation_config=ignored,
-                    **{request_id_field_name: 700},
-                )
-                request = worker._inference.call_args.args[0]
-                self.assertFalse(request.is_streaming)
-                self.assertEqual(37, request.generate_configs[0].max_new_tokens)
+            for batch in (False, True):
+                with self.subTest(ignored=ignored, batch=batch):
+                    payload = {
+                        "prompt_batch": ["hello"],
+                        "generate_config": {"max_new_tokens": 37},
+                        "generation_config": ignored,
+                        request_id_field_name: 700,
+                    }
+                    self.assertFalse(worker.is_streaming(payload))
+                    worker.inference(batch, **payload)
+                    request = worker._inference.call_args.args[0]
+                    self.assertFalse(request.is_streaming)
+                    self.assertEqual(37, request.generate_configs[0].max_new_tokens)
 
     def test_root_inference_preserves_null_stream_flag_with_incremental(self):
         worker = FrontendWorker.__new__(FrontendWorker)
@@ -273,15 +278,14 @@ class BatchFrontendWorkerTest(TestCase):
             ExceptionType.ERROR_INPUT_FORMAT_ERROR, raised.exception.exception_type
         )
 
-    def test_prepared_batch_invokes_backend_once_with_group_identity(self):
+    def test_prepared_batch_preserves_group_config_and_multimodal_inputs(self):
         worker = FrontendWorker.__new__(FrontendWorker)
-        worker.generate_env_config = None
+        worker.generate_env_config = PyEnvConfigs().generate_env_config
         pipeline = Pipeline.__new__(Pipeline)
         worker.pipeline = pipeline
-        pipeline._special_tokens = None
+        pipeline._special_tokens = SpecialTokens()
         pipeline.tokenizer = MagicMock()
         pipeline.tokenizer.encode.return_value = [1, 2]
-        pipeline.create_generate_config = lambda config, *args, **kwargs: config
         visitor = pipeline.backend_rpc_server_visitor = MagicMock()
         worker.backend_rpc_server_visitor = visitor
         visitor.pd_sep_config.role_type = RoleType.PDFUSION
@@ -298,6 +302,7 @@ class BatchFrontendWorkerTest(TestCase):
         response = worker.inference(
             True,
             prompt_batch=["first", "second"],
+            images=[["https://example.test/image.jpg"], []],
             max_new_tokens=37,
             generation_config={"max_new_tokens": 8, "aux_info": False},
             headers={"X-Request-ID": "trace", "ignored": "value"},
@@ -321,6 +326,31 @@ class BatchFrontendWorkerTest(TestCase):
             [37, 37], [item.generate_config.max_new_tokens for item in inputs]
         )
         self.assertIsNot(inputs[0].generate_config, inputs[1].generate_config)
+        self.assertEqual([], inputs[1].mm_inputs)
+        self.assertEqual(1, len(inputs[0].mm_inputs))
+        image = inputs[0].mm_inputs[0]
+        self.assertEqual("https://example.test/image.jpg", image.url)
+        self.assertEqual(MMUrlType.DEFAULT, image.mm_type)
+        self.assertEqual(0, image.tensor.numel())
+        self.assertEqual(torch.float32, image.tensor.dtype)
+        self.assertEqual("cpu", image.tensor.device.type)
+
+        visitor.batch_enqueue.reset_mock()
+        response = worker.inference(
+            True,
+            prompt_batch=["first"],
+            images=[["https://example.test/image.jpg"]],
+            generate_config={"return_prompt_logits": True},
+            **{request_id_field_name: 700},
+        )
+        with self.assertRaisesRegex(
+            FtRuntimeException, "prompt scoring does not support multimodal inputs"
+        ) as raised:
+            asyncio.run(CompleteResponseAsyncGenerator.get_last_value(response))
+        self.assertEqual(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR, raised.exception.exception_type
+        )
+        visitor.batch_enqueue.assert_not_awaited()
 
     def test_master_scheduled_batch_collects_all_final_responses(self):
         worker = FrontendWorker.__new__(FrontendWorker)
