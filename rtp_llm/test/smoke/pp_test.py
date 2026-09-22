@@ -166,6 +166,24 @@ VARIANTS.update(
         "multi_task_prompt_pp2": {"pp": 2, "tp": 1, "dp": 1, "ep": 1, "sp": 0},
         "multi_task_prompt_pp2_tp2": {"pp": 2, "tp": 2, "dp": 1, "ep": 1, "sp": 0},
         "multi_task_prompt_pp2_dp2": {"pp": 2, "tp": 1, "dp": 2, "ep": 2, "sp": 0},
+        "multi_task_prompt_pp2_pd": {
+            "pp": 2,
+            "tp": 1,
+            "dp": 1,
+            "ep": 1,
+            "sp": 0,
+            "pd": True,
+        },
+        "multi_task_prompt_pp2_cp2": {
+            "pp": 2,
+            "tp": 2,
+            "dp": 1,
+            "ep": 1,
+            "sp": 0,
+            "cp": 2,
+            "pd": True,
+            "decode_tp": 2,
+        },
     }
 )
 
@@ -990,7 +1008,7 @@ class MultiTaskPromptPPTest(unittest.TestCase):
     def shortDescription(self):
         return self.case_name
 
-    def start_server(self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name):
+    def start_server(self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name, cp=1):
         world_size = pp * tp * dp
         self.assertGreaterEqual(
             len(gpu_ids), world_size, f"need {world_size} GPUs, got {gpu_ids}"
@@ -1023,6 +1041,8 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             ]
             + speculative_args(checkpoint, 0)
         )
+        if cp > 1:
+            args += ["--prefill_cp_size", str(cp), "--cp_rotate_method", "ALL_GATHER"]
         server = MagaServerManager(
             env_args={
                 "CUDA_VISIBLE_DEVICES": ",".join(gpu_ids[:world_size]),
@@ -1067,8 +1087,10 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         self.assertEqual(len(result["output_ids"][0]), max_new_tokens, result)
         return result
 
-    def run_with_prompt(self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name):
-        server = self.start_server(checkpoint, gpu_ids, pp, tp, dp, ep, role_name)
+    def run_with_prompt(self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name, cp=1):
+        server = self.start_server(
+            checkpoint, gpu_ids, pp, tp, dp, ep, role_name, cp=cp
+        )
         try:
             return [
                 self.generate_with_task(server, task_id, prompt, tokens)
@@ -1077,19 +1099,177 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         finally:
             server.stop_server()
 
+    def run_pd_with_prompt(
+        self, checkpoint, gpu_ids, pp, tp, role_name, cp=1, decode_tp=None
+    ):
+        """Start separate PREFILL and DECODE servers (both PP>1) with multi_task_prompt."""
+        if decode_tp is None:
+            decode_tp = tp
+        prefill_ws = pp * tp
+        decode_ws = pp * decode_tp
+        total_gpus = prefill_ws + decode_ws
+        self.assertGreaterEqual(len(gpu_ids), total_gpus, f"PD needs {total_gpus} GPUs")
+        output_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prompt_file = output_dir / f"{role_name}_multi_task_prompt.json"
+        prompt_file.write_text(
+            json.dumps(MULTI_TASK_PROMPTS, ensure_ascii=False), encoding="utf-8"
+        )
+        prefill_port = MagaServerManager.get_free_port()
+        decode_port = MagaServerManager.get_free_port()
+        service_config = ServiceRoute(
+            service_id="test",
+            role_endpoints=[
+                GroupEndPoint(
+                    group="default",
+                    prefill_endpoint=EndPoint(
+                        type="Vipserver",
+                        address=f"127.0.0.1:{prefill_port}",
+                        protocol="http",
+                        path="/",
+                    ),
+                    decode_endpoint=EndPoint(
+                        type="Vipserver",
+                        address=f"127.0.0.1:{decode_port}",
+                        protocol="http",
+                        path="/",
+                    ),
+                )
+            ],
+            use_local=True,
+        ).model_dump_json()
+        common = (
+            f"--pp_size {pp} --dp_size 1 --ep_size 1"
+            " --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000"
+            " --reuse_cache 1"
+            f" --multi_task_prompt {prompt_file.resolve()}"
+        )
+        prefill_devices = ",".join(gpu_ids[:prefill_ws])
+        decode_devices = ",".join(gpu_ids[prefill_ws : prefill_ws + decode_ws])
+        cp_args = (
+            ["--prefill_cp_size", str(cp), "--cp_rotate_method", "ALL_GATHER"]
+            if cp > 1
+            else []
+        )
+        prefill = MagaServerManager(
+            env_args={
+                "CUDA_VISIBLE_DEVICES": prefill_devices,
+                "WORLD_SIZE": str(prefill_ws),
+                "MODEL_SERVICE_CONFIG": service_config,
+                "REMOTE_SERVER_PORT": str(decode_port),
+                "REMOTE_RPC_SERVER_IP": "localhost",
+                "RTP_LLM_STREAM_ASYNC": "0",
+                "RTP_LLM_DEVICE_INPUT": "0",
+            },
+            port=prefill_port,
+            role_name=f"{role_name}_prefill",
+            smoke_args_str=shlex.join(
+                base_smoke_args()
+                + shlex.split(common)
+                + ["--tp_size", str(tp), "--world_size", str(prefill_ws)]
+                + ["--role_type", "PREFILL"]
+                + cp_args
+                + speculative_args(checkpoint, 0)
+            ),
+        )
+        decode = MagaServerManager(
+            env_args={
+                "CUDA_VISIBLE_DEVICES": decode_devices,
+                "WORLD_SIZE": str(decode_ws),
+                "MODEL_SERVICE_CONFIG": service_config,
+                "REMOTE_SERVER_PORT": str(prefill_port),
+                "REMOTE_RPC_SERVER_IP": "localhost",
+                "RTP_LLM_STREAM_ASYNC": "0",
+                "RTP_LLM_DEVICE_INPUT": "0",
+            },
+            port=decode_port,
+            role_name=f"{role_name}_decode",
+            smoke_args_str=shlex.join(
+                base_smoke_args()
+                + shlex.split(common)
+                + ["--tp_size", str(decode_tp), "--world_size", str(decode_ws)]
+                + ["--role_type", "DECODE"]
+                + (["--cp_rotate_method", "PREFILL_CP"] if cp > 1 else [])
+                + speculative_args(checkpoint, 0)
+            ),
+        )
+        try:
+            self.assertTrue(
+                decode.start_server(
+                    model_path=checkpoint,
+                    model_type=MODEL_TYPE,
+                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                ),
+                f"PD decode failed to start: {decode.log_file_path}",
+            )
+            self.assertTrue(
+                prefill.start_server(
+                    model_path=checkpoint,
+                    model_type=MODEL_TYPE,
+                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                ),
+                f"PD prefill failed to start: {prefill.log_file_path}",
+            )
+            results = []
+            for task_id, prompt, tokens in MULTI_TASK_CASES:
+                generate_config = {
+                    "is_streaming": False,
+                    "max_new_tokens": tokens,
+                    "min_new_tokens": tokens,
+                    "top_k": 1,
+                    "top_p": 1.0,
+                    "random_seed": 1234,
+                    "return_output_ids": True,
+                    "aux_info": True,
+                    "task_id": task_id,
+                }
+                response = requests.post(
+                    f"http://127.0.0.1:{prefill.port}/",
+                    json={"prompt": prompt, "generate_config": generate_config},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                result = response.json()
+                self.assertTrue(result["finished"], result)
+                results.append(result)
+            return results
+        finally:
+            prefill.stop_server()
+            decode.stop_server()
+
     def test_pp_multi_task_prompt_matches_pp1(self):
         checkpoint = os.environ.get("CHECKPOINT_PATH")
         self.assertTrue(checkpoint, "Pass --test_env=CHECKPOINT_PATH=<checkpoint>")
         variant = VARIANTS[self.case_name]
         pp, tp, dp = variant["pp"], variant["tp"], variant.get("dp", 1)
         ep = variant.get("ep", 1)
+        cp = variant.get("cp", 1)
+        is_pd = variant.get("pd", False)
         gpu_ids = [str(x) for x in get_gpu_ids()]
         baseline = self.run_with_prompt(
-            checkpoint, gpu_ids, 1, tp, dp, ep, f"{self.case_name}_pp1_baseline"
+            checkpoint,
+            gpu_ids,
+            1,
+            tp,
+            dp,
+            ep,
+            f"{self.case_name}_pp1_baseline",
+            cp=1 if is_pd else cp,
         )
-        actual = self.run_with_prompt(
-            checkpoint, gpu_ids, pp, tp, dp, ep, self.case_name
-        )
+        if is_pd:
+            actual = self.run_pd_with_prompt(
+                checkpoint,
+                gpu_ids,
+                pp,
+                tp,
+                self.case_name,
+                cp=cp,
+                decode_tp=variant.get("decode_tp"),
+            )
+        else:
+            actual = self.run_with_prompt(
+                checkpoint, gpu_ids, pp, tp, dp, ep, self.case_name, cp=cp
+            )
         report = {
             "case": self.case_name,
             "model_type": MODEL_TYPE,
@@ -1141,6 +1321,8 @@ def load_tests(loader, tests, pattern):
             "multi_task_prompt_pp2",
             "multi_task_prompt_pp2_tp2",
             "multi_task_prompt_pp2_dp2",
+            "multi_task_prompt_pp2_pd",
+            "multi_task_prompt_pp2_cp2",
         ):
             case = MultiTaskPromptPPTest("test_pp_multi_task_prompt_matches_pp1")
             case.case_name = name

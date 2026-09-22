@@ -237,10 +237,8 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                        || !params.kv_cache_config.multi_task_prompt_tokens.empty()
                                        || !params.kv_cache_config.multi_task_prompt_str.empty();
     RTP_LLM_CHECK_WITH_INFO(
-        !has_multi_task_prompt
-            || (params.sp_config.type == SP_TYPE_NONE && !parallelism_config_.prefill_cp_config.is_enabled()),
-        "pipeline parallelism multi-task system prompts currently require "
-        "SP_NONE speculative decoding and no prefill context parallelism");
+        !has_multi_task_prompt || params.sp_config.type == SP_TYPE_NONE,
+        "pipeline parallelism multi-task system prompts currently require SP_NONE speculative decoding");
     const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
     RTP_LLM_CHECK_WITH_INFO(device_input == nullptr || std::strcmp(device_input, "1") != 0,
                             "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
