@@ -749,6 +749,26 @@ public:
     }
 };
 
+TEST_F(MtpExecutorTest, testExplicitMtpHiddenDefaultRows) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    components.executor->uses_recurrent_mtp_ = true;
+    auto output = createRandomGptModelOutputs(3, 4, 8);
+    output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat32);
+    components.executor->maybeOverrideLastHiddenWithMtpBuffer(output, *components.fake_draft_model);
+    EXPECT_TRUE(output.all_hidden_states.equal(output.mtp_target_hidden_states));
+}
+
+TEST_F(MtpExecutorTest, testExplicitMtpHiddenPositiveRowsRemainStrict) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    components.executor->uses_recurrent_mtp_ = true;
+    auto output = createRandomGptModelOutputs(3, 4, 8);
+    output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat32);
+    EXPECT_NO_THROW(components.executor->maybeOverrideLastHiddenWithMtpBuffer(
+        output, *components.fake_target_model, 3));
+    EXPECT_ANY_THROW(components.executor->maybeOverrideLastHiddenWithMtpBuffer(
+        output, *components.fake_target_model, 2));
+}
+
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
