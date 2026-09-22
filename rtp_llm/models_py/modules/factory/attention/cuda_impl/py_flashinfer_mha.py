@@ -1,3 +1,4 @@
+import os
 from typing import Any, Optional
 
 import torch
@@ -1278,6 +1279,28 @@ class PyFlashinferDecodeAttnOp(object):
             o_data_type=self.dtype,
             **plan_kwargs,
         )
+        _det_log = os.environ.get("RTP_DET_PLAN_LOG")
+        if _det_log:
+            try:
+                import time as _det_time
+                _pi = getattr(self.decode_wrapper, "_plan_info", None)
+                _lpl = None
+                try:
+                    _lpl = last_page_len.tolist()
+                except Exception:
+                    pass
+                _lpl_stats = ""
+                if _lpl:
+                    _lpl_stats = f" kvlen_n={len(_lpl)} kvlen_max={max(_lpl)} kvlen_sum={sum(_lpl)}"
+                with open(_det_log, "a") as _f:
+                    _f.write(
+                        f"{_det_time.time():.6f} op={id(self) % 100000} "
+                        f"bs={len(page_indptr) - 1} tc={int(self.use_tensor_core)} "
+                        f"plan_info={list(_pi) if _pi is not None else None}{_lpl_stats}"
+                        + chr(10)
+                    )
+            except Exception:
+                pass
         if use_cuda_core_graph_plan_cache:
             self._cuda_core_plan_page_indptr_h = (
                 self.fmha_params.decode_page_indptr_h.clone()

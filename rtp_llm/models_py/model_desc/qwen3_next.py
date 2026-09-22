@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
@@ -1478,6 +1479,96 @@ class Qwen3NextDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+
+_DET_CHK_W = {}
+_DET_CHK_BUF = None
+_DET_PF_BUF = None
+_DET_PF_IDX = None
+_DET_CNT = None
+_DET_CHK_F = None
+_DET_NSTEPS = 4096
+
+
+def _det_chk_line(path, fwd_n, tag, hidden_states, is_cuda_graph=False, attn_inputs=None):
+    global _DET_CHK_BUF, _DET_CHK_F, _DET_CNT, _DET_PF_BUF, _DET_PF_IDX
+    try:
+        hs = hidden_states.contiguous().view(-1, hidden_states.shape[-1])
+        h = hs.shape[1]
+        dev = hs.device
+        key = (h, str(dev))
+        w = _DET_CHK_W.get(key)
+        if w is None:
+            w = ((torch.arange(h, device=dev, dtype=torch.int64) * 2654435761) + 12345) % 1000003
+            _DET_CHK_W[key] = w
+        capturing = bool(torch.cuda.is_current_stream_capturing()) if dev.type == "cuda" else False
+        if _DET_CHK_BUF is None:
+            if capturing:
+                return
+            _DET_CHK_BUF = torch.zeros(42, _DET_NSTEPS, 8, dtype=torch.int64, device=dev)
+            _DET_PF_BUF = torch.zeros(42, _DET_NSTEPS, 64, dtype=torch.int64, device=dev)
+            _DET_CNT = torch.zeros(1, dtype=torch.int64, device=dev)
+        if tag == "entry":
+            slot = 0
+        elif tag == "norm":
+            slot = 41
+        else:
+            slot = int(tag[1:]) + 1
+        n = hs.shape[0]
+        is_pf = n > 8
+        if is_pf and capturing:
+            return
+        if n < 8 and capturing:
+            if tag == "norm":
+                _DET_CNT.add_(1)
+            return
+        idx = _DET_CNT % _DET_NSTEPS
+        if is_pf:
+            if tag == "entry" and attn_inputs is not None:
+                try:
+                    cu = None
+                    for attr in ("cu_seqlens_device", "cu_seqlens"):
+                        t = getattr(attn_inputs, attr, None)
+                        if t is not None:
+                            cu = t.detach().cpu().tolist()
+                            break
+                    if cu and len(cu) > 1:
+                        idxs = []
+                        for i in range(1, len(cu)):
+                            s, e = int(cu[i - 1]), int(cu[i])
+                            idxs.extend(range(max(s, e - 8), e))
+                        if idxs:
+                            _DET_PF_IDX = torch.as_tensor(idxs, dtype=torch.long, device=dev)
+                except Exception:
+                    _DET_PF_IDX = None
+            pf_idx = _DET_PF_IDX
+            if pf_idx is not None:
+                rows = hs.index_select(0, pf_idx)
+                chk = (rows.view(torch.int16).to(torch.int64) * w).sum(dim=1)
+                v64 = torch.zeros(64, dtype=torch.int64, device=dev)
+                v64[: chk.shape[0]] = chk
+                _DET_PF_BUF[slot].index_copy_(0, idx, v64.view(1, 64))
+        elif n < 8:
+            v8 = torch.zeros(8, dtype=torch.int64, device=dev)
+            v8[:n] = (hs.view(torch.int16).to(torch.int64) * w).sum(dim=1)
+            _DET_CHK_BUF[slot].index_copy_(0, idx, v8.view(1, 8))
+        else:
+            src8 = (hs.view(torch.int16).to(torch.int64) * w).sum(dim=1).view(1, 8)
+            _DET_CHK_BUF[slot].index_copy_(0, idx, src8)
+        if tag == "norm":
+            _DET_CNT.add_(1)
+            return
+        if tag == "entry" and not capturing:
+            if _DET_CHK_F is None:
+                _DET_CHK_F = open(path, "a")
+            cnt = int(_DET_CNT[0].item())
+            data = _DET_CHK_BUF[:, : cnt + 1, :].cpu().tolist()
+            pdata = _DET_PF_BUF[:, : cnt + 1, :].cpu().tolist()
+            print(f"DUMP fwd={fwd_n} pid={os.getpid()} cnt={cnt} shape={tuple(hs.shape)} data={data} pdata={pdata}", file=_DET_CHK_F)
+            _DET_CHK_F.flush()
+    except Exception:
+        pass
+
+
 class Qwen3NextModel(GptModelBase):
     def __init__(
         self,
@@ -1750,6 +1841,10 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
+        _det_dump = os.environ.get("RTP_DET_LAYER_DUMP")
+        if _det_dump:
+            self._det_fwd_n = getattr(self, "_det_fwd_n", 0) + 1
+            _det_chk_line(_det_dump, self._det_fwd_n, "entry", hidden_states, is_cuda_graph, attention_inputs)
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
         if capture_aux_hidden:
             self.begin_aux_hidden_capture(hidden_states, is_target_verify)
@@ -1771,12 +1866,16 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            if _det_dump:
+                _det_chk_line(_det_dump, self._det_fwd_n, f"L{i}", hidden_states)
             if i in self._mtp_aux_capture_layer_id_set:
                 self.capture_aux_hidden(i, hidden_states, residual)
         if capture_aux_hidden:
             self.finish_aux_hidden_capture()
 
         hidden_states, residual = self.norm(hidden_states, residual)
+        if _det_dump:
+            _det_chk_line(_det_dump, self._det_fwd_n, "norm", hidden_states)
         if capture_aux_hidden:
             assert self._mtp_target_hidden_states is not None
             return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
