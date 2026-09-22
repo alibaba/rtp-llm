@@ -218,19 +218,14 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._activation = getattr(cfg, "expert_activation", "swiglu")
         self._activation_kwargs = {}
         if self._activation == "situ":
-            import inspect
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
+                situ_kwargs,
+            )
 
-            required = {"activation_alpha", "activation_beta"}
-            if not required.issubset(
-                inspect.signature(deep_gemm.fp8_fp4_mega_moe).parameters
-            ):
-                raise RuntimeError("K3 requires a DeepGEMM backend with SiTU support")
-            if cfg.activation_beta is None or cfg.activation_beta <= 0:
-                raise ValueError("SiTU requires a positive activation_beta")
-            self._activation_kwargs = dict(
-                # DeepGEMM alpha is the gate tanh scale; beta is the up scale.
-                activation_alpha=cfg.activation_beta,
-                activation_beta=cfg.activation_linear_beta or 0.0,
+            self._activation_kwargs = situ_kwargs(
+                deep_gemm.fp8_fp4_mega_moe,
+                cfg.activation_beta,
+                cfg.activation_linear_beta,
             )
         elif self._activation != "swiglu":
             raise ValueError(f"Unsupported MegaMoE activation {self._activation!r}")
