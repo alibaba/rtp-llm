@@ -82,6 +82,37 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
 
 }  // namespace
 
+TEST_F(BlockPoolTest, GpuCacheTensorsCoverWholeMtpAllocation) {
+    auto cache_config = makeMtpCacheConfigByCreateSpConfig(2, 2, 4);
+    auto config = BlockPoolConfigHelper::createConfig(cache_config);
+    ASSERT_EQ(config.memory_layouts.size(), 3u);
+    for (bool use_cuda_malloc : {false, true}) {
+        BlockPool pool(config, AllocationType::DEVICE, false, use_cuda_malloc);
+        ASSERT_TRUE(pool.init());
+        const auto& tensors = pool.gpuCacheTensors();
+        ASSERT_EQ(tensors.size(), 1u);
+        EXPECT_TRUE(tensors[0].is_cuda());
+        EXPECT_TRUE(tensors[0].is_contiguous());
+        EXPECT_EQ(tensors[0].data_ptr(), pool.getBaseAddress());
+        EXPECT_EQ(tensors[0].nbytes(), config.total_size_bytes);
+        const auto begin = reinterpret_cast<uintptr_t>(tensors[0].data_ptr());
+        const auto end = begin + tensors[0].nbytes();
+        for (const auto& views : {pool.allLayerCacheBase(), pool.allLayerScaleCacheBase()}) {
+            for (const auto& view : views) {
+                ASSERT_TRUE(view.defined());
+                EXPECT_GE(reinterpret_cast<uintptr_t>(view.data_ptr()), begin);
+                EXPECT_LE(reinterpret_cast<uintptr_t>(view.data_ptr()) + view.nbytes(), end);
+            }
+        }
+        // Reinitialization must not retain obsolete allocations in the export.
+        ASSERT_TRUE(pool.init());
+        EXPECT_EQ(pool.gpuCacheTensors().size(), 1u);
+    }
+    BlockPool host_pool(config, AllocationType::HOST);
+    ASSERT_TRUE(host_pool.init());
+    EXPECT_TRUE(host_pool.gpuCacheTensors().empty());
+}
+
 // Initialization Test
 TEST_F(BlockPoolTest, ConstructorAndInit) {
     auto config = createTestConfig();

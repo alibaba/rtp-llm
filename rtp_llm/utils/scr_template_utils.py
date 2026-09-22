@@ -25,7 +25,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 from typing import Mapping as TypingMapping
 from typing import Optional
 
@@ -316,141 +316,31 @@ def _is_tensor(value: Any) -> bool:
         return False
 
 
-def _iter_tensors(value: Any) -> Iterator[Any]:
-    """Yield tensors from the nested forms accepted by Epsilon.
+def _engine_kv_cache_tensors(engine: Any) -> tuple[Any, ...]:
+    """Read complete owning allocations from the native KV allocator.
 
-    RTP-LLM's bound ``KVCache`` exposes both a flat per-layer view and a
-    per-layer/per-region view.  The latter is preferred by callers, but this
-    walker is also useful for plain lists/dicts in tests and future models.
+    Do not infer storage from Python model views: those can omit tiered MLA,
+    draft layers or entire pools. An invalid export rejects the whole hint.
     """
-
-    if value is None:
-        return
-    if _is_tensor(value):
-        # Undefined/empty placeholders are emitted by the typed region layout;
-        # Epsilon should only receive real allocations.
-        try:
-            device = getattr(value, "device", None)
-            if device is not None:
-                device_type = getattr(device, "type", str(device).split(":", 1)[0])
-                if device_type != "cuda":
-                    LOGGER.error(
-                        "refusing non-CUDA KV tensor registration device=%s",
-                        device,
-                    )
-                    return
-            is_contiguous = getattr(value, "is_contiguous", None)
-            if callable(is_contiguous) and not is_contiguous():
-                LOGGER.error("refusing non-contiguous KV tensor registration")
-                return
-            if value.numel() > 0 and value.data_ptr() != 0:
-                yield value
-        except Exception:
-            return
-        return
-    if isinstance(value, Mapping):
-        for item in value.values():
-            yield from _iter_tensors(item)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _iter_tensors(item)
-        return
-
-
-def _tensor_key(tensor: Any) -> tuple[Any, ...]:
-    """Return a stable key for de-duplicating tensor storage ranges."""
-
-    try:
-        device = str(tensor.device)
-    except Exception:
-        device = ""
-    try:
-        return (device, int(tensor.data_ptr()), int(tensor.nbytes))
-    except Exception:
-        # A tensor-like test double may not expose all metadata.  Object id is
-        # still sufficient to avoid duplicate references in one registration.
-        return (id(tensor),)
-
-
-def _kv_cache_tensors(kv_cache: Any) -> tuple[Any, ...]:
-    """Extract all non-empty base/region/scale cache tensors from KVCache."""
-
-    if kv_cache is None:
-        return ()
-
-    # Collect every exposed view.  A pybind vector is often present but empty
-    # for ordinary MHA models, so choosing a source solely by ``is not None``
-    # would accidentally discard the populated legacy view.  The pointer
-    # de-duplication below makes it safe to visit aliases more than once.
-    sources: list[Any] = []
-    for name in (
-        "kv_cache_base_by_layer_region",
-        "kv_cache_base_by_layer_region_flat",
-        "kv_cache_base_by_layer",
-        "kv_scale_base_by_layer_region",
-        "kv_scale_base_by_layer_region_flat",
-        "kv_scale_base_by_layer",
-    ):
-        try:
-            value = getattr(kv_cache, name, None)
-        except Exception:
-            value = None
-        if value is not None:
-            sources.append(value)
-
     result: list[Any] = []
     seen: set[tuple[Any, ...]] = set()
-    for source in sources:
-        for tensor in _iter_tensors(source):
-            key = _tensor_key(tensor)
-            if key in seen:
-                continue
+    for tensor in engine.gpu_cache_tensors():
+        if not _is_tensor(tensor):
+            raise ValueError("native KV cache export contains a non-tensor")
+        if (
+            str(tensor.device).split(":", 1)[0] != "cuda"
+            or not tensor.is_contiguous()
+            or tensor.numel() <= 0
+            or tensor.data_ptr() == 0
+            or tensor.nbytes <= 0
+        ):
+            raise ValueError(
+                "native KV cache export must contain non-empty contiguous CUDA tensors"
+            )
+        key = (str(tensor.device), int(tensor.data_ptr()), int(tensor.nbytes))
+        if key not in seen:
             seen.add(key)
             result.append(tensor)
-    return tuple(result)
-
-
-def _engine_kv_cache_tensors(engine: Any) -> tuple[Any, ...]:
-    """Collect cache storage owned by the target and optional draft engines.
-
-    Speculative decoding can construct a second C++ ``PyWrappedModel`` for an
-    MTP/Eagle/DSpARK draft model. Its Python model is reachable through
-    ``engine.propose_model.model`` and may own a distinct KV allocation. A
-    snapshot that registers only ``engine.model`` would then restore the main
-    cache while leaving the draft cache outside the optimized registration.
-    Pointer de-duplication keeps shared/aliased allocations safe.
-    """
-
-    candidates: list[Any] = []
-    seen_candidates: set[int] = set()
-
-    def _append(value: Any) -> None:
-        if value is None:
-            return
-        value_id = id(value)
-        if value_id in seen_candidates:
-            return
-        seen_candidates.add(value_id)
-        candidates.append(value)
-
-    _append(getattr(engine, "model", None))
-    _append(getattr(engine, "py_model", None))
-    propose_model = getattr(engine, "propose_model", None)
-    _append(propose_model)
-    _append(getattr(propose_model, "model", None))
-
-    result: list[Any] = []
-    seen_tensors: set[tuple[Any, ...]] = set()
-    for candidate in candidates:
-        for owner in (getattr(candidate, "py_model", None), candidate):
-            kv_cache = getattr(owner, "kv_cache", None)
-            for tensor in _kv_cache_tensors(kv_cache):
-                key = _tensor_key(tensor)
-                if key in seen_tensors:
-                    continue
-                seen_tensors.add(key)
-                result.append(tensor)
     return tuple(result)
 
 
@@ -849,9 +739,8 @@ def _register_for_scr_once(
 ) -> bool:
     """Register one rank's KV cache and runtime hooks with Epsilon.
 
-    The bound C++ engine has already populated ``py_model.kv_cache`` by this
-    point. Epsilon only needs the CUDA-backed cache storage for snapshot and
-    restore; the model pointer is deliberately not registered.
+    The bound C++ engine exports the allocator's complete GPU cache buffers.
+    Epsilon receives the original allocations without copying or freeing them.
     """
 
     started = time.monotonic()
@@ -878,13 +767,16 @@ def _register_for_scr_once(
         if previous is not None and previous.ok:
             return True
 
-    tensors = _engine_kv_cache_tensors(engine)
+    tensors: tuple[Any, ...] = ()
+    kv_bytes = 0
 
     cache_result: int | None = None
     hook_result: int | None = None
     ok = True
 
     try:
+        tensors = _engine_kv_cache_tensors(engine)
+        kv_bytes = sum(int(tensor.nbytes) for tensor in tensors)
         if tensors and adapter.capabilities.supports_kv_registration:
             cache_result = _call_result(epsilon.register_kv_caches, list(tensors))
             ok = ok and cache_result in (None, 0)
@@ -937,7 +829,7 @@ def _register_for_scr_once(
         _registrations[engine_key] = registration
     LOGGER.info(
         "sCR registration completed generation=%s phase=%s tensors=%d cache_result=%s "
-        "hook_result=%s ok=%s api_version=%s elapsed_ms=%.3f restore_elapsed_ms=%s",
+        "hook_result=%s ok=%s api_version=%s elapsed_ms=%.3f restore_elapsed_ms=%s kv_bytes=%d",
         _scr_generation(),
         os.environ.get(SCR_PHASE_ENV, "<unset>"),
         len(tensors),
@@ -947,6 +839,7 @@ def _register_for_scr_once(
         adapter.capabilities.api_version,
         registration.registration_duration_ms,
         _restore_elapsed_ms(),
+        kv_bytes,
     )
     return ok
 

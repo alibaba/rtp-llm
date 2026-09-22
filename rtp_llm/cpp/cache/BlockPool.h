@@ -31,6 +31,8 @@ public:
     bool init();
 
     MemoryType                 where() const;
+    // Whole owning allocations, independent of model/layer views. CPU backing is excluded.
+    const std::vector<torch::Tensor>& gpuCacheTensors() const { return gpu_cache_tensors_; }
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
 
@@ -86,7 +88,8 @@ private:
     void validateConfig() const;
     void initializeCacheBuffer();
     void initializePinnedCpuBuffer(const char* log_context);
-    void initializeCudaMallocBuffer();
+    torch::Tensor allocateGpuCacheBuffer(size_t size_bytes);
+    torch::Tensor allocateCudaBuffer(size_t size_bytes);
     void initializeLayerMappings();
     void initializeLayoutStrategies();
 
@@ -133,6 +136,7 @@ private:
     bool           use_pinned_cpu_backing_;
     bool           use_cuda_malloc_backing_;
 
+    std::vector<torch::Tensor> gpu_cache_tensors_;
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_  = nullptr;
     bool                        kvcache_reg_mr_  = false;

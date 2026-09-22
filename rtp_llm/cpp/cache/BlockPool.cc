@@ -142,6 +142,7 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
+    gpu_cache_tensors_.clear();
     if (allocation_type_ == AllocationType::HOST) {
         auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
@@ -166,11 +167,8 @@ void BlockPool::initializeCacheBuffer() {
         markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else if (use_pinned_cpu_backing_) {
         initializePinnedCpuBuffer("device block pool pinned CPU backing");
-    } else if (use_cuda_malloc_backing_) {
-        initializeCudaMallocBuffer();
     } else {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        cache_aligned_buffer_ = allocateGpuCacheBuffer(config_.total_size_bytes);
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
@@ -205,11 +203,23 @@ void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     }
 }
 
-void BlockPool::initializeCudaMallocBuffer() {
+torch::Tensor BlockPool::allocateGpuCacheBuffer(size_t size_bytes) {
+    auto tensor = use_cuda_malloc_backing_ ?
+                      allocateCudaBuffer(size_bytes) :
+                      torch::empty({static_cast<int64_t>(size_bytes)},
+                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    // Track at allocation time so new KV layouts cannot silently miss SCR registration.
+    if (tensor.numel() > 0) {
+        gpu_cache_tensors_.push_back(tensor);
+    }
+    return tensor;
+}
+
+torch::Tensor BlockPool::allocateCudaBuffer(size_t size_bytes) {
 #if USING_CUDA
     RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::DEVICE,
                             "cudaMalloc block pool backing requires DEVICE allocation");
-    RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes > 0, "cudaMalloc block pool total_size_bytes must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(size_bytes > 0, "cudaMalloc block pool total_size_bytes must be > 0");
 
     int  device_id  = -1;
     auto device_err = cudaGetDevice(&device_id);
@@ -218,11 +228,11 @@ void BlockPool::initializeCudaMallocBuffer() {
                             cudaGetErrorString(device_err));
 
     void*      ptr = nullptr;
-    const auto err = cudaMalloc(&ptr, config_.total_size_bytes);
+    const auto err = cudaMalloc(&ptr, size_bytes);
     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
                             "cudaMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
                             config_.pool_name.c_str(),
-                            config_.total_size_bytes,
+                            size_bytes,
                             cudaGetErrorString(err));
 
     auto deleter = [device_id](void* p) {
@@ -238,18 +248,19 @@ void BlockPool::initializeCudaMallocBuffer() {
         }
         (void)cudaFree(p);
     };
-    cache_aligned_buffer_ =
+    auto tensor =
         torch::from_blob(ptr,
-                         {static_cast<int64_t>(config_.total_size_bytes)},
+                         {static_cast<int64_t>(size_bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
     RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
                      config_.pool_name.c_str(),
                      ptr,
-                     config_.total_size_bytes,
+                     size_bytes,
                      device_id);
+    return tensor;
 #else
-    RTP_LLM_FAIL("cudaMalloc block pool backing requested but this binary was not built with CUDA");
+    throw std::runtime_error("cudaMalloc block pool backing requested but this binary was not built with CUDA");
 #endif
 }
 
