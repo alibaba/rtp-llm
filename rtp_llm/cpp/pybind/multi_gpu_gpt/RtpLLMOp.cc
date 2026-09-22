@@ -716,6 +716,15 @@ RtpLLMOp::~RtpLLMOp() {
     }
 }
 
+std::vector<torch::Tensor> RtpLLMOp::gpuCacheTensors() const {
+    RTP_LLM_CHECK_WITH_INFO(model_rpc_service_ != nullptr, "KV cache requested before engine initialization");
+    auto engine = model_rpc_service_->getEngine();
+    RTP_LLM_CHECK_WITH_INFO(engine != nullptr, "KV cache requested before engine initialization");
+    auto manager = engine->getCacheManager();
+    RTP_LLM_CHECK_WITH_INFO(manager != nullptr, "engine has no KV cache manager");
+    return manager->gpuCacheTensors();
+}
+
 void RtpLLMOp::pause() {
     auto engine = model_rpc_service_->getEngine();
     engine->pause();
@@ -738,6 +747,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("propose_model"),
              py::arg("token_processor"),
              py::arg("defer_service_start") = false)
+        .def("gpu_cache_tensors", &RtpLLMOp::gpuCacheTensors)
         .def("start_rpc_server", &RtpLLMOp::startRPCServer)
         .def("update_runtime_endpoints", &RtpLLMOp::updateRuntimeEndpoints)
         .def("start_http_server",

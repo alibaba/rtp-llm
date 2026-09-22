@@ -12,6 +12,10 @@
 
 namespace rtp_llm {
 
+std::vector<torch::Tensor> KVCacheAllocator::gpuCacheTensors() const {
+    return block_pool_ ? block_pool_->gpuCacheTensors() : std::vector<torch::Tensor>{};
+}
+
 bool KVCacheAllocator::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 

@@ -26,6 +26,7 @@ public:
                  py::object propose_model,
                  py::object token_processor,
                  bool       defer_service_start = false);
+    std::vector<torch::Tensor> gpuCacheTensors() const;
     void    startRPCServer();
     void    updateRuntimeEndpoints(py::object runtime_config);
     size_t  onflightRequestNum() const;
