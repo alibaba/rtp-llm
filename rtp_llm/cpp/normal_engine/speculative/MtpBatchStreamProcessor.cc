@@ -1495,7 +1495,18 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        StreamSpecUpdateInfo update_info{
+            new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        // Match normal prefill output rows. These are target outputs, not the
+        // draft recurrence feature used to construct the next proposal.
+        if (stream->generateConfig()->return_hidden_states) {
+            update_info.target_hidden_states =
+                prefill_output.model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size).clone();
+        }
+        if (stream->returnLogits()) {
+            update_info.target_logits = prefill_output.model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+        }
+        spec_update_infos.push_back(std::move(update_info));
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;

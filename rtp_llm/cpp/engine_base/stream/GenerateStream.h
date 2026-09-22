@@ -72,6 +72,11 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+
+    // Optional target diagnostics, separate from the draft recurrence feature.
+    // Undefined tensors retain the existing output behavior.
+    torch::Tensor target_hidden_states;
+    torch::Tensor target_logits;
 };
 
 struct SpeculativeExecutorStreamOutput {

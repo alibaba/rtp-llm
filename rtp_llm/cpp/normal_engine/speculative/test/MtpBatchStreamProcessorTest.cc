@@ -1709,6 +1709,77 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverri
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {8.1, 8.2});
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchReturnsTargetDiagnostics) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 4;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {2}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+
+    stream1->generateConfig()->max_new_tokens = 1;
+    stream2->generateConfig()->max_new_tokens = 1;
+    stream1->generateConfig()->return_logits = true;
+    stream1->generateConfig()->return_hidden_states = true;
+    stream2->generateConfig()->return_logits = true;
+    stream2->generateConfig()->return_hidden_states = true;
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    StreamGroups stream_groups(streams);
+
+    MergedOutput target_output;
+    target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+
+    target_output.model_output.hidden_states =
+        torch::tensor({10.0f, 11.0f, 20.0f, 21.0f}).reshape({2, 2});
+    target_output.model_output.logits =
+        torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f}).reshape({2, 4});
+
+    MergedOutput draft_output;
+    draft_output.model_output.all_hidden_states =
+        torch::tensor({0.3f, 0.4f, 1.5f, 1.6f, 1.7f, 1.8f}, torch::kFloat32).reshape({3, 2});
+    draft_output.sampler_output.token_ids = torch::tensor({2L, 0L}, torch::kInt64).reshape({2, 1});
+    draft_output.sampler_output.all_probs =
+        torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
+    auto draft_last_hidden_states = torch::tensor({9.1f, 9.2f, 8.1f, 8.2f}, torch::kFloat32).reshape({2, 2});
+
+    auto status = processor.dispatchPrefill(stream_groups, target_output, draft_output, draft_last_hidden_states);
+    EXPECT_TRUE(status.ok());
+
+    checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {9.1, 9.2});
+    checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {8.1, 8.2});
+
+    for (int row = 0; row < 2; ++row) {
+        auto stream = row == 0 ? stream1 : stream2;
+        auto output = stream->nextOutput(100);
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+        const auto& result = output.value().generate_outputs[0];
+        ASSERT_TRUE(result.hidden_states.has_value());
+        ASSERT_TRUE(result.logits.has_value());
+        EXPECT_EQ(toVec<float>(*result.hidden_states),
+                  toVec<float>(target_output.model_output.hidden_states.narrow(0, row, 1)));
+        EXPECT_EQ(toVec<float>(*result.logits),
+                  toVec<float>(target_output.model_output.logits.narrow(0, row, 1)));
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkCommitOnlyPrefillDispatch) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
