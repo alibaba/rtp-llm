@@ -36,7 +36,10 @@ public:
 public:
     torch::Tensor         logits;         // shape: [batch_size, vocab_size]
     mutable torch::Tensor token_ids;      // shape: [batch_size, max_length]
-    torch::Tensor         input_lengths;  // shape: [batch_size]
+    // False when token_ids is a compact [batch_size, 1] sampling output buffer
+    // rather than a materialized copy of the complete token history.
+    bool          token_ids_include_history = true;
+    torch::Tensor input_lengths;  // shape: [batch_size]
     // shape: [decoder_batch_size]
     torch::Tensor            sequence_lengths;
     LogitsProcessorStatesPtr logits_processor_states_ptr;
@@ -65,9 +68,10 @@ public:
 
     LogitsProcessorPhase phase = LogitsProcessorPhase::NORMAL_DECODE;
 
-    // MTP_VERIFY only. spec_vocab_mask_gpu is a bool mask with the same row
-    // count as logits; true means the token is disallowed for that verify row.
-    torch::Tensor                      spec_vocab_mask_gpu;
+    // MTP_VERIFY only. Compact int32 packed allow-mask plus its target-logits
+    // row mapping; each bit set to 1 means the token remains allowed.
+    torch::Tensor                      spec_packed_allow_mask_gpu;
+    torch::Tensor                      spec_logits_row_indices_gpu;
     torch::Tensor                      spec_cap_gpu;
     std::shared_ptr<torch::Event>      spec_mask_ready_event;
     std::shared_ptr<torch::Event>      spec_mask_consumed_event;

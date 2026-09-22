@@ -198,12 +198,6 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // [1, batch_size] — last row of transposed_tokens
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
 
-    constexpr bool       deterministic    = true;
-    constexpr int        max_sampling_rounds = 32;
-    auto [seed_t, offset_t] =
-        makeSamplingSeedOffsetTensors(
-            params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
-
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = params.top_k;
     torch::Tensor top_p_t   = params.top_p;
@@ -232,34 +226,19 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         if (output_all_probs_t.defined()) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
-    } else if (all_top_k_no_limit) {
-        top_p_sampling_from_probs(probs_t,
-                                  samples_t.squeeze(0),
-                                  success_t,
-                                  std::nullopt,
-                                  top_p_t,
-                                  1.0,
-                                  deterministic,
-                                  seed_t,
-                                  0,
-                                  offset_t,
-                                  0,
-                                  (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
-            top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
-        }
     } else {
-        // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
-        // kernel takes a top_k array, so normalize mixed batches after the
-        // pure top-p route has been selected.
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
-        if (all_top_p_one) {
-            top_k_sampling_from_probs(probs_t,
+        constexpr bool deterministic        = true;
+        constexpr int  max_sampling_rounds = 32;
+        auto [seed_t, offset_t]             = makeSamplingSeedOffsetTensors(
+            params.generator, batch_size, max_sampling_rounds, params.buffer_holder);
+
+        if (all_top_k_no_limit) {
+            top_p_sampling_from_probs(probs_t,
                                       samples_t.squeeze(0),
                                       success_t,
                                       std::nullopt,
-                                      top_k_t,
-                                      0,
+                                      top_p_t,
+                                      1.0,
                                       deterministic,
                                       seed_t,
                                       0,
@@ -267,27 +246,49 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                       0,
                                       (int64_t)cur_stream);
             if (output_all_probs_t.defined()) {
-                top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+                top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
             }
         } else {
-            top_k_top_p_sampling_from_probs(probs_t,
-                                            samples_t.squeeze(0),
-                                            success_t,
-                                            std::nullopt,
-                                            top_k_t,
-                                            0,
-                                            top_p_t,
-                                            1.0,
-                                            deterministic,
-                                            seed_t,
-                                            0,
-                                            offset_t,
-                                            0,
-                                            (int64_t)cur_stream);
-            if (output_all_probs_t.defined()) {
-                torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
-                top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
+            // kernel takes a top_k array, so normalize mixed batches after the
+            // pure top-p route has been selected.
+            std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
+            if (all_top_p_one) {
+                top_k_sampling_from_probs(probs_t,
+                                          samples_t.squeeze(0),
+                                          success_t,
+                                          std::nullopt,
+                                          top_k_t,
+                                          0,
+                                          deterministic,
+                                          seed_t,
+                                          0,
+                                          offset_t,
+                                          0,
+                                          (int64_t)cur_stream);
+                if (output_all_probs_t.defined()) {
+                    top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+                }
+            } else {
+                top_k_top_p_sampling_from_probs(probs_t,
+                                                samples_t.squeeze(0),
+                                                success_t,
+                                                std::nullopt,
+                                                top_k_t,
+                                                0,
+                                                top_p_t,
+                                                1.0,
+                                                deterministic,
+                                                seed_t,
+                                                0,
+                                                offset_t,
+                                                0,
+                                                (int64_t)cur_stream);
+                if (output_all_probs_t.defined()) {
+                    torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
+                    top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
+                    top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+                }
             }
         }
     }

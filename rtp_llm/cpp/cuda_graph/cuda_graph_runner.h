@@ -111,6 +111,9 @@ private:
     void              setPositionEncoding(torch::Tensor position_encoding) override;
     void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
     void              setInputEmbeddingScalar(float input_embedding_scalar) override;
+    bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
+        return is_prefill_cuda_graph_mode_ && is_mtp_draft_update_;
+    }
 
 private:
     std::vector<int> getDecodeBatchSizesToCapture();

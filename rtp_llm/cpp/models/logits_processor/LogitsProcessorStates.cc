@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -40,13 +41,18 @@ void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
 }  // namespace
 
 void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
-    const bool has_spec_mask = inputs.phase == LogitsProcessorPhase::MTP_VERIFY && inputs.spec_vocab_mask_gpu.defined();
+    const bool has_spec_mask =
+        inputs.phase == LogitsProcessorPhase::MTP_VERIFY && inputs.spec_packed_allow_mask_gpu.defined();
     if (has_spec_mask) {
         if (inputs.spec_mask_ready_event) {
             inputs.spec_mask_ready_event->block(cuda_graph::graphGetCurrentStream());
         }
-        recordSpecTensorUseOnCurrentStream(inputs.spec_vocab_mask_gpu);
-        inputs.logits.masked_fill_(inputs.spec_vocab_mask_gpu, BaseLogitsProcessor::neg_inf);
+        recordSpecTensorUseOnCurrentStream(inputs.spec_packed_allow_mask_gpu);
+        recordSpecTensorUseOnCurrentStream(inputs.spec_logits_row_indices_gpu);
+        SpecLogitsVerifyRunner::LaunchResult result;
+        result.packed_allow_mask_gpu  = inputs.spec_packed_allow_mask_gpu;
+        result.logits_row_indices_gpu = inputs.spec_logits_row_indices_gpu;
+        SpecLogitsVerifyRunner::applyMaskToLogits(inputs.logits, result, inputs.vocab_size);
     }
 
     for (size_t i = 0; i < logits_processors_.size(); i++) {

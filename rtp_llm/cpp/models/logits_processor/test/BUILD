@@ -73,3 +73,25 @@ cc_test(
         "TEST_USING_DEVICE": "CPU",
     },
 )
+
+cc_test(
+    name = "spec_logits_verify_runner_test",
+    srcs = ["SpecLogitsVerifyRunnerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "spec_logits_verify_runner_perf_test",
+    srcs = ["SpecLogitsVerifyRunnerPerfTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)

@@ -102,7 +102,8 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGroups& stream_groups,
                                                                 size_t              total_batch_size_in,
                                                                 size_t              total_batch_size_out,
-                                                                size_t              propose_step) const {
+                                                                size_t              propose_step,
+                                                                bool                compact_token_ids) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
     sampler_inputs.step             = stream_groups.maxSeqLen() + propose_step;
@@ -131,12 +132,12 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
     }
-    // Pin token_ids so Sampler::forward can non_blocking=true the H2D copy.
-    // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
-    // shows up as Memcpy Pageable→Device on the timeline (~33 MiB/rank/step
-    // at bs=128 / step=65552).
-    sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
+    // The compact MTP verify path only needs one sampled-token output slot per
+    // score row. History-dependent sampling features explicitly keep the full
+    // [batch, step + 1] allocation and legacy copy path.
+    const int64_t token_width = compact_token_ids ? 1 : static_cast<int64_t>(sampler_inputs.step + 1);
+    sampler_inputs.token_ids  = torch::empty({static_cast<int64_t>(total_batch_size_in), token_width}, pinned_i32);
+    sampler_inputs.token_ids_include_history = !compact_token_ids;
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }

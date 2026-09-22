@@ -370,6 +370,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "PREFILL_CP_SIZE": "16", "CP_ROTATE_METHOD": "ALLTOALL",
             "NCCL_GRAPH_REGISTER": "1",
             "MM_CACHE_GPU_MAX_BYTES": "21474836480",
+            "ENABLE_SP_PREFILL_CUDA_GRAPH": "0",
+            "RTP_LLM_MTP_ASYNC_PREPARE": "0",
         }
         for role, tp, dp, source_tp in (
             ("prefill", 8, 1, 8), ("prefill", 4, 1, 4),
@@ -395,12 +397,16 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
                     self.assertNotIn("CP_ROTATE_METHOD", env)
                     self.assertEqual(env["KV_CACHE_MEM_MB"], "56000" if role == "prefill" else "29000")
                     if role == "prefill":
+                        self.assertEqual(env["RTP_LLM_MTP_ASYNC_PREPARE"], "0")
+                        self.assertNotIn("ENABLE_SP_PREFILL_CUDA_GRAPH", env)
                         self.assertEqual(env["PREFILL_CP_KV_CACHE_SHARDED"], "1")
                         self.assertEqual(env["REUSE_CACHE"], "1")
                         self.assertEqual(env["MM_CACHE_GPU_MAX_BYTES"], "1073741824")
                         self.assertNotIn("PREFILL_CP_SIZE", env)
                         self.assertNotIn("DECODE_CP_KV_CACHE_SHARDED", env)
                     else:
+                        self.assertEqual(env["RTP_LLM_MTP_ASYNC_PREPARE"], "1")
+                        self.assertEqual(env["ENABLE_SP_PREFILL_CUDA_GRAPH"], "1")
                         self.assertNotIn("MM_CACHE_GPU_MAX_BYTES", env)
                         self.assertEqual(env["KIMI_K3_DECODE_TOPOLOGY"], "legacy")
                         self.assertEqual(env["DECODE_CP_KV_CACHE_SHARDED"], "1")

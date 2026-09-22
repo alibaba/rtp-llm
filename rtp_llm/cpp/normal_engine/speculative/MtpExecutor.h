@@ -306,6 +306,7 @@ private:
 
     AsyncRunner                             target_verify_prepare_runner_;
     AsyncRunner                             draft_prefill_prepare_runner_;
+    AsyncRunner                             spec_sampler_prepare_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
 

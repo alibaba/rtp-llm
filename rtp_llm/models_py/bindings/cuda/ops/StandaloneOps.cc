@@ -57,4 +57,66 @@ void cudaMaskLogits(torch::Tensor& logits, const torch::Tensor& mask, cudaStream
     }
 }
 
+void cudaApplyPackedMaskLogits(const torch::Tensor& logits,
+                               const torch::Tensor& packed_allow_mask,
+                               const torch::Tensor& row_indices,
+                               size_t               vocab_size,
+                               cudaStream_t         stream) {
+    RTP_LLM_CHECK(logits.dim() == 2 && logits.is_cuda());
+    RTP_LLM_CHECK(logits.stride(1) == 1);
+    RTP_LLM_CHECK(packed_allow_mask.dim() == 2 && packed_allow_mask.is_cuda());
+    RTP_LLM_CHECK(packed_allow_mask.scalar_type() == torch::kInt32 && packed_allow_mask.stride(1) == 1);
+    RTP_LLM_CHECK(row_indices.dim() == 1 && row_indices.is_cuda() && row_indices.is_contiguous());
+    RTP_LLM_CHECK(row_indices.scalar_type() == torch::kInt32);
+    RTP_LLM_CHECK(row_indices.numel() == packed_allow_mask.size(0));
+    RTP_LLM_CHECK(vocab_size > 0 && vocab_size <= static_cast<size_t>(logits.size(1)));
+    RTP_LLM_CHECK(static_cast<size_t>(packed_allow_mask.size(1)) >= (vocab_size + 31) / 32);
+
+    const int mask_rows          = static_cast<int>(packed_allow_mask.size(0));
+    const int logits_rows        = static_cast<int>(logits.size(0));
+    const int logits_row_stride  = static_cast<int>(logits.stride(0));
+    const int bitmask_row_stride = static_cast<int>(packed_allow_mask.stride(0));
+    const int bitmask_words      = static_cast<int>(packed_allow_mask.size(1));
+    if (mask_rows == 0) {
+        return;
+    }
+
+    if (logits.scalar_type() == torch::kFloat32) {
+        invokePackedMaskLogits<float>(logits.data_ptr<float>(),
+                                      packed_allow_mask.data_ptr<int32_t>(),
+                                      row_indices.data_ptr<int32_t>(),
+                                      mask_rows,
+                                      logits_rows,
+                                      logits_row_stride,
+                                      static_cast<int>(vocab_size),
+                                      bitmask_row_stride,
+                                      bitmask_words,
+                                      stream);
+    } else if (logits.scalar_type() == torch::kFloat16) {
+        invokePackedMaskLogits<half>(reinterpret_cast<half*>(logits.data_ptr<at::Half>()),
+                                     packed_allow_mask.data_ptr<int32_t>(),
+                                     row_indices.data_ptr<int32_t>(),
+                                     mask_rows,
+                                     logits_rows,
+                                     logits_row_stride,
+                                     static_cast<int>(vocab_size),
+                                     bitmask_row_stride,
+                                     bitmask_words,
+                                     stream);
+    } else if (logits.scalar_type() == torch::kBFloat16) {
+        invokePackedMaskLogits<__nv_bfloat16>(reinterpret_cast<__nv_bfloat16*>(logits.data_ptr<at::BFloat16>()),
+                                              packed_allow_mask.data_ptr<int32_t>(),
+                                              row_indices.data_ptr<int32_t>(),
+                                              mask_rows,
+                                              logits_rows,
+                                              logits_row_stride,
+                                              static_cast<int>(vocab_size),
+                                              bitmask_row_stride,
+                                              bitmask_words,
+                                              stream);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(false, "cudaApplyPackedMaskLogits: unsupported dtype");
+    }
+}
+
 }  // namespace rtp_llm
