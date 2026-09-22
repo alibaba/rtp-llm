@@ -816,6 +816,22 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_other_params(req)
         self.assertEqual(op, OtherParams(return_input_ids=False))
 
+    def test_non_stream_timeout_requires_external_sync_mode(self) -> None:
+        for key in ["x-dashscope-inner-streammode", "X-DashScope-Inner-Stream-Mode"]:
+            for mode in ["NONE", "none", "OUT", "", None]:
+                with self.subTest(key=key, mode=mode):
+                    req = predict_v2_pb2.ModelInferRequest()
+                    req.parameters["ds_header_attributes"].string_param = json.dumps(
+                        {
+                            "x-dashscope-inner-timeout": 10,
+                            "x-dashscope-inner-timeout-heartbeat-interval": 1,
+                            key: mode,
+                        }
+                    )
+                    op = parse_other_params(req)
+                    self.assertEqual(op.timeout_ms, 10000)
+                    self.assertEqual(op.non_stream_timeout, mode in ["NONE", "none"])
+
     def test_parse_other_params_bool(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "return_input_ids", "BOOL", [1], b"\x01")

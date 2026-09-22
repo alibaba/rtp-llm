@@ -720,6 +720,7 @@ class OtherParams:
     enable_thinking: bool | None = None
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
+    non_stream_timeout: bool = False
     traffic_reject_priority: int | None = None
     reasoning_effort: str | int | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
@@ -1037,6 +1038,18 @@ def parse_other_params(
 
     timeout_s = _parse_optional_int_value(ds_attrs.get("x-dashscope-inner-timeout"))
     timeout_ms = timeout_s * 1000 if timeout_s is not None and timeout_s > 0 else None
+    # External non-streaming requests still use incremental backend gRPC frames.
+    # Do not infer this from SamplingParams.is_streaming or from timeout alone.
+    stream_mode = _lookup_ds_request_control(ds_attrs, "x-dashscope-inner-streammode")
+    if not stream_mode:
+        stream_mode = _lookup_ds_request_control(
+            ds_attrs, "x-dashscope-inner-stream-mode"
+        )
+    non_stream_timeout = (
+        timeout_ms is not None
+        and isinstance(stream_mode, str)
+        and stream_mode.strip().upper() == "NONE"
+    )
 
     traffic_reject_priority = _parse_optional_int_value(
         ds_attrs.get("x-ds-request-priority")
@@ -1061,6 +1074,7 @@ def parse_other_params(
         enable_thinking=enable_thinking,
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,
+        non_stream_timeout=non_stream_timeout,
         traffic_reject_priority=traffic_reject_priority,
         reasoning_effort=reasoning_effort,
         request_headers=request_headers,
@@ -1376,7 +1390,9 @@ class StreamResponseBuilder:
         finish_reason = (
             finish_reason_override
             if finish_reason_override is not None
-            else LLMFinishReason.STOP if finished else LLMFinishReason.STREAMING
+            else LLMFinishReason.STOP
+            if finished
+            else LLMFinishReason.STREAMING
         )
         aux_info = getattr(out_py, "aux_info", None)
         prompt_tokens = (

@@ -481,6 +481,23 @@ class _CapacityThenBatchSloExpiredModelRpcClient:
 
 
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_close_after_partial_output_closes_model_rpc(self):
+        closed = []
+
+        class Client:
+            async def enqueue(self, _input):
+                try:
+                    yield "partial"
+                    yield "unread"
+                finally:
+                    closed.append(True)
+
+        visitor = self._visitor(Client())
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        self.assertEqual(await stream.__anext__(), "partial")
+        await stream.aclose()
+        self.assertEqual(closed, [True])
+
     def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.max_seq_len = 1024

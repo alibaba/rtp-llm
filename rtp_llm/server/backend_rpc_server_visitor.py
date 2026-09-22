@@ -765,6 +765,7 @@ class BackendRPCServerVisitor:
             first_exc: Optional[BaseException] = None
             while True:
                 yielded_output = False
+                stream = None
                 try:
                     stream = await route_and_enqueue(attempt_input)
                     if is_streaming:
@@ -831,6 +832,13 @@ class BackendRPCServerVisitor:
                         e,
                     )
                     await asyncio.sleep(min(0.2, 0.05 * attempt))
+                finally:
+                    # A bridge may stop after yielding partial output. Closing
+                    # this wrapper must reach model_rpc_client's cancellation
+                    # cleanup even when it is suspended at a yield.
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await close()
 
         return stream_with_aux_info()
 

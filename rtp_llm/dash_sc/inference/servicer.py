@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import struct
 from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Callable, Optional, Sequence
 
@@ -635,13 +636,10 @@ def _apply_request_overrides(
         if hasattr(generate_config, "thinking"):
             generate_config.thinking = True
     if other.timeout_ms is not None:
-        # Subtract a margin so the engine times out BEFORE the upstream gateway
-        # sends RST_STREAM. This ensures the timeout surfaces as a normal
-        # finish_reason=STOP_TIMEOUT response (200) rather than gRPC CANCELLED (5xx).
-        margin_ms = max(2000, min(5000, int(other.timeout_ms * 0.15)))
-        engine_timeout_ms = max(5000, int(other.timeout_ms) - margin_ms)
-        generate_config.timeout_ms = engine_timeout_ms
-        generate_config.ttft_timeout_ms = engine_timeout_ms
+        # This field also sets the P/D RPC hard deadline. Graceful non-stream
+        # completion is owned by the bridge timer, before this transport limit.
+        generate_config.timeout_ms = other.timeout_ms
+        generate_config.ttft_timeout_ms = other.timeout_ms
     if other.traffic_reject_priority is not None:
         generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
     # Auto-TPM QoS priority from x-dashscope-inner-qos-level. Mirrors
@@ -667,6 +665,106 @@ def _apply_request_overrides(
 
 
 async def iter_real_model_stream_infer(
+    request,
+    input_ids: ParsedInputIds,
+    sampling: SamplingParams,
+    other: OtherParams,
+    backend_visitor: Any,
+    **kwargs,
+):
+    """Finish synchronous requests gracefully before the backend RPC deadline.
+
+    One monotonic budget covers enqueue, thinking and answer phases. A deadline
+    does not turn backend errors or a request with no generated tokens into a
+    successful response. Closing the bridge also cancels its active backend.
+    """
+    with_stats = kwargs.pop("yield_access_stats", False)
+    stream = _iter_real_model_stream_infer(
+        request,
+        input_ids,
+        sampling,
+        other,
+        backend_visitor,
+        yield_access_stats=True,
+        **kwargs,
+    )
+    deadline = None
+    if other.non_stream_timeout and other.timeout_ms is not None:
+        # Keep the historical 2–5s gateway margin, capped for short budgets.
+        margin_ms = min(
+            max(2000, min(5000, int(other.timeout_ms * 0.15))),
+            other.timeout_ms * 0.2,
+        )
+        deadline = (
+            asyncio.get_running_loop().time() + (other.timeout_ms - margin_ms) / 1000
+        )
+    last = None
+    generated_tokens = 0
+    try:
+        while True:
+            try:
+                if deadline is None:
+                    item = await stream.__anext__()
+                else:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    item = await asyncio.wait_for(stream.__anext__(), remaining)
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError:
+                if deadline is None or asyncio.get_running_loop().time() < deadline:
+                    raise
+                if last is None or generated_tokens == 0:
+                    response = build_dash_error_response(
+                        str(request.id),
+                        request.model_name,
+                        error_spec=DASH_ERROR_TIMEOUT,
+                        status_message="non-stream deadline expired before any generated tokens",
+                    )
+                    stats = (
+                        0,
+                        True,
+                        DASH_ERROR_TIMEOUT.finish_reason,
+                        len(input_ids.values),
+                        0,
+                        (),
+                    )
+                else:
+                    response = predict_v2_pb2.ModelStreamInferResponse()
+                    response.CopyFrom(last[0])
+                    infer = response.infer_response
+                    for index, output in enumerate(infer.outputs):
+                        if output.name == "generated_ids":
+                            # Tokens were already delivered as incremental frames.
+                            output.shape[:] = [1, 0]
+                            infer.raw_output_contents[index] = struct.pack("<i", 0)
+                        elif output.name == "finish_reason":
+                            infer.raw_output_contents[index] = struct.pack(
+                                "<q", int(LLMFinishReason.STOP_TIMEOUT)
+                            )
+                        elif output.name == "finished":
+                            infer.raw_output_contents[index] = b"\x01"
+                    stats = (
+                        0,
+                        True,
+                        LLMFinishReason.STOP_TIMEOUT,
+                        last[1][3],
+                        last[1][4],
+                        (),
+                    )
+                yield (response, stats) if with_stats else response
+                return
+            last = item
+            generated_tokens += item[1][0]
+            if item[1][1]:
+                deadline = None
+            yield item if with_stats else item[0]
+    finally:
+        await stream.aclose()
+
+
+async def _iter_real_model_stream_infer(
     request,
     input_ids: ParsedInputIds,
     sampling: SamplingParams,
@@ -731,6 +829,8 @@ async def iter_real_model_stream_infer(
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
     should_echo = bool(matched_echo_ids)
     echoed = False
+    stream = None
+    phase2_stream = None
     try:
         input_ids_tensor = input_ids.tensor
         # Small text payloads contain messages=[]; avoid scanning long token IDs.
@@ -1271,6 +1371,7 @@ async def iter_real_model_stream_infer(
         )
         stats = (0, True, error_spec.finish_reason, prompt_length, 0, ())
         yield (response, stats) if yield_access_stats else response
+
     except Exception as e:
         _capture_access_exception(access_agg, e)
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
@@ -1284,6 +1385,11 @@ async def iter_real_model_stream_infer(
         )
         stats = (0, True, error_spec.finish_reason, prompt_length, 0, ())
         yield (response, stats) if yield_access_stats else response
+    finally:
+        if phase2_stream is not None:
+            await _close_async_stream_if_possible(phase2_stream, tag)
+        if stream is not None:
+            await _close_async_stream_if_possible(stream, tag)
 
 
 # ----------------------------------------------------------------------------

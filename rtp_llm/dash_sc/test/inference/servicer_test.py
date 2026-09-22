@@ -357,6 +357,214 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         _add_input_tensor(req, "input_ids", "INT32", [2], struct.pack("<2i", 1, 2))
         return req
 
+    def _timeout_chunk(self, ids=(3, 4), finished=False):
+        return GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(ids, dtype=torch.int32),
+                    finished=finished,
+                    aux_info=AuxInfo(input_len=2, reuse_len=1),
+                )
+            ]
+        )
+
+    async def test_non_stream_timeout_returns_partial_and_closes_backend(self):
+        closed = asyncio.Event()
+
+        async def backend():
+            try:
+                yield self._timeout_chunk()
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        visitor = _FakeVisitor(backend())
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                _parsed_input_ids([1, 2]),
+                SamplingParams(),
+                OtherParams(timeout_ms=100, non_stream_timeout=True),
+                visitor,
+                rtp_llm_request_id=1,
+                yield_access_stats=True,
+            )
+        )
+        self.assertTrue(closed.is_set())
+        self.assertEqual(visitor.last_generate_input.generate_config.timeout_ms, 100)
+        self.assertEqual([_gen_ids(c[0]) for c in chunks], [[3, 4], []])
+        self.assertEqual(_finish_reason(chunks[-1][0]), LLMFinishReason.STOP_TIMEOUT)
+        self.assertFalse(chunks[-1][0].error_message)
+        self.assertEqual(
+            chunks[-1][1], (0, True, LLMFinishReason.STOP_TIMEOUT, 2, 1, ())
+        )
+
+    async def test_non_stream_timeout_without_tokens_is_error(self):
+        async def backend():
+            await asyncio.Event().wait()
+            yield self._timeout_chunk()
+
+        stream = backend()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                _parsed_input_ids([1, 2]),
+                SamplingParams(),
+                OtherParams(timeout_ms=50, non_stream_timeout=True),
+                _FakeVisitor(stream),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_dash_error_payload(chunks[0])[1]["status_code"], 504)
+        self.assertEqual(_finish_reason(chunks[0]), DASH_ERROR_TIMEOUT.finish_reason)
+
+    async def test_non_stream_natural_finish_and_backend_errors_not_reclassified(self):
+        for fail in [False, True]:
+            with self.subTest(fail=fail):
+                stream = _FakeAsyncStream(
+                    [self._timeout_chunk(finished=not fail)],
+                    raise_after=1 if fail else None,
+                )
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        self._minimal_request(),
+                        _parsed_input_ids([1, 2]),
+                        SamplingParams(),
+                        OtherParams(timeout_ms=1000, non_stream_timeout=True),
+                        _FakeVisitor(stream),
+                        rtp_llm_request_id=1,
+                    )
+                )
+                self.assertTrue(stream.aclose_called)
+                self.assertEqual(
+                    "error_no" in chunks[-1].infer_response.parameters, fail
+                )
+                if not fail:
+                    self.assertEqual(_finish_reason(chunks[-1]), LLMFinishReason.STOP)
+
+    async def test_streaming_timeout_does_not_use_partial_completion(self):
+        async def backend():
+            yield self._timeout_chunk()
+            await asyncio.sleep(0.06)
+            raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, "rpc deadline")
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                _parsed_input_ids([1, 2]),
+                SamplingParams(),
+                OtherParams(timeout_ms=50),
+                _FakeVisitor(backend()),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(_dash_error_payload(chunks[-1])[1]["status_code"], 504)
+
+    async def test_non_stream_timeout_covers_enqueue(self):
+        closed = asyncio.Event()
+
+        class Visitor:
+            async def enqueue(self, _input):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                _parsed_input_ids([1, 2]),
+                SamplingParams(),
+                OtherParams(timeout_ms=50, non_stream_timeout=True),
+                Visitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertTrue(closed.is_set())
+        self.assertEqual(_dash_error_payload(chunks[-1])[1]["status_code"], 504)
+
+    async def test_non_stream_phase2_shares_original_deadline(self):
+        entered_phase2 = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def phase1():
+            await asyncio.sleep(0.12)
+            yield self._timeout_chunk([10, 1])
+
+        async def phase2():
+            try:
+                entered_phase2.set()
+                yield self._timeout_chunk([20])
+                await asyncio.sleep(0.12)
+                yield self._timeout_chunk([21], finished=True)
+            finally:
+                closed.set()
+
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+        visitor = _MultiStreamVisitor([phase1(), phase2()])
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                _parsed_input_ids([7, 8, 128821]),
+                SamplingParams(),
+                OtherParams(
+                    timeout_ms=250, non_stream_timeout=True, enable_thinking=True
+                ),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+        self.assertTrue(entered_phase2.is_set())
+        self.assertTrue(closed.is_set())
+        self.assertEqual(_finish_reason(chunks[-1]), LLMFinishReason.STOP_TIMEOUT)
+        self.assertTrue(chunks[-1].infer_response.id.endswith("-2"))
+        self.assertEqual(
+            [i for c in chunks for i in _gen_ids(c)], [10, 128822, 271, 20]
+        )
+
+    async def test_non_stream_client_cancel_does_not_return_partial_success(self):
+        entered = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def backend():
+            try:
+                yield self._timeout_chunk()
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        task = asyncio.create_task(
+            _drain(
+                iter_real_model_stream_infer(
+                    self._minimal_request(),
+                    _parsed_input_ids([1, 2]),
+                    SamplingParams(),
+                    OtherParams(timeout_ms=1000, non_stream_timeout=True),
+                    _FakeVisitor(backend()),
+                    rtp_llm_request_id=1,
+                )
+            )
+        )
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(closed.is_set())
+
     async def test_yields_one_chunk_from_mock_enqueue(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(
@@ -3193,8 +3401,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 0)
         self.assertEqual(generate_config.end_think_token_ids, [])
-        self.assertEqual(generate_config.timeout_ms, 1_795_000)
-        self.assertEqual(generate_config.ttft_timeout_ms, 1_795_000)
+        self.assertEqual(generate_config.timeout_ms, 1_800_000)
+        self.assertEqual(generate_config.ttft_timeout_ms, 1_800_000)
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
@@ -3501,9 +3709,12 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
             "rtp_llm.dash_sc.inference.servicer._prepare_v41_image_request",
             wraps=_prepare_v41_image_request,
         ) as prepare:
-            visitor, phase1_stream, chunks, upstream_ids = (
-                await self._run_image_two_phase()
-            )
+            (
+                visitor,
+                phase1_stream,
+                chunks,
+                upstream_ids,
+            ) = await self._run_image_two_phase()
         prepare.assert_called_once()
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertTrue(phase1_stream.aclose_called)
@@ -3606,9 +3817,9 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
         tokenizer = _dsv4_tokenizer()
         env = _GenerateEnvCfg()
         req = self._request([])
-        req.parameters["payload"].string_param = (
-            '{"input":{"messages":[]},"parameters":{}}'
-        )
+        req.parameters[
+            "payload"
+        ].string_param = '{"input":{"messages":[]},"parameters":{}}'
         req.parameters["ds_header_attributes"].string_param = json.dumps(
             {"x-ds-llm-thinking": True}
         )
@@ -3801,9 +4012,9 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
         ids = _parsed_input_ids([0, 129260, 1])
         ids = ParsedInputIds(values=NoScanList(ids.values), tensor=ids.tensor)
         req = self._request([])
-        req.parameters["payload"].string_param = (
-            '{"input":{"messages":[]},"parameters":{}}'
-        )
+        req.parameters[
+            "payload"
+        ].string_param = '{"input":{"messages":[]},"parameters":{}}'
         with patch(
             "rtp_llm.dash_sc.inference.servicer.asyncio.to_thread",
             side_effect=AssertionError,
