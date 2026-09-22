@@ -31,11 +31,19 @@ cc_library(
 )
 
 cc_library(
+    name = "rpc_error_log",
+    hdrs = ["RpcErrorLog.h"],
+    deps = ["//rtp_llm/cpp/utils:core_utils", "@grpc//:grpc++"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_rpc_pool",
     srcs = [],
     hdrs = ["RPCPool.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -57,6 +65,17 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_worker_rpc_cleanup",
+    hdrs = ["KvWorkerRpcCleanup.h"],
+    deps = [
+        ":rpc_error_log",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@grpc//:grpc++",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
@@ -72,6 +91,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":embedding_arpc_deps",
+        ":kv_worker_rpc_cleanup",
         ":model_rpc_pool",
         ":recent_cache_key_window",
         ":rpc_error_code",

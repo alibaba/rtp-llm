@@ -20,6 +20,36 @@ template<typename T>
 class Pool {
 public:
     absl::StatusOr<Connection<T>> getConnection(std::string peer) {
+        // Declare before the lock so every return unlocks before logging. These
+        // snapshots deliberately do not retain the removed Channel or Stub.
+        struct DiagnosticSnapshot {
+            const std::string& peer;
+            bool looked_up = false;
+            bool removed = false;
+            bool created = false;
+            grpc_connectivity_state observed_state = GRPC_CHANNEL_IDLE;
+            void* previous_channel_ptr = nullptr;
+            void* created_channel_ptr = nullptr;
+
+            ~DiagnosticSnapshot() noexcept {
+                try {
+                    if (looked_up) {
+                        RTP_LLM_LOG_INFO("[KV_RPC] event=POOL_LOOKUP peer=%s channel_ptr=%p observed_state=%d",
+                                         peer.c_str(), previous_channel_ptr, static_cast<int>(observed_state));
+                    }
+                    if (removed) {
+                        RTP_LLM_LOG_INFO("[KV_RPC] event=POOL_REMOVE peer=%s channel_ptr=%p reason=observed_bad_state",
+                                         peer.c_str(), previous_channel_ptr);
+                    }
+                    if (created) {
+                        RTP_LLM_LOG_INFO("[KV_RPC] event=POOL_CREATE peer=%s channel_ptr=%p",
+                                         peer.c_str(), created_channel_ptr);
+                    }
+                } catch (...) {
+                    // Logging must not change connection lookup or exception unwinding.
+                }
+            }
+        } diagnostic{peer};
         std::lock_guard<std::mutex> guard(mutex_);
         auto                        iter = connection_pool_.find(peer);
         // Check if we need to create a new connection
@@ -27,10 +57,14 @@ public:
         if (!need_new_connection) {
             // Check if existing connection is in a bad state
             auto channel_state = iter->second.channel->GetState(true);
+            diagnostic.looked_up = true;
+            diagnostic.previous_channel_ptr = iter->second.channel.get();
+            diagnostic.observed_state = channel_state;
             need_new_connection =
                 (channel_state == GRPC_CHANNEL_SHUTDOWN || channel_state == GRPC_CHANNEL_TRANSIENT_FAILURE);
             // Remove bad connection from pool if needed
             if (need_new_connection) {
+                diagnostic.removed = true;
                 connection_pool_.erase(iter);
             }
         }
@@ -57,6 +91,8 @@ public:
             }
             Connection<T> connection = {grpc_channel, std::move(grpc_stub)};
             connection_pool_[peer]   = connection;
+            diagnostic.created = true;
+            diagnostic.created_channel_ptr = grpc_channel.get();
             return connection;
         } else {
             return iter->second;
@@ -64,8 +100,25 @@ public:
     }
 
     void removeConnection(std::string peer) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        connection_pool_.erase(peer);
+        bool removed = false;
+        void* channel_ptr = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            auto iter = connection_pool_.find(peer);
+            if (iter != connection_pool_.end()) {
+                channel_ptr = iter->second.channel.get();
+                removed = true;
+            }
+            connection_pool_.erase(peer);
+        }
+        if (removed) {
+            try {
+                RTP_LLM_LOG_INFO("[KV_RPC] event=POOL_REMOVE peer=%s channel_ptr=%p reason=explicit_remove",
+                                 peer.c_str(), channel_ptr);
+            } catch (...) {
+                // The requested removal already completed; logging is best effort.
+            }
+        }
     }
 
     // TODO(xinfei.sxf) add watch for grpc channel state changed to closed

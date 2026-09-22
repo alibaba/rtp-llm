@@ -5,6 +5,21 @@ load("//bazel:device_defs.bzl",
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "rpc_error_log_test",
+    srcs = ["RpcErrorLogTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc:rpc_error_log",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest_main",
+        "@grpc//:grpc++",
+    ],
+    env = {"GRPC_VERBOSITY": "ERROR", "FT_SERVER_TEST": "0", "LOG_LEVEL": "INFO"},
+    size = "small",
+    timeout = "moderate",
+    tags = ["local"],
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
