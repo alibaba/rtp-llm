@@ -1,9 +1,8 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Union
 
 import torch
-
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
 
@@ -156,7 +155,32 @@ class GenerateOutput:
 
 @dataclass
 class GenerateOutputs:
-    generate_outputs: List[GenerateOutput] = field(default_factory=list)
+    generate_outputs: Sequence[GenerateOutput] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class BatchedTerminalOutputs(Sequence[GenerateOutput]):
+    """CPU terminal token storage; legacy consumers materialize rows on demand.
+
+    The tensor retains its protobuf bytes through frombuffer's storage owner.
+    Published tokens must be treated as read-only. No stream or KV owner is kept.
+    Only the aux-free, token-only beam path uses this representation.
+    """
+
+    output_ids: torch.Tensor  # [outputs, 1, tokens], same shape as FlattenOutputPB
+    input_ids: torch.Tensor
+
+    def __len__(self) -> int:
+        return self.output_ids.shape[0]
+
+    def __getitem__(self, index: Union[int, slice]):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        return GenerateOutput(
+            output_ids=self.output_ids[index],
+            input_ids=self.input_ids,
+            finished=True,
+        )
 
 
 @dataclass
