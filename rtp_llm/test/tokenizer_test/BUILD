@@ -1,3 +1,9 @@
+py_test(
+    name = "native_batch_decode_test",
+    srcs = ["native_batch_decode_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([
