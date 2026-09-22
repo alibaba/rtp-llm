@@ -34,6 +34,38 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
 
 }  // namespace
 
+GptModelOutputs MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+    const GptModelOutputs& target_output, const torch::Tensor& accept_lengths, int64_t verify_width) {
+    GptModelOutputs result;
+    if (!target_output.logits.defined() && !target_output.hidden_states.defined()) {
+        return result;
+    }
+    TORCH_CHECK(verify_width > 0 && accept_lengths.dim() == 1 && accept_lengths.numel() > 0,
+                "Target diagnostics require nonempty per-request accepted lengths and a positive verify width");
+    TORCH_CHECK(accept_lengths.scalar_type() == torch::kInt32 || accept_lengths.scalar_type() == torch::kInt64,
+                "Target diagnostic accepted lengths must be integers");
+    // Diagnostic requests already return device tensors to the host. Keep this
+    // validation off the default path, and reject invalid rows rather than clamp.
+    TORCH_CHECK(accept_lengths.min().item<int64_t>() >= 1
+                    && accept_lengths.max().item<int64_t>() <= verify_width,
+                "Target diagnostic accepted length is outside the verify window");
+    auto gather = [&](const torch::Tensor& values) {
+        if (!values.defined()) {
+            return torch::Tensor();
+        }
+        const auto batch = accept_lengths.numel();
+        TORCH_CHECK(values.dim() == 2 && values.size(0) >= batch * verify_width,
+                    "Target diagnostic rows do not cover the logical verify batch");
+        auto rows = torch::arange(batch, values.options().dtype(torch::kInt64)) * verify_width
+                    + accept_lengths.to(values.device(), torch::kInt64) - 1;
+        // index_select allocates: these outputs cannot alias graph buffers.
+        return values.index_select(0, rows);
+    };
+    result.logits = gather(target_output.logits);
+    result.hidden_states = gather(target_output.hidden_states);
+    return result;
+}
+
 torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch::Tensor& current_table,
                                                                     const torch::Tensor& previous_seq_lengths,
                                                                     const torch::Tensor& accept_lengths,
@@ -1559,6 +1591,13 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
         spec_update_info.speculative_propose_step = propose_step_;
         spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
+        if (stream->generateConfig()->return_hidden_states && spec_decode_output.target_hidden_states.defined()) {
+            spec_update_info.target_hidden_states =
+                spec_decode_output.target_hidden_states.narrow(0, batch_idx_out, next_batch_size);
+        }
+        if (stream->returnLogits() && spec_decode_output.target_logits.defined()) {
+            spec_update_info.target_logits = spec_decode_output.target_logits.narrow(0, batch_idx_out, next_batch_size);
+        }
         // Per-stream verify errors from SpecLogitsVerifyRunner ride the update
         // path so grammar/think mask failures reach the stream (main #1006).
         const size_t stream_idx = spec_update_infos.size();

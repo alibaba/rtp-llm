@@ -1619,6 +1619,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    GptModelOutputs target_diagnostics;
+    if (isTpRank0() && !warm_up_ && !model_input.is_fake_stream) {
+        bool need_logits = false;
+        bool need_hidden = false;
+        for (const auto& stream : streams) {
+            need_logits |= stream->returnLogits();
+            need_hidden |= stream->generateConfig()->return_hidden_states;
+        }
+        if (need_logits) {
+            TORCH_CHECK(model_output.logits.defined(), "Target verify did not return requested logits");
+            // Sampling processors may mutate logits; capture the model output first.
+            target_diagnostics.logits = model_output.logits.clone();
+        }
+        if (need_hidden) {
+            TORCH_CHECK(model_output.hidden_states.defined(), "Target verify did not return requested hidden states");
+            target_diagnostics.hidden_states = model_output.hidden_states;
+        }
+    }
+
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
@@ -1709,6 +1728,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 *spec_logits_result, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            if (target_diagnostics.logits.defined() || target_diagnostics.hidden_states.defined()) {
+                auto selected = MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+                    target_diagnostics, speculative_sampler_output.accept_len, propose_step_ + 1);
+                speculative_sampler_output.target_logits = std::move(selected.logits);
+                speculative_sampler_output.target_hidden_states = std::move(selected.hidden_states);
+            }
         }
         if (is_dspark_) {
             // Target verify wrote its aux features into the shared MTP hidden

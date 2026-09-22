@@ -406,6 +406,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
 
+    stream1->generateConfig()->is_streaming = true;
+    stream2->generateConfig()->is_streaming = true;
+    stream1->generateConfig()->return_logits = true;
+    stream1->generateConfig()->return_hidden_states = true;
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
@@ -413,6 +417,12 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
     spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
     spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
+
+    spec_decode_output.target_logits =
+        torch::tensor({8.0f, 7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f}).reshape({2, 4}).to(torch::kCUDA);
+    spec_decode_output.target_hidden_states =
+        torch::tensor({90.0f, 91.0f, 80.0f, 81.0f}).reshape({2, 2}).to(torch::kCUDA);
+    spec_decode_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -430,6 +440,19 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
+    auto output1 = stream1->nextOutput(100);
+    ASSERT_TRUE(output1.ok());
+    ASSERT_EQ(output1.value().generate_outputs.size(), 1u);
+    const auto& first = output1.value().generate_outputs[0];
+    ASSERT_TRUE(first.logits.has_value());
+    ASSERT_TRUE(first.hidden_states.has_value());
+    EXPECT_EQ(toVec<float>(*first.logits), (std::vector<float>{8, 7, 6, 5}));
+    EXPECT_EQ(toVec<float>(*first.hidden_states), (std::vector<float>{90, 91}));
+    auto output2 = stream2->nextOutput(100);
+    ASSERT_TRUE(output2.ok());
+    ASSERT_EQ(output2.value().generate_outputs.size(), 1u);
+    EXPECT_FALSE(output2.value().generate_outputs[0].logits.has_value());
+    EXPECT_FALSE(output2.value().generate_outputs[0].hidden_states.has_value());
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.
@@ -1707,6 +1730,43 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverri
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {9.1, 9.2});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {8.1, 8.2});
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testAcceptedTargetDiagnosticsExcludePaddingAndOwnStorage) {
+    GptModelOutputs target;
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    // Four logical requests at width four plus one padded physical request.
+    target.logits = torch::arange(80, options).reshape({20, 4});
+    target.hidden_states = torch::arange(40, options).reshape({20, 2});
+    auto accepted = torch::tensor({1, 2, 3, 4}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto selected = MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(target, accepted, 4);
+    EXPECT_EQ(toVec<float>(selected.logits.cpu()),
+              (std::vector<float>{0, 1, 2, 3, 20, 21, 22, 23, 40, 41, 42, 43, 60, 61, 62, 63}));
+    EXPECT_EQ(toVec<float>(selected.hidden_states.cpu()),
+              (std::vector<float>{0, 1, 10, 11, 20, 21, 30, 31}));
+    target.logits.fill_(-1);
+    target.hidden_states.fill_(-2);
+    EXPECT_EQ(selected.logits[3][0].item<float>(), 60.0f);
+    EXPECT_EQ(selected.hidden_states[3][0].item<float>(), 30.0f);
+    auto replay = MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(target, accepted, 4);
+    EXPECT_EQ(replay.logits[3][0].item<float>(), -1.0f);
+    EXPECT_EQ(replay.hidden_states[3][0].item<float>(), -2.0f);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testAcceptedTargetDiagnosticsRejectInvalidGeometry) {
+    GptModelOutputs target;
+    target.logits = torch::zeros({8, 4});
+    EXPECT_THROW(MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+                     target, torch::tensor({0, 1}, torch::kInt32), 4), c10::Error);
+    EXPECT_THROW(MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+                     target, torch::tensor({1, 5}, torch::kInt32), 4), c10::Error);
+    EXPECT_THROW(MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+                     target, torch::tensor({1, 1, 1}, torch::kInt32), 4), c10::Error);
+    EXPECT_THROW(MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+                     target, torch::tensor({1.5f, 2.0f}), 4), c10::Error);
+    GptModelOutputs empty;
+    EXPECT_FALSE(MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+                     empty, torch::Tensor(), 0).logits.defined());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchReturnsTargetDiagnostics) {
