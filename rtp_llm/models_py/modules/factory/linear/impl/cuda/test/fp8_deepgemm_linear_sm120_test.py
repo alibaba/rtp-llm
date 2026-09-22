@@ -382,6 +382,22 @@ class CudaFp8DeepGEMMLinearSM120Test(OnlineFp8LoaderTestBase, unittest.TestCase)
         self.assertTrue(has_deep_gemm())
         self.assertTrue(is_deep_gemm_e8m0_used())
 
+    def test_fused_bias_gelu_quant_accepts_row_bias(self):
+        torch.manual_seed(20261010)
+        # Four groups fill every byte of each packed UE8M0 scale value.
+        output = torch.randn((17, 512), device="cuda", dtype=torch.bfloat16)
+        bias = torch.randn((1, 512), device="cuda", dtype=torch.bfloat16)
+        linear = CudaFp8DeepGEMMLinear.__new__(CudaFp8DeepGEMMLinear)
+        torch.nn.Module.__init__(linear)
+
+        linear.bias = bias
+        actual_q, actual_s = linear._bias_gelu_quantize_output(output)
+        linear.bias = bias.reshape(-1)
+        expected_q, expected_s = linear._bias_gelu_quantize_output(output)
+
+        self.assertTrue(torch.equal(actual_q, expected_q))
+        self.assertTrue(torch.equal(actual_s, expected_s))
+
 
 class OnlineLinearAttentionTPTest(unittest.TestCase):
     def test_tp2_linear_attention_shards_preserve_weights_scales_and_gemm(self):

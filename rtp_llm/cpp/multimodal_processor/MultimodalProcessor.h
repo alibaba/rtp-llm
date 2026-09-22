@@ -82,7 +82,8 @@ private:
                    const torch::Tensor&                             token_ids,
                    const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
                    torch::Tensor                                    token_type_ids = {},
-                   const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
+                   const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt,
+                   bool                                             hash_features  = true);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 
@@ -102,7 +103,8 @@ public:
                                        grpc::ServerContext*                         server_context = nullptr);
 
     ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
-                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
+                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
+                                                         bool hash_features = true);
 };
 
 }  // namespace rtp_llm

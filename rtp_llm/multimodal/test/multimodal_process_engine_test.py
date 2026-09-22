@@ -215,6 +215,19 @@ class MMProcessEngineTest(TestCase):
         self.assertEqual(res.embeddings, [torch.tensor(0)])
         self.assertEqual(res.position_ids, [])
 
+    def test_precomputed_cpp_position_ids_are_cpu(self):
+        engine = self.mm_process_engine
+        engine.supports_precomputed_embedding = True
+        position_ids = torch.tensor([3, 4], dtype=torch.int32, device=engine.device)
+        embeddings = torch.zeros((2, 4), device=engine.device)
+        with patch.object(
+            engine.mm_part, "embedding", return_value=(embeddings, position_ids)
+        ) as embedding:
+            result = engine.mm_embedding_precomputed_cpp([embeddings])
+        embedding.assert_called_once()
+        self.assertEqual(result.position_ids[0].device.type, "cpu")
+        torch.testing.assert_close(result.position_ids[0], position_ids.cpu())
+
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     def test_embedding_length_metric_sums_a_request(self, report):
         """A multi-image request emits one gauge containing all visual tokens."""
@@ -1935,6 +1948,24 @@ class _UrlRecordingEmbedding(FakeMultiModalEmbeddingInterface):
 
 
 class MMProcessEngineGreenNetTest(TestCase):
+    def test_inline_embedding_with_cache_claim_uses_work_items(self):
+        engine = self._make_engine()
+        engine.supports_precomputed_embedding = True
+        inp = self._make_input("fake://inline-cache")
+        key = inp.cache_key()
+        _, entry = engine._embedding_cache.try_acquire(key)
+        try:
+            with patch.object(
+                engine, "_create_work_items", side_effect=RuntimeError("work-item path")
+            ) as create_work_items:
+                with self.assertRaisesRegex(RuntimeError, "work-item path"):
+                    engine._mm_embedding_impl(
+                        [inp], cache_claim=(key, entry, "miss"), report_vit_error=False
+                    )
+                create_work_items.assert_called_once()
+        finally:
+            engine.stop()
+
     def test_stop_drains_running_compute_before_closing_dependencies(self):
         engine = self._make_engine()
         entered, release, stopping = (
