@@ -31,6 +31,7 @@ public:
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) override;
 
     CacheLayerLayout allLayerCacheBase() const override;
+    std::vector<torch::Tensor> gpuCacheTensors() const override;
 
     size_t                  freeBlocksNum() const override;
     size_t                  availableBlocksNum() const override;

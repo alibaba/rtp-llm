@@ -389,6 +389,44 @@ TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) 
     EXPECT_EQ(allocator->groupBlockPools()[1]->where(), MemoryType::MEMORY_GPU);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, GpuCacheTensorsExcludePinnedDsv4Pools) {
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    config.fixed_pool_uses_pinned_cpu = true;
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    const auto tensors = allocator->gpuCacheTensors();
+    size_t index = 0;
+    for (const auto& pool : allocator->groupBlockPools()) {
+        if (pool->where() == MemoryType::MEMORY_GPU) {
+            ASSERT_LT(index, tensors.size());
+            EXPECT_EQ(tensors[index].data_ptr(), pool->getBaseAddress());
+            EXPECT_EQ(tensors[index].nbytes(), pool->getTotalSizeBytes());
+            ++index;
+        } else {
+            EXPECT_TRUE(pool->gpuCacheTensors().empty());
+        }
+    }
+    EXPECT_EQ(index, tensors.size());
+    EXPECT_GT(index, 0u);
+    EXPECT_LT(index, allocator->groupBlockPools().size());
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, GpuCacheTensorsIncludeEveryPool) {
+    auto config = makeTinyMultiPoolHybridConfig();
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    const auto tensors = allocator->gpuCacheTensors();
+    ASSERT_EQ(tensors.size(), allocator->groupBlockPools().size());
+    ASSERT_GT(tensors.size(), 1u);
+    for (size_t i = 0; i < tensors.size(); ++i) {
+        const auto& pool = allocator->groupBlockPools()[i];
+        EXPECT_TRUE(tensors[i].is_cuda());
+        EXPECT_TRUE(tensors[i].is_contiguous());
+        EXPECT_EQ(tensors[i].data_ptr(), pool->getBaseAddress());
+        EXPECT_EQ(tensors[i].nbytes(), pool->getTotalSizeBytes());
+    }
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsFirstGroupPool) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);

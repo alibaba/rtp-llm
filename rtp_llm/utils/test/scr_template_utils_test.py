@@ -17,6 +17,9 @@ class _FakeTensor:
         self.nbytes = nbytes
         self._numel = numel
 
+    def is_contiguous(self) -> bool:
+        return True
+
     def data_ptr(self) -> int:
         return self._pointer
 
@@ -229,84 +232,91 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertEqual(scr.epsilon_backend_mode(native), "wheel-native")
             self.assertEqual(scr.epsilon_backend_mode(external), "external-shim")
 
-    def test_registers_all_unique_kv_cache_regions_and_scales(self) -> None:
-        model = SimpleNamespace()
-        base = _FakeTensor(100)
-        region = _FakeTensor(200)
-        scale = _FakeTensor(300, nbytes=4)
-        empty = _FakeTensor(400, numel=0)
-        model.kv_cache = SimpleNamespace(
-            kv_cache_base_by_layer_region=[[base, base, empty], [region]],
-            kv_cache_base_by_layer=[[empty]],
-            kv_scale_base_by_layer_region=[[scale, scale]],
-            kv_scale_base_by_layer=[[empty]],
+    def test_registers_native_allocations_without_python_model_views(self) -> None:
+        # The allocator includes target/draft slices and all pools in this export.
+        base = _FakeTensor(100, nbytes=64)
+        indexer = _FakeTensor(200, nbytes=8)
+        hbm = _FakeTensor(300, nbytes=32)
+        engine = SimpleNamespace(
+            gpu_cache_tensors=lambda: [base, indexer, hbm, _FakeTensor(100, nbytes=64)]
         )
-        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
         epsilon = _FakeEpsilon()
-
-        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
-            scr.importlib, "import_module", return_value=epsilon
+        with mock.patch.dict(
+            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
+        ), mock.patch.object(
+            scr, "_load_epsilon", return_value=epsilon
         ), mock.patch.object(
             scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
-        ):
+        ), mock.patch.object(
+            scr, "_capture_cuda_device", return_value=None
+        ), self.assertLogs(
+            scr.LOGGER, level="INFO"
+        ) as logs:
+            self.assertTrue(scr.register_for_scr(engine))
             self.assertTrue(scr.register_for_scr(engine))
 
         self.assertEqual([call[0] for call in epsilon.calls], ["cache", "before"])
-        self.assertEqual(epsilon.calls[0][1], [base, region, scale])
-        self.assertTrue(callable(epsilon.before_callback))
-        self.assertEqual(scr._registrations[id(engine)].tensors, (base, region, scale))
+        self.assertEqual(epsilon.calls[0][1], [base, indexer, hbm])
+        self.assertEqual(scr._registrations[id(engine)].tensors, (base, indexer, hbm))
+        self.assertTrue(any("kv_bytes=104" in line for line in logs.output))
 
-    def test_registers_distinct_speculative_draft_cache(self) -> None:
-        target = _FakeTensor(100)
-        draft = _FakeTensor(200)
-        target_model = SimpleNamespace(
-            py_model=SimpleNamespace(
-                kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[target]])
-            )
-        )
-        draft_model = SimpleNamespace(
-            py_model=SimpleNamespace(
-                kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[draft]])
-            )
-        )
-        engine = SimpleNamespace(
-            model=target_model,
-            propose_model=SimpleNamespace(model=draft_model),
-        )
-        epsilon = _FakeEpsilon()
-
-        with mock.patch.dict(
-            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
-        ), mock.patch.object(
-            scr.importlib, "import_module", return_value=epsilon
-        ), mock.patch.object(
-            scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
+    def test_invalid_native_allocation_rejects_entire_registration(self) -> None:
+        cpu = _FakeTensor(200)
+        cpu.device = "cpu"
+        strided = _FakeTensor(300)
+        strided.is_contiguous = lambda: False
+        for invalid in (
+            cpu,
+            strided,
+            _FakeTensor(0),
+            _FakeTensor(400, numel=0),
+            object(),
         ):
-            self.assertTrue(scr.register_for_scr(engine))
+            with self.subTest(invalid=invalid):
+                scr._reset_for_test()
+                engine = SimpleNamespace(
+                    gpu_cache_tensors=lambda: [_FakeTensor(100), invalid]
+                )
+                epsilon = _FakeEpsilon()
+                with mock.patch.dict(
+                    os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
+                ), mock.patch.object(
+                    scr, "_load_epsilon", return_value=epsilon
+                ), mock.patch.object(
+                    scr,
+                    "_is_tensor",
+                    side_effect=lambda value: isinstance(value, _FakeTensor),
+                ), self.assertLogs(
+                    scr.LOGGER, level="ERROR"
+                ):
+                    self.assertFalse(scr.register_for_scr(engine))
+                self.assertEqual(epsilon.calls, [])
+                self.assertFalse(scr._registrations[id(engine)].ok)
 
-        self.assertEqual(epsilon.calls[0][1], [target, draft])
-
-    def test_registration_rejects_cpu_cache_pointer(self) -> None:
-        cpu_tensor = _FakeTensor(123)
-        cpu_tensor.device = "cpu"
-        model = SimpleNamespace(
-            kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[cpu_tensor]])
+    def test_missing_native_export_does_not_fall_back_to_model_field_names(
+        self,
+    ) -> None:
+        engine = SimpleNamespace(
+            model=SimpleNamespace(
+                py_model=SimpleNamespace(
+                    kv_cache=SimpleNamespace(kv_cache_base_by_layer=[_FakeTensor(100)])
+                )
+            )
         )
-        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
         epsilon = _FakeEpsilon()
         with mock.patch.dict(
             os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
         ), mock.patch.object(
-            scr.importlib, "import_module", return_value=epsilon
-        ), mock.patch.object(
-            scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
+            scr, "_load_epsilon", return_value=epsilon
+        ), self.assertLogs(
+            scr.LOGGER, level="ERROR"
         ):
             self.assertFalse(scr.register_for_scr(engine))
-        self.assertFalse(any(call[0] == "cache" for call in epsilon.calls))
+        self.assertEqual(epsilon.calls, [])
 
     def test_registration_is_inert_when_epsilon_is_not_active(self) -> None:
-        model = SimpleNamespace(kv_cache=SimpleNamespace())
-        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
+        allocations = []
+        engine = SimpleNamespace(gpu_cache_tensors=lambda: allocations)
         epsilon = _FakeEpsilon(snap_enabled=False)
 
         with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
@@ -317,8 +327,8 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         self.assertNotIn(id(engine), scr._registrations)
 
     def test_registration_failure_can_retry_when_cache_becomes_ready(self) -> None:
-        model = SimpleNamespace(kv_cache=SimpleNamespace())
-        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
+        allocations = []
+        engine = SimpleNamespace(gpu_cache_tensors=lambda: allocations)
         epsilon = _FakeEpsilon()
         with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
@@ -326,16 +336,13 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
         ):
             self.assertFalse(scr.register_for_scr(engine))
-            model.kv_cache.kv_cache_base_by_layer = [[_FakeTensor(123)]]
+            allocations.append(_FakeTensor(123))
             self.assertTrue(scr.register_for_scr(engine))
         self.assertEqual([call[0] for call in epsilon.calls], ["before", "cache"])
 
     def test_before_callback_uses_captured_device(self) -> None:
         epsilon = _FakeEpsilon()
-        model = SimpleNamespace(
-            kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[_FakeTensor(1)]])
-        )
-        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
+        engine = SimpleNamespace(gpu_cache_tensors=lambda: [_FakeTensor(1)])
         with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(
