@@ -347,6 +347,10 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    // Optional CPU mirrors for model-specific packed-input metadata. Models
+    // must not infer business token semantics in the shared C++ execution path.
+    torch::Tensor input_ids_host;
+    torch::Tensor text_tokens_mask_host;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

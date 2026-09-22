@@ -198,6 +198,8 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
+        .def_readwrite("input_ids_host", &PyModelInputs::input_ids_host)
+        .def_readwrite("text_tokens_mask_host", &PyModelInputs::text_tokens_mask_host)
         .def(pybind11::init([](torch::Tensor       input_ids,
                                torch::Tensor       input_hiddens,
                                torch::Tensor       combo_position_ids,

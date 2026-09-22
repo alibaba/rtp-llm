@@ -300,6 +300,8 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    input_ids_host: torch.Tensor | None
+    text_tokens_mask_host: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
