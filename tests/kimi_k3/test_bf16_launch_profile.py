@@ -46,6 +46,9 @@ def test_fixed_full_profile(tmp_path, role):
         assert options["--" + key] == "8"
     assert options["--dp_size"] == options["--prefill_cp_size"] == "1"
     assert options["--cache_store_rdma_mode"] == "1"
+    assert options["--decode_retry_times"] == "0"
+    assert options["--prefill_retry_times"] == "0"
+    assert "--int8_kv_cache" not in options
     assert options["--enable_cuda_graph"] == str(int(role == "DECODE"))
     assert options["--concurrency_limit"] == "16"
     assert int(options["--max_seq_len"]) > 2 * 65536
@@ -85,3 +88,18 @@ def test_allowed_prefix_does_not_exempt_network_mount(monkeypatch):
     monkeypatch.setattr(launcher.subprocess, "check_output", lambda *a, **kw: "nfs4\n")
     with pytest.raises(ValueError, match="filesystem"):
         launcher.require_local("/data7/user/run")
+
+
+def test_cpu_tp_socket_fits_actual_full_model_run_directory():
+    run = "/data7/luohaocheng.lhc/k3-main-decode-precheck-20260922-02"
+    environment = launcher.cpu_tp_socket_environment(run)
+    path = Path(environment["RTP_LLM_CPU_TP_BROADCASTER_DIR"]) / (
+        "rtp_llm_tp_" + environment["RTP_LLM_CPU_TP_BROADCASTER_ID"] + "_dp0_0.sock"
+    )
+    assert len(bytes(path)) < 108
+    assert path.parent.parent == Path(run)
+
+
+def test_cpu_tp_socket_rejects_oversize_run_path():
+    with pytest.raises(ValueError, match="too long"):
+        launcher.cpu_tp_socket_environment("/data7/" + "x" * 100)

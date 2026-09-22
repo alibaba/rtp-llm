@@ -75,7 +75,6 @@ def launch_config(args):
         "kernel_seq_size_per_block": 128,
         "linear_step": 1,
         "ssm_state_dtype": "fp32",
-        "int8_kv_cache": 0,
         "fp8_kv_cache": 0,
         "reuse_cache": 1,
         "enable_device_cache": 1,
@@ -83,6 +82,9 @@ def launch_config(args):
         "enable_cuda_graph": int(args.role == "DECODE"),
         "cache_store_rdma_mode": 1,
         "cache_store_rdma_connect_timeout_ms": 30000,
+        # Formal smoke must expose the first failure, including PD retries.
+        "prefill_retry_times": 0,
+        "decode_retry_times": 0,
         "load_cache_timeout_ms": 7200000,
         "load_method": "fastsafetensors",
         "warm_up": 0,
@@ -104,6 +106,18 @@ def require_local(path):
     ).strip()
     if fs not in {"ext4", "xfs", "btrfs"}:
         raise ValueError(f"Unsupported local filesystem: {resolved}: {fs}")
+
+
+def cpu_tp_socket_environment(run):
+    directory = Path(run) / "uds"
+    # Match main's socket suffix. DP is fixed to one in this profile.
+    socket_path = directory / "rtp_llm_tp_k3_dp0_0.sock"
+    if len(os.fsencode(socket_path)) >= 108:
+        raise ValueError("Run directory is too long for the CPU TP Unix socket")
+    return {
+        "RTP_LLM_CPU_TP_BROADCASTER_DIR": str(directory),
+        "RTP_LLM_CPU_TP_BROADCASTER_ID": "k3",
+    }
 
 
 def main():
@@ -129,7 +143,9 @@ def main():
         raise ValueError("Must run as luohaocheng.lhc inside lhc_GPU")
     run = Path(args.run_dir).resolve()
     require_local(run.parent)
+    environment.update(cpu_tp_socket_environment(run))
     run.mkdir(exist_ok=False)
+    (run / "uds").mkdir(mode=0o700)
     # Reject potentially inherited experimental settings instead of trusting
     # a shell left over from a DCP/FP8/synthetic-acceptance experiment.
     forbidden = ("CP_ROTATE_METHOD", "QUANTIZATION", "SP_QUANTIZATION")
