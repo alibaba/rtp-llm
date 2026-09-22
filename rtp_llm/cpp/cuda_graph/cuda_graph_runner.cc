@@ -2103,10 +2103,14 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
     if (capture_mem_hold_.py_model_inputs_.combo_position_ids.defined()) {
-        // Generation-prefill graphs are keyed by token capacity; decode and
-        // legacy prefill graphs retain the batch * tokens-per-batch contract.
+        // K3 SP draft prefill slices embeddings to the current token bucket,
+        // even though request metadata retains max_bs_ slots. Positions must
+        // describe those same physical rows, including in smaller buckets.
+        // Preserve the existing contract for other models.
         const int position_token_count =
-            isGenerationPrefillCudaGraph() ? seq_len_or_tokens : batch_size * num_tokens_per_bs_;
+            isGenerationPrefillCudaGraph() || (isMtpDraftPrefillCudaGraph() && sequence_parallel_size_ > 1) ?
+                token_slice_len :
+                batch_size * num_tokens_per_bs_;
         inputs.combo_position_ids = capture_mem_hold_.py_model_inputs_.combo_position_ids.slice(
             0, 0, position_token_count * position_id_len_factor_);
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
