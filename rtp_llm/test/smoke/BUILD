@@ -69,6 +69,26 @@ custom_smoke_test(
     gpu_type = ["H20"],
 )
 
+# PP=2 TP=2 multi-task system prompt: verifies tpSyncModelInputs broadcast alignment
+# during the startup build across TP ranks within each stage.
+custom_smoke_test(
+    name = "qwen3_multi_task_prompt_pp2_tp2_test",
+    main = "pp_test.py",
+    args = ["--cases=multi_task_prompt_pp2_tp2"],
+    smoke_args = "--tp_size 2 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
+
+# PP=2 DP=2 multi-task system prompt: verifies mayAddFakeStream alignment across DP lanes
+# during the startup build (all lanes build the same tasks in lockstep).
+custom_smoke_test(
+    name = "qwen3_multi_task_prompt_pp2_dp2_test",
+    main = "pp_test.py",
+    args = ["--cases=multi_task_prompt_pp2_dp2"],
+    smoke_args = "--tp_size 1 --dp_size 2 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
+
 # The same entry supports model overrides and --cases / PP_TEST_CASES.
 # Keep the original target available for existing PD smoke commands.
 test_suite(

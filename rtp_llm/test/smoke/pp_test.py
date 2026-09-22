@@ -164,6 +164,8 @@ VARIANTS.update(
         "fake_pp2_tp2_dp2": {"pp": 2, "tp": 2, "dp": 2, "ep": 4, "sp": 0},
         "fake_pp2_tp2_dp2_mtp": {"pp": 2, "tp": 2, "dp": 2, "ep": 4, "sp": 3},
         "multi_task_prompt_pp2": {"pp": 2, "tp": 1, "dp": 1, "ep": 1, "sp": 0},
+        "multi_task_prompt_pp2_tp2": {"pp": 2, "tp": 2, "dp": 1, "ep": 1, "sp": 0},
+        "multi_task_prompt_pp2_dp2": {"pp": 2, "tp": 1, "dp": 2, "ep": 2, "sp": 0},
     }
 )
 
@@ -988,8 +990,8 @@ class MultiTaskPromptPPTest(unittest.TestCase):
     def shortDescription(self):
         return self.case_name
 
-    def start_server(self, checkpoint, gpu_ids, pp, tp, role_name):
-        world_size = pp * tp
+    def start_server(self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name):
+        world_size = pp * tp * dp
         self.assertGreaterEqual(
             len(gpu_ids), world_size, f"need {world_size} GPUs, got {gpu_ids}"
         )
@@ -1007,9 +1009,9 @@ class MultiTaskPromptPPTest(unittest.TestCase):
                 "--tp_size",
                 str(tp),
                 "--dp_size",
-                "1",
+                str(dp),
                 "--ep_size",
-                "1",
+                str(ep),
                 "--world_size",
                 str(world_size),
                 "--role_type",
@@ -1065,8 +1067,8 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         self.assertEqual(len(result["output_ids"][0]), max_new_tokens, result)
         return result
 
-    def run_with_prompt(self, checkpoint, gpu_ids, pp, tp, role_name):
-        server = self.start_server(checkpoint, gpu_ids, pp, tp, role_name)
+    def run_with_prompt(self, checkpoint, gpu_ids, pp, tp, dp, ep, role_name):
+        server = self.start_server(checkpoint, gpu_ids, pp, tp, dp, ep, role_name)
         try:
             return [
                 self.generate_with_task(server, task_id, prompt, tokens)
@@ -1079,12 +1081,15 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         checkpoint = os.environ.get("CHECKPOINT_PATH")
         self.assertTrue(checkpoint, "Pass --test_env=CHECKPOINT_PATH=<checkpoint>")
         variant = VARIANTS[self.case_name]
-        pp, tp = variant["pp"], variant["tp"]
+        pp, tp, dp = variant["pp"], variant["tp"], variant.get("dp", 1)
+        ep = variant.get("ep", 1)
         gpu_ids = [str(x) for x in get_gpu_ids()]
         baseline = self.run_with_prompt(
-            checkpoint, gpu_ids, 1, tp, f"{self.case_name}_pp1_baseline"
+            checkpoint, gpu_ids, 1, tp, dp, ep, f"{self.case_name}_pp1_baseline"
         )
-        actual = self.run_with_prompt(checkpoint, gpu_ids, pp, tp, self.case_name)
+        actual = self.run_with_prompt(
+            checkpoint, gpu_ids, pp, tp, dp, ep, self.case_name
+        )
         report = {
             "case": self.case_name,
             "model_type": MODEL_TYPE,
@@ -1098,10 +1103,19 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             for (task_id, prompt, _), base, got in zip(
                 MULTI_TASK_CASES, baseline, actual
             ):
-                self.assertGreater(
-                    got["aux_info"]["reuse_len"],
-                    0,
-                    f"task {task_id!r} did not reuse the resident system-prompt prefix",
+                got_reuse = got["aux_info"]["reuse_len"]
+                base_reuse = base["aux_info"]["reuse_len"]
+                self.assertGreaterEqual(
+                    got_reuse,
+                    16,
+                    f"task {task_id!r}: reuse_len={got_reuse} < one full block (16); "
+                    f"resident prefix was not reused",
+                )
+                self.assertEqual(
+                    got_reuse,
+                    base_reuse,
+                    f"task {task_id!r}: PP={pp} reuse_len={got_reuse} != "
+                    f"PP=1 baseline reuse_len={base_reuse}",
                 )
                 self.assertEqual(
                     got["output_ids"],
@@ -1123,7 +1137,11 @@ def load_tests(loader, tests, pattern):
     for name in selected_cases():
         if name == "pdfusion_mtp_regression":
             case = MtpPPTest("test_pdfusion_mtp_matches_target_generation")
-        elif name == "multi_task_prompt_pp2":
+        elif name in (
+            "multi_task_prompt_pp2",
+            "multi_task_prompt_pp2_tp2",
+            "multi_task_prompt_pp2_dp2",
+        ):
             case = MultiTaskPromptPPTest("test_pp_multi_task_prompt_matches_pp1")
             case.case_name = name
         else:

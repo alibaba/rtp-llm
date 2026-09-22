@@ -570,7 +570,11 @@ absl::StatusOr<NormalEngine::BuildRunResult> NormalEngine::driveSystemPromptBuil
     const int64_t schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     RETURN_IF_STATUS_ERROR(executeOneRound(ScheduleOutput{{stream}}, schedule_time_us));
     while (stream->isPPInflight() && should_loop_()) {
-        RETURN_IF_STATUS_ERROR(executeOneRound(ScheduleOutput{}));
+        ScheduleOutput pump_output{};
+        if (parallelism_config.dp_size > 1) {
+            mayAddFakeStream(pump_output.streams);
+        }
+        RETURN_IF_STATUS_ERROR(executeOneRound(pump_output));
     }
     if (stream->isPPInflight()) {
         // should_loop_ went false: shutdown is tearing the channel down, so do not force more
@@ -619,7 +623,11 @@ absl::Status NormalEngine::buildSystemPromptsDirect() {
         // A dispatched build went through the tail stage, so release its sampling state before
         // inspecting the result; the ordered plan channel guarantees this erase precedes any
         // later request that reuses the same numeric id.
-        RETURN_IF_STATUS_ERROR(executeOneRound(ScheduleOutput{{}, {stream->streamId()}}));
+        ScheduleOutput cleanup_output{{}, {stream->streamId()}};
+        if (parallelism_config.dp_size > 1) {
+            mayAddFakeStream(cleanup_output.streams);
+        }
+        RETURN_IF_STATUS_ERROR(executeOneRound(cleanup_output));
         RETURN_IF_STATUS_ERROR(run.status);
 
         CHECK_AND_RETURN_REF(
@@ -715,9 +723,8 @@ void NormalEngine::loop() {
         absl::Status build_status = buildSystemPromptsDirect();
         if (!build_status.ok()) {
             RTP_LLM_LOG_ERROR("PP system prompt build failed: %s", build_status.ToString().c_str());
-            // Only this rank exits cleanly here, via the init thread's startup wait. Peer ranks
-            // already published READY and block in receivePlan; an in-engine cross-rank failure
-            // signal is not implemented, so they are torn down by the process launcher.
+            // Peer ranks detect this rank's death via gloo RST → PPCommWatchdogTimeout →
+            // RTP_LLM_FAIL in their own loop, so all ranks exit without launcher intervention.
             publishStartupFailed(build_status);
             return;
         }
@@ -729,8 +736,8 @@ void NormalEngine::loop() {
         try {
             status = parallelism_config.pp_size > 1 ? pp_step() : step();
         } catch (const PPCommWatchdogTimeout& e) {
-            RTP_LLM_LOG_ERROR("PP comm watchdog fired, exiting engine loop: %s", e.what());
-            break;
+            RTP_LLM_LOG_ERROR("PP comm watchdog fired, peer rank unreachable: %s", e.what());
+            RTP_LLM_FAIL("PP comm watchdog timeout - forcing process exit");
         }
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
