@@ -32,9 +32,7 @@ import torch
 
 def _load_kernel():
     here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.abspath(
-        os.path.join(here, "..", "moe", "_silu_mul_bf16_triton.py")
-    )
+    src = os.path.abspath(os.path.join(here, "..", "moe", "_silu_mul_bf16_triton.py"))
     spec = importlib.util.spec_from_file_location("_v4_silu_mul_bf16", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -55,9 +53,7 @@ def _ref_chain(gate_up_bf16: torch.Tensor, clamp_limit: float):
     silu_mul_split = _load_split_kernel()
     gate_up = gate_up_bf16.float()
     gate, up = gate_up.chunk(2, dim=-1)
-    hidden = silu_mul_split(
-        gate.contiguous(), up.contiguous(), clamp_limit=clamp_limit
-    )
+    hidden = silu_mul_split(gate.contiguous(), up.contiguous(), clamp_limit=clamp_limit)
     return hidden.to(torch.bfloat16)
 
 
@@ -73,9 +69,9 @@ class SiluMulSplitBf16EquivTest(unittest.TestCase):
     def _check(self, *, M, D, clamp_limit):
         torch.manual_seed(0)
         device = "cuda:0"
-        gate_up = (
-            torch.randn(M, 2 * D, device=device, dtype=torch.float32) * 3.0
-        ).to(torch.bfloat16)
+        gate_up = (torch.randn(M, 2 * D, device=device, dtype=torch.float32) * 3.0).to(
+            torch.bfloat16
+        )
         # Make sure some values exceed clamp_limit so the clamp branch fires.
         if clamp_limit > 0 and M > 0:
             gate_up[0, :10] = clamp_limit + 1.0
@@ -129,9 +125,9 @@ class SiluMulSplitBf16EquivTest(unittest.TestCase):
     def test_out_buffer(self):
         torch.manual_seed(1)
         device = "cuda:0"
-        gate_up = (
-            torch.randn(32, 512, device=device, dtype=torch.float32)
-        ).to(torch.bfloat16)
+        gate_up = (torch.randn(32, 512, device=device, dtype=torch.float32)).to(
+            torch.bfloat16
+        )
         ref = _ref_chain(gate_up, 0.0)
         out = torch.empty(32, 256, device=device, dtype=torch.bfloat16)
         ret = _load_kernel()(gate_up, clamp_limit=0.0, out=out)

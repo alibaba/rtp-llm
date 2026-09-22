@@ -450,7 +450,9 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         silu, combine = mock.Mock(), mock.Mock()
         base = "rtp_llm.models_py.modules.dsv4"
         modules = {
-            f"{base}._silu_mul_split_triton": fake_module("silu", silu_mul_split=silu),
+            f"{base}.moe._silu_mul_bf16_triton": fake_module(
+                "silu", silu_mul_split_bf16=silu
+            ),
             f"{base}.moe._shared_expert_triton": fake_module(
                 "combine", fused_moe_epilogue=combine
             ),
@@ -487,14 +489,12 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         warmup.warmup_v41_shared_expert_jit(model, max_m=8192, device="cuda:0")
         self.assertEqual(
             [tuple(c.args[0].shape) for c in silu.call_args_list],
-            [(1, 12), (2, 12), (16, 12)],
+            [(1, 24)],
         )
         for call in silu.call_args_list:
-            gate, up = call.args
-            self.assertEqual(gate.dtype, torch.float32)
-            self.assertEqual(up.dtype, torch.float32)
-            self.assertTrue(gate.is_contiguous() and up.is_contiguous())
-            self.assertNotEqual(gate.data_ptr(), up.data_ptr())
+            (gate_up,) = call.args
+            self.assertEqual(gate_up.dtype, torch.bfloat16)
+            self.assertTrue(gate_up.is_contiguous())
             self.assertEqual(call.kwargs, {"clamp_limit": 7.0})
         combine.assert_called_once()
         routed, shared, out_dtype = combine.call_args.args
@@ -502,22 +502,22 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(routed.stride(), (16, 2))
         self.assertEqual(routed.dtype, torch.bfloat16)
         self.assertEqual(shared.stride(), (8, 1))
-        self.assertEqual(shared.dtype, torch.float32)
+        self.assertEqual(shared.dtype, torch.bfloat16)
         self.assertEqual(out_dtype, torch.bfloat16)
         self.assertNotEqual(routed.data_ptr(), model.moe._strategy._mega_y.data_ptr())
         self.assertIs(model.moe._shared_executor._out, original_output)
         torch.testing.assert_close(model.moe._strategy._mega_y, original_routed)
         warmup.warmup_v41_shared_expert_jit(model, max_m=8192, device="cuda:0")
-        self.assertEqual(silu.call_count, 3)
+        self.assertEqual(silu.call_count, 1)
         combine.assert_called_once()
 
-    def test_shared_scalar_classes_bounded_by_capacity_and_fp32_routed(self):
+    def test_shared_minimum_capacity_and_fp32_routed(self):
         model, silu, combine = self.shared_fixture()
         model.moe._strategy = types.SimpleNamespace(name="grouped_fp4")
         model.moe.shared_experts.swiglu_limit = 0.0
         warmup.warmup_v41_shared_expert_jit(model, max_m=1, device="cuda:0")
         self.assertEqual(silu.call_count, 1)
-        self.assertEqual(silu.call_args.args[0].shape, (1, 12))
+        self.assertEqual(silu.call_args.args[0].shape, (1, 24))
         self.assertEqual(silu.call_args.kwargs["clamp_limit"], 0.0)
         self.assertEqual(combine.call_args.args[0].dtype, torch.float32)
 
@@ -547,7 +547,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         model.moe._routed_includes_shared = False
         with mock.patch.dict(os.environ, {"DSV4_SHARED_EXPERT_BF16_ADD": "1"}):
             warmup.warmup_v41_shared_expert_jit(model, max_m=16, device="cuda:0")
-        self.assertEqual(silu.call_count, 3)
+        self.assertEqual(silu.call_count, 1)
         combine.assert_not_called()
         warmup.warmup_v41_shared_expert_jit(model, max_m=16, device="cuda:0")
         combine.assert_called_once()
@@ -565,19 +565,19 @@ class V41KernelJitWarmupTest(unittest.TestCase):
     def test_shared_geometry_change_rewarms_and_invalid_geometry_fails(self):
         model, silu, combine = self.shared_fixture()
         warmup.warmup_v41_shared_expert_jit(model, max_m=4, device="cuda:0")
-        self.assertEqual(silu.call_count, 2)
+        self.assertEqual(silu.call_count, 1)
         model.moe.shared_experts.w13.N = 32
         model.moe.shared_experts.w2.K = 16
         model.moe.shared_experts.swiglu_limit = 0.0
         warmup.warmup_v41_shared_expert_jit(model, max_m=32, device="cuda:0")
-        self.assertEqual(silu.call_count, 5)
-        self.assertEqual(silu.call_args.args[0].shape, (16, 16))
+        self.assertEqual(silu.call_count, 2)
+        self.assertEqual(silu.call_args.args[0].shape, (1, 32))
         self.assertEqual(silu.call_args.kwargs["clamp_limit"], 0.0)
         self.assertEqual(len(warmup._SHARED_WARMED), 2)
         model.moe.shared_experts.w13.N = 31
         with self.assertRaisesRegex(ValueError, "geometry"):
             warmup.warmup_v41_shared_expert_jit(model, max_m=32, device="cuda:0")
-        self.assertEqual(silu.call_count, 5)
+        self.assertEqual(silu.call_count, 2)
 
     def test_prefill_failure_propagates_before_final_sync(self):
         model, calls = self.prefill_fixture()

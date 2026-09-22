@@ -535,6 +535,7 @@ class AttentionV41FP8(AttentionFP8):
         ``build_and_propagate_prefill_meta_fp8`` at the start of every forward
         and by ``_begin_forward`` before the layer loop runs.
         """
+
         def opt(name, index):
             if name in kwargs:
                 return kwargs[name]

@@ -99,44 +99,57 @@ def build_and_propagate_prefill_meta_fp8(
     first_shared = getattr(first_attn, "_shared_attention", None)
     if isinstance(first_shared, dict):
         first_shared.pop("prefill_meta_common", None)
-    with record_function_range("dsv4.fp8.prefill_meta.build_all_ratios"):
-        for r in ordered_ratios:
-            attn = representatives[r]
-            compressed_rope = r != 0
-            from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
+    try:
+        with record_function_range("dsv4.fp8.prefill_meta.build_all_ratios"):
+            for r in ordered_ratios:
+                attn = representatives[r]
+                compressed_rope = r != 0
+                from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 
-            with bind_attn_cache(attn, kv_cache, block_tables_by_type):
-                with record_function_range(f"dsv4.fp8.prefill_meta.ratio_{r}"):
-                    meta_by_ratio[r] = attn._build_shared_prefill_meta(
-                        x_first_layer,
-                        start_pos,
-                        sp_per_req=sp_per_req,
-                        cu_seqlens=cu_seqlens,
-                        batch_size=batch_size,
-                        input_lengths=input_lengths,
-                        prefix_lengths=prefix_lengths,
-                        position_ids=position_ids,
-                        req_id_per_token=req_id_per_token,
-                        max_seqlen_q=max_seqlen_q,
-                        reuse_common_meta=reusable_common,
-                        reuse_freqs_meta=reusable_freqs_by_rope_kind.get(
-                            compressed_rope
-                        ),
-                    )._replace(workspace=workspace)
-            if reusable_common is None:
-                reusable_common = meta_by_ratio[r]
-            reusable_freqs_by_rope_kind.setdefault(compressed_rope, meta_by_ratio[r])
+                with bind_attn_cache(attn, kv_cache, block_tables_by_type):
+                    with record_function_range(f"dsv4.fp8.prefill_meta.ratio_{r}"):
+                        meta_by_ratio[r] = attn._build_shared_prefill_meta(
+                            x_first_layer,
+                            start_pos,
+                            sp_per_req=sp_per_req,
+                            cu_seqlens=cu_seqlens,
+                            batch_size=batch_size,
+                            input_lengths=input_lengths,
+                            prefix_lengths=prefix_lengths,
+                            position_ids=position_ids,
+                            req_id_per_token=req_id_per_token,
+                            max_seqlen_q=max_seqlen_q,
+                            reuse_common_meta=reusable_common,
+                            reuse_freqs_meta=reusable_freqs_by_rope_kind.get(
+                                compressed_rope
+                            ),
+                        )._replace(workspace=workspace)
+                if reusable_common is None:
+                    reusable_common = meta_by_ratio[r]
+                reusable_freqs_by_rope_kind.setdefault(
+                    compressed_rope, meta_by_ratio[r]
+                )
 
-    with record_function_range("dsv4.fp8.prefill_meta.propagate"):
-        for layer in v4.layers:
-            attn = getattr(layer, "attn", None)
-            if attn is None:
-                continue
-            # Each layer owns its own compressor / indexer; freqs_cis must
-            # be bound per-layer (not just on the rep). Cheap idempotent
-            # is-None set.
-            attn._ensure_freqs_cis_bound()
-            attn._set_prefill_meta_shared(meta_by_ratio.get(int(attn.compress_ratio)))
+        with record_function_range("dsv4.fp8.prefill_meta.propagate"):
+            for layer in v4.layers:
+                attn = getattr(layer, "attn", None)
+                if attn is None:
+                    continue
+                # Each layer owns its own compressor / indexer; freqs_cis must
+                # be bound per-layer (not just on the rep). Cheap idempotent
+                # is-None set.
+                attn._ensure_freqs_cis_bound()
+                attn._set_prefill_meta_shared(
+                    meta_by_ratio.get(int(attn.compress_ratio))
+                )
+    except BaseException:
+        clear_prefill_meta_shared_fp8(v4)
+        raise
+    finally:
+        # Bucket reuse ends here; modules retain their propagated metadata.
+        # Also release the cache when a later bucket or propagation fails.
+        if isinstance(first_shared, dict):
+            first_shared.pop("prefill_meta_common", None)
 
 
 def clear_prefill_meta_shared_fp8(v4: "V4Transformer") -> None:

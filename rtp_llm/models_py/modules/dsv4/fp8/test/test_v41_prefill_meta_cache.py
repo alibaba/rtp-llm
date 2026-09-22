@@ -18,7 +18,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
-
+from types import SimpleNamespace
 from typing import NamedTuple
 from unittest.mock import patch
 
@@ -32,6 +32,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8  # noqa: E
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (  # noqa: E402
     AttentionV41FP8,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
+    build_and_propagate_prefill_meta_fp8,
+)
 
 
 class _FakeMeta(NamedTuple):
@@ -40,6 +43,7 @@ class _FakeMeta(NamedTuple):
     cp_on: bool = False
     freqs_cis: object = None
     request_row_slices: object = None
+    workspace: object = None
 
 
 def _make_attn(ratio: int, layer_id: int, shared: dict) -> AttentionV41FP8:
@@ -92,6 +96,55 @@ def _inputs():
 
 
 class V41PrefillMetaCacheTest(unittest.TestCase):
+    def test_broadcast_releases_bucket_cache_after_success_or_failure(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                shared = {}
+                layers = [_make_attn(r, i, shared) for i, r in enumerate((0, 2, 1))]
+                model = SimpleNamespace(
+                    layers=[SimpleNamespace(attn=a) for a in layers]
+                )
+                for attn in layers:
+                    attn._prefill_meta_shared = object()
+                calls = []
+
+                def parent(*args, **kwargs):
+                    calls.append(1)
+                    if fail and len(calls) == 2:
+                        raise RuntimeError("second bucket failed")
+                    return _FakeMeta()
+
+                with patch.object(
+                    AttentionFP8, "_build_shared_prefill_meta", parent
+                ), patch.object(AttentionFP8, "_ensure_freqs_cis_bound"):
+
+                    def build():
+                        build_and_propagate_prefill_meta_fp8(
+                            model,
+                            torch.zeros(8, 5120),
+                            0,
+                            None,
+                            None,
+                            workspace=None,
+                            **_inputs(),
+                        )
+
+                    if fail:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "second bucket failed"
+                        ):
+                            build()
+                        self.assertTrue(
+                            all(a._prefill_meta_shared is None for a in layers)
+                        )
+                    else:
+                        build()
+                        self.assertTrue(
+                            all(a._prefill_meta_shared is not None for a in layers)
+                        )
+                self.assertEqual(len(calls), 2)
+                self.assertNotIn("prefill_meta_common", shared)
+
     def _build(self, attn, x, start_pos, inputs):
         with patch.object(
             AttentionFP8, "_build_shared_prefill_meta", _ParentCalls()

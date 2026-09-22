@@ -62,9 +62,7 @@ if triton is not None:
         row = pid_m * (2 * N)
 
         g = tl.load(gate_up_ptr + row + n_off, mask=mask, other=0.0).to(tl.float32)
-        u = tl.load(gate_up_ptr + row + N + n_off, mask=mask, other=0.0).to(
-            tl.float32
-        )
+        u = tl.load(gate_up_ptr + row + N + n_off, mask=mask, other=0.0).to(tl.float32)
 
         if APPLY_CLAMP:
             # clamp(up, -L, L); clamp(gate, max=L) — same order as the split kernel.
@@ -76,7 +74,9 @@ if triton is not None:
         s = g * tl.sigmoid(g)
         out = s * u
 
-        tl.store(out_ptr + pid_m * N + n_off, out.to(out_ptr.dtype.element_ty), mask=mask)
+        tl.store(
+            out_ptr + pid_m * N + n_off, out.to(out_ptr.dtype.element_ty), mask=mask
+        )
 
 
 def silu_mul_split_bf16(

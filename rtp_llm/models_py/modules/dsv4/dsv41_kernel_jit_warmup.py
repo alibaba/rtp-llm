@@ -180,38 +180,41 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
     signatures = _shared_expert_signatures(model)
     if not signatures:
         return
-    from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import silu_mul_split
     from rtp_llm.models_py.modules.dsv4.moe._shared_expert_triton import (
         fused_moe_epilogue,
     )
+    from rtp_llm.models_py.modules.dsv4.moe._silu_mul_bf16_triton import (
+        silu_mul_split_bf16,
+    )
 
-    # SiLU's N is runtime but keeps Triton's ==1 / divisible-by-16 attributes.
-    # All greater token counts reuse one of these three keys; D/clamp are taken
-    # from the real merged shared-expert projections, never hard-coded.
-    rows_grid = tuple(m for m in (1, 2, 16) if m <= max_m)
+    # The fused BF16 kernel does not specialize M. One row warms every token
+    # count; width/clamp still come from the real shared-expert projections.
+    rows_grid = (1,)
     fused_add = os.environ.get("DSV4_SHARED_EXPERT_BF16_ADD", "0") != "1"
     key = (str(device), frozenset(signatures), rows_grid, fused_add)
     if key in _SHARED_WARMED:
         return
     for (dim, inter, clamp, routed_dtype, routed_stride), name in signatures.items():
         for rows in rows_grid:
-            gate_up = torch.zeros((rows, 2 * inter), dtype=torch.float32, device=device)
-            gate, up = (part.contiguous() for part in gate_up.chunk(2, dim=-1))
+            gate_up = torch.zeros(
+                (rows, 2 * inter), dtype=torch.bfloat16, device=device
+            )
             common._run_triton_warmup_launch_with_retry(
                 "DSV41 SharedExpert",
                 f"{name} silu M={rows} D={inter} clamp={clamp}",
-                partial(silu_mul_split, gate, up, clamp_limit=clamp),
+                partial(silu_mul_split_bf16, gate_up, clamp_limit=clamp),
                 device=device,
             )
         if fused_add:
             # add_cast explicitly does_not_specialize M. One launch covers
             # every token count for this dtype/stride contract. In particular,
-            # MXFP8's shared result is FP32 even when routed/output are BF16.
+            # MXFP8's shared result is BF16; add_cast promotes both inputs
+            # to FP32 inside the kernel before adding.
             rows = min(max_m, 2)
             routed = torch.empty_strided(
                 (rows, dim), routed_stride, dtype=routed_dtype, device=device
             ).zero_()
-            shared = torch.zeros((rows, dim), dtype=torch.float32, device=device)
+            shared = torch.zeros((rows, dim), dtype=torch.bfloat16, device=device)
             common._run_triton_warmup_launch_with_retry(
                 "DSV41 SharedExpert",
                 f"{name} add_cast N={dim} routed={routed_dtype} stride={routed_stride}",

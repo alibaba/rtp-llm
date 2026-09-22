@@ -203,9 +203,7 @@ class W13SharedExpert(nn.Module):
         with record_function_range("dsv4.shared_expert.w13"):
             gate_up = self.w13(x)
         with record_function_range("dsv4.shared_expert.silu_mul"):
-            hidden = silu_mul_split_bf16(
-                gate_up, clamp_limit=self.swiglu_limit
-            )
+            hidden = silu_mul_split_bf16(gate_up, clamp_limit=self.swiglu_limit)
         with record_function_range("dsv4.shared_expert.w2"):
             return self.w2(hidden)
 

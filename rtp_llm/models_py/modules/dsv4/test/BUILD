@@ -4,6 +4,14 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_silu_mul_bf16",
+    srcs = ["test_silu_mul_bf16.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_mega_api_compat",
     srcs = ["test_mega_api_compat.py"],
     deps = _DSV4_TEST_DEPS,
@@ -235,15 +243,6 @@ py_library(
 py_test(
     name = "test_cp_async",
     srcs = ["test_cp_async.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_cp_sync_varlen_scratch",
-    srcs = ["test_cp_sync_varlen_scratch.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:testlib",

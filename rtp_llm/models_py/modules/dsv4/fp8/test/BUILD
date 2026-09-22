@@ -236,6 +236,18 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_prefill_meta_cache_cuda",
+    srcs = [
+        "test_v41_prefill_meta_cache_cuda.py",
+        "test_prefill_common_metadata_cuda.py",
+    ],
+    main = "test_v41_prefill_meta_cache_cuda.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_fused_decode_meta_comprehensive",
     srcs = ["test_fused_decode_meta_comprehensive.py"],
     deps = _DSV4_FP8_TEST_DEPS,
