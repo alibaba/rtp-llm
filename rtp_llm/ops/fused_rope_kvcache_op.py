@@ -1,6 +1,9 @@
+import importlib.util
 import logging
 from dataclasses import dataclass
 from functools import cache
+from pathlib import Path
+from types import ModuleType
 from typing import Optional
 
 import torch
@@ -18,10 +21,48 @@ class DecodeRopeContractError(RuntimeError):
     """Decode RoPE input/state invariant violation that must not fall back."""
 
 
+def _load_fused_rope_kvcache_without_package_init() -> ModuleType:
+    """Load the independent fused RoPE wrapper when optional siblings fail.
+
+    Some rtp-kernel builds import every optional backend from package
+    ``__init__``.  A missing FlashAttention runtime must not make the
+    standalone fused RoPE/KV-cache extension unavailable.
+    """
+    package_spec = importlib.util.find_spec("rtp_kernel")
+    if package_spec is None or package_spec.submodule_search_locations is None:
+        raise ImportError("rtp_kernel package is unavailable")
+
+    package_dir = next(iter(package_spec.submodule_search_locations), None)
+    if package_dir is None:
+        raise ImportError("rtp_kernel package directory is unavailable")
+
+    module_path = Path(package_dir) / "fused_rope_kvcache.py"
+    module_spec = importlib.util.spec_from_file_location(
+        "_rtp_kernel_fused_rope_kvcache", module_path
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise ImportError(f"failed to load fused RoPE wrapper from {module_path}")
+
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
 @cache
-def _get_fused_rope_kvcache():
+def _get_fused_rope_kvcache() -> ModuleType:
     # Lazy: keeps import free of JIT builds; warm-up still hits this pre-readiness.
-    from rtp_kernel import fused_rope_kvcache
+    try:
+        from rtp_kernel import fused_rope_kvcache
+    except ImportError as package_error:
+        try:
+            fused_rope_kvcache = _load_fused_rope_kvcache_without_package_init()
+        except (ImportError, OSError):
+            raise package_error
+        logging.warning(
+            "loaded rtp_kernel.fused_rope_kvcache without package initialization "
+            "because an optional rtp_kernel backend failed to import: %s",
+            package_error,
+        )
 
     return fused_rope_kvcache
 
