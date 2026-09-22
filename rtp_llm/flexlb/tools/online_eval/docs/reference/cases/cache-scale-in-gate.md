@@ -16,7 +16,7 @@ at base+10, worker capacity 700 needs through base+712):
 ```sh
 export FLEXLB_FT_WORKER_PORT_CAPACITY=700
 python3 scripts/commands/run_cases.py --parallel 1 --mock-stride 704 --profile single-nonbatch \
-  --case-dir scale_cases/cache_scale_in_online.yaml --suite workload \
+  --case-dir scale_cases/cache_scale_in_lineage.yaml --suite workload \
   --out-dir "$FLEXLB_RUN_DIR/cache-scale-in"
 ```
 
@@ -71,16 +71,15 @@ Freeze thresholds only after known-bad/known-good controls. Shrink reduces total
 cache capacity and causes legitimate cold loss; calibrate the floor against a
 healthy run at the target scale. Passing 1P is not evidence that intermediate
 scales are safe: 1P removes cross-P rerouting. Keep multi-P as the primary case.
-The prior online master commits use config schema v1; this framework uses v3.
-A historical comparison needs an explicit compatible adapter, not a blind JAR swap.
+The prior online Master commits use config schema v1; the default framework
+uses v3. The ordinary launcher accepts an explicit config file and adapts
+schema-v1 file discovery at startup; both inputs are recorded in evidence.
 
-The candidate uses an explicit linear formula, shared by Master prediction and
-mock execution: `12 + 0.025 * sum(computeTokens) + 0.001 * sum(hitCacheTokens)` ms.
-It is a mechanism-test model, not the production DSv4 fit. It preserves a miss
-penalty and has bounded service capacity even when the engine forms larger
-batches. The earlier DSv4-formula 8P -> 4P smoke had only a shallow waiting queue;
-that run validates orchestration, not severe overload. `prefill_expression` is an
-optional common ConfigOverride; other scenarios retain their original formulas.
+The small orchestration smoke uses an explicit mechanism-test formula:
+`12 + 0.025 * sum(computeTokens) + 0.001 * sum(hitCacheTokens)` ms. The
+production-scale lineage case below uses the archived DSv4 fit. The 8P → 4P
+smoke validates orchestration, not severe overload. `prefill_expression` is
+an optional common ConfigOverride; other scenarios retain their formulas.
 
 ## Reproducible synthetic traffic
 
@@ -155,8 +154,8 @@ overloaded scenario, not a historical known-bad/known-good regression control.
 
 ## Production-scale candidate and shared overlay component
 
-`config/scale_cases/cache_scale_in_online.yaml` uses 125P/536D, fixed 240 QPS and one-step
-125P -> 24P. Historical real traffic in the old-master comparison had median
+`config/scale_cases/cache_scale_in_lineage.yaml` uses 125P/536D, fixed 240 QPS and one-step
+125P -> 64P. Historical real traffic in the old-master comparison had median
 235.79 QPS (range 207.38–282.09 QPS across 231 buckets); 240 is a fixed reference,
 not a live reading. Decode remains at 536 throughout. The original small case
 remains in the default catalog for orchestration smoke only.
@@ -173,17 +172,18 @@ Prefill formula (`77.82664607924481 + 112.5170362714666 * batchSize +
 execution. Decode uses 33.4254796 + 0.27851927 * running ms/step and 2.8638118
 tokens/step, EOS mean 420. Per P: Device 31,218 blocks of 512 tokens; Memory 95,311
 blocks, flat LRU, H2D consume lifecycle. Per D: 46,157 blocks of 64 tokens.
-Device tree is enabled to match the stated real policy; the early archived mock
-snapshot had it disabled. This is an explicit correction, not a claim that the
-archive already contained the correct value.
+The retained lineage control uses flat Device eviction, matching the archived
+mock A/B setup rather than the stated real Device tree policy. This is a
+controlled reproduction setup, not a claim that the archived mock matched
+the real Device policy.
 
-The synthetic input remains 16–22 logical 512-token blocks with 1,024 families,
-Zipf 0.9, 5% cold inputs, four-request growing sessions. It is NOT_VALIDATED against
-production length/prefix/reuse-distance distributions; matching QPS and P/D does
-not establish equivalent pressure or the same critical P. Generated traces stay
-outside Git. Large-run warmup and Java loading are bounded separately.
+The retained input is a finite, SHA-pinned empirical frontend prefix-lineage
+model, not the retired synthetic-family generator. It preserves observed input
+length and complete-block prefix relationships; output length remains the
+calibrated 420-token value. Matching QPS and P/D alone does not establish the
+same critical P. Generated request traces stay outside Git.
 
-`stress/multi_curve.js` is a reusable panel mounted by the shared renderer when
+`src/reporting/assets/multi_curve.js` is a reusable panel mounted by the shared renderer when
 `panel.overlay=true`. Its input contract is `series[{name,points,axis,unit,color,
 hidden}]`, `axes{axis:{title,position,min,max}}`, and named `presets`. Curves retain
 independent sampling timestamps, original units and missing-value gaps. The
@@ -216,49 +216,44 @@ Input preparation/loading took 206 s; warmup/scale/observation 235 s; the comple
 job including generic reports took about 746 s. Known-bad/known-good calibration
 and faster preparation/reporting remain pending before enforcing this in CI.
 
-## Historical Whale Master controls
+## 单 run 与下游 A/B 分析
 
-`config/scale_cases/cache_scale_in_whale_ab.yaml` reproduces the archived configuration
-with 125P/536D -> 8P/536D, 240 QPS, NON_BATCH, flat Device / flat Memory eviction
-and consume-on-H2D. This intentionally differs from the current production-scale
-candidate's Device tree setting. It is the historical mock configuration, not a
-claim that the archived mock matched real Device eviction. The Java client RPC
-deadline is 300 seconds; the 44P pilot did not reproduce the old regression. Synthetic prefix realism remains unvalidated.
+`config/scale_cases/cache_scale_in_lineage.yaml` 是真实前端前缀谱系流量的
+125P/536D → 64P/536D 单 run 门禁。它使用普通 Master 启动路径，
+判定仍是原有绝对命中率、完成量和有效性规则。该配置保留已知 A/B
+分离点的负载和容量；正式门禁前仍须核验两侧观测结果。
 
-Set `FLEXLB_FT_HISTORICAL_MASTER_MANIFEST` to an absolute JSON manifest containing
-`source_commit` (40-character SHA), `jar`, `jar_sha256`, `config`, `config_sha256`.
-The adapter verifies both files before launching; config must be schema-v1
-NON_BATCH. Build both commits remotely under opensource with the same opt-in
-`tools/whale_mock/discovery_adapter/WhaleFileDiscovery.java` Bean. Production
-Java source remains unchanged; no VIP or KMonitor is required. The adapter only
-changes the Master artifact, config and file-discovery environment; the scenario
-still owns mock execution timing. `actual-master-config.json` and the manifest
-are archived separately from `master_config.json` (mock formula envelope).
+默认运行使用本地构建的 Master JAR。测试另一版本时，可分别设置
+`FLEXLB_FT_MASTER_JAR` 为其 JAR 路径、
+`FLEXLB_FT_MASTER_CONFIG_FILE` 为其实际配置文件路径；
+schema-1 配置在 discovery_file 场景下自动接入文件发现。
+`FLEXLB_FT_MASTER_SOURCE_COMMIT` 可选，仅用于声明构建来源；
+JAR 内有可识别的 commit 字段时会自动读取。声明值与实际 JAR
+哈希分开标注，不能把声明当成已验证源码。每轮 evidence 的
+`provenance.master_artifact` 记录实际 JAR 路径、SHA256、
+source commit 及其来源；`actual_master_config` 记录实际生效配置。
+不提供 commit 仍可运行，报告会明确显示缺失，JAR 哈希始终可追溯。
 
-Run both versions sequentially with the same YAML and distinct output directories.
-Then `python -m workload.cache_gate_ab OLD_EVIDENCE NEW_EVIDENCE
---output AB_DIRECTORY` checks criteria, topology, performance, actual Master
-config, mock formula and trace SHA equality, preserves individual decisions and
-renders two multi-curve panels aligned at withdrawal. Only aligned FAIL/PASS
-controls satisfy `expected_control_observed`; this does not assert production
-realism or prove an eviction-storm cause.
+两侧依次使用同一 lineage YAML，分别输出独立 run 目录。
+`config/scale_cases/cache_scale_in_historical_ab.yaml` 只定义下游分析
+策略，不参与启动或编排：
 
-For the overloaded historical controls, give the Java stream RPC a deadline
-longer than the 180-second observation (the paired validation uses 300 seconds)
-and leave client concurrency headroom (32768). A 60-second client deadline caused
-mass cancellations and insufficient completed-prefill windows on the new Master;
-that run remains INVALID, even though hit rate recovered. The check thresholds
-are unchanged. Drain timeout scales with the explicit client deadline, and the
-scenario cleanup budget must cover it.
+```sh
+PYTHONPATH=src:. python3 -m workload.cache_gate_ab OLD_RUN_DIR NEW_RUN_DIR \
+  --config config/scale_cases/cache_scale_in_historical_ab.yaml --output AB_DIR
+```
 
-To avoid regenerating the same large synthetic plan, the source registry supports
-`trace/canonical/1`: parameters `path`, `sha256`, `count`, and
-`identity: preserve_namespaced`. It copies exact bytes only after SHA verification,
-then validates canonical records, count and the caller's namespace. Use a runtime
-artifact generated by the same synthetic source; do not commit the large trace.
-The manifest continues to identify its source, and A/B compares the actual trace
-SHA as well as normalized Java client settings. This optimization changes neither
-tokens nor arrivals.
+对比层检查流量 SHA、拓扑、容量、性能公式、Master 实际配置和
+Java client 设置；缺失控制字段显示 UNKNOWN，不会算作一致。
+两侧监控曲线按 withdraw_start 对齐，首页同图叠加关键曲线，
+并保留单侧详情。默认 strong 模式仅在控制变量一致且 old FAIL /
+new PASS 时输出 CONTROL_OBSERVED。传 `--mode weak` 仅要求控制
+变量一致，传 `--mode none` 仅出报告并照常列出差异或缺失。
+对比不改变任何单 run 的 PASS / FAIL / INVALID 判定。
+
+远端 125P 测试仍需大于观测期的 Java stream RPC deadline 和足够的
+并发余量。若基线阶段大量取消或完成量不足，单 run 会返回 INVALID，
+不能当成回归对照。
 
 ### Frontend-derived empirical prefix model
 

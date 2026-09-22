@@ -27,11 +27,11 @@ from scenario.compiler import compile_scenarios
 from scenario.catalog import handlers
 import runtime.resource_plan as resource_plan
 root=Path(resource_plan.__file__).resolve().parents[2]
-plans=compile_scenarios(load_scenarios(root/'config/scale_cases/cache_scale_in_online.yaml'), handlers=handlers())
+plans=compile_scenarios(load_scenarios(root/'config/scale_cases/cache_scale_in_lineage.yaml'), handlers=handlers())
 assert plans[0]['environment']['n_prefill']==125
 assert plans[0]['environment']['n_decode']==536
 source=plans[0]['stages'][1]['params']['source']['parameters']
-assert source['profile']=='frontend_20260921'
+assert source['path'].endswith('frontend_20260921.xz')
 assert plans[0]['stages'][1]['params']['client']['playback']['qps']==240
 budget = JavaMockBudget(661, 0)
 lease = plan_lane_leases([[budget]], master_base=61000, mock_base=61010, mock_stride=704)[0]

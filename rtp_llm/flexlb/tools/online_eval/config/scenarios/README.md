@@ -29,7 +29,7 @@ python3 rtp_llm/flexlb/tools/online_eval/scripts/commands/list_cases.py \
 | master | [client_fallback_failback.yaml](master/client_fallback_failback.yaml), [master_ha_failover.yaml](master/master_ha_failover.yaml), [master_lifecycle.yaml](master/master_lifecycle.yaml) |
 | workload | [cache_scale_in.yaml](workload/cache_scale_in.yaml), [trace_scale_out.yaml](workload/trace_scale_out.yaml) |
 
-`config/scale_cases/` 保存未来接入的在线规模实验，其中包括 codex13 的分阶段缓存缩容场景；
+`config/scale_cases/` 保存 lineage 单 run 规模实验与其下游 A/B 分析策略；
 它不进入默认功能回归。
 
 更多配置及资源语义见 [执行器说明](../../src/scenario/README.md)。

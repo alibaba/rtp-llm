@@ -16,7 +16,7 @@
     wrap.appendChild(box); parent.appendChild(wrap);
     const datasets = panel.series.map(s => ({label:s.name, description:s.description||'', group:s.group||'其他',
       data:s.points || s.data.map((y,i)=>({x:panel.xNums[i],y})), yAxisID:s.axis || 'y', unit:s.unit || '',
-      borderColor:s.color, backgroundColor:s.color, baseColor:s.color, hidden:!!s.hidden, borderWidth:2, pointRadius:0,
+      borderColor:s.color, backgroundColor:s.color, baseColor:s.color, borderDash:s.dash||[], hidden:!!s.hidden, borderWidth:2, pointRadius:0,
       tension:0, spanGaps:false}));
     const scales = {x:{type:'linear',min:context.timeAxis.min,max:context.timeAxis.max,title:{display:true,text:'时间 / 秒'}}};
     Object.entries(panel.axes).forEach(([key,axis]) => {
