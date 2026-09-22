@@ -4,6 +4,13 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
+try:
+    from transformers.tokenization_utils_tokenizers import TokenizersBackend
+except ImportError:
+    TokenizersBackend = None
+
+ENABLE_NATIVE_BATCH_DECODE = os.environ.get("RTP_LLM_NATIVE_BATCH_DECODE", "1") == "1"
+
 
 class BaseTokenizer:
     def __init__(
@@ -145,6 +152,23 @@ class BaseTokenizer:
         return self.tokenizer.decode(token_id, **kwargs)
 
     def batch_decode(self, token_ids: Union[List[int], List[List[int]]], **kwargs):
+        cleanup = kwargs.get("clean_up_tokenization_spaces")
+        if cleanup is None:
+            cleanup = getattr(self.tokenizer, "clean_up_tokenization_spaces", True)
+        # Only bypass the exact upstream implementation whose semantics match
+        # decode_batch. Custom decoders and cleanup hooks retain the legacy path.
+        if (
+            ENABLE_NATIVE_BATCH_DECODE
+            and TokenizersBackend is not None
+            and getattr(self.tokenizer._decode, "__func__", None)
+            is TokenizersBackend._decode
+            and not cleanup
+            and isinstance(token_ids, (list, tuple))
+            and all(isinstance(row, (list, tuple)) for row in token_ids)
+        ):
+            return self.tokenizer._tokenizer.decode_batch(
+                token_ids, skip_special_tokens=kwargs.get("skip_special_tokens", False)
+            )
         return [
             self.tokenizer._decode(
                 seq,

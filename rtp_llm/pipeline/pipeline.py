@@ -347,7 +347,15 @@ class Pipeline(object):
                 else torch.cat([go.output_ids for go in outputs], dim=0)
             )
             all_output_ids_np = all_output_ids.cpu().numpy()
-            if not generate_config.ignore_eos:
+            if batched:
+                # Convert the matrix once instead of allocating a NumPy view
+                # per beam before converting each view to a Python list.
+                tokens_lists_for_decode_input = all_output_ids_np.tolist()
+                if not generate_config.ignore_eos and all_output_ids_np.shape[1]:
+                    eos_mask = all_output_ids_np == self._special_tokens.eos_token_id
+                    for i in eos_mask.any(axis=1).nonzero()[0]:
+                        del tokens_lists_for_decode_input[i][eos_mask[i].argmax() :]
+            elif not generate_config.ignore_eos:
                 processed_tokens_np_list = batch_remove_padding_eos(
                     all_output_ids_np, self._special_tokens.eos_token_id
                 )
