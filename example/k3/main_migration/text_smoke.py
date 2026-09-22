@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument(
         "--suite",
-        choices=("flow", "main-text"),
+        choices=("flow", "main-text", "main-text-64k"),
         default="main-text",
     )
     parser.add_argument("--namespace", required=True)
@@ -206,14 +206,14 @@ def parse_args() -> argparse.Namespace:
     expected_owners = (
         (args.decode_dp_size,) if args.decode_dp_size is not None else (8, 16)
     )
-    if args.suite == "main-text" and len(args.decode_role_addrs) not in expected_owners:
+    if args.suite in ("main-text", "main-text-64k") and len(args.decode_role_addrs) not in expected_owners:
         parser.error(
             f"--suite=all requires {expected_owners} ordered --decode-role-addr values"
         )
     for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
         if getattr(args, key) < 0:
             parser.error(f"--{key.replace('_', '-')} must be non-negative")
-    if args.suite == "main-text":
+    if args.suite in ("main-text", "main-text-64k"):
         config = json.loads((args.long_prefix_checkpoint / "config.json").read_text())
         config = config.get("text_config", config)
         if config.get("num_hidden_layers") != 93:
@@ -222,10 +222,12 @@ def parse_args() -> argparse.Namespace:
             )
         if not args.require_mtp:
             parser.error("main-text requires --require-mtp (real acceptance)")
-        if args.long_prefix_target_tokens < DEFAULT_TARGET_TOKENS:
+        if args.suite == "main-text" and args.long_prefix_target_tokens < DEFAULT_TARGET_TOKENS:
             parser.error("main-text cannot reduce the 110K long-prefix gate")
         if args.chunk_tokens < 65536:
             parser.error("main-text requires a chunk budget of at least 65536")
+        if args.suite == "main-text-64k" and args.chunk_tokens != 65536:
+            parser.error("main-text-64k requires a 65536-token single-prefill budget")
     if args.reuse_unit_tokens not in (0, args.block_size):
         parser.error(
             "main ordinary layout requires reuse-unit-tokens equal to block-size"
@@ -335,6 +337,11 @@ class Runner:
             "suite": self.args.suite,
             "source_reference": "64c6aff3666402228950f1f09031e228c3734277",
             "profile": "tp8-ep8-sp-no-dcp-text",
+            "deferred_by_user": (
+                ["chunk prefill", "over-64K inputs", "chunk budget +1/+7", "110K seed and append"]
+                if self.args.suite == "main-text-64k" else []
+            ),
+            "single_prefill_input_limit": 65536 if self.args.suite == "main-text-64k" else None,
             "not_applicable": [
                 "DCP",
                 "PageRR owner",
@@ -485,6 +492,15 @@ class Runner:
     ) -> dict[str, Any]:
         if barrier is not None:
             barrier.wait(timeout=30)
+        if self.args.suite == "main-text-64k":
+            if not isinstance(case.prompt, str):
+                raise SmokeFailure("64K profile requires a text prompt")
+            input_ids = self.tokenize(case.prompt)
+            self.save_token_fixture(case.prompt, input_ids)
+            audit["verified_input_len"] = len(input_ids)
+            persist()
+            if len(input_ids) > 65536 or case.require_chunk:
+                raise SmokeFailure(f"{case.name}: outside the non-chunk 64K profile")
         request_max_tokens = case.max_tokens or self.args.max_tokens
         payload = {
             "model": "kimi-k3",
@@ -1156,6 +1172,8 @@ class Runner:
         page = self.args.block_size
         unit = self.reuse_unit_tokens
         boundaries = cache_block_boundaries(page, unit, self.args.chunk_tokens)
+        if self.args.suite == "main-text-64k":
+            boundaries = tuple(b for b in boundaries if b + 1 <= 65536)
         owners = max(1, len(self.decode_role_addrs))
         # Each triplet is cold first, then repeated before another triplet can
         # evict its entries. A repeat below the first complete KDA checkpoint
@@ -1502,6 +1520,12 @@ class Runner:
             concurrent=True,
         )
 
+        if self.args.suite == "main-text-64k":
+            self.run_single_prefill_64k()
+            self.run_prefix_branches()
+            self.run_cache_block_boundaries()
+            return
+
         single_prompt = make_whole_chunk_prompt(
             self.args.namespace, "whole-chunk-single", 61
         )
@@ -1588,6 +1612,31 @@ class Runner:
         self.run_cache_block_boundaries()
         self.run_long_prefix_case()
 
+    def run_single_prefill_64k(self) -> None:
+        # Exact rendered-token count, including the serving chat template.
+        # Keep two concurrent long requests; capacity failures remain failures.
+        for label, count in (("single", 1), ("batch", 2)):
+            cases = []
+            for index in range(count):
+                tag = f"K64-{label}-{index}"
+                prompt, ids = self.fit_prompt(
+                    f"Archive {self.args.namespace}/{tag}. Background:\n",
+                    f'\nRecord value={tag}. Return only JSON {{"value":"{tag}"}}.',
+                    65536,
+                )
+                cases.append(Case(
+                    f"prefill_64k_{label}_{index}_cold", prompt, "", "miss",
+                    require_mtp=True, expected_json={"value": tag},
+                    expected_input_len=len(ids), expected_reuse_len=0,
+                    max_tokens=max(self.args.max_tokens, self.args.mtp_chunk_max_tokens),
+                ))
+            self.run_stage(f"prefill_64k_{label}_cold", cases, concurrent=count > 1)
+            self.run_stage(f"prefill_64k_{label}_reuse", [
+                replace(case, name=case.name.replace("_cold", "_reuse"), reuse="hit",
+                        expected_reuse_len=65535 // self.reuse_unit_tokens * self.reuse_unit_tokens)
+                for case in cases
+            ], concurrent=count > 1)
+
     def run_long_prefix_case(self) -> None:
         self.health("long_prefix_cached_dialog")
         stage = dict(name="long_prefix_cached_dialog", concurrent=False, passed=False)
@@ -1627,6 +1676,7 @@ def main() -> int:
         suites: dict[str, Callable[[], None]] = {
             "flow": runner.run_flow,
             "main-text": runner.run_main_text,
+            "main-text-64k": runner.run_main_text,
         }
         suites[args.suite]()
         runner.save(passed=True)

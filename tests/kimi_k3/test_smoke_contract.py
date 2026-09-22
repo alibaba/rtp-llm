@@ -169,3 +169,40 @@ def test_long_prefix_http_failure_retains_wire_response(tmp_path):
         json.loads((tmp_path / "failed-seed-http-error.json").read_text())["status"]
         == 503
     )
+
+
+def test_64k_profile_is_explicit_and_requires_full_model(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=("--suite", "main-text-64k"))
+    assert args.suite == "main-text-64k"
+    assert args.chunk_tokens == 65536
+
+
+@pytest.mark.parametrize("layers,extra", [(4, ()), (93, ("--chunk-tokens", "131072"))])
+def test_64k_profile_rejects_wrong_layers_or_budget(tmp_path, monkeypatch, layers, extra):
+    with pytest.raises(SystemExit):
+        cli(tmp_path, monkeypatch, layers=layers, extra=("--suite", "main-text-64k", *extra))
+
+
+def test_64k_cases_keep_exact_length_concurrency_and_reuse(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=("--suite", "main-text-64k"))
+    runner = smoke.Runner(args)
+    stages = []
+    monkeypatch.setattr(runner, "fit_prompt", lambda h, t, n: (h + t, list(range(n))))
+    monkeypatch.setattr(runner, "run_stage", lambda name, cases, **kw: stages.append((name, cases, kw)))
+    runner.run_single_prefill_64k()
+    assert len(stages) == 4
+    assert sum(len(cases) for _, cases, _ in stages) == 6
+    for name, cases, kw in stages:
+        assert kw["concurrent"] == ("batch" in name)
+        for case in cases:
+            assert case.expected_input_len == 65536
+            assert case.require_mtp and not case.require_chunk
+            assert case.expected_reuse_len == (61440 if "reuse" in name else 0)
+    stages.clear()
+    runner.run_cache_block_boundaries()
+    assert all(c.expected_input_len <= 65536 for _, cases, _ in stages for c in cases)
+    assert any(c.decode_crossings for _, cases, _ in stages for c in cases)
+    runner.save(False)
+    saved = json.loads(args.output.read_text())
+    assert saved["deferred_by_user"] and saved["suite"] == "main-text-64k"
+    assert saved["single_prefill_input_limit"] == 65536
