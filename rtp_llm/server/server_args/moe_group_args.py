@@ -177,6 +177,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "mega_moe_se",
             "mega_moe_fp8",
             "mega_moe_fp8_se",
+            "mega_moe_nvfp4",
             "mega_moe_fused",
         ],
         default="auto",

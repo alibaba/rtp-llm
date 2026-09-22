@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.glm5_mega_moe import (
     mega_moe_fp8_se_wrapper,
     mega_moe_fp8_wrapper,
     mega_moe_fused_wrapper,
+    mega_moe_nvfp4_wrapper,
     mega_moe_se_wrapper,
     mega_moe_wrapper,
 )
@@ -37,6 +38,11 @@ class _FakeMegaMoE:
 
     def maybe_warmup_fused_shared_jit_once(self):
         self.fused_shared_jit_warmed = True
+
+
+class _FakeMegaMoENVFP4(_FakeMegaMoE):
+    def setup_weights_from_nvfp4(self, **kwargs):
+        self.nvfp4_kwargs = kwargs
 
 
 def _config(hidden_size=8, inter=4, max_seq_len=16, gen_num_per_cycle=0):
@@ -154,6 +160,42 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
         torch.testing.assert_close(captured["w1_w"][:, 4:], up_w)
         torch.testing.assert_close(captured["w1_s"][:, :4], gate_s)
         torch.testing.assert_close(captured["w1_s"][:, 4:], up_s)
+
+    def test_nvfp4_wrapper_passes_packed_weights_and_global_scales(self):
+        config = _config(hidden_size=8, inter=4)
+        config.swiglu_limit = 7.0
+        config.swiglu_alpha = 1.702
+        up_w = torch.full((2, 4, 4), 3, dtype=torch.int8)
+        gate_w = torch.full((2, 4, 4), 7, dtype=torch.int8)
+        up_s = torch.full((2, 4, 1), 5, dtype=torch.float32).to(torch.float8_e4m3fn)
+        gate_s = torch.full((2, 4, 1), 11, dtype=torch.float32).to(torch.float8_e4m3fn)
+        inverse_gsf = torch.tensor([[3.0, 7.0], [5.0, 11.0]])
+        w2 = torch.ones((2, 8, 2), dtype=torch.int8)
+        s2 = torch.ones((2, 8, 1), dtype=torch.float32).to(torch.float8_e4m3fn)
+        inverse_gsf2 = torch.tensor([13.0, 17.0])
+        weights = {
+            W.moe_w1: torch.cat([up_w, gate_w], dim=1),
+            W.moe_s1: torch.cat([up_s, gate_s], dim=1),
+            W.moe_w1_s2: inverse_gsf,
+            W.moe_w2: w2,
+            W.moe_s2: s2,
+            W.moe_w2_s2: inverse_gsf2,
+        }
+
+        with patch.object(
+            mega_moe_nvfp4_wrapper, "GLM5MegaMoENVFP4", _FakeMegaMoENVFP4
+        ):
+            mega_moe_nvfp4_wrapper.MegaMoeNvfp4Wrapper(
+                config, _parallelism(), weights, moe_config=None, layer_idx=0
+            )
+
+        captured = _FakeMegaMoENVFP4.instance.nvfp4_kwargs
+        torch.testing.assert_close(captured["w1_w"], torch.cat([up_w, gate_w], 1))
+        torch.testing.assert_close(captured["w1_s"], torch.cat([up_s, gate_s], 1))
+        torch.testing.assert_close(captured["w1_inverse_gsf"], inverse_gsf)
+        torch.testing.assert_close(captured["w2_w"], w2)
+        torch.testing.assert_close(captured["w2_s"], s2)
+        torch.testing.assert_close(captured["w2_inverse_gsf"], inverse_gsf2)
 
     def test_fp8_se_wrapper_loads_shared_expert_fp8(self):
         config = _config(hidden_size=8, inter=4)

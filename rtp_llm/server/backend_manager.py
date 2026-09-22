@@ -56,6 +56,7 @@ class BackendManager(object):
             "mega_moe_se",
             "mega_moe_fp8",
             "mega_moe_fp8_se",
+            "mega_moe_nvfp4",
             "mega_moe_fused",
         ):
             need_dist = True

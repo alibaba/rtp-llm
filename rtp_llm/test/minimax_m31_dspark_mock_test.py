@@ -5,13 +5,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import torch
+
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.models.minimax_m3 import MiniMaxM3
+from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
+from rtp_llm.models.minimax_m3 import MiniMaxM3, MiniMaxM3Weight
 from rtp_llm.models.minimax_m3_vl import MiniMaxM3_VL
 from rtp_llm.models.minimax_m31 import MiniMaxM31, MiniMaxM31Weight
 from rtp_llm.models.minimax_m31_dspark import MiniMaxM31DSpark, MiniMaxM31DSparkWeight
 from rtp_llm.models.minimax_m31_vl import MiniMaxM31_VL
 from rtp_llm.openai.renderer_factory_register import _renderer_type_to_module
+from rtp_llm.utils.model_weight import W
 
 
 def _m31_config():
@@ -87,49 +91,62 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
             "rtp_llm.openai.renderers.minimax_m3_vl_renderer",
         )
 
-    def test_real_shape_and_explicit_mock_gate(self):
+    def test_real_shape_and_nvfp4_metadata(self):
         with TemporaryDirectory() as tmpdir:
             Path(tmpdir, "config.json").write_text(json.dumps(_m31_config()))
-            with patch.dict(os.environ, {"M3_M31_MOCK_NVFP4_MOE": "1"}):
-                config = MiniMaxM31._create_config(tmpdir)
+            config = MiniMaxM31._create_config(tmpdir)
 
-        self.assertEqual(config.num_layers, 60)
         self.assertEqual(config.model_type, "minimax_m31")
+        self.assertEqual(config.num_layers, 60)
         self.assertEqual(config.moe_layer_index, list(range(3, 60)))
         self.assertEqual(config.msa_sparse_config["sparse_layer_ids"], list(range(60)))
-        self.assertTrue(config.mock_nvfp4_moe)
+        self.assertTrue(config.prepacked_nvfp4_moe)
+        self.assertFalse(config.mock_nvfp4_moe)
 
-    def test_vl_registration_path_preserves_mock_gate(self):
+    def test_vl_registration_path_preserves_nvfp4_metadata(self):
         raw = _m31_config()
         raw["vision_config"] = {"hidden_size": 1152}
         with TemporaryDirectory() as tmpdir:
             Path(tmpdir, "config.json").write_text(json.dumps(raw))
-            with patch.dict(os.environ, {"M3_M31_MOCK_NVFP4_MOE": "1"}):
-                config = MiniMaxM31_VL._create_config(tmpdir)
+            config = MiniMaxM31_VL._create_config(tmpdir)
 
-        self.assertTrue(config.mm_model_config.is_multimodal)
         self.assertEqual(config.model_type, "minimax_m31_vl")
-        self.assertTrue(config.mock_nvfp4_moe)
+        self.assertTrue(config.mm_model_config.is_multimodal)
+        self.assertTrue(config.prepacked_nvfp4_moe)
+        self.assertFalse(config.mock_nvfp4_moe)
         self.assertEqual(config.msa_sparse_config["sparse_layer_ids"], list(range(60)))
 
-    def test_mock_gate_does_not_affect_non_nvfp4_draft(self):
+    def test_non_nvfp4_draft_is_not_marked_prepacked(self):
         raw = _m31_config()
         raw["quantization_config"].pop("moe_quant_algo")
         raw["quantization_config"].pop("moe_quant_format")
         with TemporaryDirectory() as tmpdir:
             Path(tmpdir, "config.json").write_text(json.dumps(raw))
-            with patch.dict(os.environ, {"M3_M31_MOCK_NVFP4_MOE": "1"}):
-                config = MiniMaxM31._create_config(tmpdir)
+            config = MiniMaxM31._create_config(tmpdir)
 
+        self.assertFalse(config.prepacked_nvfp4_moe)
         self.assertFalse(config.mock_nvfp4_moe)
 
-    def test_legacy_m3_does_not_parse_m31_mock_state(self):
+    def test_old_mock_flag_does_not_bypass_native_nvfp4(self):
+        with TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "config.json").write_text(json.dumps(_m31_config()))
+            with patch.dict(os.environ, {"M3_M31_MOCK_NVFP4_MOE": "1"}):
+                for model_cls in (MiniMaxM31, MiniMaxM31_VL):
+                    with self.subTest(model=model_cls.__name__):
+                        config = model_cls._create_config(tmpdir)
+                        self.assertTrue(config.prepacked_nvfp4_moe)
+                        self.assertFalse(config.mock_nvfp4_moe)
+                        self.assertIs(model_cls.get_weight_cls(), MiniMaxM31Weight)
+
+    def test_legacy_m3_does_not_parse_m31_nvfp4_state(self):
         with TemporaryDirectory() as tmpdir:
             Path(tmpdir, "config.json").write_text(json.dumps(_m31_config()))
             with patch.dict(os.environ, {"M3_M31_MOCK_NVFP4_MOE": "1"}):
                 text_config = MiniMaxM3._create_config(tmpdir)
                 vl_config = MiniMaxM3_VL._create_config(tmpdir)
 
+        self.assertFalse(text_config.prepacked_nvfp4_moe)
+        self.assertFalse(vl_config.prepacked_nvfp4_moe)
         self.assertFalse(text_config.mock_nvfp4_moe)
         self.assertFalse(vl_config.mock_nvfp4_moe)
 
@@ -141,8 +158,12 @@ class MiniMaxM31WeightContractTest(unittest.TestCase):
         weight._load_raw_mxfp8_idx = False
         weight._native_mxfp4_routed = False
         weight._prepacked_nvfp4_routed = False
-        weight._mock_nvfp4_moe = False
         weight.prefix = "language_model."
+        weight._align_size = 0
+        weight._is_gated_activation = True
+        weight.moe_layer_index_ = [3]
+        weight.expert_num_ = 128
+        weight.has_e_score_correction_bias = True
         return weight
 
     @staticmethod
@@ -154,30 +175,17 @@ class MiniMaxM31WeightContractTest(unittest.TestCase):
             "language_model.model.layers.3.block_sparse_moe.e_score_correction_bias",
         }
 
-    def test_prepacked_nvfp4_fails_closed_by_default(self):
+    def test_prepacked_nvfp4_is_detected_without_mock_gate(self):
         weight = self._weight()
         with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "not supported yet"):
-                weight._process_meta([], self._keys())
-
-    def test_prepacked_nvfp4_is_mocked_only_when_requested(self):
-        weight = self._weight()
-        with patch.dict(os.environ, {"M3_M31_MOCK_NVFP4_MOE": "1"}, clear=True):
             weight._process_meta([], self._keys())
 
         self.assertTrue(weight._prepacked_nvfp4_routed)
-        self.assertTrue(weight._mock_nvfp4_moe)
         self.assertEqual(weight._sparse_layer_set, {0, 3})
 
-    def test_mock_weight_contract_keeps_only_shared_expert(self):
+    def test_prepacked_weight_contract_loads_all_nvfp4_components(self):
         weight = self._weight()
-        weight._align_size = 0
-        weight._is_gated_activation = True
-        weight.moe_layer_index_ = [3]
-        weight.expert_num_ = 128
-        weight.has_e_score_correction_bias = True
         weight._prepacked_nvfp4_routed = True
-        weight._mock_nvfp4_moe = True
 
         modules = weight._get_hf_ffn_layer_weight_info(3)
         checkpoint_names = {
@@ -187,21 +195,98 @@ class MiniMaxM31WeightContractTest(unittest.TestCase):
             for checkpoint_weight in (getattr(component, "weights", None) or [])
         }
 
-        self.assertEqual(len(modules), 1)
-        self.assertEqual(
+        self.assertEqual(len(modules), 9)
+        self.assertIn(
+            "language_model.model.layers.{i}.block_sparse_moe."
+            "experts.{expert_id}.w1.weight_packed",
             checkpoint_names,
-            {
-                "language_model.model.layers.{i}.block_sparse_moe."
-                "shared_experts.gate_proj.weight",
-                "language_model.model.layers.{i}.block_sparse_moe."
-                "shared_experts.down_proj.weight",
-                "language_model.model.layers.{i}.block_sparse_moe."
-                "shared_experts.up_proj.weight",
-            },
         )
-        self.assertFalse(
-            any("experts.{expert_id}" in name for name in checkpoint_names)
+        self.assertIn(
+            "language_model.model.layers.{i}.block_sparse_moe."
+            "experts.{expert_id}.w3.weight_scale",
+            checkpoint_names,
         )
+        self.assertIn(
+            "language_model.model.layers.{i}.block_sparse_moe."
+            "experts.{expert_id}.w2.weight_global_scale",
+            checkpoint_names,
+        )
+        self.assertIn(
+            "language_model.model.layers.{i}.block_sparse_moe."
+            "shared_experts.gate_proj.weight",
+            checkpoint_names,
+        )
+        self.assertIn(
+            "language_model.model.layers.{i}.block_sparse_moe."
+            "e_score_correction_bias",
+            checkpoint_names,
+        )
+        components = {
+            component.name: component
+            for module in modules
+            for component in module.get_components()
+        }
+        for name, dtype in (
+            (W.moe_w1, torch.int8),
+            (W.moe_w2, torch.int8),
+            (W.moe_s1, torch.float8_e4m3fn),
+            (W.moe_s2, torch.float8_e4m3fn),
+            (W.moe_w1_s2, torch.float32),
+            (W.moe_w2_s2, torch.float32),
+        ):
+            with self.subTest(weight=name):
+                self.assertEqual(components[name].data_type, dtype)
+                self.assertTrue(components[name].disable_quantization)
+
+        # Distinct values expose accidental gate/up or expert reordering.
+        for name in (W.moe_w1, W.moe_s1, W.moe_w1_s2):
+            component = components[name]
+            shape = () if name == W.moe_w1_s2 else (2, 4)
+            inputs = [
+                torch.full(shape, value, dtype=component.data_type)
+                for value in (3, 5, 7, 11)
+            ]
+            actual = component.process_fun(inputs).float()
+            expected = torch.tensor([[3, 7], [5, 11]], dtype=torch.float32)
+            if shape:
+                expected = expected.repeat_interleave(2, dim=1)
+                expected = expected.unsqueeze(-1).expand(2, 4, 4)
+            torch.testing.assert_close(actual, expected)
+
+    def test_prepacked_checkpoint_keeps_dense_layers(self):
+        weight = self._weight()
+        weight._prepacked_nvfp4_routed = True
+        modules = weight._get_hf_ffn_layer_weight_info(0)
+        self.assertEqual(len(modules), 1)
+        self.assertIsInstance(modules[0], FfnWeight)
+        self.assertTrue(
+            all(
+                ".mlp." in ckpt.name
+                for component in modules[0].get_components()
+                for ckpt in component.weights
+            )
+        )
+
+    def test_non_nvfp4_checkpoint_keeps_inherited_moe_loader(self):
+        weight = self._weight()
+        for native_mxfp4 in (False, True):
+            with self.subTest(native_mxfp4=native_mxfp4):
+                weight._native_mxfp4_routed = native_mxfp4
+                modules = weight._get_hf_ffn_layer_weight_info(3)
+                self.assertEqual(len(modules), 3)
+                self.assertIsInstance(modules[0], FfnWeight)
+                self.assertIsInstance(modules[1], MoeWeight)
+                self.assertEqual(modules[2].name, W.e_score_correction_b)
+                routed = modules[1].sub_weights[W.moe_w1]
+                self.assertEqual(routed.stacked_ckpt_keys, native_mxfp4)
+                self.assertEqual(routed.disable_quantization, native_mxfp4)
+
+    def test_legacy_loader_does_not_detect_m31_packed_weights(self):
+        weight = object.__new__(MiniMaxM3Weight)
+        weight.prefix = "language_model."
+        weight._process_meta([], self._keys())
+        self.assertFalse(hasattr(weight, "_prepacked_nvfp4_routed"))
+        self.assertEqual(weight._sparse_layer_set, {0, 3})
 
 
 if __name__ == "__main__":

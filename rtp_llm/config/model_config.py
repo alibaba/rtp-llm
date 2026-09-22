@@ -64,6 +64,7 @@ class ModelConfig(CppModelConfig):
         "dspark_markov_rank",
         "dspark_sample_from_anchor",
         "mock_nvfp4_moe",
+        "prepacked_nvfp4_moe",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -533,6 +534,7 @@ class ModelConfig(CppModelConfig):
         self.dspark_markov_rank: Optional[int] = None
         self.dspark_sample_from_anchor: bool = True
         self.mock_nvfp4_moe: bool = False
+        self.prepacked_nvfp4_moe: bool = False
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True

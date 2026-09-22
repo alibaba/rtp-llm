@@ -25,7 +25,7 @@ class MiniMaxM31_VL(MiniMaxM31):
         with open(config_path) as reader:
             config_json = json.load(reader)
         _apply_minimax_m3_vl_config(config, config_json, ckpt_path)
-        cls._parse_nvfp4_mock_config(config, config_json)
+        cls._parse_nvfp4_config(config, config_json)
         return config
 
     @staticmethod

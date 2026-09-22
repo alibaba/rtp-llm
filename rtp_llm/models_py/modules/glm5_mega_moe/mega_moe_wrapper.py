@@ -175,7 +175,25 @@ class MegaMoeWrapper(nn.Module):
                 "quantization without checkpoint scales is not supported."
             )
 
-        if w1.dtype == torch.int8 and w2.dtype == torch.int8:
+        setup_nvfp4 = getattr(self.mega_moe, "setup_weights_from_nvfp4", None)
+        if callable(setup_nvfp4):
+            w1_inverse_gsf = weights.pop(W.moe_w1_s2, None)
+            w2_inverse_gsf = weights.pop(W.moe_w2_s2, None)
+            if w1_inverse_gsf is None or w2_inverse_gsf is None:
+                raise ValueError(
+                    "MegaMoe NVFP4 requires moe_w1_s2/moe_w2_s2 checkpoint "
+                    "global scales"
+                )
+            setup_nvfp4(
+                w1_w=w1,
+                w1_s=s1,
+                w1_inverse_gsf=w1_inverse_gsf,
+                w2_w=w2,
+                w2_s=s2,
+                w2_inverse_gsf=w2_inverse_gsf,
+            )
+            del w1, s1, w1_inverse_gsf, w2, s2, w2_inverse_gsf
+        elif w1.dtype == torch.int8 and w2.dtype == torch.int8:
             w1_up, w1_gate = _split_stacked_moe_w1_up_gate(w1)
             s1_up, s1_gate = _split_stacked_moe_w1_up_gate(s1)
             del w1, s1

@@ -2,11 +2,37 @@
 
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.minimax_m3 import MiniMaxM3, MiniMaxM3Weight, _env_flag
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
+from rtp_llm.models.minimax_m3 import MiniMaxM3, MiniMaxM3Weight, _router_dtype
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    identity,
+    stack_,
+    stack_moe_w1,
+    transpose,
+)
+
+
+def stack_nvfp4_w13_global_scales(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Stack per-expert up/gate NVFP4 inverse GSFs as ``[E, 2]``.
+
+    The normal RTP MoE W1 contract is ``[up | gate]``.  Keep the global
+    scales in the same order here; ``MegaMoeNvfp4Wrapper`` restacks both the
+    packed weights and their GSFs to DeepGEMM's ``[gate | up]`` contract.
+    """
+    if len(ts) % 2 != 0:
+        raise ValueError(f"NVFP4 W13 global scales require pairs, got {len(ts)}")
+    half = len(ts) // 2
+    up = torch.stack([t.reshape(()) for t in ts[:half]], dim=0)
+    gate = torch.stack([t.reshape(()) for t in ts[half:]], dim=0)
+    return torch.stack([up, gate], dim=1).contiguous()
 
 
 class MiniMaxM31Weight(MiniMaxM3Weight):
@@ -14,7 +40,6 @@ class MiniMaxM31Weight(MiniMaxM3Weight):
 
     def __init__(self, *args: Any, **kwargs: Any):
         self._prepacked_nvfp4_routed = False
-        self._mock_nvfp4_moe = False
         super().__init__(*args, **kwargs)
 
     def _process_meta(self, meta_dict, weight_keys):
@@ -22,21 +47,124 @@ class MiniMaxM31Weight(MiniMaxM3Weight):
         self._prepacked_nvfp4_routed = self._contains(
             weight_keys, ".block_sparse_moe.experts.0.w1.weight_packed"
         )
-        self._mock_nvfp4_moe = _env_flag("M3_M31_MOCK_NVFP4_MOE")
-        if self._prepacked_nvfp4_routed and not self._mock_nvfp4_moe:
-            raise RuntimeError(
-                "MiniMax-M3.1 per-expert packed NVFP4 routed-MoE weights are not "
-                "supported yet. Set M3_M31_MOCK_NVFP4_MOE=1 only for structural "
-                "bring-up; that mode skips routed experts, keeps the MXFP8 shared "
-                "expert, and is not valid for quality evaluation."
-            )
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         layer_weights = super()._get_hf_ffn_layer_weight_info(layer_id)
-        if self._prepacked_nvfp4_routed and self._mock_nvfp4_moe:
-            # M3.1 structural bring-up deliberately materializes only the shared
-            # expert. The M3 loader never sees this checkpoint-specific branch.
-            return layer_weights[:1]
+        if not self._prepacked_nvfp4_routed or layer_id not in self.moe_layer_index_:
+            return layer_weights
+
+        moe_config = MoeConfig(
+            align_size=self._align_size,
+            expert_num=self.expert_num_,
+        )
+        moe_root = self.prefix + "model.layers.{i}.block_sparse_moe."
+        # Preserve the inherited shared expert and routing bias. Only replace
+        # the routed MoE module, keeping packed values and both scale levels
+        # intact until MegaMoeNvfp4Wrapper prepares the DeepGEMM layout.
+        routed_weights = [
+            MoeAtomicWeight(
+                W.moe_gate,
+                [CkptWeightInfo(moe_root + "gate.weight", identity)],
+                transpose,
+                data_type=_router_dtype(),
+                config=moe_config,
+            ),
+            MoeAtomicWeight(
+                W.moe_w2,
+                [
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w2.weight_packed",
+                        identity,
+                    )
+                ],
+                stack_,
+                data_type=torch.int8,
+                config=moe_config,
+                disable_quantization=True,
+            ),
+            MoeAtomicWeight(
+                W.moe_s2,
+                [
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w2.weight_scale",
+                        identity,
+                    )
+                ],
+                stack_,
+                data_type=torch.float8_e4m3fn,
+                config=moe_config,
+                disable_quantization=True,
+            ),
+            MoeAtomicWeight(
+                W.moe_w2_s2,
+                [
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w2.weight_global_scale",
+                        identity,
+                    )
+                ],
+                stack_,
+                data_type=torch.float32,
+                config=moe_config,
+                disable_quantization=True,
+            ),
+            # Standard RTP W1 order is [up(w3) | gate(w1)].
+            MoeAtomicWeight(
+                W.moe_w1,
+                [
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w3.weight_packed",
+                        identity,
+                    ),
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w1.weight_packed",
+                        identity,
+                    ),
+                ],
+                stack_moe_w1,
+                data_type=torch.int8,
+                config=moe_config,
+                disable_quantization=True,
+            ),
+            MoeAtomicWeight(
+                W.moe_s1,
+                [
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w3.weight_scale",
+                        identity,
+                    ),
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w1.weight_scale",
+                        identity,
+                    ),
+                ],
+                stack_moe_w1,
+                data_type=torch.float8_e4m3fn,
+                config=moe_config,
+                disable_quantization=True,
+            ),
+            MoeAtomicWeight(
+                W.moe_w1_s2,
+                [
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w3.weight_global_scale",
+                        identity,
+                    ),
+                    CkptWeightInfo(
+                        moe_root + "experts.{expert_id}.w1.weight_global_scale",
+                        identity,
+                    ),
+                ],
+                stack_nvfp4_w13_global_scales,
+                data_type=torch.float32,
+                config=moe_config,
+                disable_quantization=True,
+            ),
+        ]
+        for index, module in enumerate(layer_weights):
+            if isinstance(module, MoeWeight):
+                layer_weights[index : index + 1] = routed_weights
+                break
         return layer_weights
 
 
@@ -57,22 +185,21 @@ class MiniMaxM31(MiniMaxM3):
             return config
         with open(config_path) as reader:
             config_json = json.load(reader)
-        cls._parse_nvfp4_mock_config(config, config_json)
+        cls._parse_nvfp4_config(config, config_json)
         return config
 
     @staticmethod
-    def _parse_nvfp4_mock_config(
-        config: ModelConfig, config_json: Dict[str, Any]
-    ) -> None:
+    def _parse_nvfp4_config(config: ModelConfig, config_json: Dict[str, Any]) -> None:
         quant_cfg = config_json.get("quantization_config", {})
         packed_nvfp4 = (
             str(quant_cfg.get("moe_quant_algo", "")).upper() == "NVFP4"
             and str(quant_cfg.get("moe_quant_format", "")).lower()
             == "nvfp4-pack-quantized"
         )
-        config.mock_nvfp4_moe = bool(
-            packed_nvfp4 and _env_flag("M3_M31_MOCK_NVFP4_MOE")
-        )
+        config.prepacked_nvfp4_moe = bool(packed_nvfp4)
+        # Keep the compatibility field, but native routed NVFP4 must never
+        # enter the shared-expert-only structural mock path.
+        config.mock_nvfp4_moe = False
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.minimax_m31 import MiniMaxM31Model
