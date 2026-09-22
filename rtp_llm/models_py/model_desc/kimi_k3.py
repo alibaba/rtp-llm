@@ -259,7 +259,15 @@ class KimiK3Model(GptModelBase):
         if valid_mask is not None:
             valid_mask = valid_mask.narrow(0, self.tp_rank * local_rows, local_rows)
         conv_meta = None
-        if primary.is_prefill and not primary.is_target_verify:
+        # Native MTP is MLA-only. Conv metadata performs host-side sequence
+        # inspection and must not run in its prefill CUDA graph.
+        if (
+            primary.is_prefill
+            and not primary.is_target_verify
+            and any(
+                layer.layer_type == HybridAttentionType.LINEAR for layer in self.layers
+            )
+        ):
             conv_meta = prepare_causal_conv1d_metadata(
                 query_start_loc=primary.cu_seqlens_device, device=hidden.device
             )
