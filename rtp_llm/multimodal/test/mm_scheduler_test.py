@@ -13,6 +13,7 @@ from unittest import TestCase, main, mock
 import torch
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
@@ -189,6 +190,98 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    def test_metric_failures_do_not_drop_requests(self):
+        """A failed reporter cannot lose dequeued work or preparation slots."""
+        for prepare_inputs in (False, True):
+            with self.subTest(prepare_inputs=prepare_inputs):
+                part = _FakeMMPart(delay=0.01)
+                if prepare_inputs:
+                    part.prepare_embedding_inputs = lambda data, types: data
+                requests = [[_FakeWorkItem(timeout_ms=2000)] for _ in range(3)]
+                with mock.patch(
+                    "rtp_llm.multimodal.mm_scheduler.kmonitor.report",
+                    side_effect=RuntimeError("metric backend unavailable"),
+                ), mock.patch("rtp_llm.multimodal.mm_scheduler.logging.exception"):
+                    sched = MMScheduler(
+                        part, batch_wait_ms=0, max_batch_size=1, max_queue_size=8
+                    )
+                    try:
+                        errors = _submit_concurrently(sched, requests)
+                        self.assertEqual(errors, [None, None, None])
+                        self.assertTrue(
+                            all(wis[0].embedding_result is not None for wis in requests)
+                        )
+                        # Later requests must still progress after every report
+                        # failed, including the reports after queue removal.
+                        followup = _FakeWorkItem(timeout_ms=2000)
+                        sched.submit_and_wait([followup])
+                        self.assertIsNotNone(followup.embedding_result)
+                        self.assertEqual(sched._preparation_admitted, 0)
+                    finally:
+                        sched.close()
+                    self.assertEqual(part.calls, [1, 1, 1, 1])
+                    self.assertEqual(sched._queue_depth(), 0)
+
+    def test_queue_metrics_report_depth_and_wait(self):
+        """Queue gauges expose backlog depth and time before a forward starts."""
+        fake = _FakeMMPart(delay=0.2)
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1)
+        errors: List[Optional[Exception]] = [None, None]
+
+        def submit(index: int):
+            try:
+                sched.submit_and_wait([_FakeWorkItem(timeout_ms=5000)])
+            except Exception as error:  # noqa: BLE001 - asserted below
+                errors[index] = error
+
+        with mock.patch("rtp_llm.multimodal.mm_scheduler.kmonitor.report") as report:
+            first = threading.Thread(target=submit, args=(0,))
+            second = threading.Thread(target=submit, args=(1,))
+            try:
+                first.start()
+                self.assertTrue(fake.forward_entered.wait(timeout=1.0))
+                second.start()
+                # Keep the second request behind the first forward so its queue
+                # wait is observable rather than a scheduler race.
+                time.sleep(0.03)
+                second.join(timeout=2.0)
+                first.join(timeout=2.0)
+            finally:
+                sched.close()
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [None, None])
+
+            depth_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args
+                and call.args[0] == GaugeMetrics.VIT_EMBEDDING_QUEUE_SIZE_METRIC
+            ]
+            wait_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args
+                and call.args[0] == GaugeMetrics.VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC
+            ]
+            self.assertIn(1, depth_values)
+            self.assertEqual(depth_values[-1], 0)
+            self.assertGreater(max(wait_values), 50.0)
+            self.assertEqual(len(wait_values), 2)
+            forward_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args[0] == GaugeMetrics.VIT_EMBEDDING_RT_METRIC
+            ]
+            batch_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args[0] == GaugeMetrics.VIT_EMBEDDING_BATCH_RT_METRIC
+            ]
+            self.assertEqual(len(forward_values), 2)
+            self.assertEqual(len(batch_values), 2)
+            self.assertGreater(max(batch_values), max(forward_values) + 50.0)
 
     def test_preparation_overlaps_previous_forward(self):
         from concurrent.futures import ThreadPoolExecutor

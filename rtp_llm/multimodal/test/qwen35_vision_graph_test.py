@@ -1,9 +1,11 @@
 import copy
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.vision_graph import (
     VisionGraphCache,
 )
@@ -25,6 +27,76 @@ class TinyVision(torch.nn.Module):
 
 
 class VisionGraphTest(unittest.TestCase):
+    @mock.patch(
+        "rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.vision_graph.kmonitor.report"
+    )
+    def test_fallback_reports_m3_and_legacy_metrics(self, report):
+        vision = TinyVision()
+        cache = VisionGraphCache(vision, enabled=True)
+        pixels, grid = torch.ones(16, 8), torch.tensor([[1, 4, 4]])
+        torch.testing.assert_close(
+            cache.run(pixels, grid), vision(pixels, grid).pooler_output
+        )
+        report.assert_any_call(AccMetrics.VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC, 1)
+        report.assert_any_call(
+            AccMetrics.VIT_GRAPH_EVENT_QPS_METRIC,
+            1,
+            {"event": "fallback", "model": "qwen35"},
+        )
+        self.assertEqual(cache.stats()["fallback"], 1)
+
+    @mock.patch(
+        "rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.vision_graph.kmonitor.report"
+    )
+    def test_explicit_bypasses_report_fallback(self, report):
+        vision = TinyVision()
+        pixels = torch.ones(16, 8)
+        for options, grid in (
+            ({"enabled": False}, torch.tensor([[1, 4, 4]])),
+            ({"enabled": True, "max_entries": 0}, torch.tensor([[1, 4, 4]])),
+            ({"enabled": True}, torch.tensor([[1, 2, 4], [1, 2, 4]])),
+        ):
+            with self.subTest(options=options, grid=grid.tolist()):
+                report.reset_mock()
+                cache = VisionGraphCache(vision, **options)
+                torch.testing.assert_close(
+                    cache.run(pixels, grid), vision(pixels, grid).pooler_output
+                )
+                report.assert_any_call(AccMetrics.VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC, 1)
+                self.assertEqual(cache.stats()["fallback"], 1)
+                self.assertEqual(cache.stats()["miss"], 0)
+                self.assertEqual(cache.stats()["entries"], 0)
+
+    @mock.patch(
+        "rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.vision_graph.kmonitor.report"
+    )
+    def test_exact_grid_metrics_have_zero_padding(self, report):
+        cache = VisionGraphCache(TinyVision())
+        for event, metric in (
+            ("hit", AccMetrics.VIT_CUDA_GRAPH_HIT_QPS_METRIC),
+            ("capture", AccMetrics.VIT_CUDA_GRAPH_CAPTURE_QPS_METRIC),
+        ):
+            with self.subTest(event=event):
+                report.reset_mock()
+                cache._report(event)
+                report.assert_any_call(metric, 1)
+                report.assert_any_call(
+                    GaugeMetrics.VIT_CUDA_GRAPH_PADDING_RATIO_METRIC, 0
+                )
+
+    @mock.patch(
+        "rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.vision_graph.kmonitor.report",
+        side_effect=RuntimeError("metrics unavailable"),
+    )
+    def test_report_failure_does_not_fail_inference(self, report):
+        vision = TinyVision()
+        cache = VisionGraphCache(vision, enabled=False)
+        pixels, grid = torch.ones(16, 8), torch.tensor([[1, 4, 4]])
+        torch.testing.assert_close(
+            cache.run(pixels, grid), vision(pixels, grid).pooler_output
+        )
+        self.assertEqual(cache.stats()["fallback"], 1)
+
     def test_cpu_fallback_and_invalid_limits(self):
         vision = TinyVision()
         cache = VisionGraphCache(vision)

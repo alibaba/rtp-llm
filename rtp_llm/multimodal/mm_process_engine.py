@@ -32,6 +32,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import (
+    collect_download_timing,
     trans_mm_input,
     url_data_cache_,
     vit_emb_cache_,
@@ -81,17 +82,73 @@ def _worker_process_task(
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
 
+    return _run_preprocess_task(
+        _worker_preprocess_func,
+        mm_inputs,
+        _worker_vit_config,
+        _worker_preprocess_params,
+    )
+
+
+def _run_preprocess_task(
+    preprocess_func: Callable,
+    mm_inputs: List[MultimodalInput],
+    vit_config: VitConfig,
+    preprocess_params: dict,
+) -> Tuple[Any, float, List[VitMetricSample]]:
+    """Keep worker samples and add M3's non-overlapping millisecond timings."""
     with collect_vit_preprocess_metrics() as preprocess_metrics:
-        with Timer() as route_timer:
-            result = _worker_preprocess_func(
-                mm_inputs, _worker_vit_config, **_worker_preprocess_params
-            )
-    return result, route_timer.cost_ms(), preprocess_metrics.samples
+        with collect_download_timing() as download_timing:
+            with Timer() as route_timer:
+                result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
+    total_ms = max(0.0, route_timer.cost_ms())
+    download_ms = max(0.0, min(download_timing.elapsed_ms, total_ms))
+    preprocess_metrics.report(GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, download_ms)
+    preprocess_metrics.report(
+        GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC, total_ms - download_ms
+    )
+    return result, total_ms, preprocess_metrics.samples
 
 
 def _report_vit_preprocess_samples(samples: List[VitMetricSample]) -> None:
     for sample in samples:
-        kmonitor.report(sample.metric, sample.value, sample.tags)
+        try:
+            kmonitor.report(sample.metric, sample.value, sample.tags)
+        except Exception:
+            logging.exception(
+                "Failed to report ViT preprocess metric %s", sample.metric
+            )
+
+
+def _report_preprocess_queue_size(queue_size: int) -> None:
+    """Report the number of preprocessing work items not yet completed."""
+    try:
+        kmonitor.report(
+            GaugeMetrics.VIT_PREPROCESS_QUEUE_SIZE_METRIC, max(0, int(queue_size))
+        )
+    except Exception:
+        # Telemetry must never change the preprocessing result.
+        logging.exception("Failed to report ViT preprocess queue size")
+
+
+def _count_images(mm_inputs: List[MultimodalInput]) -> int:
+    """Count image-like inputs without treating videos or audio as images."""
+    return sum(
+        mm_input.mm_type in (MMUrlType.DEFAULT, MMUrlType.IMAGE)
+        for mm_input in mm_inputs
+    )
+
+
+def _report_image_count(mm_inputs: List[MultimodalInput]) -> None:
+    """Report the image count once for the current logical request."""
+    try:
+        kmonitor.report(
+            GaugeMetrics.VIT_IMAGE_COUNT_METRIC,
+            _count_images(mm_inputs),
+        )
+    except Exception:
+        # Telemetry must never change the multimodal request result.
+        logging.exception("Failed to report ViT image count")
 
 
 class PreprocessExecutor:
@@ -119,25 +176,22 @@ class LocalPreprocessExecutor(PreprocessExecutor):
         self.preprocess_func = preprocess_func
         self.vit_config = vit_config
         self.preprocess_params = preprocess_params
+        _report_preprocess_queue_size(0)
 
     def submit(self, work_item: "MMWorkItem") -> None:
         if not work_item.should_preprocess:
             return
 
         try:
-            with collect_vit_preprocess_metrics() as preprocess_metrics:
-                with Timer() as route_timer:
-                    result = self.preprocess_func(
-                        work_item.mm_inputs,
-                        self.vit_config,
-                        **self.preprocess_params,
-                    )
-            preprocess_time = route_timer.cost_ms()
+            result, preprocess_time, samples = _run_preprocess_task(
+                self.preprocess_func,
+                work_item.mm_inputs,
+                self.vit_config,
+                self.preprocess_params,
+            )
             work_item.preprocess_result = result
             # 使用简单的对象模拟 future 行为
-            work_item.future = _LocalResult(
-                result, preprocess_time, preprocess_metrics.samples
-            )
+            work_item.future = _LocalResult(result, preprocess_time, samples)
         except Exception as e:
             logging.error(f"Error in local preprocessing: {e}", exc_info=True)
             raise
@@ -150,8 +204,14 @@ class LocalPreprocessExecutor(PreprocessExecutor):
 
         try:
             _, preprocess_time, samples = work_item.future.get()
-            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
-            _report_vit_preprocess_samples(samples)
+            _report_vit_preprocess_samples(
+                [
+                    VitMetricSample(
+                        GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time
+                    )
+                ]
+                + samples
+            )
         except Exception as e:
             logging.error(f"Error getting local preprocess result: {e}", exc_info=True)
             raise
@@ -182,10 +242,15 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.pool: Optional[multiprocessing.pool.Pool] = None
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
+        # Accepted, unfinished work; includes both running and waiting tasks (M3).
+        self._preprocess_queue_lock = threading.Lock()
+        self._pending_preprocess_tasks: Set[int] = set()
+        self._next_preprocess_task_id = 0
         # Serializes timeout-counter updates and pool rebuilds — without it
         # concurrent get_result/submit callers can race to _rebuild_pool, double
         # tear down the pool, or miscount consecutive timeouts.
         self._pool_lock = threading.Lock()
+        _report_preprocess_queue_size(0)
         self._create_pool()
 
     def _create_pool(self) -> None:
@@ -203,6 +268,38 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             ),
         )
 
+    def _track_preprocess_task(self) -> int:
+        with self._preprocess_queue_lock:
+            self._next_preprocess_task_id += 1
+            task_id = self._next_preprocess_task_id
+            self._pending_preprocess_tasks.add(task_id)
+            queue_size = len(self._pending_preprocess_tasks)
+        _report_preprocess_queue_size(queue_size)
+        return task_id
+
+    def _finish_preprocess_task(self, task_id: int) -> None:
+        with self._preprocess_queue_lock:
+            if task_id not in self._pending_preprocess_tasks:
+                return
+            self._pending_preprocess_tasks.remove(task_id)
+            queue_size = len(self._pending_preprocess_tasks)
+        _report_preprocess_queue_size(queue_size)
+
+    def _clear_preprocess_tasks(self) -> None:
+        with self._preprocess_queue_lock:
+            if not self._pending_preprocess_tasks:
+                return
+            self._pending_preprocess_tasks.clear()
+        _report_preprocess_queue_size(0)
+
+    def _apply_async(self, work_item: "MMWorkItem", task_id: int) -> Any:
+        return self.pool.apply_async(
+            _worker_process_task,
+            args=(work_item.mm_inputs,),
+            callback=lambda _result: self._finish_preprocess_task(task_id),
+            error_callback=lambda _error: self._finish_preprocess_task(task_id),
+        )
+
     def _rebuild_pool(self) -> None:
         """Tear down the current pool and create a fresh one.
 
@@ -211,6 +308,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         """
         old = self.pool
         self.pool = None
+        self._clear_preprocess_tasks()
         try:
             if old is not None:
                 old.terminate()
@@ -218,27 +316,43 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         except Exception as e:
             logging.warning(f"terminate broken pool failed: {e}")
         self._create_pool()
+        try:
+            kmonitor.report(AccMetrics.VIT_PROCESS_POOL_RESTART_QPS_METRIC, 1)
+        except Exception:
+            logging.exception("Failed to report ViT process pool restart")
 
     def submit(self, work_item: "MMWorkItem") -> None:
         if not work_item.should_preprocess:
             return
 
+        task_id: Optional[int] = None
         try:
-            work_item.future = self.pool.apply_async(
-                _worker_process_task, args=(work_item.mm_inputs,)
-            )
+            # Serialize submission with pool rebuilds. This keeps a task from
+            # being submitted to an old pool while its queue accounting resets.
+            with self._pool_lock:
+                # Track only after taking the rebuild lock. Otherwise a pool
+                # rebuild can clear the task between accounting and submit.
+                task_id = self._track_preprocess_task()
+                try:
+                    work_item.future = self._apply_async(work_item, task_id)
+                except (BrokenPipeError, OSError, EOFError) as e:
+                    # multiprocessing.Pool surfaces broken state via these —
+                    # rebuild and retry once.
+                    logging.error(
+                        f"Pool broken on submit, rebuilding: {e}", exc_info=True
+                    )
+                    self._finish_preprocess_task(task_id)
+                    self._rebuild_pool()
+                    task_id = self._track_preprocess_task()
+                    work_item.future = self._apply_async(work_item, task_id)
             return
         except (BrokenPipeError, OSError, EOFError) as e:
-            # multiprocessing.Pool surfaces broken state via these — rebuild and retry once.
-            # Keep both rebuild and the retry submission under _pool_lock so another thread
-            # cannot tear self.pool down between our rebuild and the apply_async call.
-            logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
-            with self._pool_lock:
-                self._rebuild_pool()
-                work_item.future = self.pool.apply_async(
-                    _worker_process_task, args=(work_item.mm_inputs,)
-                )
+            if task_id is not None:
+                self._finish_preprocess_task(task_id)
+            raise
         except Exception as e:
+            if task_id is not None:
+                self._finish_preprocess_task(task_id)
             logging.error(f"Unexpected error during submission: {e}", exc_info=True)
             raise
 
@@ -254,8 +368,14 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             )
             with self._pool_lock:
                 self._consecutive_timeouts = 0
-            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
-            _report_vit_preprocess_samples(samples)
+            _report_vit_preprocess_samples(
+                [
+                    VitMetricSample(
+                        GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time
+                    )
+                ]
+                + samples
+            )
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
                 self._consecutive_timeouts += 1
@@ -304,6 +424,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             logging.warning("Preprocessing pool join exceeded 10s, terminating workers")
             pool.terminate()
             pool.join()
+        self._clear_preprocess_tasks()
         logging.info("Preprocessing pool shut down.")
 
 
@@ -341,6 +462,39 @@ class MMEmbeddingRes:
 
     def __str__(self) -> str:
         return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
+
+
+def _embedding_token_length(embeddings: List[Any]) -> int:
+    """Count output tokens, treating a non-empty 1-D vector as one token."""
+    total = 0
+    for embedding in embeddings:
+        if isinstance(embedding, torch.Tensor):
+            if embedding.numel() > 0:
+                total += int(embedding.shape[0]) if embedding.ndim >= 2 else 1
+        else:
+            try:
+                total += len(embedding)
+            except TypeError:
+                logging.warning(
+                    "Cannot derive embedding length from %s", type(embedding).__name__
+                )
+    return total
+
+
+def _report_embedding_length(results: List[MMEmbeddingRes], hashes_only=False) -> None:
+    """Report once per logical result retrieval, including cache/hash-only hits."""
+    try:
+        length = sum(
+            (
+                sum(h.numel() for h in result.feature_hashes)
+                if hashes_only
+                else _embedding_token_length(result.embeddings)
+            )
+            for result in results
+        )
+        kmonitor.report(GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC, length)
+    except Exception:
+        logging.exception("Failed to report ViT embedding length")
 
 
 def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
@@ -677,6 +831,8 @@ class MMProcessEngine:
         request_id: int = 0,
         cache_claim=None,
         defer_cache_complete=False,
+        report_image_count=True,
+        report_embedding_length=True,
     ):
         work_items = []
         self.inc_query_num()
@@ -684,6 +840,8 @@ class MMProcessEngine:
             with torch.profiler.record_function("mm_embedding_impl"):
                 if self._stopped:
                     raise RuntimeError("MMProcessEngine is stopped")
+                if report_image_count:
+                    _report_image_count(mm_inputs)
                 if not self.is_proxy_mode:
                     kmonitor.report(
                         AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
@@ -706,6 +864,8 @@ class MMProcessEngine:
                     extras,
                     [h for item in work_items for h in (item.feature_hashes or [])],
                 )
+                if report_embedding_length:
+                    _report_embedding_length([result])
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_success_access(
                         mm_inputs, str(result), request_id=request_id
@@ -925,6 +1085,7 @@ class MMProcessEngine:
         """
         current_entry: Optional[MMEmbeddingCacheEntry] = None
         try:
+            _report_image_count(mm_inputs)
             timeout_ms = timeout_ms or self.vit_config.mm_timeout_ms
             claims = self._claim_and_submit_async(
                 mm_inputs,
@@ -957,6 +1118,7 @@ class MMProcessEngine:
                     )
                 del raw_result
 
+            _report_embedding_length(results, hashes_only=hashes_only)
             return results
         except Exception as error:
             if hashes_only:
@@ -1278,6 +1440,8 @@ class MMProcessEngine:
                     cache_claim=(cache_key, entry, "miss"),
                     defer_cache_complete=True,
                     request_id=request_id,
+                    report_image_count=False,
+                    report_embedding_length=False,
                 )
                 raw_result = work_items[0].embedding_result
                 if raw_result is None:

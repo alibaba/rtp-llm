@@ -32,7 +32,10 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.multimodal.qwen3_vl_video import resolve_video_size, video_timestamp_tokens
-from rtp_llm.multimodal.vit_metrics import vit_preprocess_timer
+from rtp_llm.multimodal.vit_metrics import (
+    record_vit_preprocess_value,
+    vit_preprocess_timer,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.database import CkptDatabase
@@ -134,6 +137,11 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
         )
         if mm_inputs[0].mm_type == MMUrlType.VIDEO:
             pixels, grid, metadata = data
+            record_vit_preprocess_value(
+                GaugeMetrics.VIT_VIDEO_FRAME_COUNT_METRIC,
+                len(metadata.frames_indices),
+                {"model": "qwen35", "mm_type": "video", "backend": "cpu"},
+            )
             return (
                 pixels,
                 grid,

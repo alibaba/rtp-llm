@@ -79,6 +79,14 @@ class MMSchedulerRequestTooLargeError(MMSchedulerError, ValueError):
     """
 
 
+def _report_metric(metric: AccMetrics | GaugeMetrics, value: float) -> None:
+    """Keep telemetry failures outside the scheduler's request lifecycle."""
+    try:
+        kmonitor.report(metric, value)
+    except Exception:
+        logging.exception("Failed to report ViT scheduler metric %s", metric.name)
+
+
 def _run_embedding(
     mm_part: MultiModalEmbeddingInterface,
     items: List[MMWorkItem],
@@ -94,10 +102,11 @@ def _run_embedding(
     with Timer() as route_timer:
         with torch.profiler.record_function("batched_embedding"):
             batch_outputs = mm_part.batched_embedding(data_list, type_list)
-    # Forward-only latency, sampled per merged batch -> its own metric. The
-    # historical per-request (wait + forward) latency stays on
-    # VIT_EMBEDDING_RT_METRIC, reported in submit_and_wait.
-    kmonitor.report(GaugeMetrics.VIT_EMBEDDING_FORWARD_RT_METRIC, route_timer.cost_ms())
+    # Match M3's dashboard: embedding_rt is forward-only; batch_rt is
+    # per-request scheduler time. Keep the existing forward metric as well.
+    forward_ms = route_timer.cost_ms()
+    _report_metric(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, forward_ms)
+    _report_metric(GaugeMetrics.VIT_EMBEDDING_FORWARD_RT_METRIC, forward_ms)
 
     # A short/long return would silently mis-pair work items with outputs.
     if len(batch_outputs) != len(items):
@@ -142,6 +151,8 @@ class _EmbeddingRequest:
         "future",
         "work_estimate",
         "preparation_reserved",
+        "enqueued_at",
+        "queue_wait_reported",
     )
 
     def __init__(self, work_items: List[MMWorkItem]):
@@ -150,6 +161,8 @@ class _EmbeddingRequest:
         self.future: Future[None] = Future()
         self.work_estimate = MMWorkEstimate()
         self.preparation_reserved = False
+        self.enqueued_at: Optional[float] = None
+        self.queue_wait_reported = False
 
 
 # Fallback for hand-built work items without a positive request timeout.
@@ -262,12 +275,49 @@ class MMScheduler:
         self._executor = threading.Thread(
             target=self._executor_loop, daemon=True, name="mm-scheduler"
         )
+        self._report_queue_depth()
         self._executor.start()
         self._ready.wait()
         if self._init_error is not None:
             raise RuntimeError(
                 f"MMScheduler failed to bind device {self._device!r}"
             ) from self._init_error
+
+    def _queue_depth(self) -> int:
+        """Return queued chunks, including a budget-overflow pending chunk.
+
+        ``Queue.qsize()`` is intentionally used as a point-in-time gauge; it is
+        approximate under concurrent producers, which is appropriate for
+        monitoring and avoids adding a lock to the submission hot path.
+        """
+        return self._waiting.qsize() + int(self._pending is not None)
+
+    def _report_queue_depth(self) -> None:
+        _report_metric(
+            GaugeMetrics.VIT_EMBEDDING_QUEUE_SIZE_METRIC, self._queue_depth()
+        )
+
+    def _enqueue_chunk(self, chunk: _EmbeddingRequest) -> None:
+        """Put a chunk into the waiting queue and stamp its queue-entry time."""
+        chunk.enqueued_at = time.monotonic()
+        chunk.queue_wait_reported = False
+        self._waiting.put_nowait(chunk)
+        self._report_queue_depth()
+
+    def _report_queue_wait(self, batch: List[_EmbeddingRequest]) -> List[float]:
+        """Report each active chunk's wait before its first forward attempt."""
+        now = time.monotonic()
+        wait_times = []
+        for chunk in batch:
+            if chunk.queue_wait_reported:
+                continue
+            chunk.queue_wait_reported = True
+            if chunk.enqueued_at is None:
+                continue
+            wait_ms = max(0.0, (now - chunk.enqueued_at) * 1000.0)
+            _report_metric(GaugeMetrics.VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC, wait_ms)
+            wait_times.append(wait_ms)
+        return wait_times
 
     @property
     def max_request_images(self) -> int:
@@ -343,8 +393,9 @@ class MMScheduler:
             # Do not retain prior chunks/tensors in a public exception traceback.
             work_items, chunks, chunk = [], [], None
             raise
-        kmonitor.report(
-            GaugeMetrics.VIT_EMBEDDING_RT_METRIC, (time.monotonic() - started) * 1000.0
+        _report_metric(
+            GaugeMetrics.VIT_EMBEDDING_BATCH_RT_METRIC,
+            (time.monotonic() - started) * 1000.0,
         )
 
     def _reserve_preparation(self, req: _EmbeddingRequest, deadline: float) -> None:
@@ -353,7 +404,7 @@ class MMScheduler:
                 raise RuntimeError("MMScheduler is closed, request rejected")
             limit = self._waiting.maxsize
             if len(self._admission_waiters) + self._preparation_admitted >= limit:
-                kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
+                _report_metric(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
                 raise MMSchedulerOverloadError(
                     f"MMScheduler queue full (admission_limit={limit}), request rejected"
                 )
@@ -414,12 +465,12 @@ class MMScheduler:
                     if self._stopped.is_set():
                         raise RuntimeError("MMScheduler is closed, request rejected")
                     if self._waiting.full():
-                        kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
+                        _report_metric(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
                         raise MMSchedulerOverloadError(
                             f"MMScheduler queue full (admission_limit={self._waiting.maxsize}), "
                             "request rejected"
                         )
-                    self._waiting.put_nowait(req)
+                    self._enqueue_chunk(req)
 
             if prepare is not None:
                 # Work/image budgets were validated before admitting GPU work.
@@ -443,7 +494,7 @@ class MMScheduler:
                         )
                     for wi, data in zip(work_items, prepared):
                         wi.preprocess_result = data
-                    self._waiting.put_nowait(req)
+                    self._enqueue_chunk(req)
                     self._preparing -= 1
                     reserved = False
         finally:
@@ -631,6 +682,7 @@ class MMScheduler:
         queued = [self._pending] if self._pending else []
         self._pending = None
         queued.extend(self._drain(self._waiting))
+        self._report_queue_depth()
         for req in queued:
             with self._lock:
                 self._release_preparation_locked(req)
@@ -661,6 +713,7 @@ class MMScheduler:
                     first = self._waiting.get(timeout=_STOP_POLL_INTERVAL_S)
                 except queue.Empty:
                     continue
+            self._report_queue_depth()
             if not first.future.cancelled():
                 break
             with self._lock:
@@ -691,6 +744,7 @@ class MMScheduler:
                     )
                 except queue.Empty:
                     continue
+            self._report_queue_depth()
             if req.future.cancelled():
                 with self._lock:
                     self._release_preparation_locked(req)
@@ -702,6 +756,7 @@ class MMScheduler:
                 and not (batch_work + req.work_estimate).fits_within(self._work_budget)
             ):
                 self._pending = req
+                self._report_queue_depth()
                 break
             batch.append(req)
             n_images += req.n_images
@@ -744,8 +799,9 @@ class MMScheduler:
         # Actual composition of this forward (after cancellations). The batch-size
         # metric is reported every forward for continuous monitoring via kmonitor
         # (VIT_EMBEDDING_BATCH_SIZE_METRIC); no per-merge logging on the hot path.
+        self._report_queue_wait(batch)
         batch_size = len(batch)
-        kmonitor.report(GaugeMetrics.VIT_EMBEDDING_BATCH_SIZE_METRIC, batch_size)
+        _report_metric(GaugeMetrics.VIT_EMBEDDING_BATCH_SIZE_METRIC, batch_size)
 
         items = [wi for req in batch for wi in req.work_items]
         # Profile the forward on this executor thread (per forward/batch) when a

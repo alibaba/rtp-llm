@@ -324,6 +324,140 @@ class Qwen35VitTest(unittest.TestCase):
         )
         self.assertFalse(torch.equal(replayed, expected))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    @torch.inference_mode()
+    def test_packed_qk_rotary_matches_general_kernel(self):
+        from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe import vision_kernels
+
+        for dtype in (torch.bfloat16, torch.float16, torch.float32):
+            for length in (1, 7, 129, 513):
+                with self.subTest(dtype=dtype, length=length):
+                    qkv = torch.randn(length, 3, 16, 72, device="cuda", dtype=dtype)
+                    before = qkv.clone()
+                    packed = qkv[:, :2].permute(1, 0, 2, 3)
+                    # Dense input takes the general rotary kernel as reference.
+                    dense = packed.clone(memory_format=torch.contiguous_format)
+                    factors = torch.randn(length, 36, device="cuda", dtype=dtype)
+                    cos, sin = factors.cos(), factors.sin()
+                    expected = vision_kernels.apply_rotary(dense, cos, sin)
+                    actual = vision_kernels.apply_rotary(packed, cos, sin)
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                    torch.testing.assert_close(qkv, before, atol=0, rtol=0)
+                    if dtype != torch.float32:
+                        self.assertTrue(actual.is_contiguous())
+                    self.assertNotEqual(actual.data_ptr(), packed.data_ptr())
+
+        # In-place and offset variants must retain their general-kernel behavior.
+        qkv = torch.randn(129, 3, 16, 72, device="cuda", dtype=torch.bfloat16)
+        packed = qkv[:, :2].permute(1, 0, 2, 3)
+        factors = torch.randn(131, 36, device="cuda", dtype=torch.bfloat16)
+        cos, sin = factors.cos(), factors.sin()
+        expected = vision_kernels.apply_rotary(
+            packed.contiguous(), cos, sin, seqlen_offsets=2
+        )
+        actual = vision_kernels.apply_rotary(packed, cos, sin, seqlen_offsets=2)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        expected = vision_kernels.apply_rotary(packed.contiguous(), cos, sin)
+        actual = vision_kernels.apply_rotary(packed, cos, sin, inplace=True)
+        self.assertEqual(actual.data_ptr(), packed.data_ptr())
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    def test_mlp_cpu_autograd_preserves_unfused_path(self):
+        torch.manual_seed(41)
+        mlp = self.make_model().blocks[0].mlp
+        x = torch.randn(5, 2, 32, requires_grad=True)
+        reference_x = x.detach().clone().requires_grad_()
+        with patch.object(
+            torch,
+            "_addmm_activation",
+            side_effect=AssertionError("CPU/autograd must retain the unfused path"),
+        ):
+            actual = mlp(x)
+        expected = mlp.linear_fc2(mlp.act_fn(mlp.linear_fc1(reference_x)))
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        parameters = tuple(p for p in mlp.parameters() if p.requires_grad)
+        actual_grad = torch.autograd.grad(actual.square().sum(), (x, *parameters))
+        expected_grad = torch.autograd.grad(
+            expected.square().sum(), (reference_x, *parameters)
+        )
+        for actual_value, expected_value in zip(actual_grad, expected_grad):
+            torch.testing.assert_close(actual_value, expected_value, atol=0, rtol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    @torch.inference_mode()
+    def test_cuda_mlp_fuses_fc1_for_half_inputs_and_preserves_shapes(self):
+        torch.manual_seed(43)
+        for dtype in (torch.float16, torch.bfloat16):
+            if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+                continue
+            mlp = self.make_model().blocks[0].mlp.cuda().to(dtype)
+            inputs = [
+                torch.randn(9, 32, device="cuda", dtype=dtype),
+                torch.randn(3, 5, 32, device="cuda", dtype=dtype),
+                torch.randn(3, 5, 64, device="cuda", dtype=dtype)[..., ::2],
+                torch.randn(3, 5, 32, device="cuda", dtype=dtype).transpose(0, 1),
+            ]
+            for x in inputs:
+                with self.subTest(dtype=dtype, shape=x.shape, stride=x.stride()):
+                    with patch.object(
+                        torch, "_addmm_activation", wraps=torch._addmm_activation
+                    ) as fused:
+                        actual = mlp(x)
+                    fused.assert_called_once()
+                    self.assertTrue(fused.call_args.kwargs["use_gelu"])
+                    self.assertEqual(actual.shape, x.shape)
+                    self.assertEqual(actual.dtype, dtype)
+                    self.assertTrue(torch.isfinite(actual).all())
+                    # A layout change must not change values. This compares
+                    # the same fused math, not old FC1's intermediate rounding.
+                    contiguous = mlp(x.contiguous())
+                    torch.testing.assert_close(actual, contiguous, atol=0, rtol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_cuda_mlp_grad_and_custom_linear_method_use_original_path(self):
+        torch.manual_seed(47)
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        mlp = self.make_model().blocks[0].mlp.cuda().to(dtype)
+        with torch.enable_grad():
+            x = torch.randn(7, 1, 32, device="cuda", dtype=dtype, requires_grad=True)
+            with patch.object(
+                torch,
+                "_addmm_activation",
+                side_effect=AssertionError("grad-enabled MLP must not use fused op"),
+            ):
+                actual = mlp(x)
+            expected = mlp.linear_fc2(mlp.act_fn(mlp.linear_fc1(x)))
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            actual.float().square().sum().backward()
+            self.assertIsNotNone(x.grad)
+            self.assertTrue(torch.isfinite(x.grad).all())
+
+        class OffsetLinearMethod(UnquantizedLinearMethod):
+            def __init__(self):
+                self.calls = 0
+
+            def apply(self, layer, x, bias=None):
+                self.calls += 1
+                return super().apply(layer, x, bias) + 0.5
+
+        method = OffsetLinearMethod()
+        mlp.linear_fc1.quant_method = method
+        with torch.inference_mode():
+            x = torch.randn(7, 1, 32, device="cuda", dtype=dtype)
+            expected = mlp.linear_fc2(
+                mlp.act_fn(
+                    F.linear(x, mlp.linear_fc1.weight, mlp.linear_fc1.bias) + 0.5
+                )
+            )
+            with patch.object(
+                torch,
+                "_addmm_activation",
+                side_effect=AssertionError("custom linear method must not be bypassed"),
+            ):
+                actual = mlp(x)
+            self.assertEqual(method.calls, 1)
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
 
 if __name__ == "__main__":
     unittest.main()

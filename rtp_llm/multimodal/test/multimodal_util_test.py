@@ -10,7 +10,12 @@ from PIL import Image
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.multimodal.mm_error_messages import MMErr, format_mm_rpc_error
-from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.multimodal.multimodal_util import (
+    _record_download_time,
+    collect_download_timing,
+    get_bytes_io_from_url,
+    get_json_result_from_url,
+)
 
 
 class _FakeResponse:
@@ -33,6 +38,96 @@ class _FakeResponse:
 
     def close(self):
         self.closed = True
+
+
+class TestDownloadTiming(unittest.TestCase):
+    def test_http_body_is_timed_and_cache_hit_is_not(self):
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.url_data_cache_"
+        ) as cache, patch(
+            "rtp_llm.multimodal.multimodal_util.request_get",
+            return_value=_FakeResponse(),
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.time.monotonic",
+            side_effect=[1.0, 1.025],
+        ):
+            cache.check_cache.return_value = None
+            with collect_download_timing() as timing:
+                loaded = get_bytes_io_from_url("https://example.com/timed")
+            self.assertEqual(loaded.read(), b"payload")
+            self.assertAlmostEqual(timing.elapsed_ms, 25.0)
+            cache.check_cache.return_value = io.BytesIO(b"cached")
+            with collect_download_timing() as cached_timing:
+                self.assertEqual(
+                    get_bytes_io_from_url("https://example.com/timed").read(),
+                    b"cached",
+                )
+            self.assertEqual(cached_timing.elapsed_ms, 0)
+
+    def test_local_data_url_and_json_loading_are_timed(self):
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.url_data_cache_"
+        ) as cache, patch(
+            "rtp_llm.multimodal.multimodal_util.time.monotonic",
+            side_effect=[1.0, 1.002, 2.0, 2.003, 3.0, 3.004],
+        ):
+            cache.check_cache.return_value = None
+            with tempfile.NamedTemporaryFile() as stream:
+                stream.write(b"local")
+                stream.flush()
+                with collect_download_timing() as timing:
+                    self.assertEqual(
+                        get_bytes_io_from_url(stream.name).read(), b"local"
+                    )
+                    self.assertEqual(
+                        get_bytes_io_from_url(
+                            "data:application/octet-stream;base64,eA=="
+                        ).read(),
+                        b"x",
+                    )
+                    self.assertEqual(
+                        get_json_result_from_url("data:application/json;base64,e30="),
+                        "{}",
+                    )
+            self.assertAlmostEqual(timing.elapsed_ms, 9.0)
+
+    def test_nested_and_concurrent_collectors_are_isolated(self):
+        import concurrent.futures
+
+        def collect_one():
+            with collect_download_timing() as timing:
+                _record_download_time(9.0)
+            return timing.elapsed_ms
+
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.time.monotonic", return_value=10.0
+        ):
+            with collect_download_timing() as outer:
+                _record_download_time(9.0)
+                with collect_download_timing() as inner:
+                    _record_download_time(8.0)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    values = list(pool.map(lambda _: collect_one(), range(2)))
+                _record_download_time(7.0)
+            self.assertEqual(outer.elapsed_ms, 4000.0)
+            self.assertEqual(inner.elapsed_ms, 2000.0)
+            self.assertEqual(values, [1000.0, 1000.0])
+
+    def test_failed_load_preserves_error_and_records_time(self):
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.url_data_cache_"
+        ) as cache, patch(
+            "rtp_llm.multimodal.multimodal_util.request_get",
+            return_value=_FakeResponse(status_code=503),
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.time.monotonic",
+            side_effect=[1.0, 1.010],
+        ):
+            cache.check_cache.return_value = None
+            with collect_download_timing() as timing:
+                with self.assertRaises(FtRuntimeException):
+                    get_bytes_io_from_url("https://example.com/failed")
+            self.assertAlmostEqual(timing.elapsed_ms, 10.0)
 
 
 class TestMultiModalUtil(unittest.TestCase):

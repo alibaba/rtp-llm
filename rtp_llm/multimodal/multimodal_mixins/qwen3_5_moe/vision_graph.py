@@ -8,7 +8,7 @@ from collections import OrderedDict
 import torch
 
 from rtp_llm.metrics import kmonitor
-from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +44,42 @@ class VisionGraphCache:
 
     def _report(self, event):
         self._stats[event] += 1
-        kmonitor.report(
-            AccMetrics.VIT_GRAPH_EVENT_QPS_METRIC,
-            1,
-            {"event": event, "model": "qwen35"},
-        )
+        # The M3 dashboard uses separate counters; keep the tagged counter too.
+        metric = {
+            "hit": AccMetrics.VIT_CUDA_GRAPH_HIT_QPS_METRIC,
+            "miss": AccMetrics.VIT_CUDA_GRAPH_MISS_QPS_METRIC,
+            "capture": AccMetrics.VIT_CUDA_GRAPH_CAPTURE_QPS_METRIC,
+            "fallback": AccMetrics.VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC,
+        }[event]
+        try:
+            kmonitor.report(metric, 1)
+            if event in ("hit", "capture"):
+                kmonitor.report(GaugeMetrics.VIT_CUDA_GRAPH_PADDING_RATIO_METRIC, 0)
+            kmonitor.report(
+                AccMetrics.VIT_GRAPH_EVENT_QPS_METRIC,
+                1,
+                {"event": event, "model": "qwen35"},
+            )
+        except Exception:
+            logger.warning("Failed to report ViT CUDA graph metrics", exc_info=True)
 
     @torch.inference_mode()
     def run(self, pixels, grid, **kwargs):
         def eager():
             return self.visual(pixels, grid_thw=grid, **kwargs).pooler_output
 
+        # Count every explicit bypass so eager-only workloads remain visible.
+        if not self.enabled or not self.max_entries or grid.shape[0] != 1:
+            with self._lock:
+                self._report("fallback")
+            return eager()
         if (
-            not self.enabled
-            or not self.max_entries
-            or not pixels.is_cuda
+            not pixels.is_cuda
             or pixels.shape[0] > self.max_patches
-            or grid.shape[0] != 1
             or torch.cuda.is_current_stream_capturing()
         ):
+            with self._lock:
+                self._report("fallback")
             return eager()
         signature = (
             pixels.device,
@@ -91,6 +108,7 @@ class VisionGraphCache:
                 metadata = self.visual.prepare_graph_metadata(grid, pixels)
                 if metadata["attention_backend"] not in ("fa4", "flash_attention_2"):
                     self._seen[signature] = -1
+                    self._report("fallback")
                     return eager()
                 stream = torch.cuda.current_stream(pixels.device)
                 capture_stream = torch.cuda.Stream(device=pixels.device)

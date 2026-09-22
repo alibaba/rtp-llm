@@ -56,6 +56,7 @@ from .vision_linear import (
     LinearBase,
     QKVParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from .vision_linear_runtime import QuantizationConfig
 
@@ -599,8 +600,27 @@ class Qwen3_5MoeVisionMLP(nn.Module):
         self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
-        mlp_output = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
-        return mlp_output
+        fc1 = self.linear_fc1
+        if (
+            x.is_cuda
+            and x.dtype in (torch.float16, torch.bfloat16)
+            and not torch.is_grad_enabled()
+            and type(fc1.quant_method) is UnquantizedLinearMethod
+            and fc1.bias is not None
+            and x.dtype == fc1.weight.dtype == fc1.bias.dtype
+        ):
+            # Fuse bias and tanh GELU in cuBLASLt's GEMM epilogue. This skips
+            # the intermediate FP16/BF16 rounding of a separate FC1 output.
+            hidden = torch._addmm_activation(
+                fc1.bias,
+                x.reshape(-1, x.shape[-1]),
+                fc1.weight.t(),
+                use_gelu=True,
+            )
+            hidden = hidden.reshape(*x.shape[:-1], hidden.shape[-1])
+        else:
+            hidden = self.act_fn(fc1(x))
+        return self.linear_fc2(hidden)
 
 
 class Qwen3_5MoeVisionAttention(nn.Module):

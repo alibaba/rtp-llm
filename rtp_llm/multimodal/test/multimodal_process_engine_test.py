@@ -4,7 +4,7 @@ import pickle
 import threading
 import time
 from typing import List
-from unittest import TestCase, main
+from unittest import TestCase, main, mock
 
 import PIL
 import pillow_avif
@@ -27,6 +27,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine, MMWorkItem
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
@@ -521,6 +522,270 @@ class MMProcessEngineGpuBatchTest(TestCase):
         self.assertEqual(r1.embeddings[0].item(), 7)
         self.assertEqual(r2.embeddings[0].item(), 7)
         self.assertEqual(part.embedding_calls, 1)
+
+
+class PreprocessMetricTest(TestCase):
+    @mock.patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_download_components_preserve_local_and_worker_samples(self, report):
+        from rtp_llm.multimodal import mm_process_engine as engine_module
+        from rtp_llm.multimodal.multimodal_util import _download_timing
+        from rtp_llm.multimodal.vit_metrics import record_vit_preprocess_value
+
+        def preprocess(inputs, config):
+            _download_timing.get().elapsed_ms = 3.0
+            record_vit_preprocess_value(
+                GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, 3000, {"mm_type": "video"}
+            )
+            return "prepared"
+
+        with mock.patch.object(engine_module, "Timer") as timer:
+            timer.return_value.cost_ms.return_value = 10.0
+            timer.return_value.__enter__.return_value = timer.return_value
+            local = engine_module.LocalPreprocessExecutor(preprocess, VitConfig(), {})
+            item = mock.Mock(should_preprocess=True, mm_inputs=[], mm_timeout_ms=30000)
+            local.submit(item)
+            local.get_result(item)
+            with mock.patch.multiple(
+                engine_module,
+                _worker_preprocess_func=preprocess,
+                _worker_vit_config=VitConfig(),
+                _worker_preprocess_params={},
+            ):
+                payload = engine_module._worker_process_task([])
+            # The worker wire format keeps the sample list in its third field.
+            restored = pickle.loads(pickle.dumps(payload))
+            executor = object.__new__(engine_module.MultiprocessPreprocessExecutor)
+            executor._pool_lock = threading.Lock()
+            item.future = mock.Mock()
+            item.future.get.return_value = restored
+            executor.get_result(item)
+        for metric, expected in (
+            (GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, 3.0),
+            (GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC, 7.0),
+            (GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, 3000.0),
+        ):
+            values = [c.args[1] for c in report.call_args_list if c.args[0] == metric]
+            self.assertEqual(values, [expected, expected])
+
+    @mock.patch("rtp_llm.multimodal.mm_process_engine.logging.exception")
+    @mock.patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_metrics_backend_failure_does_not_fail_preprocessing(self, report, log):
+        from rtp_llm.multimodal import mm_process_engine as engine_module
+
+        report.side_effect = RuntimeError("metrics unavailable")
+        local = engine_module.LocalPreprocessExecutor(
+            lambda inputs, config: "prepared", VitConfig(), {}
+        )
+        item = mock.Mock(should_preprocess=True, mm_inputs=[], mm_timeout_ms=30000)
+        local.submit(item)
+        payload = item.future.get()
+        local.get_result(item)
+        self.assertEqual(item.preprocess_result, "prepared")
+        executor = object.__new__(engine_module.MultiprocessPreprocessExecutor)
+        executor._pool_lock = threading.Lock()
+        item.future = mock.Mock()
+        item.future.get.return_value = payload
+        executor.get_result(item)
+        self.assertEqual(item.preprocess_result, "prepared")
+        reported_metrics = [call.args[0] for call in report.call_args_list]
+        for metric in (
+            GaugeMetrics.VIT_PREPROCESS_RT_METRIC,
+            GaugeMetrics.VIT_DOWNLOAD_RT_METRIC,
+            GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC,
+        ):
+            self.assertEqual(reported_metrics.count(metric), 2)
+
+    def test_preprocess_components_cannot_be_negative(self):
+        from rtp_llm.multimodal import mm_process_engine as engine_module
+        from rtp_llm.multimodal.multimodal_util import _download_timing
+
+        def preprocess(inputs, config):
+            _download_timing.get().elapsed_ms = 11.0
+            return "prepared"
+
+        with mock.patch.object(engine_module, "Timer") as timer:
+            timer.return_value.cost_ms.return_value = 10.0
+            timer.return_value.__enter__.return_value = timer.return_value
+            _, total, samples = engine_module._run_preprocess_task(
+                preprocess, [], VitConfig(), {}
+            )
+        values = {s.metric: s.value for s in samples}
+        self.assertEqual(values[GaugeMetrics.VIT_DOWNLOAD_RT_METRIC], total)
+        self.assertEqual(values[GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC], 0.0)
+
+    @mock.patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_process_pool_restart_only_after_success(self, report):
+        from rtp_llm.multimodal.mm_process_engine import MultiprocessPreprocessExecutor
+
+        executor = object.__new__(MultiprocessPreprocessExecutor)
+        executor.pool = mock.Mock()
+        old_pool = executor.pool
+        executor._clear_preprocess_tasks = mock.Mock()
+        executor._create_pool = mock.Mock()
+        executor._rebuild_pool()
+        old_pool.terminate.assert_called_once()
+        old_pool.join.assert_called_once()
+        report.assert_called_once_with(
+            AccMetrics.VIT_PROCESS_POOL_RESTART_QPS_METRIC, 1
+        )
+        report.reset_mock()
+        executor._create_pool.side_effect = OSError("cannot create pool")
+        with self.assertRaises(OSError):
+            executor._rebuild_pool()
+        report.assert_not_called()
+        # Metrics failure must not turn a successful rebuild into a failure.
+        executor._create_pool.side_effect = None
+        report.side_effect = RuntimeError("metrics unavailable")
+        executor._rebuild_pool()
+
+    @mock.patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    @mock.patch("rtp_llm.multimodal.mm_process_engine._feature_hashes_from_result")
+    def test_embedding_length_once_for_sync_async_cache_and_hash_only(
+        self, hashes, report
+    ):
+        hashes.side_effect = lambda result: [
+            torch.zeros(result[0].shape[0], dtype=torch.int64)
+        ]
+        model = FakeModel(FakeBatchMMPart())
+        config = VitConfig()
+        config.use_local_preprocess = True
+        config.mm_cache_gpu_max_bytes = 0
+        config.mm_cache_cpu_max_bytes = 4096
+        config.disable_access_log = True
+        engine = MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            config,
+            ProfilingDebugLoggingConfig(),
+            device="cpu",
+        )
+        preprocess = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+
+        def inputs(index):
+            return [
+                MultimodalInput(
+                    f"fake://{index}", MMUrlType.IMAGE, torch.empty(0), preprocess
+                )
+            ]
+
+        try:
+            engine.mm_embedding_impl(inputs(0))
+            engine.mm_embedding_impl(inputs(0))  # synchronous cache hit
+            engine.get_embedding_result(inputs(1), request_id=1)  # new async task
+            engine.get_embedding_result(inputs(1), request_id=2)  # cache hit
+            result = engine.get_embedding_result(
+                inputs(1), request_id=3, hashes_only=True
+            )
+            self.assertEqual(result[0].embeddings, [])
+            self.assertEqual(model.mm_part.embedding_calls, 2)
+        finally:
+            engine.stop()
+        values = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args[0] == GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC
+        ]
+        self.assertEqual(values, [1, 1, 1, 1, 1])
+
+    def test_embedding_length_counts_tokens_not_hidden_width(self):
+        from rtp_llm.multimodal.mm_process_engine import _embedding_token_length
+
+        self.assertEqual(
+            _embedding_token_length(
+                [torch.zeros(3, 8), torch.zeros(8), torch.empty(0, 8)]
+            ),
+            4,
+        )
+
+    @mock.patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_preprocess_queue_metric_tracks_pending_tasks(self, report):
+        from rtp_llm.multimodal.mm_process_engine import MultiprocessPreprocessExecutor
+
+        class FakePool:
+            def __init__(self):
+                self.callbacks = []
+
+            def apply_async(self, *args, **kwargs):
+                self.callbacks.append((kwargs["callback"], kwargs["error_callback"]))
+                return object()
+
+        executor = object.__new__(MultiprocessPreprocessExecutor)
+        executor.pool = FakePool()
+        executor._pool_lock = threading.Lock()
+        executor._preprocess_queue_lock = threading.Lock()
+        executor._pending_preprocess_tasks = set()
+        executor._next_preprocess_task_id = 0
+
+        config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        work_items = [
+            MMWorkItem(
+                [
+                    MultimodalInput(
+                        f"fake://queue-{index}",
+                        MMUrlType.IMAGE,
+                        torch.empty(0),
+                        config,
+                    )
+                ],
+                mm_timeout_ms=30000,
+            )
+            for index in range(2)
+        ]
+
+        executor.submit(work_items[0])
+        executor.submit(work_items[1])
+        depth_values = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args
+            and call.args[0] == GaugeMetrics.VIT_PREPROCESS_QUEUE_SIZE_METRIC
+        ]
+        self.assertEqual(depth_values[-1], 2)
+
+        executor.pool.callbacks[0][0](None)
+        executor.pool.callbacks[1][1](RuntimeError("preprocess failed"))
+        depth_values = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args
+            and call.args[0] == GaugeMetrics.VIT_PREPROCESS_QUEUE_SIZE_METRIC
+        ]
+        self.assertEqual(depth_values[-1], 0)
+
+    @mock.patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_image_count_once_per_logical_sync_and_async_request(self, report):
+        model = FakeModel(FakeMultiModalEmbeddingInterface())
+        config = VitConfig()
+        config.use_local_preprocess = True
+        config.mm_cache_gpu_max_bytes = 0
+        config.mm_cache_cpu_max_bytes = 0
+        engine = MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            config,
+            ProfilingDebugLoggingConfig(),
+            device="cpu",
+        )
+        preprocess = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        inputs = [
+            MultimodalInput(
+                "fake://image", MMUrlType.IMAGE, torch.empty(0), preprocess
+            ),
+            MultimodalInput(
+                "fake://video", MMUrlType.VIDEO, torch.empty(0), preprocess
+            ),
+        ]
+        try:
+            engine.mm_embedding_impl(inputs)
+            engine.get_embedding_result(inputs, request_id=17)
+        finally:
+            engine.stop()
+        counts = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args[0] == GaugeMetrics.VIT_IMAGE_COUNT_METRIC
+        ]
+        self.assertEqual(counts, [1, 1])
 
 
 class FtRuntimeExceptionSerializationTest(TestCase):

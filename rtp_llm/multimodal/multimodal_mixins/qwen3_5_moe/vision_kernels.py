@@ -9,6 +9,43 @@ import triton.language as tl
 
 
 @triton.jit
+def _packed_qk_rotary_kernel(
+    X,
+    COS,
+    SIN,
+    OUT,
+    SEQLEN: tl.constexpr,
+    NHEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Rotate packed Q/K together, sharing factors without padding half-heads."""
+    # Packed QKV offsets exceed int32 for large video batches.
+    index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    half_dim = HEAD_DIM // 2
+    mask = index < SEQLEN * NHEADS * half_dim
+    token = index // (NHEADS * half_dim)
+    head = (index // half_dim) % NHEADS
+    dim = index % half_dim
+    input_offset = token * (3 * NHEADS * HEAD_DIM) + head * HEAD_DIM + dim
+    factor_offset = token * half_dim + dim
+    cos = tl.load(COS + factor_offset, mask, other=1).to(tl.float32)
+    sin = tl.load(SIN + factor_offset, mask, other=0).to(tl.float32)
+    q0 = tl.load(X + input_offset, mask, other=0).to(tl.float32)
+    q1 = tl.load(X + input_offset + half_dim, mask, other=0).to(tl.float32)
+    k0 = tl.load(X + input_offset + NHEADS * HEAD_DIM, mask, other=0).to(tl.float32)
+    k1 = tl.load(X + input_offset + NHEADS * HEAD_DIM + half_dim, mask, other=0).to(
+        tl.float32
+    )
+    output_offset = token * NHEADS * HEAD_DIM + head * HEAD_DIM + dim
+    key_offset = output_offset + SEQLEN * NHEADS * HEAD_DIM
+    tl.store(OUT + output_offset, q0 * cos - q1 * sin, mask)
+    tl.store(OUT + output_offset + half_dim, q0 * sin + q1 * cos, mask)
+    tl.store(OUT + key_offset, k0 * cos - k1 * sin, mask)
+    tl.store(OUT + key_offset + half_dim, k0 * sin + k1 * cos, mask)
+
+
+@triton.jit
 def rotary_kernel(
     OUT,  # Pointers to matrices
     X,
@@ -176,6 +213,32 @@ def apply_rotary(
         seqlen_offsets = seqlen_offsets.contiguous()
     else:
         assert seqlen_offsets + seqlen <= seqlen_ro
+
+    # Qwen3.5 packs Q/K as views of [tokens, 3, heads, head_dim].
+    # Process both together to share rotary factors and avoid masked head padding.
+    if (
+        not is_varlen
+        and not inplace
+        and not interleaved
+        and not conjugate
+        and not isinstance(seqlen_offsets, torch.Tensor)
+        and seqlen_offsets == 0
+        and x.is_cuda
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and cos.dtype == sin.dtype == x.dtype
+        and batch == 2
+        and nheads == 16
+        and headdim == rotary_dim == 72
+        and x.stride() == (nheads * headdim, 3 * nheads * headdim, headdim, 1)
+    ):
+        output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+        if seqlen:
+            block = 512
+            with torch.cuda.device(x.device.index):
+                torch.library.wrap_triton(_packed_qk_rotary_kernel)[
+                    (triton.cdiv(seqlen * nheads * (headdim // 2), block),)
+                ](x, cos, sin, output, seqlen, nheads, headdim, block, num_warps=4)
+        return output
 
     output = torch.empty_like(x) if not inplace else x
     if rotary_dim < headdim and not inplace:

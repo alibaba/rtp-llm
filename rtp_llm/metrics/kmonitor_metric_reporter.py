@@ -25,6 +25,10 @@ def qos_priority_tag(qos_level: Any) -> str:
 
 class AccMetrics(Enum):
     VIT_GRAPH_EVENT_QPS_METRIC = "vit_graph_event_qps"
+    VIT_CUDA_GRAPH_HIT_QPS_METRIC = "py_rtp_vit_cuda_graph_hit_qps"
+    VIT_CUDA_GRAPH_MISS_QPS_METRIC = "py_rtp_vit_cuda_graph_miss_qps"
+    VIT_CUDA_GRAPH_CAPTURE_QPS_METRIC = "py_rtp_vit_cuda_graph_capture_qps"
+    VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC = "py_rtp_vit_cuda_graph_fallback_qps"
 
     VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
     VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
@@ -67,6 +71,9 @@ class AccMetrics(Enum):
     # queue is full (overload / stalled forward backpressure).
     VIT_EMBEDDING_OVERLOAD_QPS_METRIC = "py_rtp_vit_embedding_overload_qps"
     VIT_PROCESS_POOL_RESTART_QPS_METRIC = "py_rtp_vit_process_pool_restart_qps"
+    VIT_PREPROCESS_METRIC_DROPPED_QPS_METRIC = (
+        "py_rtp_vit_preprocess_metric_dropped_qps"
+    )
     VIT_RPC_CLIENT_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_client_error_qps"
     VIT_RPC_SERVER_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_server_error_qps"
     VIT_RPC_PROXY_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_proxy_error_qps"
@@ -120,11 +127,24 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
-    # Per-request embedding latency = wait + forward, sampled once per request in
-    # submit_and_wait. Preserves the historical meaning (pre-scheduler this timed
-    # the forward under the embedding lock, i.e. lock-wait + forward per request)
-    # so existing dashboards/alerts are unchanged.
+    # Milliseconds spent reading media and in the remaining preprocess work.
+    VIT_DOWNLOAD_RT_METRIC = "py_rtp_vit_download_rt"
+    VIT_PREPROCESS_OTHER_RT_METRIC = "py_rtp_vit_preprocess_other_rt"
+    VIT_PREPROCESS_QUEUE_SIZE_METRIC = "py_rtp_vit_preprocess_queue_size"
+    # Match M3: forward-only, once per GPU batch.
     VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
+    # Per-request scheduler latency, including preparation, queueing and forward.
+    VIT_EMBEDDING_BATCH_RT_METRIC = "py_rtp_vit_embedding_batch_rt"
+    # Image-like inputs per logical request (videos/audio are excluded).
+    VIT_IMAGE_COUNT_METRIC = "py_rtp_vit_image_count"
+    # Sampled video frames, before temporal padding; separate from image count.
+    VIT_VIDEO_FRAME_COUNT_METRIC = "py_rtp_vit_video_frame_count"
+    VIT_EMBEDDING_LENGTH_METRIC = "py_rtp_vit_embedding_length"
+    # Ready chunks waiting for forward, including a carried-over pending chunk.
+    VIT_EMBEDDING_QUEUE_SIZE_METRIC = "py_rtp_vit_embedding_queue_size"
+    # Enqueue-to-forward wait per chunk, including the batch collection window.
+    VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
+    VIT_CUDA_GRAPH_PADDING_RATIO_METRIC = "py_rtp_vit_cuda_graph_padding_ratio"
     VIT_RPC_SERVER_HANDLER_RT_US_METRIC = "rtp_llm_vit_rpc_server_handler_rt_us"
     VIT_RPC_SERVER_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_server_lifecycle_rt_us"
     VIT_RPC_PROXY_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_proxy_lifecycle_rt_us"
@@ -145,9 +165,7 @@ class GaugeMetrics(Enum):
     VIT_IMAGE_RESIZE_RT_US_METRIC = "rtp_llm_vit_image_resize_rt_us"
     VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"
     VIT_RESIZED_PIXEL_COUNT_METRIC = "rtp_llm_vit_resized_pixel_count"
-    # Forward-only latency of one GPU embedding forward (no wait), sampled once
-    # per merged batch in _run_embedding. A NEW name so it doesn't redefine the
-    # historical per-request VIT_EMBEDDING_RT.
+    # Retain the existing forward-only metric alongside the M3 dashboard name.
     VIT_EMBEDDING_FORWARD_RT_METRIC = "py_rtp_vit_embedding_forward_rt"
     # Number of requests merged into one GPU forward by the MMScheduler. 1 on the
     # serial path (gpu_max_batch_size == 1); > 1 means cross-request batching kicked in.

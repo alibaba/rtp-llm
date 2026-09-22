@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import contextvars
 import json
 import logging
 import re
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
@@ -28,6 +31,43 @@ from rtp_llm.utils.lru_dict import LruDict
 download_executor = concurrent.futures.ThreadPoolExecutor()
 
 logger = logging.getLogger(__name__)
+
+
+class _DownloadTiming:
+    """Mutable timing carrier used while one preprocess call is running."""
+
+    __slots__ = ("elapsed_ms",)
+
+    def __init__(self):
+        self.elapsed_ms = 0.0
+
+
+_download_timing: contextvars.ContextVar[Optional[_DownloadTiming]] = (
+    contextvars.ContextVar("multimodal_download_timing", default=None)
+)
+
+
+@contextmanager
+def collect_download_timing():
+    """Collect media-loading time for the enclosing preprocess call.
+
+    The timer is context-local so concurrent preprocess calls cannot add their
+    download durations to one another. A cache hit does not enter the timed
+    load section and therefore contributes zero download time.
+    """
+    timing = _DownloadTiming()
+    token = _download_timing.set(timing)
+    try:
+        yield timing
+    finally:
+        _download_timing.reset(token)
+
+
+def _record_download_time(start_time: float) -> None:
+    timing = _download_timing.get()
+    if timing is not None:
+        timing.elapsed_ms += max(0.0, time.monotonic() - start_time) * 1000.0
+
 
 REQUEST_GET = None
 CONNECT_TIMEOUT_RETRIES = 2
@@ -130,6 +170,7 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
     """
     headers = _get_http_heads(download_headers)
+    load_start = time.monotonic()
     try:
         if url.startswith("http") or url.startswith("https"):
             import requests
@@ -149,6 +190,8 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
             res = buf
     except Exception as e:
         raise Exception(f"download and load {url} error, exception {e}")
+    finally:
+        _record_download_time(load_start)
     return res
 
 
@@ -226,6 +269,7 @@ def get_bytes_io_from_url(
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         headers = _get_http_heads(download_headers)
+        load_start = time.monotonic()
         try:
             if url.startswith("http") or url.startswith("https"):
                 res = _download_http_content(url, headers, max_file_size_kb)
@@ -246,6 +290,8 @@ def get_bytes_io_from_url(
         except Exception:
             logger.exception("failed to load multimodal content")
             raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+        finally:
+            _record_download_time(load_start)
         url_data_cache_.insert_cache(url, res)
         return res
     else:

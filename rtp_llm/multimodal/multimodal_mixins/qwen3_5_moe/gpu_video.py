@@ -3,10 +3,13 @@
 import copy
 import importlib
 import io
+import logging
 import math
 import os
+import queue
 import sys
 import threading
+import time
 import weakref
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -17,12 +20,180 @@ from typing import Tuple
 import _imp
 import torch
 
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.qwen3_vl_video import (
     resize_video_to_shape,
     resolve_video_size,
     sample_frame_indices,
     video_resize_shape,
 )
+
+_VIDEO_METRIC_TAGS = {"model": "qwen35", "mm_type": "video", "backend": "nvdec"}
+
+
+def _record_video_metric_drop(stage, reason):
+    """Accumulate only; slow logging/KMonitor backends run on the daemon."""
+    try:
+        _get_video_metric_reporter().record_drop(stage, reason)
+    except Exception:
+        # Failure to create a diagnostics thread cannot fail inference.
+        pass
+
+
+@dataclass
+class _CudaVideoMetricSample:
+    metric: GaugeMetrics
+    stage: str
+    start: object
+    end: object
+    base_us: float = 0.0
+    sampled_frames: int | None = None
+    resized_pixels: int | None = None
+
+    def report(self):
+        # Only the metrics daemon waits; never drain a producer/consumer stream
+        # or retain its tensors. This also reports the final idle request.
+        self.end.synchronize()
+        value = self.base_us + self.start.elapsed_time(self.end) * 1000.0
+        kmonitor.report(
+            self.metric,
+            value,
+            {
+                **_VIDEO_METRIC_TAGS,
+                "timing": "wall_plus_cuda" if self.stage == "decode" else "cuda_event",
+            },
+        )
+        if self.sampled_frames is not None:
+            kmonitor.report(
+                GaugeMetrics.VIT_VIDEO_FRAME_COUNT_METRIC,
+                self.sampled_frames,
+                _VIDEO_METRIC_TAGS,
+            )
+        if self.resized_pixels is not None:
+            kmonitor.report(
+                GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+                self.resized_pixels,
+                _VIDEO_METRIC_TAGS,
+            )
+
+
+class _CudaVideoMetricReporter:
+    """Bounded, event-only diagnostics; independent from inference scheduling."""
+
+    def __init__(self, capacity=256):
+        self._pending = queue.Queue(maxsize=capacity)
+        self._drop_lock = threading.Lock()
+        self._drops = {}
+        self._drop_total = 0
+        self._drop_last_log = float("-inf")
+        self._thread = threading.Thread(
+            target=self._run, name="qwen35-video-metrics", daemon=True
+        )
+        self._thread.start()
+
+    def submit(self, sample):
+        try:
+            self._pending.put_nowait(sample)
+        except queue.Full:
+            self.record_drop(sample.stage, "queue_full")
+
+    def record_drop(self, stage, reason):
+        # Only fixed stage/reason pairs, no unbounded per-request state.
+        with self._drop_lock:
+            key = (stage, reason)
+            self._drops[key] = self._drops.get(key, 0) + 1
+            self._drop_total += 1
+
+    def _flush_drops(self):
+        with self._drop_lock:
+            dropped, self._drops = self._drops, {}
+            total = self._drop_total
+        if not dropped:
+            return
+        now = time.monotonic()
+        if now - self._drop_last_log >= 60:
+            try:
+                logging.warning(
+                    "NVDEC preprocessing metric samples dropped: counts=%s total=%d",
+                    dropped,
+                    total,
+                )
+            except Exception:
+                pass
+            self._drop_last_log = now
+        for (stage, reason), count in dropped.items():
+            try:
+                kmonitor.report(
+                    AccMetrics.VIT_PREPROCESS_METRIC_DROPPED_QPS_METRIC,
+                    count,
+                    {**_VIDEO_METRIC_TAGS, "stage": stage, "reason": reason},
+                )
+            except Exception:
+                # Never recursively report an error from the reporting backend.
+                pass
+
+    def _run(self):
+        while True:
+            try:
+                sample = self._pending.get(timeout=1)
+            except queue.Empty:
+                self._flush_drops()
+                continue
+            try:
+                sample.report()
+            except Exception:
+                self.record_drop(sample.stage, "report_error")
+            finally:
+                self._pending.task_done()
+                del sample
+            self._flush_drops()
+
+
+_cuda_video_metric_reporter = None
+_cuda_video_metric_lock = threading.Lock()
+
+
+def _get_video_metric_reporter():
+    global _cuda_video_metric_reporter
+    with _cuda_video_metric_lock:
+        if _cuda_video_metric_reporter is None:
+            _cuda_video_metric_reporter = _CudaVideoMetricReporter()
+        return _cuda_video_metric_reporter
+
+
+def _submit_video_metric(sample):
+    _get_video_metric_reporter().submit(sample)
+
+
+@contextmanager
+def _cuda_video_timer(
+    metric, stage, device, *, base_us=0.0, sampled_frames=None, resized_pixels=None
+):
+    if torch.device(device).type != "cuda":
+        yield
+        return
+    try:
+        stream = torch.cuda.current_stream(device)
+        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+            enable_timing=True
+        )
+        start.record(stream)
+    except Exception:
+        _record_video_metric_drop(stage, "report_error")
+        yield
+        return
+    # A failed stage must not emit a successful duration/frame count.
+    yield
+    try:
+        end.record(stream)
+        _submit_video_metric(
+            _CudaVideoMetricSample(
+                metric, stage, start, end, base_us, sampled_frames, resized_pixels
+            )
+        )
+    except Exception:
+        _record_video_metric_drop(stage, "report_error")
 
 
 @dataclass(frozen=True)
@@ -231,6 +402,7 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
     # A dedicated decode stream keeps surface-lifetime waits from draining the
     # preceding ViT forward on the consumer stream. Only sampled frames cross
     # the stream boundary; no frame or embedding is cached across requests.
+    decode_start_ns = time.monotonic_ns()
     offset = 0
 
     def feed(buffer):
@@ -302,11 +474,22 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
                 stream.synchronize()
         if count != data.total_frames or selected != wanted:
             raise ValueError("NVDEC and container frame counts disagree")
+        # Surface copies are already complete at the lifetime waits above.
+        # Measure completed demux/NVDEC/copy wall time separately from the RGB
+        # conversion enqueued on the consumer stream.
+        decode_wall_us = (time.monotonic_ns() - decode_start_ns) / 1000.0
         # Explicit indexing also preserves duplicates in a sampling policy.
         consumer_stream.wait_stream(stream)
         with torch.cuda.stream(consumer_stream):
             sampled.record_stream(consumer_stream)
-            return nv12_to_rgb(sampled, data.height, data.color_space)
+            with _cuda_video_timer(
+                GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
+                "decode",
+                device,
+                base_us=decode_wall_us,
+                sampled_frames=len(data.frame_indices),
+            ):
+                return nv12_to_rgb(sampled, data.height, data.color_space)
     except Exception:
         # A failed/incompletely drained session must not reach the next request.
         _decode_state.decoder = None
@@ -475,7 +658,12 @@ def process_video_pixels(video, processor):
 def preprocess_video_cuda(data: GpuVideoInput, processor, device, *, video=None):
     if video is None:
         video = decode_video_cuda(data, device)
-    with torch.profiler.record_function("video_resize"):
+    with torch.profiler.record_function("video_resize"), _cuda_video_timer(
+        GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC,
+        "resize",
+        device,
+        resized_pixels=int(video.shape[0]) * data.resized_height * data.resized_width,
+    ):
         # Keep decoded frames on CUDA through resize and normalization.
         # Preserve the processor's bicubic/antialias and uint8 conversion policy;
         # CPU and CUDA backends can differ in arithmetic and uint8 rounding.
@@ -483,7 +671,9 @@ def preprocess_video_cuda(data: GpuVideoInput, processor, device, *, video=None)
             video = resize_video_to_shape(
                 video, processor, data.resized_height, data.resized_width
             )
-    with torch.profiler.record_function("video_processor"):
+    with torch.profiler.record_function("video_processor"), _cuda_video_timer(
+        GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, "processor", device
+    ):
         pixels = process_video_pixels(video, processor)
     if not pixels.is_cuda or tuple(pixels.shape) != data.shape:
         raise ValueError("video processor changed the device or expected patch shape")

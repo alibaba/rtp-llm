@@ -31,6 +31,8 @@
     "Keep the quant_method factory dispatch and shard-aware loaders. This Qwen3.5 model currently accepts unquantized ViT weights only; quantized ViT kernels and engine QuantizationConfig implementations are not ported.",
     "Bridge RTP visual-relative complete checkpoint dictionaries to each vLLM parameter weight_loader, followed by process_weights_after_loading and update_param_tp_status. Preserve the HF load_state_dict interface for ordinary state dict copies.",
     "Read the strided Q/K view directly in rotary_kernel; remove pre-RoPE contiguous and preserve the native head dimension without zero padding.",
-    "Consolidate the active encoder into qwen3_5_moe_vit.py under the original Qwen3_5MoeVision* class names. Shared linear helpers use vision_* modules and the rotary kernel lives in vision_kernels.py; remove the previous duplicate encoder and rotary implementation."
+    "Consolidate the active encoder into qwen3_5_moe_vit.py under the original Qwen3_5MoeVision* class names. Shared linear helpers use vision_* modules and the rotary kernel lives in vision_kernels.py; remove the previous duplicate encoder and rotary implementation.",
+    "Add packed Q/K RoPE for H16/D72 BF16/FP16 with matching rotary-factor dtype: share cos/sin within each program, avoid half-head tile padding and write contiguous Q/K outputs directly. Retain the general kernel for other layouts, dtypes and modes; keep native LayerNorm and GELU.",
+    "Fuse unquantized FP16/BF16 CUDA inference FC1 bias and tanh GELU with torch._addmm_activation; preserve CPU, other dtypes, quantization-method overrides and autograd paths. The fused epilogue omits intermediate FC1 rounding, so embeddings are not bitwise equivalent to separate GEMM/GELU."
   ]
 }
