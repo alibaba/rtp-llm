@@ -5,6 +5,8 @@ This mode is used when there's existing KV cache (prefix/prompt caching).
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -22,8 +24,107 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
     TRTLLMFMHAv2PagedPrefillOp,
 )
 from rtp_llm.models_py.utils.arch import is_sm12x
-from rtp_llm.ops import KvCacheDataType, RopeStyle
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import get_typemeta
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestTRTLLMFMHAv2PagedPrefillQuantization(unittest.TestCase):
+    def test_unit_scale_query_and_existing_cache(self):
+        module = "rtp_llm.models_py.modules.factory.attention.cuda_impl.trt"
+        for dtype in (torch.float16, torch.bfloat16):
+            for heads in (4, 28):
+                for fp8 in (False, True):
+                    with self.subTest(dtype=dtype, heads=heads, fp8=fp8):
+                        config = AttentionConfigs()
+                        config.head_num = heads
+                        config.kv_head_num = 4
+                        config.size_per_head = 128
+                        config.tokens_per_block = 16
+                        config.kernel_tokens_per_block = 16
+                        config.dtype = dtype
+                        config.kv_cache_dtype = (
+                            KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE
+                        )
+                        config.fp8_kv_cache_mode = int(fp8)
+                        op = TRTLLMFMHAv2PagedPrefillOp(config)
+                        q = (
+                            torch.tensor(
+                                [
+                                    0,
+                                    1,
+                                    -1,
+                                    100,
+                                    -100,
+                                    448,
+                                    -448,
+                                    500,
+                                    -500,
+                                    1000,
+                                    -1000,
+                                    1e-4,
+                                ],
+                                dtype=dtype,
+                                device="cuda",
+                            )
+                            .repeat((4 * heads * 128 + 11) // 12)[: 4 * heads * 128]
+                            .view(4, -1)
+                        )
+                        q = q.repeat_interleave(2, dim=1)[:, ::2]
+                        original = q.clone()
+                        cache_dtype = torch.float8_e4m3fn if fp8 else dtype
+                        base = torch.ones(
+                            2, 2, 4, 16, 128, dtype=dtype, device="cuda"
+                        ).to(cache_dtype)
+                        cache = SimpleNamespace(kv_cache_base=base)
+                        before = base.view(torch.uint8).clone()
+                        params = SimpleNamespace(
+                            block_tables=torch.tensor(
+                                [[1, 0]], device="cuda", dtype=torch.int32
+                            ),
+                            seq_lens=torch.tensor(
+                                [20], device="cuda", dtype=torch.int32
+                            ),
+                            max_q_len=4,
+                            max_kv_len=20,
+                            batch_size=1,
+                            cu_seqlens=torch.tensor(
+                                [0, 4], device="cuda", dtype=torch.int32
+                            ),
+                            cu_kv_seqlens=torch.tensor(
+                                [0, 20], device="cuda", dtype=torch.int32
+                            ),
+                        )
+                        with patch(
+                            f"{module}.trtllm_fmha_v2_prefill",
+                            return_value=torch.zeros(
+                                4, heads, 128, device="cuda", dtype=dtype
+                            ),
+                        ) as fmha:
+                            output = op.forward(q, cache, params)
+                        kwargs = fmha.call_args.kwargs
+                        actual_q, actual_cache = kwargs["qkv"]
+                        expected_q = (
+                            q.float().clamp(-448, 448).to(cache_dtype) if fp8 else q
+                        )
+                        self.assertTrue(torch.isfinite(actual_q.float()).all().item())
+                        torch.testing.assert_close(
+                            actual_q.float().reshape_as(q),
+                            expected_q.float(),
+                            rtol=0,
+                            atol=0,
+                        )
+                        torch.testing.assert_close(q, original, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            base.view(torch.uint8), before, rtol=0, atol=0
+                        )
+                        self.assertEqual(actual_cache.data_ptr(), base.data_ptr())
+                        self.assertEqual(actual_q.dtype, cache_dtype)
+                        self.assertEqual(kwargs["input_layout"], "Q_PAGED_KV_HND")
+                        self.assertEqual(output.dtype, dtype)
+                        self.assertEqual(output.shape, (4, heads * 128))
+                        self.assertEqual(kwargs["out_dtype"], dtype)
+                        self.assertEqual(kwargs["bmm2_scale"], 1.0)
 
 
 class TestTRTLLMFMHAv2PagedPrefillOpBF16(TRTLLMFMHAv2TestBase):

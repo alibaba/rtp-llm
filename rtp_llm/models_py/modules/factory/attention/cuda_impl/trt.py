@@ -10,6 +10,7 @@ except (ImportError, AttributeError):
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPrefillAttnOp,
+    quantize_to_fp8_if_needed,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
     is_cuda_12_9_or_later,
@@ -247,7 +248,8 @@ class TRTLLMFMHAv2PagedPrefillOp:
             if self.kv_cache_dtype == KvCacheDataType.FP8
             else q_type
         )
-        q = q.to(compute_dtype).contiguous().view(-1, self.head_num, self.head_dim)
+        q = quantize_to_fp8_if_needed(q, compute_dtype)
+        q = q.contiguous().view(-1, self.head_num, self.head_dim)
         kv_cache_5d = common.reshape_paged_kv_cache(
             kv_cache.kv_cache_base,
             self.kv_head_num,
@@ -354,23 +356,18 @@ class TRTLLMFMHAv2PrefillOp:
             if self.kv_cache_dtype == KvCacheDataType.FP8
             else q_type
         )
+        qkv = quantize_to_fp8_if_needed(qkv, compute_dtype)
         if self.attention_type == "mha":
-            fmha_input = (
-                qkv.to(compute_dtype)
-                .contiguous()
-                .view(-1, 3, self.head_num, self.head_dim)
-            )
+            fmha_input = qkv.contiguous().view(-1, 3, self.head_num, self.head_dim)
             input_layout = "PACKED_QKV"
         else:
             q = (
                 qkv[:, : self.q_size]
-                .to(compute_dtype)
                 .contiguous()
                 .view(-1, self.head_num, self.head_dim)
             )
             kv = (
                 qkv[:, self.q_size :]
-                .to(compute_dtype)
                 .contiguous()
                 .view(-1, 2, self.kv_head_num, self.head_dim)
             )

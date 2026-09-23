@@ -19,6 +19,7 @@ requirement(deep)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
+requirement(["packaging"])
 
 
 filegroup(
@@ -60,6 +61,7 @@ py_library(
     deps = [
         ":utils",
         ":tile_kernels_mhc",
+        ":packaging",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",

@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
     PyFlashinferDecodeImpl,
+    _create_dynamic_fp8_decode_wrapper,
     _validate_dynamic_fp8_scale,
 )
 from rtp_llm.ops import KvCacheDataType, RopeConfig, RopeStyle
@@ -34,6 +35,206 @@ class PageMetadata(NamedTuple):
     page_indptr: List[int]
     page_indices: List[int]
     last_page_lens: List[int]
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestDynamicFp8DirectScaleNumerics(unittest.TestCase):
+    def test_large_negative_logits_preserve_constant_values(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+            wrapper = _create_dynamic_fp8_decode_wrapper(workspace, dtype, dtype, 128)
+            for length in (
+                33,
+                63,
+                64,
+                65,
+                127,
+                128,
+                129,
+                4095,
+                4096,
+                4097,
+                4807,
+                4808,
+                8191,
+            ):
+                with self.subTest(dtype=dtype, length=length):
+                    pages = (length + 63) // 64
+                    raw = torch.ones(pages, 2, 4, 64, 128, device="cuda")
+                    raw[:, 0].fill_(-32)
+                    scales = raw.abs().amax(-1) / 448
+                    payload = (raw / scales.unsqueeze(-1)).to(torch.float8_e4m3fn)
+                    wrapper.plan(
+                        torch.tensor([0, pages], dtype=torch.int32, device="cuda"),
+                        torch.arange(
+                            pages - 1, -1, -1, dtype=torch.int32, device="cuda"
+                        ),
+                        torch.tensor(
+                            [(length - 1) % 64 + 1], dtype=torch.int32, device="cuda"
+                        ),
+                        28,
+                        4,
+                        128,
+                        64,
+                        q_data_type=dtype,
+                        kv_data_type=payload.dtype,
+                    )
+                    q = torch.full((1, 28, 128), 32, dtype=dtype, device="cuda")
+                    output = wrapper.run(q, payload, scales.reshape(pages, -1))
+                    torch.testing.assert_close(
+                        output, torch.ones_like(output), rtol=0.01, atol=0.01
+                    )
+
+    def test_long_context_independent_scales_match_fp32_reference(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            torch.manual_seed(2026)
+            workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+            wrapper = _create_dynamic_fp8_decode_wrapper(workspace, dtype, dtype, 128)
+            for length in (33, 129, 4095, 4096, 4097, 4807, 8191):
+                pages = (length + 63) // 64
+                raw = torch.randn(pages, 2, 4, 64, 128, device="cuda")
+                raw[:, 0] *= torch.tensor([0, 0.01, 1, 4], device="cuda").view(
+                    1, 4, 1, 1
+                )
+                raw[:, 1] *= torch.tensor([2, 0.1, 0.5, 1], device="cuda").view(
+                    1, 4, 1, 1
+                )
+                maxima = raw.abs().amax(-1)
+                scales = torch.where(maxima > 0, maxima / 448, torch.ones_like(maxima))
+                payload = (
+                    (raw / scales.unsqueeze(-1))
+                    .clamp(-448, 448)
+                    .to(torch.float8_e4m3fn)
+                )
+                indices = torch.randperm(pages, dtype=torch.int32, device="cuda")
+                wrapper.plan(
+                    torch.tensor([0, pages], dtype=torch.int32, device="cuda"),
+                    indices,
+                    torch.tensor(
+                        [(length - 1) % 64 + 1], dtype=torch.int32, device="cuda"
+                    ),
+                    28,
+                    4,
+                    128,
+                    64,
+                    q_data_type=dtype,
+                    kv_data_type=payload.dtype,
+                )
+                restored = payload.float()[indices.long()] * scales[
+                    indices.long()
+                ].unsqueeze(-1)
+                keys = (
+                    restored[:, 0]
+                    .permute(1, 0, 2, 3)
+                    .reshape(4, -1, 128)[:, :length]
+                    .repeat_interleave(7, 0)
+                )
+                values = (
+                    restored[:, 1]
+                    .permute(1, 0, 2, 3)
+                    .reshape(4, -1, 128)[:, :length]
+                    .repeat_interleave(7, 0)
+                )
+                for amplitude in (0.001, 1, 4, 16):
+                    with self.subTest(dtype=dtype, length=length, amplitude=amplitude):
+                        q = (torch.randn(1, 28, 128, device="cuda") * amplitude).to(
+                            dtype
+                        )
+                        scores = torch.einsum(
+                            "bhd,hld->bhl", q.float(), keys
+                        ) / math.sqrt(128)
+                        expected = torch.einsum(
+                            "bhl,hld->bhd", scores.softmax(-1), values
+                        )
+                        output = wrapper.run(q, payload, scales.reshape(pages, -1))
+                        torch.testing.assert_close(
+                            output.float(), expected, rtol=0.06, atol=0.04
+                        )
+
+    def test_qwen2_gqa_eager_and_graph_match_reference(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                torch.manual_seed(2026)
+                workspace = torch.empty(
+                    128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
+                )
+                wrapper = _create_dynamic_fp8_decode_wrapper(
+                    workspace, dtype, dtype, 128
+                )
+                raw = torch.randn(6, 2, 4, 16, 128, device="cuda", dtype=dtype).float()
+                raw[:, 0] *= torch.tensor([0, 1e-4, 1, 1000], device="cuda").view(
+                    1, 4, 1, 1
+                )
+                raw[:, 1] *= torch.tensor([1, 4, 0.01, 0.5], device="cuda").view(
+                    1, 4, 1, 1
+                )
+                maxima = raw.abs().amax(dim=-1)
+                scales = torch.where(maxima > 0, maxima / 448, torch.ones_like(maxima))
+                payload = (
+                    (raw / scales.unsqueeze(-1))
+                    .clamp(-448, 448)
+                    .to(torch.float8_e4m3fn)
+                )
+                scale_arg = scales.reshape(6, -1)
+                q = torch.randn(2, 28, 128, device="cuda", dtype=dtype) * 0.001
+                indptr = torch.tensor([0, 2, 5], device="cuda", dtype=torch.int32)
+                indices = torch.tensor(
+                    [4, 1, 5, 0, 3], device="cuda", dtype=torch.int32
+                )
+                last_page_len = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
+                wrapper.plan(
+                    indptr,
+                    indices,
+                    last_page_len,
+                    28,
+                    4,
+                    128,
+                    16,
+                    q_data_type=dtype,
+                    kv_data_type=torch.float8_e4m3fn,
+                )
+
+                def reference():
+                    outputs = []
+                    for batch, (pages, length) in enumerate(
+                        (([4, 1], 19), ([5, 0, 3], 33))
+                    ):
+                        restored = payload.float()[pages] * scales[pages].unsqueeze(-1)
+                        key = (
+                            restored[:, 0]
+                            .permute(1, 0, 2, 3)
+                            .reshape(4, -1, 128)[:, :length]
+                        )
+                        value = (
+                            restored[:, 1]
+                            .permute(1, 0, 2, 3)
+                            .reshape(4, -1, 128)[:, :length]
+                        )
+                        key = key.repeat_interleave(7, dim=0)
+                        value = value.repeat_interleave(7, dim=0)
+                        scores = torch.einsum(
+                            "hd,hld->hl", q[batch].float(), key
+                        ) / math.sqrt(128)
+                        outputs.append(
+                            torch.einsum("hl,hld->hd", scores.softmax(dim=-1), value)
+                        )
+                    return torch.stack(outputs).to(dtype)
+
+                output = wrapper.run(q, payload, scale_arg)
+                self.assertTrue(torch.isfinite(output).all().item())
+                torch.testing.assert_close(output, reference(), rtol=0.06, atol=0.04)
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    graph_output = wrapper.run(q, payload, scale_arg)
+                q.mul_(0.5)
+                scales.mul_(2)
+                graph.replay()
+                eager_output = wrapper.run(q, payload, scale_arg)
+                torch.testing.assert_close(graph_output, eager_output, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    graph_output, reference(), rtol=0.06, atol=0.04
+                )
 
 
 class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
@@ -944,12 +1145,22 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             )
 
     def test_dynamic_fp8_impl_real_cuda_graph_replay(self):
+        self._check_dynamic_fp8_impl_real_cuda_graph_replay(32, 8, "bf16")
+
+    def test_qwen2_dynamic_fp8_impl_real_cuda_graph_replay(self):
+        for data_type in ("fp16", "bf16"):
+            with self.subTest(data_type=data_type):
+                self._check_dynamic_fp8_impl_real_cuda_graph_replay(28, 4, data_type)
+
+    def _check_dynamic_fp8_impl_real_cuda_graph_replay(
+        self, head_num: int, head_num_kv: int, data_type: str
+    ):
         config = self._create_config(
-            head_num=32,
-            head_num_kv=8,
+            head_num=head_num,
+            head_num_kv=head_num_kv,
             size_per_head=128,
             seq_size_per_block=64,
-            data_type="bf16",
+            data_type=data_type,
         )
         config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
         config.attn_configs.fp8_kv_cache_mode = 2
@@ -1336,6 +1547,143 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
             max_seq_len=128,
         )
 
+    def test_mode2_rejects_legacy_flashinfer_before_jit(self):
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha"
+        )
+        with mock.patch(f"{module}.flashinfer.__version__", "0.2.5"), mock.patch(
+            f"{module}.flashinfer_decode.gen_customize_batch_prefill_module"
+        ) as generator:
+            with self.assertRaisesRegex(
+                RuntimeError, r"requires FlashInfer >= 0\.6\.9.*0\.2\.5"
+            ):
+                _create_dynamic_fp8_decode_wrapper(
+                    torch.empty(0), torch.float16, torch.float16, 128
+                )
+            generator.assert_not_called()
+
+    def test_mode2_rejects_missing_jit_api(self):
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha"
+        )
+        with mock.patch(f"{module}.flashinfer.__version__", "0.6.9"), mock.patch(
+            f"{module}.flashinfer_decode.get_batch_prefill_jit_module", None
+        ), mock.patch(
+            f"{module}.flashinfer_decode.gen_customize_batch_prefill_module"
+        ) as generator:
+            with self.assertRaisesRegex(RuntimeError, "JitSpec batch-prefill API"):
+                _create_dynamic_fp8_decode_wrapper(
+                    torch.empty(0), torch.float16, torch.float16, 128
+                )
+            generator.assert_not_called()
+
+    def test_mode2_rejects_loaded_module_instead_of_jitspec(self):
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha"
+        )
+        with mock.patch(f"{module}.flashinfer.__version__", "0.6.9"), mock.patch(
+            f"{module}.flashinfer_decode.gen_customize_batch_prefill_module",
+            return_value=object(),
+        ), mock.patch.dict(f"{module}._g_dynamic_fp8_jit_modules", clear=True) as cache:
+            with self.assertRaisesRegex(
+                RuntimeError, "extra_include_dirs and build_and_load"
+            ):
+                _create_dynamic_fp8_decode_wrapper(
+                    torch.empty(0), torch.float16, torch.float16, 128
+                )
+            self.assertEqual(cache, {})
+
+    def test_mode2_build_failure_does_not_populate_cache(self):
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha"
+        )
+        spec = SimpleNamespace(
+            extra_include_dirs=[],
+            build_and_load=mock.Mock(side_effect=RuntimeError("compile failed")),
+        )
+        with mock.patch(f"{module}.flashinfer.__version__", "0.6.9"), mock.patch(
+            f"{module}.flashinfer_decode.gen_customize_batch_prefill_module",
+            return_value=spec,
+        ) as generator, mock.patch.dict(
+            f"{module}._g_dynamic_fp8_jit_modules", clear=True
+        ) as cache:
+            with self.assertRaisesRegex(RuntimeError, "compile failed"):
+                _create_dynamic_fp8_decode_wrapper(
+                    torch.empty(0), torch.float16, torch.float16, 128
+                )
+            generator.assert_called_once()
+            self.assertEqual(cache, {})
+
+    def test_mode2_supported_versions_preserve_include_order(self):
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha"
+        )
+        for version in ("0.6.9", "0.6.9+rtp.dynamicfp8.1", "0.6.18"):
+            with self.subTest(version=version):
+                spec = SimpleNamespace(
+                    extra_include_dirs=["original/include"],
+                    extra_cuda_cflags=["-O3"],
+                    build_and_load=mock.Mock(return_value=object()),
+                )
+                with mock.patch(
+                    f"{module}.flashinfer.__version__", version
+                ), mock.patch(
+                    f"{module}.flashinfer_decode.gen_customize_batch_prefill_module",
+                    return_value=spec,
+                ), mock.patch(
+                    f"{module}.flashinfer_decode.get_batch_prefill_jit_module"
+                ), mock.patch(
+                    f"{module}.BatchDecodeWithPagedKVCacheWrapper"
+                ), mock.patch.dict(
+                    f"{module}._g_dynamic_fp8_jit_modules", clear=True
+                ):
+                    _create_dynamic_fp8_decode_wrapper(
+                        torch.empty(0), torch.float16, torch.float16, 128
+                    )
+                self.assertTrue(
+                    str(spec.extra_include_dirs[0]).endswith(
+                        "flashinfer_direct_scale/include"
+                    )
+                )
+                self.assertEqual(spec.extra_include_dirs[1:], ["original/include"])
+                self.assertEqual(spec.extra_cuda_cflags[:2], ["-O3", "-include"])
+                self.assertTrue(
+                    spec.extra_cuda_cflags[2].endswith(
+                        "flashinfer_direct_scale/include/flashinfer/math.cuh"
+                    )
+                )
+                spec.build_and_load.assert_called_once()
+
+    def test_legacy_modes_do_not_require_mode2_jit(self):
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha"
+        )
+        for mode in (0, 1):
+            with self.subTest(mode=mode):
+                config = self._config()
+                config.fp8_kv_cache_mode = mode
+                config.kv_cache_dtype = (
+                    KvCacheDataType.BASE if mode == 0 else KvCacheDataType.FP8
+                )
+                with mock.patch(
+                    f"{module}.flashinfer.__version__", "0.2.5"
+                ), mock.patch(
+                    f"{module}.get_py_flashinfer_workspace_buffer",
+                    return_value=torch.empty(0),
+                ), mock.patch(
+                    f"{module}.determine_use_tensor_core_from_configs",
+                    return_value=False,
+                ), mock.patch(
+                    f"{module}.BatchDecodeWithPagedKVCacheWrapper"
+                ), mock.patch(
+                    f"{module}._create_dynamic_fp8_decode_wrapper"
+                ) as dynamic_wrapper:
+                    op = _NoReleaseDecodeAttnOp(
+                        config, SimpleNamespace(is_cuda_graph=False)
+                    )
+                    self.assertFalse(op.dynamic_fp8)
+                    dynamic_wrapper.assert_not_called()
+
     def test_mode2_allows_single_token_and_rejects_speculative_decode(self):
         config = self._config()
         config.use_mla = False
@@ -1395,7 +1743,7 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
         self.assertIs(op.decode_wrapper._jit_module, loaded_module)
         self.assertIs(cached_op.decode_wrapper._jit_module, loaded_module)
         jit_args = generator.call_args.args[1:]
-        self.assertIn("direct_scale_v3", jit_args[0])
+        self.assertIn("direct_scale_v5", jit_args[0])
         self.assertIn("q_bfloat16", jit_args[0])
         self.assertIn("kv_float8_e4m3fn", jit_args[0])
         self.assertIn("o_bfloat16", jit_args[0])

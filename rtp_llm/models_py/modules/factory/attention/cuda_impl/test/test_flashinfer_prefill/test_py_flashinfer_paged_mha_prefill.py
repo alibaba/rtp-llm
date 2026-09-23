@@ -880,6 +880,151 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
         )
         torch.testing.assert_close(output, reference, rtol=0.06, atol=0.04)
 
+    def test_mode2_large_negative_logits_preserve_constant_values_with_subdivision(
+        self,
+    ):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+
+        device = torch.device("cuda")
+        harness = BaseAttentionTest()
+        harness.device = device
+        sequence_lengths = [33, 129, 4807]
+        values = [1.0, 2.0, 3.0]
+        physical_page_size = 64
+        for dtype in (torch.float16, torch.bfloat16):
+            for subdivision in (1, 2, 4):
+                with self.subTest(dtype=dtype, subdivision=subdivision):
+                    kernel_page_size = physical_page_size // subdivision
+                    config = harness._create_config(
+                        head_num=28,
+                        head_num_kv=4,
+                        size_per_head=128,
+                        seq_size_per_block=kernel_page_size,
+                    )
+                    config.attn_configs.dtype = dtype
+                    config.attn_configs.tokens_per_block = physical_page_size
+                    config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+                    config.attn_configs.fp8_kv_cache_mode = 2
+                    config.attn_configs.is_causal = True
+                    inputs = harness._create_prefill_attention_inputs(
+                        len(sequence_lengths),
+                        sequence_lengths,
+                        kernel_page_size,
+                        dtype=dtype,
+                    )
+
+                    physical_pages = sum(
+                        math.ceil(length / physical_page_size)
+                        for length in sequence_lengths
+                    )
+                    page_ids = list(range(1, 2 * physical_pages, 2))
+                    page_ids = page_ids[::2] + page_ids[1::2]
+                    physical_blocks = harness._create_kv_cache_block_ids(
+                        len(sequence_lengths), sequence_lengths, physical_page_size
+                    )
+                    block_table = torch.zeros_like(inputs.kv_cache_kernel_block_id)
+                    page_offset = 0
+                    for batch_idx, length in enumerate(sequence_lengths):
+                        num_physical_pages = math.ceil(length / physical_page_size)
+                        physical_blocks[batch_idx, :num_physical_pages] = torch.tensor(
+                            page_ids[page_offset : page_offset + num_physical_pages],
+                            dtype=torch.int32,
+                        )
+                        num_kernel_pages = math.ceil(length / kernel_page_size)
+                        for logical_page in range(num_kernel_pages):
+                            block_table[batch_idx, logical_page] = (
+                                physical_blocks[batch_idx, logical_page // subdivision]
+                                * subdivision
+                                + logical_page % subdivision
+                            )
+                        page_offset += num_physical_pages
+                    inputs.kv_cache_block_id = physical_blocks
+                    inputs.kv_cache_block_id_device = physical_blocks.to(device)
+                    inputs.kv_cache_kernel_block_id = block_table
+                    inputs.kv_cache_kernel_block_id_device = block_table.to(device)
+
+                    op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, inputs)
+                    params = op.prepare(inputs)
+                    total_tokens = sum(sequence_lengths)
+                    q = torch.full(
+                        (total_tokens, 28, 128), 32, dtype=dtype, device=device
+                    )
+                    k = torch.full(
+                        (total_tokens, 4, 128), -32, dtype=dtype, device=device
+                    )
+                    v = torch.cat(
+                        [
+                            torch.full(
+                                (length, 4, 128), value, dtype=dtype, device=device
+                            )
+                            for length, value in zip(sequence_lengths, values)
+                        ]
+                    )
+                    kernel_page_count = 2 * physical_pages * subdivision
+                    cache = LayerKVCache()
+                    cache.kv_cache_base = torch.zeros(
+                        kernel_page_count,
+                        2,
+                        4,
+                        kernel_page_size,
+                        128,
+                        dtype=torch.float8_e4m3fn,
+                        device=device,
+                    )
+                    cache.kv_scale_base = torch.ones(
+                        kernel_page_count,
+                        2 * 4 * kernel_page_size,
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    writer = KVCacheWriteOp(
+                        num_kv_heads=4,
+                        head_size=128,
+                        physical_page_size=physical_page_size,
+                        kernel_page_size=kernel_page_size,
+                        dynamic_mode=True,
+                    )
+                    writer.set_params(params)
+                    writer.forward(k, v, cache)
+                    output = op.forward(q, cache)
+                    self.assertEqual(output.shape, q.shape)
+                    self.assertEqual(output.dtype, dtype)
+                    self.assertTrue(torch.isfinite(output).all().item())
+
+                    scale_view = cache.kv_scale_base.view(
+                        kernel_page_count, 2, 4, kernel_page_size
+                    )
+                    restored_cache = cache.kv_cache_base.float() * scale_view.unsqueeze(
+                        -1
+                    )
+                    token_offset = 0
+                    for batch_idx, (length, value) in enumerate(
+                        zip(sequence_lengths, values)
+                    ):
+                        with self.subTest(length=length):
+                            positions = torch.arange(length, device=device)
+                            pages = inputs.kv_cache_kernel_block_id_device[
+                                batch_idx, positions // kernel_page_size
+                            ]
+                            offsets = positions % kernel_page_size
+                            for kv, expected_value in enumerate((-32.0, value)):
+                                restored = restored_cache[pages, kv, :, offsets]
+                                torch.testing.assert_close(
+                                    restored,
+                                    torch.full_like(restored, expected_value),
+                                    rtol=1e-5,
+                                    atol=1e-5,
+                                )
+                            actual = output[token_offset : token_offset + length]
+                            torch.testing.assert_close(
+                                actual,
+                                torch.full_like(actual, value),
+                                rtol=1e-2,
+                                atol=1e-2,
+                            )
+                        token_offset += length
+
 
 if __name__ == "__main__":
     unittest.main()
