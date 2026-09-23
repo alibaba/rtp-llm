@@ -33,46 +33,6 @@ FallbackTick tickFallback(std::atomic<uint64_t>& counter) {
     return {count, count != 0 && (count & (count - 1)) == 0};
 }
 
-class ScopedEnvFlag {
-public:
-    ScopedEnvFlag(const char* name, const char* value): name_(name) {
-        // Python's os.environ is a cached mapping: changing the process
-        // environment with setenv() does not update the mapping that
-        // os.environ.get() reads.  The warmup signal is consumed by Python,
-        // so update os.environ itself (which also calls putenv()) while the
-        // GIL is held.  Otherwise the compiled SM120 MoE path is skipped
-        // during warmup and torch.compile first runs inside graph capture.
-        py::gil_scoped_acquire gil;
-        auto                   environ = py::module_::import("os").attr("environ");
-        auto                   py_name = py::str(name_);
-        if (environ.contains(py_name)) {
-            had_old_value_ = true;
-            old_value_     = py::cast<std::string>(environ[py_name]);
-        }
-        environ[py_name] = py::str(value);
-    }
-
-    ~ScopedEnvFlag() noexcept {
-        py::gil_scoped_acquire gil;
-        try {
-            auto environ = py::module_::import("os").attr("environ");
-            auto py_name = py::str(name_);
-            if (had_old_value_) {
-                environ[py_name] = py::str(old_value_);
-            } else {
-                environ.attr("pop")(py_name, py::none());
-            }
-        } catch (py::error_already_set& error) {
-            error.discard_as_unraisable("ScopedEnvFlag::~ScopedEnvFlag");
-        }
-    }
-
-private:
-    std::string name_;
-    bool        had_old_value_ = false;
-    std::string old_value_;
-};
-
 // Thread-local depth counters rather than setenv/unsetenv: engine gather threads
 // may call getenv() concurrently with capture, which is a data race.
 class ScopedCudaGraphForwardFlag {
@@ -471,10 +431,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
     // Compact draft-prefill graphs capture fewer batch rows than max_bs_, so the
     // replay fills must follow what this graph actually captured.
-    const int captured_batch_capacity = py_model_inputs_.attention_inputs.input_lengths_device.defined() ?
-                                            static_cast<int>(
-                                                py_model_inputs_.attention_inputs.input_lengths_device.numel()) :
-                                            static_cast<int>(max_bs_);
+    const int captured_batch_capacity =
+        py_model_inputs_.attention_inputs.input_lengths_device.defined() ?
+            static_cast<int>(py_model_inputs_.attention_inputs.input_lengths_device.numel()) :
+            static_cast<int>(max_bs_);
     RTP_LLM_CHECK_WITH_INFO(state.current_batch_size <= captured_batch_capacity,
                             "cuda graph replay batch size %d exceeds captured capacity %d for graph %zu",
                             state.current_batch_size,
@@ -1293,8 +1253,7 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs,
     // requires q.shape[0] == cu_seqlens[-1], so padding up to the next bucket
     // would expand Q beyond the captured token layout. Fixed-capacity draft
     // models keep the max-batch layout and may pad.
-    if (draft_prefill_graph_mode && !usesFixedCapacityMtpDraftPrefillCudaGraph()
-        && *it != state.current_seq_len) {
+    if (draft_prefill_graph_mode && !usesFixedCapacityMtpDraftPrefillCudaGraph() && *it != state.current_seq_len) {
         RTP_LLM_LOG_DEBUG("compact draft-prefill CUDA graph has no exact batch bucket: tokens=%d "
                           "next_capture=%d; run eager forward",
                           state.current_seq_len,
@@ -1983,7 +1942,6 @@ void CudaGraphRunner::initCapture() {
             // Distributed model implementations may rendezvous during this
             // eager warmup forward. The flag is scoped so real graph capture
             // and replay never contain that synchronization.
-            ScopedEnvFlag              cuda_graph_warmup_env("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
             ScopedCudaGraphForwardFlag cuda_graph_warmup(ScopedCudaGraphForwardFlag::Type::Warmup);
             initial_outputs = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj).cast<PyModelOutputs>();
         } catch (const py::error_already_set& e) {
@@ -2031,7 +1989,6 @@ void CudaGraphRunner::initCapture() {
                 prepareCaptureInputs(inputs, post_check_batch, post_check_tokens);
                 try {
                     auto                       post_attn_pyobj = prepareFmhaImpl(inputs, true);
-                    ScopedEnvFlag              cuda_graph_warmup_env("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
                     ScopedCudaGraphForwardFlag cuda_graph_warmup(ScopedCudaGraphForwardFlag::Type::Warmup);
                     py_forward_method_(inputs, post_attn_pyobj);
                 } catch (const py::error_already_set& e) {
@@ -2099,7 +2056,6 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // Run the same backend that will be captured for this exact key.  In
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
-        ScopedEnvFlag              cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
         ScopedCudaGraphForwardFlag cuda_graph_warmup_flag(ScopedCudaGraphForwardFlag::Type::Warmup);
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
