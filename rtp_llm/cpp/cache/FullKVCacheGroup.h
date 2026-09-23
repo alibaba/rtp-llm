@@ -46,6 +46,7 @@ public:
                                  const RequiredPositions& required_positions = {}) const override;
 
 private:
+    bool zero_new_blocks_{false};
 };
 
 }  // namespace rtp_llm

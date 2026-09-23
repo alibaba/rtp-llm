@@ -32,7 +32,7 @@ public:
                             std::function<void()>                  profile_step_start  = nullptr,
                             std::function<void()>                  profile_step_finish = nullptr);
     ~NormalExecutor();
-    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,
                                RtpLLMTokenPSMetricsCollector&             tps_collector,
@@ -100,16 +100,15 @@ private:
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    bool                                                                     enable_ffn_disaggregate_ = false;
-    bool                                                                     enable_detail_log_       = false;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    bool enable_ffn_disaggregate_ = false;
+    bool enable_detail_log_       = false;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;
     int                   tp_rank_             = 0;
     ParallelismConfig     parallelism_config_;
-    RoleType              role_type_           = RoleType::PDFUSION;
+    RoleType              role_type_ = RoleType::PDFUSION;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
 

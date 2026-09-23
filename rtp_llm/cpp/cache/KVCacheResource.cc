@@ -59,23 +59,37 @@ BlockIdxType BlockIds::popBack() {
     RTP_LLM_CHECK(!block_indices.empty());
     const BlockIdxType val = block_indices.back();
     block_indices.pop_back();
+    needs_zero_.pop_back();
     kernel_block_indices_.resize(block_indices.size() * kernel_blocks_per_kv_block_);
     return val;
 }
 
-void BlockIds::add(const BlockIndicesType& ids) {
+void BlockIds::add(const BlockIndicesType& ids, bool needs_zero) {
     const size_t old_size = block_indices.size();
     block_indices.insert(block_indices.end(), ids.begin(), ids.end());
+    needs_zero_.resize(block_indices.size(), needs_zero);
     kernel_block_indices_.resize((old_size + ids.size()) * kernel_blocks_per_kv_block_);
     for (size_t i = 0; i < ids.size(); ++i) {
         updateKernelSlotAt(old_size + i, ids[i]);
     }
 }
 
+BlockIndicesType BlockIds::takeBlocksToZero(size_t initialized_prefix_blocks) {
+    BlockIndicesType result;
+    for (size_t i = initialized_prefix_blocks; i < block_indices.size(); ++i) {
+        if (needs_zero_[i] && block_indices[i] > 0) {
+            result.push_back(block_indices[i]);
+        }
+    }
+    std::fill(needs_zero_.begin(), needs_zero_.end(), 0);
+    return result;
+}
+
 void BlockIds::remove(const std::vector<size_t>& indices) {
     for (auto idx : indices) {
         RTP_LLM_CHECK(idx < block_indices.size());
         block_indices[idx] = NULL_BLOCK_IDX;
+        needs_zero_[idx] = 0;
         updateKernelSlotAt(idx, NULL_BLOCK_IDX);
     }
 }
@@ -97,29 +111,34 @@ void BlockIds::swap(size_t pos_a, size_t pos_b) {
         return;
     }
     std::swap(block_indices[pos_a], block_indices[pos_b]);
+    std::swap(needs_zero_[pos_a], needs_zero_[pos_b]);
     updateKernelSlotAt(pos_a, block_indices[pos_a]);
     updateKernelSlotAt(pos_b, block_indices[pos_b]);
 }
 
 void BlockIds::assign(const BlockIndicesType& new_block_indices) {
     block_indices = new_block_indices;
+    needs_zero_.assign(block_indices.size(), 0);
     syncKernelBlocks();
 }
 
 void BlockIds::assign(BlockIndicesType&& new_block_indices) {
     block_indices = std::move(new_block_indices);
+    needs_zero_.assign(block_indices.size(), 0);
     syncKernelBlocks();
 }
 
 void BlockIds::setAt(size_t pos, BlockIdxType val) {
     RTP_LLM_CHECK(pos < block_indices.size());
     block_indices[pos] = val;
+    needs_zero_[pos] = 0;
     updateKernelSlotAt(pos, val);
 }
 
 void BlockIds::resize(size_t new_size, BlockIdxType value) {
     const size_t old_size = block_indices.size();
     block_indices.resize(new_size, value);
+    needs_zero_.resize(new_size, 0);
     kernel_block_indices_.resize(new_size * kernel_blocks_per_kv_block_);
     for (size_t i = old_size; i < new_size; ++i) {
         updateKernelSlotAt(i, value);

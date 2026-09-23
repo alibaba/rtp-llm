@@ -8,6 +8,7 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <string>
 #include <memory>
@@ -19,12 +20,16 @@
 namespace rtp_llm {
 
 enum class ParallelMode {
-    TP        = 0,
-    DP        = 1,
-    DP_AND_TP = 2,
-    FFN_TP    = 3,
-    EP        = 4,
-    EPLB      = 5,
+    TP = 0,
+    DP = 1,
+    // WORLD: spans ALL ranks including every PP stage; never narrow it per
+    // stage. Formerly named DP_AND_TP (pre-PP legacy).
+    WORLD  = 2,
+    FFN_TP = 3,
+    EP     = 4,
+    EPLB   = 5,
+    // All TP/DP ranks in the current PP stage; WORLD when pp_size == 1.
+    STAGE = 6,
 };
 
 // A batch includes two parts: context batch and decoder batch.
@@ -60,6 +65,7 @@ struct GptModelInputs {
 
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_id, src block, dst block
+    torch::Tensor kv_cache_blocks_to_zero;  // [new_block_num], int64 physical IDs in the shared pool
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
@@ -91,6 +97,7 @@ struct GptModelInputs {
     bool warmup                 = false;
     bool skip_run               = false;
     bool is_fake_stream         = false;
+    bool shutdown               = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.
@@ -107,6 +114,7 @@ public:
 
 struct GptModelOutputs {
     torch::Tensor logits;
+    // Same selected LM output rows as logits, independent of need_all_logits.
     torch::Tensor hidden_states;
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;

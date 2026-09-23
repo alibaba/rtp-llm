@@ -46,6 +46,8 @@ public:
     int64_t num_layers  = 0;
     int64_t hidden_size = 0;
 
+    uint32_t global_layer_begin = 0;
+
     // Attention configuration - contains all attention-related params
     AttentionConfigs      attn_config;
     LinearAttentionConfig linear_attention_config;

@@ -50,8 +50,8 @@ struct LayerKVCache {
         tag(std::move(tag)) {}
 };
 
-// Whole-model KV cache holding tensors for all layers.
-// Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
+/* Layer ids are model-local (0..layerCount()-1): under PP each rank's layout
+   is projected to its own stage layers, so local ids may differ from global. */
 class KVCache {
 public:
     explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout): grouped_layout_(std::move(grouped_layout)) {}
@@ -349,6 +349,9 @@ struct PyMultimodalInputs {
 };
 
 using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
+
+// PP stage-boundary tensors; keys are model-defined ("hidden_states" + "residual" for fused-residual models).
+using PPIntermediates = std::map<std::string, torch::Tensor>;
 
 struct PyModelInputs {
     torch::Tensor      input_ids;

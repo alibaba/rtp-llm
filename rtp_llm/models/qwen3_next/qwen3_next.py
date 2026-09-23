@@ -45,6 +45,9 @@ class Qwen3NextBase(BaseModel):
     def support_cuda_graph(self) -> bool:
         return True
 
+    def support_pp(self) -> bool:
+        return True
+
     @classmethod
     def _apply_kv_cache_config(
         cls, model_config: ModelConfig, kv_cache_config: KVCacheConfig

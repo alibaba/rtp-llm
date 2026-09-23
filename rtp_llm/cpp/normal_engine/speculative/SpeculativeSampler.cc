@@ -94,19 +94,19 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStr
     // staged for rejection sampling H2D in the previous forward.
     buffer_holder_.release();
     SpeculativeSamplerOutput sample_output;
-    batchSample(sample_output, streams, draft_sampler_output, target_sampler_output);
+    batchSample(sample_output, params, draft_sampler_output, target_sampler_output);
 
     return sample_output;
 }
 
-void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_output,
-                                     const std::list<GenerateStreamPtr>& streams,
-                                     SamplerOutput&                      draft_sampler_output,
-                                     SamplerOutput&                      target_sampler_output) const {
+void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&         sample_output,
+                                     const SpeculativeSamplingParams& params,
+                                     SamplerOutput&                   draft_sampler_output,
+                                     SamplerOutput&                   target_sampler_output) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample");
     torch::Device target_device = getTorchCudaDevice();
 
-    int batch_size = streams.size();
+    const int batch_size = params.do_sample.size(0);
 
     auto draft_token_ids  = draft_sampler_output.token_ids;
     auto target_token_ids = target_sampler_output.token_ids;
@@ -141,8 +141,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     // ensuring deterministic acceptance for reproducible iter_count.
     {
         int idx = 0;
-        for (const auto& stream : streams) {
-            auto gen = stream->getGenerator();
+        for (const auto& gen : params.generators) {
             if (gen.defined()) {
                 uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
             }
@@ -213,13 +212,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         bool has_force = false;
         auto force_mask =
             torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
-        int idx = 0;
-        for (const auto& stream : streams) {
-            if (stream->forceSpAccept()) {
+        for (int idx = 0; idx < batch_size; ++idx) {
+            if (params.force_accept[idx].item<bool>()) {
                 force_mask[idx] = true;
                 has_force       = true;
             }
-            idx++;
         }
         if (has_force) {
             RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
@@ -245,16 +242,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
-
-    sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
-    sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
-    sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
-
-void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,
-                                      const std::list<GenerateStreamPtr>& streams,
-                                      SamplerOutput&                      draft_sampler_output,
-                                      SamplerOutput&                      target_sampler_output) const {}
 
 }  // namespace speculative
 }  // namespace rtp_llm

@@ -6,6 +6,12 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.pp_layout import (
+    derive_pp_rank,
+    stage_has_embedding,
+    stage_has_lm_head,
+    stage_layer_range,
+)
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
@@ -66,6 +72,48 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_buffer: Optional[torch.Tensor] = None
         self._mtp_aux_capture_rows = 0
         self._mtp_aux_capture_index = 0
+
+    # Pipeline-parallel stage view; layout delegates to config/pp_layout.py.
+    @property
+    def pp_size(self) -> int:
+        return max(int(getattr(self.parallelism_config, "pp_size", 1) or 1), 1)
+
+    @property
+    def pp_rank(self) -> int:
+        rank = getattr(self.parallelism_config, "pp_rank", None)
+        if rank is None:
+            rank = derive_pp_rank(
+                getattr(self.parallelism_config, "world_rank", 0),
+                getattr(self.parallelism_config, "dp_size", 1),
+                getattr(self.parallelism_config, "tp_size", 1),
+            )
+        return int(rank)
+
+    @property
+    def pp_has_embedding(self) -> bool:
+        """First stage owns the token/positional embedding."""
+        return stage_has_embedding(self.pp_rank)
+
+    @property
+    def pp_has_lm_head(self) -> bool:
+        """Last stage owns lm_head + final_layernorm."""
+        return stage_has_lm_head(self.pp_rank, self.pp_size)
+
+    def pp_layer_ids(self) -> list[int]:
+        """Global layer ids owned by this stage.
+
+        Lookup over the materialized partition on ParallelismConfig
+        (decided once at startup), so model construction stays in sync
+        with weight loading; pp_size=1 is trivially all layers.
+        """
+        counts = getattr(self.parallelism_config, "pp_stage_layer_counts", None)
+        return list(
+            stage_layer_range(self.layer_num, self.pp_size, self.pp_rank, counts)
+        )
+
+    def make_empty_intermediate_tensors(self, hidden_template: Any) -> dict[str, Any]:
+        """Build this model's stage-boundary inputs for stage-local PP warmup."""
+        return {"hidden_states": hidden_template}
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache

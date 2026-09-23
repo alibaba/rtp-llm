@@ -53,6 +53,8 @@ std::optional<ErrorInfo> TreeLogitsProcessor::updateStatus(const torch::Tensor& 
         if (!info.in_tree_mode)
             continue;
 
+        // Beam updates contain full token histories; ordinary multi-return
+        // updates contain only newly generated tokens.
         auto offset = info.is_beam_search ? (info.current_output_length + info.input_length) : 0;
 
         if (!info.is_beam_search) {
@@ -83,8 +85,7 @@ TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(std::shared_ptr<Ge
         StreamTreeInfo              tree_info(PrefixToCandidateTokens::instance()->initSuccess(),
                                  generate_input->inputLength(),
                                  0,
-                                 generate_input->generate_config->hasNumBeams()
-                                     || generate_input->generate_config->num_return_sequences > 1,
+                                 generate_input->generate_config->hasNumBeams(),
                                  std::make_shared<TreeDFA<std::string, int>>(PrefixToCandidateTokens::instance()));
         std::vector<StreamTreeInfo> tree_infos       = {tree_info};
         auto                        single_processor = std::make_shared<TreeLogitsProcessor>(tree_infos);

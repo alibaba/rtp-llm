@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -25,7 +26,6 @@
 #include <sstream>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #endif
 #include "autil/TimeUtility.h"
@@ -258,6 +258,8 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
     if (verify_result.consumed_event) {
         verify_result.consumed_event->record(cuda_graph::graphGetCurrentStream());
     }
+
+    return params;
 }
 
 }  // namespace
@@ -556,7 +558,7 @@ static void applyCacheStrideToModelInput(GptModelInputs& model_input, const Cach
     model_input.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
 }
 
-static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
+std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
                                                             size_t                 reserved_blocks,
                                                             const ModelConfig&     model_config,
                                                             const RuntimeConfig&   runtime_config,
@@ -752,9 +754,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.model_config_.num_layers,
                                              moe_inter_size,
                                              params.model_config_.hidden_size,
-                                             params.parallelism_config.ep_rank,
-                                             params.parallelism_config.ep_size,
-                                             params.parallelism_config.world_size,
+                                             params.parallelism_config,
+                                             std::pair<int64_t, int64_t>{0, params.model_config_.num_layers},
                                              params.py_eplb,
                                              moe_weight_type,
                                              params.model_config_.quant_algo,
@@ -1116,7 +1117,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, !model_input.is_fake_stream);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1667,7 +1668,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, !model_input.is_fake_stream);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1703,9 +1704,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 
             // rejection sampling
-            speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
-            applySpecLogitsAcceptLenCap(
-                *spec_logits_result, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            auto params = gatherSpeculativeSamplingParams(streams);
+            mtp::runRejectionSampling(*speculative_sampler_,
+                                     params,
+                                     draft_sampler_output,
+                                     sampler_output,
+                                     *spec_logits_result,
+                                     speculative_sampler_output);
         }
         if (is_dspark_) {
             // Target verify wrote its aux features into the shared MTP hidden
@@ -1716,7 +1721,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 model_input, model_output.all_hidden_states, batch_size);
         } else {
             batch_stream_processor_->updateDecodePostDraftModelInput(
-                model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+                model_input, model_output, speculative_sampler_output, hidden_states_d_t, buffer_holder_);
         }
         if (metrics_reporter_) {
             accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
@@ -2316,7 +2321,8 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     for (auto& stream : streams) {
         // Capability compatibility is a stream admission property: reject the
         // single stream instead of failing the whole engine step (main #1006).
-        if (auto error = validateMtpCompatibility(stream->getAllLogitsProcessorPtr()); error.has_value()) {
+        if (auto error = LogitsProcessorFactory::validateMtpCompatibility(stream->getAllLogitsProcessorPtr());
+            error.has_value()) {
             stream->reportError(error->code(), error->ToString());
             continue;
         }
@@ -2362,7 +2368,8 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     }
 }
 
-absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+absl::Status MtpExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    const auto& streams = schedule_output.streams;
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
 
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -2452,7 +2459,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
 
-    GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;
     torch::Tensor              spec_prefix_lengths;
 
@@ -2540,16 +2546,16 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     draft_token_columns.push_back(pre_propose_token_t_raw);
 
     // n-1 steps draft model decode
-    for (int i = 0; i < propose_step_ - 1; i++) {
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
-        RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
+    const size_t decode_steps = propose_step_ - 1;
+    for (size_t i = 0; i < decode_steps; ++i) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%zu)", i);
+        RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu/%zu start, batch_size %zu", i, decode_steps, batch_size);
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        draft_decode_model_output =
-            std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
+        auto draft_decode_model_output = forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
-        RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
+        RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu forward done", i);
 
         // sample
         auto fast_topk_sampler_output = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);
@@ -2567,9 +2573,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         draft_probs_list.push_back(draft_probs_reshape);
 
         // update model input
-        if (i != propose_step_ - 2) {
-            batch_stream_processor_->updateDecodeDraftModelInput(
-                model_input, draft_decode_model_output, draft_token_ids, buffer_holder_);
+        if (i + 1 < decode_steps) {
+            mtp::advanceDraftInput(model_input,
+                                   draft_decode_model_output.all_hidden_states,
+                                   draft_token_ids,
+                                   batch_stream_processor_->positionIdLenFactor(),
+                                   buffer_holder_);
         }
     }
 

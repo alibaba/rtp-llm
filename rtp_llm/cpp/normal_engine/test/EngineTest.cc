@@ -496,9 +496,8 @@ TEST_F(NormalEngineTest, testRejectInvalidOutputVocabIds) {
 
 TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     CustomConfig config;
-    config.prefill_cp_enabled  = true;
-    config.speculative_enabled = true;
-    config.warm_up_with_loss   = true;
+    config.prefill_cp_enabled = true;
+    config.warm_up_with_loss  = true;
     EXPECT_NO_THROW(createMockEngine(config));
 }
 

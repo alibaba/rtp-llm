@@ -13,6 +13,7 @@
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
+#include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -1260,7 +1261,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
             .reshape({6, 2});
 
     processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
+        model_input, model_output, spec_decode_output, hidden_states_d_t, holder);
 
     auto        combo_tokens        = model_input.combo_tokens.cpu();
     vector<int> expect_combo_tokens = {2, 3, 1, 2};
@@ -1305,13 +1306,18 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDens
     TensorHolder  holder;
 
     processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
+        model_input, model_output, spec_decode_output, hidden_states_d_t, holder);
 
     EXPECT_TRUE(model_input.combo_tokens.is_cuda());
     EXPECT_EQ((vector<int>{2, 3, 1, 2, 0, 0}), toVec<int>(model_input.combo_tokens));
     EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
     EXPECT_EQ((vector<int>{2, 3}), toVec<int>(model_input.lm_output_indexes));
     EXPECT_EQ(6, model_input.last_hidden_states.size(0));
+    EXPECT_TRUE(torch::equal(hidden_states_d_t, model_output.all_hidden_states));
+    EXPECT_EQ((vector<int>{3, 3}), toVec<int>(model_input.input_lengths));
+    EXPECT_EQ((vector<int>{5, 9}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ((vector<int>{5, 6, 7, 9, 10, 11}), toVec<int>(model_input.combo_position_ids));
+    EXPECT_FALSE(model_input.is_target_verify);
     unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
 }
 

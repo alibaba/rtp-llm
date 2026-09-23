@@ -996,6 +996,34 @@ class CustomChatRenderer:
                 )
             )
 
+        extra_outputs = None
+        for item in items:
+            if item.extra_outputs is not None:
+                if extra_outputs is None:
+                    extra_outputs = item.extra_outputs.model_copy(deep=True)
+                else:
+                    for name in ("all_hidden_states", "loss"):
+                        if getattr(extra_outputs, name) is None:
+                            setattr(extra_outputs, name, getattr(item.extra_outputs, name))
+        if extra_outputs is not None and len(items) > 1:
+            for name in ("input_ids", "output_ids", "hidden_states", "logits"):
+                values = [
+                    getattr(item.extra_outputs, name)
+                    if item.extra_outputs is not None else None
+                    for item in items
+                ]
+                if any(value is not None for value in values):
+                    # Keep the choice index even when a sequence has no new row.
+                    rows = []
+                    for value in values:
+                        if value is None or len(value) == 0:
+                            rows.append([])
+                        elif isinstance(value[0], list):
+                            rows.extend(value)
+                        else:
+                            rows.append(value)
+                    setattr(extra_outputs, name, rows)
+
         return StreamResponseObject(
             choices=all_choices,
             usage=UsageInfo(
@@ -1015,8 +1043,7 @@ class CustomChatRenderer:
                     reuse_lengths, items[0].multimodal_lengths
                 ),
             ),
-            # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
-            extra_outputs=items[-1].extra_outputs,
+            extra_outputs=extra_outputs,
         )
 
     def _should_yield_stream_response(

@@ -88,6 +88,31 @@ private:
     int                           listen_port_{0};
 };
 
+class CapturingGenerateClientStream: public grpc::ClientReaderWriterInterface<GenerateRequestPB, GenerateOutputsPB> {
+public:
+    bool Read(GenerateOutputsPB*) override {
+        return false;
+    }
+    bool NextMessageSize(uint32_t*) override {
+        return false;
+    }
+    bool Write(const GenerateRequestPB& value, grpc::WriteOptions) override {
+        request = value;
+        ++write_count;
+        return true;
+    }
+    void WaitForInitialMetadata() override {}
+    bool WritesDone() override {
+        return true;
+    }
+    grpc::Status Finish() override {
+        return grpc::Status::OK;
+    }
+
+    GenerateRequestPB request;
+    int write_count = 0;
+};
+
 class TestMultimodalProcessor: public MultimodalProcessor {
 public:
     explicit TestMultimodalProcessor(ErrorCode result_code):
@@ -1111,6 +1136,33 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     ASSERT_EQ(alloc_request.peer_addrs_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs(0), "a:1");
     EXPECT_EQ(alloc_request.peer_addrs(1), "b:2");
+    EXPECT_EQ(alloc_request.stage_peer_groups_size(), 0);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestCarriesStagePeerGroupsUnderPp) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(10);
+    auto context                              = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {
+        "w0:1:2", "w1:1:2", "w2:1:2", "w3:1:2", "w4:1:2", "w5:1:2", "w6:1:2", "w7:1:2"};
+
+    TestPrefillRpcServer server;
+    server.maga_init_params_.parallelism_config.pp_size               = 4;
+    server.maga_init_params_.parallelism_config.tp_size               = 2;
+    server.maga_init_params_.parallelism_config.pp_stage_layer_counts = {3, 3, 2, 2};
+
+    auto alloc_request = server.buildAllocateRequest(*context);
+
+    ASSERT_EQ(alloc_request.stage_peer_groups_size(), 4);
+    EXPECT_EQ(alloc_request.stage_peer_groups(0).layer_begin(), 0u);
+    EXPECT_EQ(alloc_request.stage_peer_groups(0).layer_count(), 3u);
+    EXPECT_EQ(alloc_request.stage_peer_groups(2).layer_begin(), 6u);
+    EXPECT_EQ(alloc_request.stage_peer_groups(2).layer_count(), 2u);
+    ASSERT_EQ(alloc_request.stage_peer_groups(1).peer_addrs_size(), 2);
+    EXPECT_EQ(alloc_request.stage_peer_groups(1).peer_addrs(0), "w2:1:2");
+    EXPECT_EQ(alloc_request.stage_peer_groups(1).peer_addrs(1), "w3:1:2");
+    EXPECT_EQ(alloc_request.stage_peer_groups(3).peer_addrs(1), "w7:1:2");
 }
 
 }  // namespace rtp_llm

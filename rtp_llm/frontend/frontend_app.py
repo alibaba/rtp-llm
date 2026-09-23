@@ -32,6 +32,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
     get_dp_addrs_from_world_info,
+    get_eplb_stage_root_addresses,
     get_world_info,
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
@@ -439,6 +440,7 @@ class FrontendApp(object):
             self.server_config.rpc_server_port,
             dp_addresses=dp_addresses,
             client_config=client_config,
+            eplb_address_resolver=lambda: get_eplb_stage_root_addresses(py_env_configs),
         )
 
         logging.info(

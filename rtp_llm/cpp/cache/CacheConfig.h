@@ -20,6 +20,8 @@
 
 namespace rtp_llm {
 
+using PPBlockNumOverrides = std::unordered_map<std::string, uint32_t>;
+
 // Residency (memory_placement) and budget (charge_to_paged_budget) are independent
 // knobs: CacheConfig::finalizeBlockNums only consults charge_to_paged_budget when it
 // accumulates explicitly_sized_pool_reserve_bytes. A pool that lives on host memory
@@ -46,11 +48,12 @@ public:
     bool             use_opaque_kv_cache_store                = false;
     bool             disable_decode_first_malloc_device_reuse = false;
 
-    rtp_llm::DataType dtype         = rtp_llm::DataType::TYPE_INVALID;
-    uint32_t          layer_num     = 0;  // the number of main model layers
-    uint32_t          layer_all_num = 0;  // the number of all layers including mtp modules
-    bool              use_mla       = false;
-    bool              is_sparse     = false;
+    rtp_llm::DataType dtype              = rtp_llm::DataType::TYPE_INVALID;
+    uint32_t          layer_num          = 0;  // the number of main model layers
+    uint32_t          layer_all_num      = 0;  // the number of all layers including mtp modules
+    uint32_t          global_layer_begin = 0;  // first global layer id; range length is layer_all_num
+    bool              use_mla            = false;
+    bool              is_sparse          = false;
 
     // Block configuration
     uint32_t block_num                 = 0;
@@ -355,7 +358,9 @@ public:
                                  const std::vector<CacheGroupType>&   types,
                                  const std::vector<std::string>&      tags     = {},
                                  const std::vector<CacheGroupPolicy>& policies = {});
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    void        finalizeBlockNums(uint32_t                   global_block_num,
+                                  const RuntimeConfig&       runtime_config,
+                                  const PPBlockNumOverrides* pp_overrides = nullptr);
     std::string debugString(size_t indent = 0) const;
 };
 

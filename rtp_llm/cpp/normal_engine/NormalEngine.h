@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -35,6 +36,7 @@ public:
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
+    absl::Status pp_step();
     absl::Status startLoop();
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
@@ -62,7 +64,7 @@ private:
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
     void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
-    void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
+    void initExecutor(const EngineInitParams& params);
 
     bool isMTPEagle() override;
     bool isEagle() override;
@@ -71,6 +73,7 @@ private:
 private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::function<bool()>                         should_loop_;
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

@@ -115,6 +115,15 @@ cc_test(
 )
 
 cc_test(
+    name = "stage_peer_groups_test",
+    srcs = ["StagePeerGroupsTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "decode_rpc_server_test",
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,

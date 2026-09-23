@@ -25,6 +25,13 @@ namespace rtp_llm {
 enum class ModelInputsModelRole;
 
 class ModelInputsLogger;
+class NormalGenerateStream;
+
+std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
+                                                  size_t                 reserved_blocks,
+                                                  const ModelConfig&     model_config,
+                                                  const RuntimeConfig&   runtime_config,
+                                                  const ResourceContext& resource_context);
 
 struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;
@@ -47,7 +54,7 @@ public:
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {

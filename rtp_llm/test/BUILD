@@ -430,3 +430,12 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "draft_model_loading_test",
+    srcs = ["draft_model_loading_test.py"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+)

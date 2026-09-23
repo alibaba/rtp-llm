@@ -25,12 +25,14 @@
 #include <atomic>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #endif
+#include <pybind11/chrono.h>
 #include <pybind11/functional.h>
 
 #if USING_CUDA
@@ -362,7 +364,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const std::string cache_key = makeCacheKey(
                 cache_model_id,
                 std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
-                layer_kv.layer_id,
+                cache_config.global_layer_begin + layer_kv.layer_id,
                 layer_kv.tag);
             const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.
@@ -665,9 +667,12 @@ namespace {
 std::mutex g_comm_mutex;
 
 // Avoid destroying static Python objects after interpreter finalization.
-py::function* g_broadcast_fn = nullptr;
-py::function* g_allreduce_fn = nullptr;
-py::function* g_allgather_fn = nullptr;
+py::function* g_broadcast_fn            = nullptr;
+py::function* g_allreduce_fn            = nullptr;
+py::function* g_allgather_fn            = nullptr;
+py::function* g_isend_fn                = nullptr;
+py::function* g_irecv_fn                = nullptr;
+py::function* g_pp_snapshot_exchange_fn = nullptr;
 
 void clearCommOpsUnlocked() {
     py::function broadcast_fn;
@@ -688,6 +693,89 @@ void clearCommOpsUnlocked() {
         delete g_allgather_fn;
         g_allgather_fn = nullptr;
     }
+}
+
+// PP callbacks (P2P transport + snapshot exchange) are registered together via register_pp_ops.
+void clearPPOpsUnlocked() {
+    py::function isend_fn;
+    py::function irecv_fn;
+    py::function pp_snapshot_exchange_fn;
+    if (g_isend_fn != nullptr) {
+        isend_fn = std::move(*g_isend_fn);
+        delete g_isend_fn;
+        g_isend_fn = nullptr;
+    }
+    if (g_irecv_fn != nullptr) {
+        irecv_fn = std::move(*g_irecv_fn);
+        delete g_irecv_fn;
+        g_irecv_fn = nullptr;
+    }
+    if (g_pp_snapshot_exchange_fn != nullptr) {
+        pp_snapshot_exchange_fn = std::move(*g_pp_snapshot_exchange_fn);
+        delete g_pp_snapshot_exchange_fn;
+        g_pp_snapshot_exchange_fn = nullptr;
+    }
+}
+
+class PythonP2PWork final: public P2PWork {
+public:
+    PythonP2PWork(py::object work, torch::Tensor tensor): work_(std::move(work)), tensor_(std::move(tensor)) {}
+
+    ~PythonP2PWork() override {
+        py::gil_scoped_acquire gil;
+        work_ = py::object();
+    }
+
+    void wait() override {
+        py::gil_scoped_acquire gil;
+        if (!work_) {
+            return;
+        }
+        /** PyTorch's CUDA caching allocator delays memory reuse until NCCL communication completes. */
+        const bool wait_succeeded = work_.attr("wait")().cast<bool>();
+        RTP_LLM_CHECK_WITH_INFO(wait_succeeded, "P2P work wait failed");
+    }
+
+    bool wait(std::chrono::milliseconds timeout) override {
+        py::gil_scoped_acquire gil;
+        if (!work_) {
+            return true;
+        }
+        try {
+            return work_.attr("wait")(py::cast(timeout)).cast<bool>();
+        } catch (const py::error_already_set& e) {
+            /* gloo terminates the transfer when the bounded wait expires (or the peer
+             * dies); the caller only uses this path while stopping, where "not delivered"
+             * means exit. Report and surface it as an incomplete wait. */
+            RTP_LLM_LOG_WARNING("P2P bounded wait failed: %s", e.what());
+            return false;
+        }
+    }
+
+private:
+    py::object    work_;
+    torch::Tensor tensor_;
+};
+
+std::unique_ptr<P2PWork> runP2PCallback(const torch::Tensor& tensor,
+                                        int64_t              global_peer,
+                                        P2PBackend           backend,
+                                        py::function**       callback,
+                                        const char*          callback_name) {
+    py::gil_scoped_acquire gil;
+    py::function           fn;
+    {
+        std::lock_guard<std::mutex> lock(g_comm_mutex);
+        if (*callback != nullptr) {
+            fn = **callback;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        static_cast<bool>(fn), "%s called but its callback is not registered via register_pp_ops", callback_name);
+    py::object work = fn(tensor, global_peer, static_cast<int>(backend));
+    RTP_LLM_CHECK_WITH_INFO(!work.is_none(), "%s callback returned None", callback_name);
+    RTP_LLM_CHECK_WITH_INFO(py::hasattr(work, "wait"), "%s callback returned an object without wait()", callback_name);
+    return std::make_unique<PythonP2PWork>(std::move(work), tensor);
 }
 }  // anonymous namespace
 
@@ -718,8 +806,9 @@ void execBroadcastCpu(const BroadcastParams& params) {
     auto& broadcaster = CpuTpBroadcaster::instance();
     if (broadcaster.isInitialized()) {
         for (auto& tensor : params.buffers) {
-            RTP_LLM_CHECK_WITH_INFO(
-                tensor.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", tensor.device().str().c_str());
+            RTP_LLM_CHECK_WITH_INFO(tensor.is_cpu(),
+                                    "execBroadcastCpu requires CPU tensors (got device=%s)",
+                                    tensor.device().str().c_str());
             auto contiguous = tensor.contiguous();
             broadcaster.broadcast(contiguous.data_ptr(), contiguous.nbytes(), params.root);
             if (!contiguous.is_same(tensor)) {
@@ -772,6 +861,30 @@ void execAllGather(const AllGatherParams& params) {
     for (auto& t : params.send_buffers)
         send_list.append(t);
     fn(recv_list, static_cast<int>(params.mode), send_list, params.inplace);
+}
+
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int64_t global_peer, P2PBackend backend) {
+    return runP2PCallback(tensor, global_peer, backend, &g_isend_fn, "execISend");
+}
+
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int64_t global_peer, P2PBackend backend) {
+    return runP2PCallback(tensor, global_peer, backend, &g_irecv_fn, "execIRecv");
+}
+
+std::vector<std::string> execPPSnapshotExchange(const std::string& local_snapshot) {
+    py::function           fn;
+    py::gil_scoped_acquire gil;
+    {
+        std::lock_guard<std::mutex> lock(g_comm_mutex);
+        if (g_pp_snapshot_exchange_fn != nullptr) {
+            fn = *g_pp_snapshot_exchange_fn;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
+                            "execPPSnapshotExchange called but PP snapshot callback not registered via "
+                            "register_pp_ops (collective_torch registers it when pp_size > 1)");
+    py::object result = fn(py::bytes(local_snapshot));
+    return result.cast<std::vector<std::string>>();
 }
 
 void execSyncCommunication(bool timeout) {
@@ -882,12 +995,36 @@ void registerExecCtxOps(pybind11::module& m) {
         "Register Python callbacks for C++ communication ops.");
 
     m.def(
+        "register_pp_ops",
+        [](py::function isend_fn, py::function irecv_fn, py::function pp_snapshot_exchange_fn) {
+            std::lock_guard<std::mutex> lock(g_comm_mutex);
+            clearPPOpsUnlocked();
+            g_isend_fn                = new py::function(std::move(isend_fn));
+            g_irecv_fn                = new py::function(std::move(irecv_fn));
+            g_pp_snapshot_exchange_fn = new py::function(std::move(pp_snapshot_exchange_fn));
+        },
+        py::arg("isend_fn"),
+        py::arg("irecv_fn"),
+        py::arg("pp_snapshot_exchange_fn"),
+        "Register all PP communication callbacks: P2P tensor transport "
+        "(isend/irecv) and the startup snapshot exchange. P2P callbacks take "
+        "(tensor, global_peer, backend), where backend is P2PBackend (0=NCCL, 1=GLOO).");
+
+    m.def(
         "clear_comm_ops",
         []() {
             std::lock_guard<std::mutex> lock(g_comm_mutex);
             clearCommOpsUnlocked();
         },
         "Clear registered Python communication callbacks.");
+
+    m.def(
+        "clear_pp_ops",
+        []() {
+            std::lock_guard<std::mutex> lock(g_comm_mutex);
+            clearPPOpsUnlocked();
+        },
+        "Clear registered PP communication callbacks.");
 
     m.def(
         "init_cpu_tp_broadcaster",
@@ -899,12 +1036,10 @@ void registerExecCtxOps(pybind11::module& m) {
         py::arg("tp_size"),
         py::arg("base_path"));
 
-    m.def(
-        "destroy_cpu_tp_broadcaster",
-        []() {
-            py::gil_scoped_release release;
-            CpuTpBroadcaster::instance().reset();
-        });
+    m.def("destroy_cpu_tp_broadcaster", []() {
+        py::gil_scoped_release release;
+        CpuTpBroadcaster::instance().reset();
+    });
 }
 
 }  // namespace rtp_llm

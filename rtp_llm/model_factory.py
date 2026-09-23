@@ -14,6 +14,7 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.pp_layout import ModuleKind, ModulePlacement, resolve_pp_partition
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -26,6 +27,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
+    HybridAttentionType,
     ProfilingDebugLoggingConfig,
     SpeculativeType,
     TaskType,
@@ -33,6 +35,51 @@ from rtp_llm.ops import (
 )
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.warmup import configure_warmup
+
+
+def _retype_pp_hybrid_spec_tags(kv_cache_spec_descs, hybrid_attention_types) -> None:
+    """Rename positional hybrid tags (linear0/linear1/...) to type tags.
+
+    With PP + independent pools each tag becomes one physical pool per stage.
+    Positional tags give every stage a different tag SUBSET that needs
+    cross-stage reconciliation; one tag per attention type (full / linear)
+    keeps all stage topologies identical.
+    """
+    check_with_info(
+        len(kv_cache_spec_descs) == len(hybrid_attention_types),
+        "hybrid spec desc count %d != hybrid_attention_types count %d"
+        % (len(kv_cache_spec_descs), len(hybrid_attention_types)),
+    )
+    for layer_idx, layer_descs in enumerate(kv_cache_spec_descs):
+        tag = (
+            "linear"
+            if hybrid_attention_types[layer_idx] == HybridAttentionType.LINEAR
+            else "full"
+        )
+        for desc in layer_descs:
+            desc.tag = tag
+
+
+def _normalize_pp_cache_config(model_config: ModelConfig, pp_size: int) -> None:
+    """Normalize hybrid cache metadata for any model participating in PP."""
+    hybrid_config = model_config.hybrid_attention_config
+    if (
+        pp_size <= 1
+        or not hybrid_config.enable_hybrid_attention
+        or hybrid_config.enable_independent_kv_cache_pools
+    ):
+        return
+
+    hybrid_config.enable_independent_kv_cache_pools = True
+    _retype_pp_hybrid_spec_tags(
+        model_config.kv_cache_spec_descs,
+        hybrid_config.hybrid_attention_types,
+    )
+    logging.info(
+        "PP hybrid cache switched to independent type pools: num_layers=%d pp_size=%d",
+        model_config.num_layers,
+        pp_size,
+    )
 
 
 class ModelFactory:
@@ -166,6 +213,15 @@ class ModelFactory:
                 engine_config.sp_config.type = SpeculativeType.EAGLE3
                 sp_type = SpeculativeType.EAGLE3
 
+            parallelism_config = engine_config.parallelism_config
+            is_mtp = sp_type == SpeculativeType.MTP
+            placement = ModulePlacement.from_parallelism_config(
+                parallelism_config, has_mtp=is_mtp
+            )
+            module_kind = ModuleKind.MTP if is_mtp else ModuleKind.LM_HEAD
+            if not placement.owns(module_kind, parallelism_config.pp_rank):
+                return None
+
             # Need to create GPT model for propose model
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
@@ -216,6 +272,7 @@ class ModelFactory:
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
+                apply_pp_partition=False,
             )
             aliased_local_bytes = 0
             for name in alias_names:
@@ -431,6 +488,28 @@ class ModelFactory:
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
 
+        # Materialize the PP layer partition once; downstream consumers (loading, construction, cache) read the counts.
+        parallelism_config = engine_config.parallelism_config
+        if (
+            parallelism_config.pp_size > 1
+            and not parallelism_config.pp_stage_layer_counts
+        ):
+            counts = resolve_pp_partition(
+                model_config.num_layers,
+                parallelism_config.pp_size,
+                model_config,
+            )
+            parallelism_config.pp_stage_layer_counts = counts
+            logging.info(
+                "PP layer partition materialized: num_layers=%d pp_size=%d counts=%s",
+                model_config.num_layers,
+                parallelism_config.pp_size,
+                counts,
+            )
+
+        # The cache gate requires independent pools when pp_size > 1; linear tags collapse to a single "linear" tag.
+        _normalize_pp_cache_config(model_config, parallelism_config.pp_size)
+
     @staticmethod
     def create_propose_model_config(
         engine_config: EngineConfig,
@@ -507,6 +586,9 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+        _normalize_pp_cache_config(
+            propose_model_config, engine_config.parallelism_config.pp_size
+        )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

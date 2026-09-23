@@ -286,8 +286,12 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                             const ParallelismConfig& parallelism_config,
                                             const KVCacheConfig&     kv_cache_config,
                                             bool                     is_mtp,
-                                            int                      gen_num_per_cycle) {
-    const auto    dtype                  = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+                                            int                      gen_num_per_cycle,
+                                            bool                     is_draft_model) {
+    const ModelConfig stage_model_config =
+        CacheConfigCreator::stageScopedModelConfig(model_config, parallelism_config, is_draft_model);
+
+    const auto    dtype                  = MemoryEvaluationHelper::getDataTypeForCache(stage_model_config);
     constexpr int kDefaultKvCacheSeqSize = 64;
     const bool    has_seq_override =
         kv_cache_config.seq_size_per_block > 0 && kv_cache_config.seq_size_per_block != kDefaultKvCacheSeqSize;
@@ -307,30 +311,31 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         kernel_tokens_per_block);
 
     CacheConfig config;
-    config.layer_num                 = static_cast<uint32_t>(model_config.num_layers);
+    config.layer_num                 = static_cast<uint32_t>(stage_model_config.num_layers);
     config.layer_all_num             = config.layer_num;
+    config.global_layer_begin        = stage_model_config.global_layer_begin;
     config.block_num                 = 0;
     config.seq_size_per_block        = physical_tokens_per_block;
     config.kernel_seq_size_per_block = kernel_tokens_per_block;
-    config.use_mla                   = model_config.attn_config.use_mla;
+    config.use_mla                   = stage_model_config.attn_config.use_mla;
     config.dtype                     = dtype;
     config.linear_step               = 1;
-    config.is_sparse                 = model_config.attn_config.is_sparse;
+    config.is_sparse                 = stage_model_config.attn_config.is_sparse;
 
-    if (!model_config.kv_cache_spec_descs.empty()) {
-        validateHybridPoolDescs(model_config, kernel_tokens_per_block, gen_num_per_cycle);
+    if (!stage_model_config.kv_cache_spec_descs.empty()) {
+        validateHybridPoolDescs(stage_model_config, kernel_tokens_per_block, gen_num_per_cycle);
         SpecBuildContext ctx;
         ctx.dtype                   = dtype;
         ctx.seq_size_per_block      = physical_tokens_per_block;
-        ctx.attn_config             = &model_config.attn_config;
-        ctx.linear_attention_config = &model_config.linear_attention_config;
+        ctx.attn_config             = &stage_model_config.attn_config;
+        ctx.linear_attention_config = &stage_model_config.linear_attention_config;
         ctx.parallelism_config      = &parallelism_config;
         ctx.kernel_tokens_per_block = kernel_tokens_per_block;
         ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
         auto refreshed_specs        = CacheConfigCreator::buildLayerSpecsFromDescs(
-            model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
+            stage_model_config.kv_cache_spec_descs, ctx, stage_model_config.num_layers);
         populateGroupsFromLayerSpecs(
-            config, model_config.kv_cache_spec_descs, refreshed_specs, model_config, parallelism_config);
+            config, stage_model_config.kv_cache_spec_descs, refreshed_specs, stage_model_config, parallelism_config);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec               = config.specForGroup(gid);
             config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
@@ -339,7 +344,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                                || spec->type == KVCacheSpecType::OpaqueKV
                                                || spec->type == KVCacheSpecType::OpaqueState;
         }
-        for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
+        for (const auto& layer_descs : stage_model_config.kv_cache_spec_descs) {
             for (const auto& desc : layer_descs) {
                 config.is_sparse = config.is_sparse || desc.cache_type == KVCacheSpecType::OpaqueKV;
             }
@@ -361,9 +366,10 @@ CacheConfig HybridPoolConfigCreator::createConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp,
-                                                  int                      gen_num_per_cycle) {
+                                                  int                      gen_num_per_cycle,
+                                                  bool                     is_draft_model) {
     return createHybridAttentionPoolConfig(
-        model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
+        model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle, is_draft_model);
 }
 
 }  // namespace rtp_llm

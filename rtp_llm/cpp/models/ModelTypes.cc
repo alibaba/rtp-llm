@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -57,6 +58,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
     shape_hints[GptModelInputIndex::kvCacheUpdateCopyNum] =
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
+    shape_hints[GptModelInputIndex::kvCacheZeroBlockNum] =
+        inputs.kv_cache_blocks_to_zero.defined() ? inputs.kv_cache_blocks_to_zero.numel() : 0;
     shape_hints[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints[GptModelInputIndex::comboPositionIds] =
@@ -90,7 +93,10 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::skipRun] = inputs.skip_run;
     shape_hints[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
-    shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints[GptModelInputIndex::isFakeStream]     = inputs.is_fake_stream;
+    shape_hints[GptModelInputIndex::isTargetVerify]   = inputs.is_target_verify;
+    shape_hints[GptModelInputIndex::pdSeparation]     = inputs.pd_separation;
+    shape_hints[GptModelInputIndex::shutdownSentinel] = inputs.shutdown;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
@@ -353,6 +359,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                          {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3},
                          pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheUpdateMapping));
         }
+        inputs.kv_cache_blocks_to_zero =
+            allocBuf(rtp_llm::DataType::TYPE_INT64,
+                     {checkedHint(GptModelInputIndex::kvCacheZeroBlockNum, "kvCacheZeroBlockNum")});
         if (max_blocks != 0) {
             inputs.kv_cache_block_id =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
@@ -460,6 +469,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         collect(inputs.kv_cache_update_mapping);
     }
+    collect(inputs.kv_cache_blocks_to_zero);
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);

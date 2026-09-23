@@ -59,6 +59,7 @@ class FakeCompositeWeight:
 
 def make_database(files: List[FakeCkptFileInfo]) -> CkptDatabase:
     database = CkptDatabase(None)
+    database.lora_ckpt = SimpleNamespace(has_lora=lambda: False)
     database.pretrain_file_list = files
     database.finetune_file_list = []
     database._is_ft_style = False
@@ -519,6 +520,9 @@ class OutputVocabWeightTest(unittest.TestCase):
 
 
 class FakeQuantAlgo:
+    def getWeightBits(self):
+        return 16
+
     def isQuant(self):
         return False
 
@@ -590,6 +594,33 @@ def make_minimal_configs(
     )
     hw_kernel_config = SimpleNamespace(use_swizzleA=False)
     return model_config, parallelism_config, hw_kernel_config
+
+
+class EplbNodeCountTest(unittest.TestCase):
+    def test_node_count_belongs_to_the_ep_group(self):
+        # (PP, TP, DP, EP, local world size, nodes per EP group)
+        for pp, tp, dp, ep, local, expected in (
+            (1, 1, 8, 8, 8, 1),
+            (2, 1, 8, 8, 8, 1),
+            (2, 1, 16, 16, 8, 2),
+            (2, 8, 1, 1, 8, 1),
+        ):
+            with self.subTest(pp=pp, tp=tp, dp=dp, ep=ep):
+                model, parallel, hw = make_minimal_configs()
+                parallel.pp_size, parallel.pp_rank = pp, 0
+                parallel.pp_stage_layer_counts = [1] * pp
+                parallel.tp_size, parallel.dp_size = tp, dp
+                parallel.ep_size = ep
+                parallel.world_size = pp * tp * dp
+                parallel.local_world_size = local
+                parallel.get_attn_tp_size = lambda: tp
+                model.num_layers = pp
+                weights_info = ModelDeployWeightInfo(model, parallel, hw, object())
+                self.assertEqual(weights_info.num_nodes, expected)
+                load_config = weights_info.create_load_config(
+                    torch.float16, make_database([])
+                )
+                self.assertEqual(load_config.num_nodes, expected)
 
 
 class MinimalLmHeadDeployWeightInfo(ModelDeployWeightInfo):

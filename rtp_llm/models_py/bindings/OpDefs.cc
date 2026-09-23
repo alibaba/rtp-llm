@@ -49,7 +49,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
-        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
+        .def_readonly("layer_id", &LayerKVCache::layer_id, "Model-local layer id")
         .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
@@ -58,7 +58,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
-             "Return a per-layer LayerKVCache for the given global layer id")
+             "Return a per-layer LayerKVCache for the given model-local layer id")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int, const std::string&) const>(&KVCache::getLayerCache),
              "Return a LayerKVCache for the given layer and tag")

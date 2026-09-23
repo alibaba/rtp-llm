@@ -12,8 +12,9 @@ class SingleConfigCreator {
 public:
     static CacheConfig createSingleConfig(const ModelConfig&       model_config,
                                           const ParallelismConfig& parallelism_config,
-                                          bool                     is_mtp = false,
-                                          int                      gen_num_per_cycle = 0);
+                                          bool                     is_mtp            = false,
+                                          int                      gen_num_per_cycle = 0,
+                                          bool                     is_draft_model    = false);
 };
 
 }  // namespace rtp_llm

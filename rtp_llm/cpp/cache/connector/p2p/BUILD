@@ -80,6 +80,20 @@ cc_library(
 )
 
 cc_library(
+    name = "connector_routing",
+    srcs = [
+        "ConnectorRouting.cc",
+    ],
+    hdrs = [
+        "ConnectorRouting.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "components",
     srcs = [
         "P2PBroadcastClient.cc",

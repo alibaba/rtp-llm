@@ -16,6 +16,7 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
+#include <pybind11/stl.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 // cuda_graph_base.h is platform-agnostic (only defines GraphParams/CudaGraphState structs),
 // safe to include unconditionally. cuda_graph_runner.h requires CUDA/ROCm runtime.
@@ -48,7 +49,7 @@ inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_confi
     py::gil_scoped_acquire gil;
     try {
         auto collective = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
-        auto group      = collective.attr("Group").attr("DP_AND_TP");
+        auto group      = collective.attr("Group").attr("WORLD");
         collective.attr("barrier")(group);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("CUDA graph capture rank sync failed at %s:\n%s", phase, e.what());
@@ -141,6 +142,8 @@ private:
     const bool                                      track_cache_store_completion_;
     const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
+    const int64_t                                   pp_size_;
+    const int64_t                                   hidden_size_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
@@ -203,6 +206,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     track_cache_store_completion_(track_cache_store_completion),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
+    pp_size_(std::max<int64_t>(1, params.parallelism_config.pp_size)),
+    hidden_size_(params.hidden_size),
     description_(params.description),
     cache_manager_(params.cache_manager),
     owns_generation_prefill_cuda_graph_(shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,

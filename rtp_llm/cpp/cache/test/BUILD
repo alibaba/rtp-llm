@@ -104,6 +104,35 @@ cc_test(
 )
 
 cc_test(
+    name = "pp_topology_validator_test",
+    srcs = ["PPTopologyValidatorTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:pp_topology_validator",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "pp_stage_cache_config_test",
+    srcs = ["PPStageCacheConfigTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:pp_topology_validator",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {},
+)
+
+cc_test(
     name = "cache_layer_layout_test",
     srcs = ["CacheLayerLayoutTest.cc"],
     copts = test_copts,

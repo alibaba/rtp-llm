@@ -2,6 +2,7 @@
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 

@@ -1499,8 +1499,13 @@ class Qwen3NextModel(GptModelBase):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
-        self.embed_tokens = Embedding(
-            model_config, parallelism_config, weights.get_global_weight(W.embedding)
+        # First stage owns the embedding; pp_size=1 keeps today's behavior.
+        self.embed_tokens = (
+            Embedding(
+                model_config, parallelism_config, weights.get_global_weight(W.embedding)
+            )
+            if self.pp_has_embedding
+            else None
         )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
@@ -1508,6 +1513,7 @@ class Qwen3NextModel(GptModelBase):
             if py_hw_kernel_config is not None
             else False
         )
+        self.pp_layer_ids_list = self.pp_layer_ids()
         self.layers = nn.ModuleList(
             [
                 Qwen3NextDecoderLayer(
@@ -1520,11 +1526,16 @@ class Qwen3NextModel(GptModelBase):
                     enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
                 )
-                for idx in range(self.layer_num)
+                for idx in self.pp_layer_ids_list
             ]
         )
-        self.norm = RMSResNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+        self.norm = (
+            RMSResNorm(
+                weights.get_global_weight(W.final_ln_gamma),
+                eps=model_config.layernorm_eps,
+            )
+            if self.pp_has_lm_head
+            else None
         )
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -1756,18 +1767,20 @@ class Qwen3NextModel(GptModelBase):
 
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, i
+                inputs, self.kv_cache, local_idx
             )
             layer_fmha_impl = (
                 None
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, local_idx)
             )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=(
+                    self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
+                ),
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
