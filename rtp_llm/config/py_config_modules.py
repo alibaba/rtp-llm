@@ -727,6 +727,13 @@ class PyEnvConfigs:
         # override reach those implementations without changing the default
         # behavior of servers that do not configure the switch.
         self.ft_disable_custom_ar_override: Optional[bool] = None
+        # Explicit --max_generate_batch_size override (tri-state like the
+        # field above). None = not provided: EngineConfig.create keeps deriving
+        # max_generate_batch_size from concurrency_limit. A positive int = an
+        # explicit scheduler-side decode running-batch cap: excess streams queue
+        # in the scheduler instead of being rejected at the HTTP frontend the
+        # way concurrency_limit does.
+        self.max_generate_batch_size_override: Optional[int] = None
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()

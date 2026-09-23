@@ -244,13 +244,27 @@ class EngineConfig:
             load_config=load_config,
         )
 
+        # Legacy default: the decode running-batch cap follows concurrency_limit.
+        # An explicit --max_generate_batch_size overrides it as a scheduler-side
+        # cap: excess streams queue in the scheduler instead of being rejected
+        # at the HTTP frontend.
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
+        if py_env_configs.max_generate_batch_size_override is not None:
+            if py_env_configs.max_generate_batch_size_override <= 0:
+                raise ValueError(
+                    "--max_generate_batch_size must be positive, got "
+                    f"{py_env_configs.max_generate_batch_size_override}"
+                )
+            runtime_config.max_generate_batch_size = (
+                py_env_configs.max_generate_batch_size_override
+            )
 
         apply_deterministic_inference_config(
             py_env_configs.deterministic_config,
             runtime_config,
             hw_kernel_config,
             parallelism_config,
+            explicit_max_generate_batch_size=py_env_configs.max_generate_batch_size_override,
         )
 
         # Setup PD separation config
@@ -269,6 +283,7 @@ def apply_deterministic_inference_config(
     runtime_config,
     hw_kernel_config,
     parallelism_config,
+    explicit_max_generate_batch_size=None,
 ) -> None:
     """Apply the deterministic-inference switch to engine configs.
 
@@ -292,6 +307,11 @@ def apply_deterministic_inference_config(
     serial serving -- every request prefills alone and decodes as the only real
     row of the padded batch, which is exactly the solo composition, so each
     request reproduces the solo output bitwise regardless of concurrent traffic.
+
+    explicit_max_generate_batch_size carries the tri-state --max_generate_batch_size
+    override (None = not provided). The batched/full presets pin the value
+    (decode graph size / 1) because their determinism contract requires it;
+    when they override a user-provided value a warning is logged.
     """
     if not deterministic_config.enable:
         return
@@ -321,6 +341,17 @@ def apply_deterministic_inference_config(
         runtime_config.fifo_scheduler_config.force_single_prefill = True
         # Cap the running decode batch at the single captured graph size;
         # extra streams queue in the scheduler (never rejected).
+        if (
+            explicit_max_generate_batch_size is not None
+            and explicit_max_generate_batch_size != b_det
+        ):
+            logging.warning(
+                "deterministic_level=batched pins max_generate_batch_size=%d to "
+                "match the single decode graph size; overriding explicit "
+                "--max_generate_batch_size=%d",
+                b_det,
+                explicit_max_generate_batch_size,
+            )
         runtime_config.max_generate_batch_size = b_det
         # Ratio scheduler: PREFILL and DECODE run as separate rounds on a fixed
         # cadence, so exclusive prefill forwards are scheduled promptly instead
@@ -334,6 +365,15 @@ def apply_deterministic_inference_config(
         # Mechanism F: single-request serial serving. The scheduler admits
         # at most one running stream, so each request prefills alone (M equals
         # its own length) and decodes as the only real row of the B_det batch.
+        if (
+            explicit_max_generate_batch_size is not None
+            and explicit_max_generate_batch_size != 1
+        ):
+            logging.warning(
+                "deterministic_level=full is single-request serial serving; "
+                "overriding explicit --max_generate_batch_size=%d with 1",
+                explicit_max_generate_batch_size,
+            )
         runtime_config.max_generate_batch_size = 1
 
     # Mechanism C: pin the NCCL algorithm for TP>1 so all-reduce reduction
