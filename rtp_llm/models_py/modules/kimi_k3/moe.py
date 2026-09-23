@@ -2,7 +2,6 @@
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.modules import RMSNorm
@@ -14,6 +13,7 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import MoeConfig
 from .attention import linear
 from .router import KimiK3RouterProjection
+from .linear import bf16_linear
 
 
 def situ(gate, up, beta, linear_beta, *, inplace=False):
@@ -124,5 +124,5 @@ class KimiK3LatentMoE(nn.Module):
         if self.norm is not None:
             routed = self.norm(routed.contiguous())
         routed = self.up(routed)
-        gate, up = F.linear(hidden, self.shared_gate_up).chunk(2, dim=-1)
+        gate, up = bf16_linear(hidden, self.shared_gate_up).chunk(2, dim=-1)
         return routed + self.shared_down(situ(gate, up, self.beta, self.linear_beta))

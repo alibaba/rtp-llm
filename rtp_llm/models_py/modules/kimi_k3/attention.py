@@ -14,11 +14,15 @@ from rtp_llm.models_py.model_desc.kimi_linear import (
 )
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.collectives import reduce_scatter
+from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.utils.model_weight import W
 
 
 def linear(weights, name, hardware=None):
+    weight = weights[name]
+    if weight.is_cuda and weight.dtype == torch.bfloat16:
+        return KimiK3Bf16Linear(weight)
     return LinearFactory.create_linear_from_weights(
         weights, name, None, None, quant_config=None, hw_kernel_config=hardware
     )
