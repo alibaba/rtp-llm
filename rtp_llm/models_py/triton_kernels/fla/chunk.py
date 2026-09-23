@@ -3,6 +3,8 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import functools
+import importlib
+import logging
 import os
 from typing import Optional
 
@@ -34,6 +36,7 @@ from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
 
 RCP_LN2 = 1.0 / 0.6931471805599453
 _TRUE_ENV_VALUES = {"1", "true", "t", "yes", "y", "on"}
+logger = logging.getLogger(__name__)
 
 # All Qwen3.5/Qwen3.6 runtime (Hg, H, K, V) shapes that the FlyDSL megakernel
 # targets. ENABLED_SHAPES is the subset with validated correctness AND acceptable
@@ -70,14 +73,30 @@ FLYDSL_CHUNK_GDN_ENABLED_SHAPES = frozenset(
     }
 )
 
+
 @functools.lru_cache(maxsize=None)
 def _use_flydsl_chunk_gdn() -> bool:
     """Cached read of USE_FLYDSL env var (evaluated once per process)."""
     return os.getenv("USE_FLYDSL", "0").strip().lower() in _TRUE_ENV_VALUES
 
 
+@functools.lru_cache(maxsize=1)
+def _is_flydsl_chunk_gdn_importable() -> bool:
+    """Probe the optional AITER/FlyDSL bridge once and fall back safely."""
+    try:
+        importlib.import_module("rtp_llm.models_py.triton_kernels.fla._flydsl_compat")
+    except ImportError as exc:
+        logger.warning(
+            "USE_FLYDSL is enabled but the AITER/FlyDSL Chunk-GDN bridge is "
+            "unavailable; falling back to the Triton implementation: %s",
+            exc,
+        )
+        return False
+    return True
+
+
 def is_flydsl_chunk_gdn_enabled() -> bool:
-    return _use_flydsl_chunk_gdn()
+    return _use_flydsl_chunk_gdn() and _is_flydsl_chunk_gdn_importable()
 
 
 def _flydsl_chunk_gdn_shape(
@@ -243,9 +262,10 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
     When ssm_states is provided, the kernel also writes RTP SSM block cache
     state directly. Without ssm_states it runs the same fused no-store path.
     """
-    if not _use_flydsl_chunk_gdn():
+    if not is_flydsl_chunk_gdn_enabled():
         raise RuntimeError(
-            "chunk_gated_delta_rule_flydsl_with_cache_store requires USE_FLYDSL=1"
+            "chunk_gated_delta_rule_flydsl_with_cache_store requires USE_FLYDSL=1 "
+            "and a compatible AITER/FlyDSL installation"
         )
     if head_first:
         raise ValueError(

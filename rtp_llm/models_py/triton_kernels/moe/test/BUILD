@@ -14,6 +14,17 @@ py_test(
 )
 
 py_test(
+    name = "test_fixed_order_route_reduce",
+    srcs = ["test_fixed_order_route_reduce.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ] + [":triton", ":torch"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {'gpu': 'MI308X-ROCM7', 'gpu_count': '1'},
+)
+
+py_test(
     name = "test_ep_kernels",
     srcs = ["test_ep_kernels.py"],
     deps = [

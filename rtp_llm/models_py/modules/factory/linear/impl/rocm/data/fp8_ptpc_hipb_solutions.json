@@ -1,13 +1,37 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "target": {
     "arch_prefix": "gfx942",
     "torch_hip_prefix": "7.2",
-    "aiter_version_prefix": "0.1.17.dev79+g2570b35f9",
+    "validated_aiter_versions": [],
     "layout": "fp8_ptpc_swizzleA_col16_4r16",
     "dtype": "float8_e4m3fn"
   },
-  "selection_policy": "Built-in offline HIPB solution cache for common VisionBert FP8 PTPC swizzleA M-buckets. Candidates are included only when robust confirmation shows correctness on GPU0/2/3/4, every GPU median is at least 3% faster than solution_index=-1, cross-GPU median std is <=5%, and per-GPU round-median std is <=5%. Shapes without a stable >=3% gain intentionally fall back to -1.",
+  "selection_policy": {
+    "criteria": {
+      "correctness": "Matches solution_index=-1 for the same quantized inputs",
+      "minimum_median_speedup_percent": 3.0,
+      "maximum_cross_gpu_median_std_percent": 5.0,
+      "maximum_per_gpu_round_median_std_percent": 5.0
+    },
+    "fallback": "Shapes or AITER versions without complete validation use solution_index=-1"
+  },
+  "upgrade_validation": {
+    "aiter_version": "0.1.21.dev80+g987203ba5",
+    "temporary_fallback_owner": "RTP-LLM ROCm maintainers",
+    "reenable_target": "Before AITER 0.1.21 is enabled in production",
+    "correctness": {
+      "status": "pending_full_sweep",
+      "last_validated": null
+    },
+    "performance": {
+      "status": "pending_full_sweep",
+      "last_validated": null
+    },
+    "schema_history": "Version 2 replaces aiter_version_prefix with validated_aiter_versions and structures selection/validation metadata.",
+    "reenable_procedure": "Run //rtp_llm/models_py/modules/factory/linear/impl/rocm/test:fp8_ptpc_linear_test on the complete solution set, repeat the documented multi-GPU timing sweep against solution_index=-1, require every row to satisfy selection_policy.criteria, then set both validation statuses to validated, record last_validated, and add the full AITER +g commit prefix to target.validated_aiter_versions.",
+    "note": "Cached values are hipBLASLt solution indices, not AITER dispatch-table indices. The empty validated_aiter_versions list temporarily disables the cache and may lose at least 3% GEMM performance on recorded shapes until the full sweep is complete."
+  },
   "solutions": [
     {
       "op": "down_proj",

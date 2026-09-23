@@ -6,6 +6,11 @@ import torch
 from aiter.fused_moe import fused_moe
 
 from rtp_llm.device.device_impl import is_gfx950
+from rtp_llm.models_py.kernel_tuning import is_rocm_fp8_moe_deterministic_reduce_enabled
+from rtp_llm.models_py.kernel_tuning.aiter import (
+    AiterFmoeWorkloadSignature,
+    require_aiter_fmoe_tuning,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -26,11 +31,63 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 )
 from rtp_llm.utils.model_weight import W
 
+_MOE_ACTIVATION_TYPES = {
+    "gelu": aiter.ActivationType.Gelu,
+    "gated-silu": aiter.ActivationType.Silu,
+    "siglu": aiter.ActivationType.Silu,
+    "silu": aiter.ActivationType.Silu,
+    "swiglu": aiter.ActivationType.Silu,
+}
 
-def _moe_activation_type(activation: str) -> aiter.ActivationType:
-    if activation in ("silu", "SiGLU"):
-        return aiter.ActivationType.Silu
-    return aiter.ActivationType.Gelu
+
+def _normalized_moe_activation_type(activation: Any) -> aiter.ActivationType:
+    # ModelConfig canonicalizes activation strings to an RTP ActivationType
+    # enum. Normalize both that representation and the raw strings accepted by
+    # fused_moe so the tuning signature describes the activation actually sent
+    # to AITER.
+    activation_name = str(getattr(activation, "name", activation))
+    activation_name = activation_name.rsplit(".", 1)[-1].lower()
+    try:
+        return _MOE_ACTIVATION_TYPES[activation_name]
+    except KeyError as error:
+        raise ValueError(
+            f"Unsupported AITER FMoE activation: {activation!r} "
+            f"(normalized as {activation_name!r})"
+        ) from error
+
+
+def _moe_activation_type(activation: Any) -> aiter.ActivationType:
+    if not is_rocm_fp8_moe_deterministic_reduce_enabled():
+        if activation in ("silu", "SiGLU"):
+            return aiter.ActivationType.Silu
+        return aiter.ActivationType.Gelu
+    return _normalized_moe_activation_type(activation)
+
+
+def _aiter_fmoe_workload_signature(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk: int,
+    activation: Any,
+    output_dtype: torch.dtype,
+) -> AiterFmoeWorkloadSignature:
+    properties = torch.cuda.get_device_properties(w1.device)
+    gfx = str(getattr(properties, "gcnArchName", "")).split(":", 1)[0]
+    return AiterFmoeWorkloadSignature(
+        gfx=gfx,
+        cu_num=properties.multi_processor_count,
+        model_dim=w1.shape[2],
+        inter_dim=w2.shape[2],
+        expert=w1.shape[0],
+        topk=topk,
+        act_type=str(_moe_activation_type(activation)),
+        dtype=str(output_dtype),
+        q_dtype_a=str(w1.dtype),
+        q_dtype_w=str(w2.dtype),
+        q_type=str(aiter.QuantType.per_Token),
+        use_g1u1=int(w1.shape[1] == 2 * w2.shape[2]),
+        doweight_stage1=0,
+    )
 
 
 def build_ep_expert_mask(
@@ -197,6 +254,27 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.w2 = weights[W.moe_w2]
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
+        self._stability_enabled = is_rocm_fp8_moe_deterministic_reduce_enabled()
+        if self._stability_enabled:
+            self._configured_activation_type = _normalized_moe_activation_type(
+                config.activation_type
+            )
+            require_aiter_fmoe_tuning(
+                _aiter_fmoe_workload_signature(
+                    self.w1,
+                    self.w2,
+                    config.moe_k,
+                    self._configured_activation_type,
+                    config.model_config.compute_dtype,
+                )
+            )
+
+            # ROCmDevice.shuffle_moe_weight always converts MoE weights to the
+            # layout consumed by AITER's preshuffle_on kernels. Tensor attributes
+            # can be dropped while the loaded tensors are registered on the model,
+            # so restore the layout marker only for the opt-in deterministic path.
+            self.w1.is_shuffled = True
+            self.w2.is_shuffled = True
 
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
@@ -224,6 +302,17 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         assert self.w1.stride(-1) == 1, "Stride of last dimension must be 1"
         assert self.w2.stride(-1) == 1, "Stride of last dimension must be 1"
         assert payload.expert_tokens_meta is not None
+
+        activation_type = _moe_activation_type(activation)
+        if (
+            self._stability_enabled
+            and activation_type != self._configured_activation_type
+        ):
+            raise ValueError(
+                "MoE activation mismatch: ModelConfig resolved to "
+                f"{self._configured_activation_type}, but execute() received "
+                f"{activation!r}, which resolved to {activation_type}"
+            )
 
         E = self.local_num_experts
         assert payload.expert_topk_ids is not None
@@ -256,18 +345,36 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        output = fused_moe(
-            hidden_states,
-            self.w1,
-            self.w2,
-            topk_weights,
-            topk_ids,
-            quant_type=aiter.QuantType.per_Token,
-            w1_scale=self.w1_scale,
-            w2_scale=self.w2_scale,
-            activation=_moe_activation_type(activation),
-            expert_mask=effective_expert_mask,
-        )
+        output = None
+        if self._stability_enabled:
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deterministic_fp8_moe import (
+                try_deterministic_fp8_moe,
+            )
+
+            output = try_deterministic_fp8_moe(
+                hidden_states=hidden_states,
+                w1=self.w1,
+                w2=self.w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w1_scale=self.w1_scale,
+                w2_scale=self.w2_scale,
+                activation=activation_type,
+                expert_mask=effective_expert_mask,
+            )
+        if output is None:
+            output = fused_moe(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                quant_type=aiter.QuantType.per_Token,
+                w1_scale=self.w1_scale,
+                w2_scale=self.w2_scale,
+                activation=activation_type,
+                expert_mask=effective_expert_mask,
+            )
 
         return CombineForwardPayload(fused_expert_output=output)
 
@@ -320,6 +427,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
         )
+
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)
@@ -574,7 +682,9 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
         self.w2_scale = weights[W.moe_s2]
 
         self.hidden_size_raw = config.hidden_size
-        self.intermediate_size_raw = config.model_config.moe_inter_size // config.tp_size
+        self.intermediate_size_raw = (
+            config.model_config.moe_inter_size // config.tp_size
+        )
         packed_factor = 2 if self.w1.dtype == torch.uint8 else 1
         self.hidden_size_padded = self.w1.size(2) * packed_factor
         self.intermediate_size_padded = self.w2.size(1)
@@ -625,7 +735,7 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
             ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
-        
+
         # view w1 and w2 to float4_e2m1fn_x2 if they are uint8
         w1 = self.w1
         w2 = self.w2
