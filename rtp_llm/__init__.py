@@ -1,5 +1,12 @@
 import importlib
+import os
+import sys
 from typing import Any
+
+# Prepend an explicitly selected DeepGEMM provider before runfiles imports win.
+_shadow = os.environ.get("DSV4_DEEPGEMM_SHADOW_PATH")
+if _shadow and _shadow not in sys.path:
+    sys.path.insert(0, _shadow)
 
 
 def __getattr__(name: str) -> Any:
