@@ -567,7 +567,7 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 
     overlayMtpCacheSnapshots(stream_groups, model_input.value(), host_holder);
 
-    if (propose_step_ == 1 || is_dspark_) {
+    if (propose_step_ == 1 || is_block_draft_) {
         return model_input;
     }
 
@@ -758,7 +758,7 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
         // DSpARK commit-only dispatches explicitly invalidate proposal state.
         // Traditional MTP PD partial updates omit this tensor to preserve the
         // proposal received at handoff.
-        if (is_dspark_) {
+        if (is_block_draft_) {
             for (auto& update_info : spec_update_infos) {
                 update_info.draft_token_gpu = torch::Tensor();
             }
@@ -1482,7 +1482,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         }
 
         torch::Tensor last_hidden_states;
-        if (propose_step_ > 1 && !is_dspark_) {
+        if (propose_step_ > 1 && !is_block_draft_) {
             if (draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0) {
                 // CP: the draft forward output is rank-local, so the per-request
                 // rows come from the draft model's MTP last-hidden buffer.
@@ -1535,7 +1535,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         int cur_accept_len = accept_len[batch_idx_out].item<int>();
 
         torch::Tensor last_hidden_states;
-        if (propose_step_ > 1 && !is_dspark_) {
+        if (propose_step_ > 1 && !is_block_draft_) {
             last_hidden_states =
                 cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
         }

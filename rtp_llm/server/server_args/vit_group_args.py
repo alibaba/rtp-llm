@@ -288,6 +288,14 @@ def init_vit_group_args(parser, vit_config):
         default="round_robin",
         help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
     )
+    vit_group.add_argument(
+        "--vit_proxy_min_healthy_workers",
+        env_name="VIT_PROXY_MIN_HEALTHY_WORKERS",
+        bind_to=(vit_config, "vit_proxy_min_healthy_workers"),
+        type=_non_negative_int,
+        default=0,
+        help="VIT proxy 最少健康 worker 数：0 自动取 ceil(N/2)，显式值必须在 1..N",
+    )
     transport_config = vit_config.output_transport
     control_config = transport_config.control
     rdma_config = transport_config.rdma

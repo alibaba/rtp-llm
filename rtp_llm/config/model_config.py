@@ -5,9 +5,9 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
-
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
+    CompressedW8A8Int8PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
     QuantizationConfig,
     W4a8Int4PerChannelQuantConfig,
@@ -85,6 +85,12 @@ class ModelConfig(CppModelConfig):
         "dspark_target_layer_ids",
         "dspark_markov_rank",
         "dspark_sample_from_anchor",
+        "dspark_share_target_lm_head",
+        "dflash_mask_token_id",
+        "dflash_target_layer_ids",
+        "dflash_layer_types",
+        "dflash_sliding_window",
+        "dflash_native_block_size",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -98,6 +104,7 @@ class ModelConfig(CppModelConfig):
         "template_type",
         "model_name",
         "quant_config",
+        "w8a8_quant_chunk_rows",
         "inter_size",
         "dense_inter_size",
         "moe_inter_size",
@@ -570,6 +577,15 @@ class ModelConfig(CppModelConfig):
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
         self.dspark_sample_from_anchor: bool = True
+        self.dspark_share_target_lm_head: bool = False
+        # DFlash V1 checkpoint metadata.  Its runtime proposal width remains
+        # the engine's ``gen_num_per_cycle``; the native checkpoint block size
+        # is retained only for contract validation and provenance.
+        self.dflash_mask_token_id: Optional[int] = None
+        self.dflash_target_layer_ids: Optional[list[int]] = None
+        self.dflash_layer_types: Optional[list[str]] = None
+        self.dflash_sliding_window: Optional[int] = None
+        self.dflash_native_block_size: Optional[int] = None
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
@@ -582,6 +598,7 @@ class ModelConfig(CppModelConfig):
         self.quantization: str = (
             ""  # Quantization method string (e.g., "INT8", "FP8", etc.)
         )
+        self.w8a8_quant_chunk_rows: int = 1024
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 
@@ -641,9 +658,42 @@ class ModelConfig(CppModelConfig):
         Args:
             kv_cache_config: Optional KVCacheConfig to set attn_config.kv_cache_dtype
         """
-        # Load quant_config
+        explicit_online_w8a8 = (
+            self.quantization or ""
+        ).upper() == "W8A8_INT8_PER_CHANNEL"
+
+        # Load quant_config. An explicit online W8A8 request is intentionally
+        # handled before the legacy checkpoint-first path: it may reuse a W8A8
+        # checkpoint, but it must never silently turn into another scheme.
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
-        if not quant_config:
+        if explicit_online_w8a8:
+            if quant_config is None:
+                # Qwen3.5 and Qwen3.6 share RTP-LLM's qwen35_moe model
+                # implementation. Check that resolved runtime model identity
+                # rather than checkpoint model_type/version metadata.
+                if self.model_type != "qwen35_moe":
+                    raise ValueError(
+                        "QUANTIZATION=W8A8_INT8_PER_CHANNEL online quantization "
+                        "is supported only for the qwen35_moe model family; "
+                        f"got model_type={self.model_type!r}"
+                    )
+                quant_config = CompressedW8A8Int8PerChannelQuantConfig(
+                    is_quanted=False,
+                    load_chunk_rows=self.w8a8_quant_chunk_rows,
+                )
+                logging.info("need online W8A8 quantization")
+            elif isinstance(quant_config, CompressedW8A8Int8PerChannelQuantConfig):
+                # Retain pre-quantized weights but apply the requested loading
+                # chunking policy to the configuration passed to the loader.
+                quant_config.load_chunk_rows = self.w8a8_quant_chunk_rows
+                logging.info("using checkpoint W8A8 quantization")
+            else:
+                raise ValueError(
+                    "QUANTIZATION=W8A8_INT8_PER_CHANNEL requests W8A8, but "
+                    f"checkpoint quantization is {quant_config.get_method()}; "
+                    "use a non-quantized or W8A8 checkpoint"
+                )
+        elif not quant_config:
             if self.quantization:
                 quant_config = init_quant_config(self.quantization)
                 logging.info(f"need_load_quant by {quant_config.get_method()}")
@@ -938,6 +988,7 @@ def build_model_config(
     # Set quantization from quantization_config
     if quantization_config is not None:
         model_config.quantization = quantization_config.get_quantization()
+        model_config.w8a8_quant_chunk_rows = quantization_config.w8a8_quant_chunk_rows
 
     # Initialize precision configuration (uses self.ckpt_path and self.quantization)
     # This will initialize data_type from act_type (or config_dtype), set attn_config.kv_cache_dtype

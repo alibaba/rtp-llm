@@ -20,27 +20,42 @@ public:
         int64_t total              = 0;
     };
     using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
+    struct NormalDeviceInput {
+        GenerateStream::NormalAsyncDeviceState state;
+        // Keep the validated prompt anchor with this epoch. Prompt positions
+        // are immutable, but a later handoff/reset may replace the stream's tensor.
+        torch::Tensor context_position_ids;
+    };
+    using NormalDeviceStates = std::map<const GenerateStream*, NormalDeviceInput>;
 
-    StreamGroups(const std::list<GenerateStreamPtr>& streams) {
+    // NormalExecutor selects the complete batch before reading host metadata.
+    // Retain those exact epochs for both group sizing and model-input gather.
+    StreamGroups(const std::list<GenerateStreamPtr>& streams, NormalDeviceStates normal_states = {}):
+        normal_device_states_(std::move(normal_states)) {
+        RTP_LLM_CHECK_WITH_INFO(normal_device_states_.empty() || normal_device_states_.size() == streams.size(),
+                                "Normal decode snapshots must cover the complete batch");
         for (auto& stream : streams) {
             // A cache snapshot is published only for an established decode
             // stream. Avoid reading is_context_stream_ while the prior worker
             // redundantly commits the same decode state.
             const auto mtp_state        = stream->getMtpAsyncDeviceState();
             const bool use_mtp_snapshot = GenerateStream::hasMtpCacheSnapshot(mtp_state);
-            const bool is_context       = use_mtp_snapshot ? false : stream->isContextStream();
-            // A speculative stream is admitted only with one fixed sequence.
+            const auto normal_state        = normal_device_states_.find(stream.get());
+            const bool use_normal_snapshot = normal_state != normal_device_states_.end();
+            const bool use_snapshot        = use_mtp_snapshot || use_normal_snapshot;
+            const bool is_context          = use_snapshot ? false : stream->isContextStream();
+            // A snapshot stream is admitted only with one fixed sequence.
             // currentBatchSize()/nextBatchSize() derive their answer from the
             // mutable output-token history, which belongs to the bookkeeping
             // worker while a device snapshot is active. Do not read that
             // history merely to rediscover the invariant batch size.
-            if (use_mtp_snapshot) {
+            if (use_snapshot) {
                 RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
-                                        "MTP cache snapshots require one non-beam sequence per stream, stream=%ld",
+                                        "Decode snapshots require one non-beam sequence per stream, stream=%ld",
                                         stream->streamId());
             }
-            const auto cur_batch_size  = use_mtp_snapshot ? 1 : stream->currentBatchSize();
-            const auto next_batch_size = use_mtp_snapshot ? 1 : stream->nextBatchSize();
+            const auto cur_batch_size  = use_snapshot ? 1 : stream->currentBatchSize();
+            const auto next_batch_size = use_snapshot ? 1 : stream->nextBatchSize();
             if (stream->isFakeStream()) {
                 is_fake_stream_ = true;
             }
@@ -60,21 +75,24 @@ public:
                 // Decode does not consume multimodal feature tensors. Avoid
                 // multimodalFeaturesLength(), which also derives a multiplier
                 // from worker-owned output-token history.
-                if (!use_mtp_snapshot && !has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
+                if (!use_snapshot && !has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
                     has_multimodal_input_ = true;
                 }
             }
-            auto block_update_copy_num = stream->streamCacheResource().getKVBlockUpdateMapping().size();
+            // The normal worker clears this vector even without a beam swap.
+            // Eligibility already checked its publish-time value; do not race clear().
+            auto block_update_copy_num =
+                use_normal_snapshot ? 0 : stream->streamCacheResource().getKVBlockUpdateMapping().size();
             if (is_context) {
                 context_block_update_copy_num_ += block_update_copy_num;
             } else {
                 decode_block_update_copy_num_ += block_update_copy_num;
             }
             // A decode round always executes one input row per live sequence.
-            // While an async MTP commit is pending, complete_token_ids is
+            // While an async commit is pending, complete_token_ids is
             // worker-owned; do not read it merely to rediscover cur_batch_size.
-            auto execute_token_size = use_mtp_snapshot ? static_cast<size_t>(cur_batch_size) :
-                                                         static_cast<size_t>(stream->currentExecuteTokenSize());
+            auto execute_token_size = use_snapshot ? static_cast<size_t>(cur_batch_size) :
+                                                     static_cast<size_t>(stream->currentExecuteTokenSize());
             if (is_context) {
                 auto reuse_length = stream->reuseLength();
                 context_execute_token_size_ += execute_token_size;
@@ -85,27 +103,35 @@ public:
             }
             model_execute_token_size_ += execute_token_size;
             total_sampler_batch_size_in_ +=
-                !use_mtp_snapshot && stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
+                !use_snapshot && stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
             max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
             // cache_keys are context/CacheStore metadata and are not consumed
             // by a decode-only model input.  Avoid traversing them while the
-            // speculative worker updates the corresponding token history.
-            if (!use_mtp_snapshot && stream->hasCacheKeys()) {
+            // worker updates the corresponding token history.
+            if (!use_snapshot && stream->hasCacheKeys()) {
                 for (int32_t batch_id = 0; batch_id < cur_batch_size; ++batch_id) {
                     max_cache_keys_num_ = std::max(max_cache_keys_num_, stream->cacheKeys(batch_id).size());
                 }
             }
-            const int    snapshot_seq_len = mtp_state.next_seq_len_upper_bound;
-            const size_t seq_len          = use_mtp_snapshot && snapshot_seq_len > 0 ?
-                                                static_cast<size_t>(snapshot_seq_len) :
-                                                static_cast<size_t>(stream->seqLength());
+            const int snapshot_seq_len =
+                use_normal_snapshot ? normal_state->second.state.next_real_seq_len : mtp_state.next_seq_len_upper_bound;
+            const size_t seq_len = use_snapshot && snapshot_seq_len > 0 ? static_cast<size_t>(snapshot_seq_len) :
+                                                                          static_cast<size_t>(stream->seqLength());
             max_seq_len_                  = std::max(max_seq_len_, seq_len);
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
-            gen_timeline_ |= use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) :
-                                                stream->genTimeline();
+            gen_timeline_ |=
+                use_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) : stream->genTimeline();
         }
+    }
+
+    bool hasNormalDeviceStates() const {
+        return !normal_device_states_.empty();
+    }
+
+    const NormalDeviceInput& normalDeviceInput(const GenerateStreamPtr& stream) const {
+        return normal_device_states_.at(stream.get());
     }
 
     size_t totalDecodeBatchSize() const {
@@ -340,6 +366,7 @@ public:
     }
 
 private:
+    NormalDeviceStates           normal_device_states_;
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
     size_t                       total_sampler_batch_size_in_           = 0;

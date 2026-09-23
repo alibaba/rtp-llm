@@ -157,6 +157,12 @@ _JIT_CACHE_SRCS = [
 ]
 
 py_library(
+    name = "w8a8_int8_quant",
+    srcs = ["utils/w8a8_int8_quant.py"],
+    deps = [":torch"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
@@ -503,6 +509,7 @@ py_library(
         ":config_ops",
         ":warmup",
         ":jit_cache_manager_lib",
+        "//rtp_llm/models_py/kernel_tuning",
     ],
     data = jit_deps(),
     imports = ["."],

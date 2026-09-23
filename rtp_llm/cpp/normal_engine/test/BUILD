@@ -28,6 +28,19 @@ device_runtime_deps = device_impl_target() + select({
     "//conditions:default": [],
 })
 
+_batch_stream_processor_gpu_deps = select({
+    "@//:using_rocm": [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:rocm",
+    ],
+    "//conditions:default": [
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+})
+
 cc_library(
     name = "mock_engine",
     hdrs = [
@@ -44,7 +57,12 @@ cc_library(
         "//rtp_llm/cpp/engine_base:weights_converter",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
+    ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [],
+    }),
     alwayslink = 1,
     visibility = ["//visibility:public"],
 )
@@ -74,7 +92,7 @@ cc_test(
         "//rtp_llm/cpp/models:models",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
+    ] + _batch_stream_processor_gpu_deps + torch_deps() + cuda13_torch_link_deps,
     env = device_test_envs(),
     exec_properties = {'gpu':'A10'},
 )

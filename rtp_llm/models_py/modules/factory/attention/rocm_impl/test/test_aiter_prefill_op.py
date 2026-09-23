@@ -39,6 +39,7 @@ except ImportError:
     _AITER_AVAILABLE = False
 
 try:
+    from rtp_llm.models_py.kernel_tuning import ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV
     from rtp_llm.models_py.modules.factory.attention import attn_factory
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplTriton,
@@ -1150,6 +1151,79 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
                 )
                 self.assertEqual(observed_pad_query, [expected])
 
+    def test_q5_to_q8_verify_backend_prepares_only_its_workspace(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        batch_impl = MagicMock()
+        triton_impl = MagicMock()
+        verify_impl = MagicMock()
+        verify_params = SimpleNamespace(workspace_bytes=4096)
+        verify_impl.prepare.return_value = verify_params
+        rope_impl = MagicMock()
+        cfg = SimpleNamespace(
+            need_rope_kv_cache=True,
+            head_num=12,
+            kv_head_num=2,
+            size_per_head=256,
+            kernel_tokens_per_block=16,
+        )
+        attn_inputs = SimpleNamespace(
+            is_cuda_graph=True, input_lengths=torch.tensor([8, 8], dtype=torch.int32)
+        )
+        module_path = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
+        with patch(
+            f"{module_path}.AiterPrefillAttnOpPaged", return_value=batch_impl
+        ), patch(
+            f"{module_path}.AiterPrefillAttnOpTriton", return_value=triton_impl
+        ), patch(
+            f"{module_path}.AiterPrefillAttnOpVerify", return_value=verify_impl
+        ), patch(
+            f"{module_path}.FusedRopeKVCachePrefillOpAsm", return_value=rope_impl
+        ), patch(
+            f"{module_path}.common.create_write_cache_store_impl"
+        ), patch.object(
+            AiterPrefillImplPaged, "_use_verify_paged_prefill", return_value=True
+        ):
+            impl = AiterPrefillImplPaged(cfg, attn_inputs)
+
+        self.assertEqual(impl.backend, "verify")
+        self.assertTrue(impl.support_cuda_graph())
+        verify_impl.prepare.assert_called_once_with(attn_inputs)
+        batch_impl.prepare.assert_not_called()
+        triton_impl.prepare.assert_not_called()
+        self.assertTrue(rope_impl.pad_query)
+        self.assertIs(impl.verify_fmha_params, verify_params)
+
+    def test_verify_wrapper_forwards_only_stable_kernel_inputs(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
+            AiterPrefillAttnOpVerify,
+        )
+
+        workspace = MagicMock()
+        expected = torch.empty((16, 12, 256))
+        workspace.forward.return_value = expected
+        op = AiterPrefillAttnOpVerify.__new__(AiterPrefillAttnOpVerify)
+        op.workspace = workspace
+        query = torch.empty((16, 12, 256))
+        cache = SimpleNamespace(kv_cache_base=torch.empty(1))
+        block_table = torch.empty((2, 4), dtype=torch.int32)
+        lengths = torch.tensor([4096, 4096], dtype=torch.int32)
+        params = SimpleNamespace(
+            kv_cache_block_id_device=block_table, prefill_seqlen_k_int32=lengths
+        )
+
+        out = op.forward((query,), cache, params)
+
+        self.assertEqual(tuple(out.shape), (16, 12 * 256))
+        self.assertEqual(out.data_ptr(), expected.data_ptr())
+        workspace.forward.assert_called_once_with(
+            query, cache.kv_cache_base, block_table, lengths
+        )
+
     def _make_stub(self, graph_prepared: bool):
         from types import SimpleNamespace
 
@@ -1224,6 +1298,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         calls = []
         fmha_params = object()
         triton_fmha_params = object()
+        verify_fmha_params = object()
         attn_inputs = object()
 
         def prepare_batch(params, inputs):
@@ -1231,6 +1306,9 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
 
         def prepare_triton(params, inputs):
             calls.append(("prepare_triton", params, inputs))
+
+        def prepare_verify(params, inputs):
+            calls.append(("prepare_verify", params, inputs))
 
         def prepare_rope(inputs):
             calls.append(("prepare_rope", inputs))
@@ -1242,27 +1320,32 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         stub.backend = captured_backend
         stub.fmha_params = fmha_params
         stub.triton_fmha_params = triton_fmha_params
+        stub.verify_fmha_params = verify_fmha_params
         stub.batch_prefill_impl = SimpleNamespace(prepare_cuda_graph=prepare_batch)
         stub.triton_prefill_impl = SimpleNamespace(prepare_cuda_graph=prepare_triton)
+        stub.verify_prefill_impl = SimpleNamespace(prepare_cuda_graph=prepare_verify)
         stub.rope_params = SimpleNamespace(prepare_in_place=prepare_rope)
         stub._refresh_prefill_fmha_params_for_cuda_graph = refresh
 
         stub.prepare_cuda_graph(attn_inputs)
-        return calls, fmha_params, triton_fmha_params, attn_inputs
+        return calls, fmha_params, triton_fmha_params, verify_fmha_params, attn_inputs
 
     def test_cuda_graph_replay_refreshes_only_captured_backend(self):
-        for captured_backend in ("triton", "batch"):
+        for captured_backend in ("triton", "verify", "batch"):
             with self.subTest(captured_backend=captured_backend):
                 (
                     calls,
                     fmha_params,
                     triton_fmha_params,
+                    verify_fmha_params,
                     attn_inputs,
                 ) = self._run_cuda_graph_prepare(captured_backend)
 
-                selected_params = (
-                    triton_fmha_params if captured_backend == "triton" else fmha_params
-                )
+                selected_params = {
+                    "triton": triton_fmha_params,
+                    "verify": verify_fmha_params,
+                    "batch": fmha_params,
+                }[captured_backend]
                 self.assertEqual(
                     calls,
                     [
@@ -1275,6 +1358,159 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
                         ("prepare_rope", attn_inputs),
                     ],
                 )
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillVerifyDispatchGuards(unittest.TestCase):
+    """Exercise the real Q5--Q8 route; only gfx942 detection is mocked."""
+
+    def _impl(self, cfg):
+        impl = AiterPrefillImplPaged.__new__(AiterPrefillImplPaged)
+        impl.max_triton_q_len = 4
+        impl.need_rope_kv_cache = cfg.need_rope_kv_cache
+        impl.head_num = cfg.head_num
+        impl.head_num_kv = cfg.kv_head_num
+        impl.head_dim = cfg.size_per_head
+        impl.tokens_per_block = cfg.kernel_tokens_per_block
+        impl.attn_configs = cfg
+        impl.linear_v = False
+        return impl
+
+    def _cfg(self, **overrides):
+        values = dict(
+            need_rope_kv_cache=True,
+            head_num=12,
+            kv_head_num=2,
+            size_per_head=256,
+            kernel_tokens_per_block=16,
+            dtype=torch.bfloat16,
+            kv_cache_dtype=KvCacheDataType.BASE,
+            is_causal=True,
+            use_logn_attn=False,
+            is_sparse=False,
+            sliding_window=0,
+            softmax_extra_scale=1.0,
+            q_scaling=1.0,
+        )
+        values.update(overrides)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(**values)
+
+    def _inputs(self, lengths, *, target=True):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            input_lengths=torch.tensor(lengths, dtype=torch.int32),
+            is_target_verify=target,
+            kv_cache_kernel_block_id_device=torch.zeros(
+                (len(lengths), 256), dtype=torch.int32, device="cuda"
+            ),
+        )
+
+    def test_q_width_and_guard_matrix(self):
+        from unittest.mock import patch
+
+        # Keep the shape/dtype route real.  CI machines may be another ROCm
+        # architecture, so only the hardware capability predicate is mocked.
+        device_gate = (
+            "rtp_llm.models_py.triton_kernels.common."
+            "aiter_verify_attention.is_supported_device"
+        )
+        with patch(device_gate, return_value=True):
+            for q_len in range(1, 10):
+                with self.subTest(q_len=q_len):
+                    backend = self._impl(self._cfg())._select_backend(
+                        self._inputs([q_len, q_len])
+                    )
+                    expected = (
+                        "triton"
+                        if q_len <= 4
+                        else ("verify" if q_len <= 8 else "batch")
+                    )
+                    self.assertEqual(backend, expected)
+
+            cases = (
+                ("batch", self._cfg(), self._inputs([8] * 33)),
+                ("batch", self._cfg(), self._inputs([8, 7])),
+                ("batch", self._cfg(dtype=torch.float16), self._inputs([8, 8])),
+                (
+                    "batch",
+                    self._cfg(kv_cache_dtype=KvCacheDataType.FP8),
+                    self._inputs([8, 8]),
+                ),
+                ("batch", self._cfg(is_causal=False), self._inputs([8, 8])),
+                ("batch", self._cfg(use_logn_attn=True), self._inputs([8, 8])),
+                (
+                    "batch",
+                    self._cfg(use_attention_linear_bias=True),
+                    self._inputs([8, 8]),
+                ),
+                ("batch", self._cfg(softmax_extra_scale=0.5), self._inputs([8, 8])),
+                ("batch", self._cfg(q_scaling=2.0), self._inputs([8, 8])),
+                ("batch", self._cfg(sliding_window=128), self._inputs([8, 8])),
+                ("batch", self._cfg(head_num=10), self._inputs([8, 8])),
+                ("batch", self._cfg(), self._inputs([8, 8], target=False)),
+            )
+            for expected, cfg, inputs in cases:
+                with self.subTest(cfg=cfg, lengths=inputs.input_lengths.tolist()):
+                    self.assertEqual(self._impl(cfg)._select_backend(inputs), expected)
+
+    def test_verify_preserves_kv_layout_and_generation_graph_routes(self):
+        from unittest.mock import patch
+
+        inputs = self._inputs([8, 8])
+        impl = self._impl(self._cfg())
+        # Gluon consumes vectorized V. A linear writer must never select it,
+        # even on otherwise supported hardware and target-verify geometry.
+        impl.linear_v = True
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter."
+            "_get_verify_attention_api",
+            side_effect=AssertionError("incompatible layout reached Gluon"),
+        ):
+            self.assertEqual(impl._select_backend(inputs), "batch")
+
+        # The generation-prefill implementation owns unified_attention's
+        # packed-row contract, including short buckets; it keeps that route.
+        impl.linear_v = False
+        impl.use_unified_attention = True
+        with patch.object(
+            impl,
+            "_use_verify_paged_prefill",
+            side_effect=AssertionError("generation prefill reached verify"),
+        ):
+            self.assertEqual(impl._select_backend(inputs), "triton")
+
+    def test_workspace_prepare_sets_capacity_and_rejects_live_short_q(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
+            AiterPrefillAttnOpVerify,
+        )
+
+        cfg = self._cfg()
+        inputs = self._inputs([8, 8])
+        workspace = SimpleNamespace(batch_size=2, query_length=8)
+        params = SimpleNamespace()
+        workspace_cls = MagicMock(return_value=workspace)
+        module_path = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
+        with patch(f"{module_path}.FMHAParams", return_value=params), patch(
+            f"{module_path}._get_verify_attention_api",
+            return_value=(None, None, workspace_cls),
+        ):
+            op = AiterPrefillAttnOpVerify(cfg)
+            self.assertIs(op.prepare(inputs), params)
+
+        self.assertEqual(params.graph_query_length, 8)
+        self.assertEqual(params.graph_token_q_capacity, 16)
+        self.assertEqual(params.graph_max_seqlen_k, 256 * 16)
+        self.assertIs(params.verify_attention_workspace, workspace)
+        op.prepare_cuda_graph(params, self._inputs([8, 8]))
+        with self.assertRaisesRegex(ValueError, "fixed uniform Q"):
+            op.prepare_cuda_graph(params, self._inputs([7, 8]))
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOpTriton module")
@@ -1584,6 +1820,13 @@ class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
     """Regression tests for fixed-address batch-prefill graph workspace."""
 
     def test_repeated_prepare_keeps_captured_workspace_addresses(self):
+        for enabled in ("0", "1"):
+            with self.subTest(stability_enabled=enabled), patch.dict(
+                "os.environ", {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: enabled}
+            ):
+                self._check_captured_workspace()
+
+    def _check_captured_workspace(self):
         from types import SimpleNamespace
 
         cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
@@ -1592,18 +1835,14 @@ class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
         device = torch.device("cuda")
         block_table = torch.zeros(3, 4, dtype=torch.int32, device=device)
         fmha_params = SimpleNamespace(
-            cu_seqlens_q=torch.tensor(
-                [0, 8, 16, 24], dtype=torch.int32, device=device
-            ),
+            cu_seqlens_q=torch.tensor([0, 8, 16, 24], dtype=torch.int32, device=device),
             cu_seqlens_k=torch.tensor(
                 [0, 40, 80, 120], dtype=torch.int32, device=device
             ),
             kv_cache_block_id_device=block_table,
         )
         attn_inputs = SimpleNamespace(
-            input_lengths_device=torch.full(
-                (3,), 8, dtype=torch.int32, device=device
-            ),
+            input_lengths_device=torch.full((3,), 8, dtype=torch.int32, device=device),
             prefix_lengths_device=torch.full(
                 (3,), 32, dtype=torch.int32, device=device
             ),
@@ -1630,6 +1869,34 @@ class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
             "sanitized_block_table": op.sanitized_bt_buf.data_ptr(),
         }
         self.assertEqual(replay_ptrs, captured_ptrs)
+
+        # A graph belongs to its captured batch and block-table shape. Neither
+        # opt-in MoE stability nor a smaller request may resize its workspace.
+        for batch_size, block_columns in ((4, 4), (3, 5), (2, 4), (3, 3)):
+            with self.subTest(batch_size=batch_size, block_columns=block_columns):
+                changed_params = SimpleNamespace(
+                    cu_seqlens_q=torch.arange(
+                        batch_size + 1, dtype=torch.int32, device=device
+                    )
+                    * 8,
+                    cu_seqlens_k=torch.arange(
+                        batch_size + 1, dtype=torch.int32, device=device
+                    )
+                    * 40,
+                    kv_cache_block_id_device=torch.zeros(
+                        batch_size, block_columns, dtype=torch.int32, device=device
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "recapture required"):
+                    op.prepare_cuda_graph(changed_params, attn_inputs)
+                self.assertEqual(op.seqlen_k_buf.data_ptr(), captured_ptrs["seqlen_k"])
+                self.assertEqual(
+                    op.kv_indptr_buf.data_ptr(), captured_ptrs["kv_indptr"]
+                )
+                self.assertEqual(
+                    op.sanitized_bt_buf.data_ptr(),
+                    captured_ptrs["sanitized_block_table"],
+                )
 
 
 @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
@@ -2151,6 +2418,81 @@ class TestAiterGenerationPrefillCudaGraphLongBucketNumerics(
     BUCKET = 768
     MAX_REQUESTS = 1
     REAL_LENGTH_CASES = ([600],)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillVerifyEagerNumerics(unittest.TestCase):
+    """Real eager Q8 verify route, including FusedRope's dense Q output."""
+
+    def test_q8_target_verify_matches_batch_paged_attention(self):
+        from rtp_llm.models_py.triton_kernels.common.aiter_verify_attention import (
+            is_supported_device,
+        )
+
+        device = torch.device("cuda")
+        if not is_supported_device(device):
+            self.skipTest("requires gfx942 verify-attention hardware")
+        dtype = torch.bfloat16
+        q_len = 8
+        head_num = 12
+        head_num_kv = 2
+        head_dim = 256
+        tokens_per_block = 16
+
+        def make_inputs(target_verify):
+            inputs = _make_rope_prefill_inputs([q_len], device, dtype)
+            inputs.is_target_verify = target_verify
+            inputs.prefix_lengths = torch.tensor(
+                [tokens_per_block], dtype=torch.int32, device="cpu"
+            ).pin_memory()
+            inputs.cu_kv_seqlens_device = torch.tensor(
+                [0, tokens_per_block + q_len], dtype=torch.int32, device=device
+            )
+            block_table = torch.tensor([[0, 1]], dtype=torch.int32)
+            inputs.kv_cache_kernel_block_id = block_table.pin_memory()
+            inputs.kv_cache_kernel_block_id_device = block_table.to(device)
+            inputs.kv_cache_block_id_device = inputs.kv_cache_kernel_block_id_device
+            return inputs
+
+        cfg = _make_rope_attn_configs(
+            head_num, head_num_kv, head_dim, dtype, tokens_per_block
+        )
+        cfg.q_scaling = 1.0
+        query = torch.randn(q_len, head_num, head_dim, dtype=dtype, device=device)
+        key = torch.randn(q_len, head_num_kv, head_dim, dtype=dtype, device=device)
+        value = torch.randn_like(key)
+        qkv = _pack_qkv(query, key, value)
+        cache_snapshot = torch.randn(
+            2,
+            2,
+            head_num_kv,
+            tokens_per_block,
+            head_dim,
+            dtype=dtype,
+            device=device,
+        )
+
+        verify_inputs = make_inputs(True)
+        verify_cache = LayerKVCache()
+        verify_cache.kv_cache_base = cache_snapshot.clone()
+        verify_impl = AiterPrefillImplPaged(cfg, verify_inputs)
+        self.assertEqual(verify_impl.backend, "verify")
+        actual = verify_impl.forward(qkv.clone(), verify_cache, layer_idx=0)
+
+        batch_inputs = make_inputs(False)
+        batch_cache = LayerKVCache()
+        batch_cache.kv_cache_base = cache_snapshot.clone()
+        batch_impl = AiterPrefillImplPaged(cfg, batch_inputs)
+        self.assertEqual(batch_impl.backend, "batch")
+        expected = batch_impl.forward(qkv.clone(), batch_cache, layer_idx=0)
+
+        self.assertEqual(actual.shape, (q_len, head_num * head_dim))
+        torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+        self.assertTrue(
+            torch.equal(verify_cache.kv_cache_base, batch_cache.kv_cache_base)
+        )
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")

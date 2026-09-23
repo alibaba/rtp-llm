@@ -349,8 +349,13 @@ enum SpeculativeType {
     SP_TYPE_EAGLE3        = 3,  // EAGLE-3
     SP_TYPE_EAGLE         = 4,  // EAGLE
     SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
-    SP_TYPE_DSPARK        = 6   // DSpARK block-diffusion draft
+    SP_TYPE_DSPARK        = 6,  // DSpARK block-diffusion draft
+    SP_TYPE_DFLASH        = 7   // DFlash parallel block draft
 };
+
+inline bool isBlockDraftType(SpeculativeType type) {
+    return type == SP_TYPE_DSPARK || type == SP_TYPE_DFLASH;
+}
 
 struct SpeculativeExecutionConfig {
     std::string     model_type                    = "";
