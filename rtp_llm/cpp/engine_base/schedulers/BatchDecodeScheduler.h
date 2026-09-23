@@ -52,6 +52,7 @@ public:
                 stream->moveToNext();
                 return absl::CancelledError("scheduler stopped");
             }
+            stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",

@@ -51,6 +51,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/observability:execution_recorder",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/normal_engine:normal_engine",
@@ -80,6 +81,15 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "recording_engine_test",
+    srcs = ["RecordingEngineTest.cc"],
+    copts = test_copts,
+    deps = [":mock_engine", "//rtp_llm/cpp/observability:execution_recorder"] + cuda13_torch_link_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    tags = ["manual"],
 )
 
 cc_test(
