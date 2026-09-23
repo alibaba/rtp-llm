@@ -15,19 +15,17 @@ python3 tools/online_eval/scripts/commands/run_stress.py \
   --warmup-s 10 --fetch-output-stream 1
 ```
 
-默认源是 `data/traffic_models/glm-5.3_20260921_1400_15m.xz`：匿名 prefix DAG 模型，
-不是原始访问日志。脚本先核验模型 SHA，再在运行目录生成 `traffic-plan.jsonl`
-及其 manifest，Java 只读取这份临时计划。模型有 141113 个事件、原始跨度约
-900 秒；`--replay-speed 4` 对应全量模型平均约 627 名义 QPS。改变目标 QPS 时按下式重算：
+真实流量从 `data/traffic_models/` 按文件名选择：`--traffic-model <model-name>`。
+默认选择以 `--help` 为准；模型是匿名 prefix DAG，不能传入原始访问日志。
+脚本验证模型 SHA，在运行目录生成 `traffic-plan.jsonl` 及 manifest，Java 读取物化后的计划。
+事件数与采集跨度从模型 manifest 查询。全量单轮的名义平均速率可按下式估算：
 
 ```text
-speed = round(target_qps × (max(valid_ts)-min(valid_ts)) / valid_request_count)
+speed = target_qps × event_span_seconds / valid_request_count
 ```
 
-要选用其他采集文件，在同一命令中加入 `--traffic-model glm-5.3_20260922_0610_3h30m`
-（06:10 开始，3.5 小时）或 `--traffic-model glm-5.3_20260921_2126_3h`（21:26 开始，约 3 小时）。无需增加 case；
-`--traffic-model` 与 `--traffic-source-spec` 互斥。默认仍使用 0921 固定模型。
-新采集源尚未标定门禁，切换数据后应记录模型 SHA 和发送节奏，不直接沿用旧基线结论。
+`--traffic-model` 与 `--traffic-source-spec` 互斥。换源后记录模型 SHA 和发送节奏，
+重新确认可比条件及门禁标定，不直接沿用其他来源的结论。
 
 `valid_request_count` 是模型事件数；实际 `--limit`、时长和发送拥塞会改变实发
 QPS，报告中的实发 QPS 才是结果口径。要使用参数化合成源，设置
@@ -47,7 +45,7 @@ QPS，报告中的实发 QPS 才是结果口径。要使用参数化合成源，
 - `--collection-profile aggregate|request|diagnostic` 决定证据量；默认 `aggregate`。
 - `--config-override` 只覆盖 Master 配置字段；最终配置保存在运行目录。
 
-完整含义见[参数参考](../reference/parameters.md)。
+完整含义见[参数参考](parameters.md)。
 
 ## 收结果
 
@@ -78,4 +76,4 @@ python3 tools/online_eval/scripts/commands/compare_runs.py \
   --out /path/to/comparison.json --html
 ```
 
-以 `compare_runs.py --help` 为当前参数契约。Prometheus 归档必须两边 `test_valid=true`、无采集错误或缺口，且流量 SHA、Master 配置、模式计划和有效客户端参数一致；该入口输出逐曲线稳态均值差及可选 HTML，结论固定为 `DESCRIPTIVE_ONLY`，不能当性能版本门禁。无效样本或 provenance 不一致时退出 2，需先修复采集并重跑。旧格式仍走原有门禁。指标单位、聚合和误判边界见[结果与指标](../reference/results.md)。
+以 `compare_runs.py --help` 为当前参数契约。Prometheus 归档必须两边 `test_valid=true`、无采集错误或缺口，且流量 SHA、Master 配置、模式计划和有效客户端参数一致；该入口输出逐曲线稳态均值差及可选 HTML，结论固定为 `DESCRIPTIVE_ONLY`，不能当性能版本门禁。无效样本或 provenance 不一致时退出 2，需先修复采集并重跑。旧格式仍走原有门禁。指标单位、聚合和误判边界见[结果与指标](results.md)。

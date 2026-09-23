@@ -20,7 +20,7 @@
 | `--n-prefill` / `--n-decode` | 逻辑引擎数，默认 12/40 |
 | `--mock-base-grpc-port` | Mock 连续 gRPC 端口起点，默认 61000；控制口为起点减一；功能测试自动端口窗口不进入该 band |
 | `--master-http-port` / `--master-management-port` | 默认 7001/7002；gRPC 另占 HTTP+2 |
-| `--traffic-model` | 按文件名选择 `data/traffic_models/` 中的真实流量；默认使用 0921 固定模型，与 `--traffic-source-spec` 互斥 |
+| `--traffic-model` | 按文件名选择 `data/traffic_models/` 中的真实流量；默认选择见 `--help`，与 `--traffic-source-spec` 互斥 |
 | `--traffic-source-spec` | 读取流量源 JSON，可用于参数化合成源；拒绝外部 `TRACE_FILE` |
 | `--limit` | 物化计划的请求数上限，0 表示无上限；默认 1000 |
 | `--send-mode replay\|uniform` | trace 默认 replay，synthetic 默认 uniform；合成源不得 replay |

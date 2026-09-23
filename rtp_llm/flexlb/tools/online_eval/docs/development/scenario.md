@@ -13,7 +13,7 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 
 python3 tools/online_eval/scripts/commands/run_cases.py \
   --suite workload \
-  --instances 'balance_distribution::sustained_mix::batch-window' \
+  --instances '<exact-instance-id>' \
   --parallel 1 --dry-run
 ```
 
@@ -59,20 +59,20 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.compare \
 
 只能比较相同实例和声明配置。阶段按同名步骤对齐；缺采样显示为 `MISSING_DATA`，不能当作零。变化排序是调查入口，不自动等于产品回归。
 
-## Cache 缩容的单 run 与 A/B
+## 干预与恢复取证
 
-`config/scenarios/cache_scale_in.yaml` 是真实前端前缀谱系流量的单 run 缩容门禁。运行大型 125P/536D 拓扑前须设置 `FLEXLB_FT_WORKER_PORT_CAPACITY=700`。分别使用普通启动路径运行旧、新 Master；可用 `FLEXLB_FT_MASTER_JAR` 指定 JAR，`FLEXLB_FT_MASTER_CONFIG_FILE` 指定实际配置。`FLEXLB_FT_MASTER_SOURCE_COMMIT` 只声明源码来源；每轮证据独立记录实际 JAR 哈希与生效配置，不要求事前 manifest。
+故障、扩缩容和主备切换分别保留基线、过渡期、恢复期。基线样本应非空且成功；
+过渡期逐笔记录成功、拒绝、传输错误和 deadline，所有已发请求必须有界结束；
+确认成员和路由收敛后，另发独立的恢复请求，不能用故障前晚完成请求代替恢复流量。
+采集器取消、丢记录、线程不退出或资源账目不收敛属于真实失败。
 
-两轮完成后，再读取同一场景 YAML 中的 `analysis` 策略生成 A/B 报告：
+缓存命中取请求准入时的观测，晚完成请求仍归其发送窗口。容量、驱逐和副本数量保留
+连续采样；终态恢复不能掩盖中途越界，采样峰值不能证明采样间隙不存在更高峰值。
+校准 band 仅使用独立有效的基线样本，保存参数、窗口、样本路径和 SHA；
+改变负载、容量、拓扑或运行形态后重新校准，不用干预结果调整健康门槛。
 
-```bash
-PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.cache_gate_ab \
-  OLD_RUN_DIR NEW_RUN_DIR \
-  --config tools/online_eval/config/scenarios/cache_scale_in.yaml \
-  --output AB_DIR
-```
-
-报告核对流量、拓扑、容量、性能和 Master 配置，缺字段会显示 UNKNOWN；曲线按缩容事件对齐。默认强判定观察 old FAIL / new PASS；`--mode weak` 只核对控制变量，`--mode none` 只出报告。A/B 不修改单 run 的 PASS / FAIL / INVALID 结论。
+专用离线分析器从实例产物读取证据与 YAML 中的分析策略，命令参数以其 `--help` 为准。
+各实例的阈值、拓扑和流程留在配置与程序中，不在文档重复维护。
 
 ## Master 性能绝对门禁
 

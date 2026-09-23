@@ -1,6 +1,6 @@
 # 功能测试
 
-功能回归只有 5 个核心合同：请求完成、容量准入、KV 生命周期、Engine 代际隔离和 Master 重启。它使用少量可控请求；任一前置步骤失败会阻断依赖步骤。原扩展功能矩阵已经删除，复杂行为由持续负载场景覆盖。
+功能回归只有 5 个核心合同：请求完成、容量准入、KV 生命周期、Engine 代际隔离和 Master 重启。它使用少量可控请求；任一前置步骤失败会阻断依赖步骤。复杂行为由持续负载场景覆盖。
 
 先完成[编译与运行底座](build-and-runtime.md)，再从 `rtp_llm/flexlb` 执行。
 
@@ -14,14 +14,14 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 
 该命令必须只列出 5 个实例。`--suite functional` 选择相同的 5 个功能合同。
 
-实例 ID 形如 `request_completion::immediate::batch-window`。按 category 选一组，或用 `--instances` 精确选择。精确选择可避免一次运行混入无关场景。
+实例 ID 形如 `<case>::<variant>::<profile>`。按 category 选一组，或用 `--instances` 精确选择。精确选择可避免一次运行混入无关场景。
 
 ## 预览资源计划
 
 ```bash
 python3 tools/online_eval/scripts/commands/run_cases.py \
   --suite core \
-  --instances 'request_completion::immediate::batch-window' \
+  --instances '<exact-instance-id>' \
   --parallel 1 --dry-run
 ```
 
@@ -56,4 +56,4 @@ python3 tools/online_eval/scripts/commands/run_cases.py \
 3. `FAIL` 表示检查得到反例；`ERROR/TIMEOUT` 表示运行或证据不完整；`BLOCKED` 是前序失败的结果。
 4. YAML 中显式登记的 finding 只解释指定检查，不能吞掉异常、超时或清理失败。
 
-功能测试 PASS 只证明相应合同，不证明性能健康。产物字段见[结果与指标](../reference/results.md)。
+功能测试 PASS 只证明相应合同，不证明性能健康。产物字段见[结果与指标](results.md)。

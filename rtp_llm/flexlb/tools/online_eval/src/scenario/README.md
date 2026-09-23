@@ -1,6 +1,6 @@
 # Python case execution core
 
-中文文档：[框架结构](../../docs/reference/architecture.md) · [如何添加新 case](../../docs/reference/adding-cases.md)。
+中文文档：[框架结构](../../docs/architecture/framework.md) · [如何添加新 case](../../docs/development/adding-cases.md)。
 
 A schema-version-2 configuration selects a registered Python case program. YAML supplies data only; Python builds the ordered steps and assertions. A configuration defines one public scenario ID. Explicit variants and profiles compile into separate
 `scenario_id::variant_id::profile` instances; definition counts are not instance

@@ -1,7 +1,9 @@
 # 测试数据
 
+本页只说明数据规则和用法，遵循 [文档维护规则](../AGENTS.md)。
+
 数据分为真实流量、合成流量画像和引擎性能参数。实验输出写入 `run/` 或指定归档目录。
-新增数据提交到仓库前必须取得用户同意；不需要登记 catalog、修改白名单或为数据新增 case。
+新增数据提交到仓库前必须取得用户同意；通过文件发现选择数据，无需增加 case。
 已有数据的重命名不改变内容。不可重采的原始样本应保存于仓库外归档。
 
 | 目录 | 内容 |
@@ -14,24 +16,16 @@
 
 `run_stress.py --traffic-model <文件名去掉.xz>` 直接读取 `traffic_models/`，`--help` 列出可选文件。
 无需中央清单。参数化合成通过 `--traffic-source-spec` 选择 `synthetic/realistic/1` 源；
-其 `profile` 按 `calibration/` 下去掉 `.profile.json` 的文件名选择，如
-`glm-5.3_20260921_1400_15m`；也可直接填写生成参数，无需增加登记项。
-现有场景继续在 YAML 中固定输入文件及 SHA，不因目录增加数据而改变默认输入。
+其 `profile` 按 `calibration/` 下去掉 `.profile.json` 的文件名选择，也可显式填写生成参数。
+场景在 YAML 中固定输入文件及 SHA，不因目录增加文件而改变默认输入。
+来源、窗口、请求数、统计值、SHA 和标定参数从对应 manifest/profile/config 读取，不在本页列清单。
 
-| 真实流量文件名 | 采集窗口（北京时间） | 请求数 | 观测平均 QPS |
-|---|---|---:|---:|
-| `glm-5.3_20260921_1400_15m.xz` | 09-21 14:00 至 14:15 | 141,113 | 156.8 |
-| `glm-5.3_20260921_2126_3h.xz` | 09-21 21:26 至 09-22 00:25 | 587,711 | 54.7 |
-| `glm-5.3_20260922_0610_3h30m.xz` | 09-22 06:10 至 09:40 | 538,208 | 42.7 |
+## 命名与来源
 
-时长名称经过取整，精确窗口在 manifest。平均 QPS 使用捕获事件数 / 首末事件跨度，
-不对缺失 Pod 外推。压测发送节奏由客户端参数控制。默认仍为首份 15 分钟数据；
-另两份尚未标定门禁，切换数据不能直接沿用旧基线结论。
-
-文件名优先使用已确认的业务来源或模型，再加采集起点和时长；本批服务模型由用户确认为 `glm-5.3-model`，文件名使用 `glm-5.3`。
-Spectrum 业务来源标识仍待补充，`frontend` 仅表示采集位置。codec 版本与 SHA 放在 manifest，不用作统一文件名前缀。
-`calibration/glm-5.3_20260921_1400_15m.profile.json` 是首份捕获派生的合成画像。
-对应 `.templates.json` 可运行 `python3 scripts/pipeline/derive_master_templates.py` 重建。
+流量文件优先使用已确认的业务来源或模型，加采集起点和时长。精确窗口以 manifest 为准；
+codec 版本与 SHA 放在元数据中，不作为统一文件名前缀。`frontend` 只表示采集位置，
+不能替代业务身份。更换来源、模型或长度口径后重新确认可比性，不直接沿用其他输入的门禁结论。
+性能文件采用 `<model>_<hardware-or-calibration>.json`，性能模型与流量来源分别标识。
 
 ## Manifest
 
@@ -51,7 +45,7 @@ Spectrum 业务来源标识仍待补充，`frontend` 仅表示采集位置。cod
 重算统计会保留已手工补充的 `source`：
 
 ```bash
-python3 scripts/pipeline/describe_traffic.py data/traffic_models/glm-5.3_20260921_1400_15m.xz
+python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 ```
 
 也可通过 `--source-info /path/to/source.json` 提供完整 `source` 对象。
@@ -59,16 +53,13 @@ python3 scripts/pipeline/describe_traffic.py data/traffic_models/glm-5.3_2026092
 未确认字段保持 `null/unconfirmed`。这一步描述已存在的文件，不自动授权提交新数据。
 `fit_frontend_prefix.py` 拟合时同时写出这份 sidecar。
 
-## 性能参数
+## 派生数据
 
-性能文件采用 `<model>_<hardware-or-calibration>.json` 命名。
-`synthetic_baseline.json` 与 `synthetic_prefill_100ms.json` 是合成测试性能模型；
-`deepseek_v4_flash_decode_table.json` 保留 decode 表标定，`deepseek_v4_flash_sm100.json` 是 SM100 开发环境参数；
-`deepseek_v4_flash_l20c.json` 来自 Flash 模型 L20C 测试部署的标定（prefill 公式 ×1.23、decode step 模型、EOS 均值 400）；
-`glm_5_3_l20d.json` 来自 GLM-5.3 L20D 对齐实验。它们的模型名不代表上述流量的服务模型。
-
-合成画像 schema 2 保存联合分布；默认仍保持独立采样的旧 seed 语义。显式 `sampling: joint` 使用联合采样，
-独立对比工具及限制见[合成保真度](../docs/reference/concepts/synthetic-fidelity.md)。
+`python3 scripts/pipeline/derive_master_templates.py --model /path/to/model.xz --out /path/to/model.templates.json`
+生成 Java 回归夹具。合成画像由 `traffic.calibrate_traffic` 从固定模型与 fit-report 标定；
+它描述统计分布，不等同于原请求回放。`sampling: joint` 的用法和限制见
+[合成保真度](../docs/development/synthetic-fidelity.md)。运行命令的工作目录为 `online_eval`，
+模块入口需要 `PYTHONPATH=src:.`。
 
 ## 采集契约与归档
 

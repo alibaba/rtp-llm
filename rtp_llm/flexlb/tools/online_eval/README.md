@@ -15,4 +15,4 @@
 
 目录内容分别见 [config](config/README.md) 和 [data](data/README.md)。更多说明见[文档导航](docs/README.md)。
 
-合成输入与真实捕获的独立对比工具：[`compare_traffic.py` 使用与口径](docs/reference/concepts/synthetic-fidelity.md)。
+合成输入与真实捕获的独立对比工具：[`compare_traffic.py` 使用与口径](docs/development/synthetic-fidelity.md)。

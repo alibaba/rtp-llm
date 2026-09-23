@@ -27,13 +27,10 @@ checkout，不在历史 bundle 上做部分覆盖。CPU 基座通过流水线
 
 ```bash
 python3 ~/.agents/skills/ci-image-build/scripts/ci_image_build.py \
-  --pipeline-branch feat/dsv4-master-bundle-codex \
-  --build-ref origin/codex/ft-case-framework \
+  --pipeline-branch '<pipeline-branch>' \
+  --build-ref '<source-ref>' \
   --jobs mock-bundle --poll
 ```
-
-旧 `mock-refresh` 已移除：它不更新当前 `master.jar`，而且白名单覆盖会让镜像
-混入旧基座内容。新构建统一使用 `mock-bundle`；历史 CI run 仍可按 run ID 查询。
 
 ### 独立 Mock Engine
 

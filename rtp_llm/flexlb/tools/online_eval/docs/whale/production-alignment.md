@@ -15,9 +15,9 @@
 
 Carbon 的 `health_checker_config` 和 VIPServer 域名的 `clusters[].healthChecker` 是两套配置，两处均须核对。寄生模式不注册独立 P/D Pod，frontend 原生 `/health` 仍检查 P/D VIP，可能返回 503；此模式按运行验收约定使用 `/frontend_health`。只修改 Carbon 的 `CHECK_PATH` 不会同步修改 VIPServer 的 `curlPath`，会出现 `HT_ALIVE/WT_READY` 但 `SVT_UNAVAILABLE`、ready 为零、发布一直进行的状态。
 
-VIPServer 调整只限测试部署实际引用的域名，保留其他注册参数。先读回域名配置，确认平台 API 对已有域名的行为后再执行；部署发布白名单不意味着域名注册 API 也在白名单。工具拒绝时保留原配置及具体未执行请求，不绕过确认。探针恢复后仍须独立验证 Master、Mock 240 个逻辑引擎（本次 48P/192D）及完整请求成功率；frontend 存活不等于性能门禁通过。
+VIPServer 调整只限测试部署实际引用的域名，保留其他注册参数。先读回域名配置，确认平台 API 对已有域名的行为后再执行；部署发布白名单不意味着域名注册 API 也在白名单。工具拒绝时保留原配置及具体未执行请求，不绕过确认。探针恢复后仍须独立验证 Master、Mock 逻辑引擎数量及完整请求成功率；frontend 存活不等于性能门禁通过。
 
-切换模型时同时核查 zone 的 `MODEL_TYPE`、`TOKENIZER_PATH`、`CHECKPOINT_PATH`。只清理前两项仍可能加载旧模型 config，例如 Flash 使用 GLM checkpoint 导致缺失 `compress_ratios`。清除旧覆盖后，检查最终 Carbon plan 与进程环境实际加载的资源，不仅查看 biz 快照。
+切换模型时同时核查 zone 的 `MODEL_TYPE`、`TOKENIZER_PATH`、`CHECKPOINT_PATH`。只清理前两项仍可能加载旧模型 config，避免模型类型与 checkpoint 配置不匹配。清除旧覆盖后，检查最终 Carbon plan 与进程环境实际加载的资源，不仅查看 biz 快照。
 
 ## 每次必须对齐的配置
 
@@ -42,24 +42,24 @@ VIPServer 调整只限测试部署实际引用的域名，保留其他注册参�
 
 ## 监控清单与聚合口径
 
-每次保存 Grafana panel JSON，包括 metric、tags、aggregator、downsample、expression 和 transformation。以下 panel ID 来自 engine dashboard `iZ5Q_81nz`，使用前刷新；Master 补充 dashboard 为 `fv0CDqzDk`。
+每次保存 Grafana panel JSON，包括 metric、tags、aggregator、downsample、expression 和 transformation。按目标部署实时读取大盘配置，不把面板 ID 当作指标语义。
 
 | 指标 | 面板/口径 | 用途 |
 |---|---|---|
-| Prefill context TPS | 10379，`rtp_llm_context_tps`，有效 compute token / 对应执行时间 | 主性能指标 |
-| Prefill with-cache TPS | 10370，`rtp_llm_context_tps_with_cache`，含复用输入 / 对应执行时间 | 与 context TPS 同时观察，禁止称作单独 cache token TPS |
-| Decode generate TPS | 10369，`rtp_llm_generate_tps`；对照真实 emitter 与 Mock 上报窗口 | D 性能；不与 frontend output TPS 混用 |
+| Prefill context TPS | `rtp_llm_context_tps`，有效 compute token / 对应执行时间 | 主性能指标 |
+| Prefill with-cache TPS | `rtp_llm_context_tps_with_cache`，含复用输入 / 对应执行时间 | 与 context TPS 同时观察，禁止称作单独 cache token TPS |
+| Decode generate TPS | `rtp_llm_generate_tps`；对照真实 emitter 与 Mock 上报窗口 | D 性能；不与 frontend output TPS 混用 |
 | TTFT / TPOT | frontend 对应面板，保留单位、均值和可用分位数 | 延迟护栏；不能平均各实例 p99 得出全局 p99 |
 | Output length | 成功完成请求的实际输出长度及分布 | 检查 EOS、截断和成功率造成的偏差 |
-| 实际缓存命中率 | 10077：同窗 `sum(rtp_llm_kv_cache_reuse_length) / sum(rtp_llm_input_token_length)` | 实际复用；不是 30min key 理论命中率；分母为零时显示无样本 |
-| Device / Memory 复用 | 9205 / 9206 对应 expression，分别观察 device / memory reuse 与输入比例 | 区分复用来源，不把旧/new Memory 指标相加 |
-| KV 空间占用 | 154，`rtp_llm_kv_cache_used_ratio`；并看 556 total、552 available、553 free 与 Memory total/available | 占用率与实际命中率是两项指标；可驱逐缓存与不可回收引用占用不能混算 |
-| Batch size | 150 query、122 context、123 generate；Master batch size 另列 | 区分调度批与实际执行批 |
+| 实际缓存命中率 | 同窗 `sum(rtp_llm_kv_cache_reuse_length) / sum(rtp_llm_input_token_length)` | 实际复用；不是 30min key 理论命中率；分母为零时显示无样本 |
+| Device / Memory 复用 | 对应 expression，分别观察 device / memory reuse 与输入比例 | 区分复用来源，不把旧/new Memory 指标相加 |
+| KV 空间占用 | `rtp_llm_kv_cache_used_ratio`；并看 total、available、free 与 Memory total/available | 占用率与实际命中率是两项指标；可驱逐缓存与不可回收引用占用不能混算 |
+| Batch size | query、context、generate；Master batch size 另列 | 区分调度批与实际执行批 |
 | P waiting / D waiting | 对应角色 `wait_stream_size` 面板及队列深度 | 区分 engine waiting、Master queue 和 cache loading |
 | 成功 / 失败 QPS | frontend 完成口径、Master 按 code 分组分别保留 | Master 调度成功不能代替端到端成功；所有错误码、超时与未完成请求都要计入 |
-| Model forward | 9101 中 `rtp_llm_model_forward_us`，按 panel 的 `global_avg` 聚合，统一转 ms | P forward 对照；同时保留逐引擎分布和有效实例数 |
+| Model forward | 大盘中的 `rtp_llm_model_forward_us`，按 panel 的 `global_avg` 聚合，统一转 ms | P forward 对照；同时保留逐引擎分布和有效实例数 |
 | MTP Decode step | 真实 D 使用 speculative decoding 时核对 `rtp_llm_sp_step_latency_us` 及 `mtp_model_type` 标签 | 普通 D forward 为零不代表执行无耗时，不用零值拟合 D 性能 |
-| Context batch size | 122 均值与 10099 max 同看 | 排查组批不足或异常大批，不能只看请求数 |
+| Context batch size | 均值与 max 同看 | 排查组批不足或异常大批，不能只看请求数 |
 
 同一测试/生产窗口保留逐引擎曲线、引擎均值与合理的集群总量。真实 D 保留 dp_rank；寄生 Mock 全在一 Pod，必须按 engine / engine_port 拆分。逐引擎 TPS 与 Pod 总和不可比较；吞吐总量不能由混有 standby 的平均值替代。保留零负载点；监控缺点与零值分开处理。priority 的归并严格按 panel transformation 执行。
 
@@ -71,18 +71,8 @@ VIPServer 调整只限测试部署实际引用的域名，保留其他注册参�
 
 ### 满缓存后的 Mock 宿主机开销
 
-验收窗口必须覆盖 Memory pool 填满并持续驱逐的阶段。2026-09-22 在 48P/192D、每 P 52,295 个 Memory blocks 的测试部署中，旧实现每次驱逐遍历整个缓存并搜索后代；30 秒 JFR 的主要采样集中在 `MockMemoryBlockCache.hasResidentDescendant -> evictOne -> beginWrite`，Mock JVM 长时间消耗约 30 个 CPU 核。重启后的短暂恢复不能作为校准成功证据。
-
-修复 `30b0b8a387` 用可驱逐叶子的 LRU 索引及前缀子树计数维护候选，避免逐块全表扫描。发布后需要验证实际执行镜像、持续驱逐计数、CPU、成功/失败 QPS 和 TPS，不能以单元测试或 CI 成功替代运行验收。
+验收窗口应覆盖 Memory pool 填满并持续驱逐的阶段，保存实际执行镜像、驱逐计数、CPU、
+GC、成功/失败 QPS 和 TPS。冷启动后的短暂恢复不能替代持续负载验收；单测与 CI 成功
+也不能替代运行证据。
 
 当前 Mock P 的 `rtp_llm_model_forward_us` 上报性能公式计算的 `executionMs`，context TPS 的计时还包含实际回调与缓存处理开销。因此 forward 均值接近生产、TPS 却显著偏低时，应先排查宿主机 CPU、回调延迟、缓存操作和 GC，不能直接缩短公式耗时来掩盖执行开销。输出长度校准同样需要成功请求分布，不能仅通过缩短 EOS 抬高成功 QPS。
-
-### 2026-09-22 Flash 测试部署校准记录
-
-此记录是一次部署观测，不是生产门禁阈值。测试 deployment `6aa3b6979ffe080d001c3dbb` 使用模板 v10 / biz 170，CI 75163186 构建源码 `30b0b8a387` 的 mock-bundle；legacy Master 仍为 `ab73d2b6931d11dd5bc35993042f74fa53e54814`。48P / 192D（12×DP16），CP4，P/D block 为 512/128，Device pool 为 21553/221484，P Memory pool 为 52295。保持生产 BATCH 配置及 `FETCH_OUTPUT_STREAM=1`。
-
-P 执行公式来自已记录的生产预测公式，`prefill.scale=1.23`；只缩放 Mock 执行耗时，不改 Master 预测公式。D 保持 `tokens_per_step=2.6`、`step_base_ms=19.5`、`step_per_running_ms=0.175`；几何 EOS `mean_tokens=400`、seed 20260922。输出长度分布仍需继续核对，此参数不是生产常量。22:00:39 重启后读回全部 48P 的 scale=1.23、runtime_override=false。
-
-22:10–22:12:59 CST，按 panel 9101 的 global_avg 查询，P forward 时序点均值：生产 380.3 ms，Mock 382.1 ms；frontend 完成 QPS 为 1542.2 / 1535.9。22:02–22:12:59 的 12 个 Mock 错误码序列共 11 个分钟点均为零。22:10 有效 Memory 占用样本均值 98.6%，44 个 P 已发生驱逐，写入拒绝为零。这些是监控观测，不替代固定请求集合的 100% 完成核账。
-
-仍未完全对齐：同窗 P context TPS 约 64893 / 58613，with-cache TPS 126681 / 112470（按 priority 分组后求和的角色均值，不能当集群 TPS）；实际 reuse/input 比例 48.4% / 45.6%，context batch 16.45 / 15.02。生产缺测/standby 实例需保留 coverage，不能填成零掩盖差异。frontend readiness 仍为 0/20，测试 VIP 探针修复未执行，Whale 状态仍 PUBLISHING；不宣布整体部署或绝对门禁通过。

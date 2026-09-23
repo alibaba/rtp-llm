@@ -1,31 +1,28 @@
-# Mock 测试文档导航
+# Mock 测试文档
 
-[上级入口](../README.md)按四种功能选择 runbook。本页说明文档边界。
+文档只说明现行规则、架构和运行方式。维护约束见 [文档规则](../AGENTS.md)；入口命令从
+`rtp_llm/flexlb` 执行，另有工作目录说明的命令除外。实验结果保存在运行归档中。
 
-## 当前文档
+## 架构与契约
 
-### 开发机
+- [框架结构](architecture/framework.md)：组件职责、配置和执行边界。
+- [请求与资源生命周期](architecture/request-lifecycle.md)：P/D 分配、Fetch、完成与释放。
+- [流量与播放模型](architecture/traffic.md)：真实/合成输入、精确长度、节奏与身份策略。
 
-1. [编译与运行底座](development/build-and-runtime.md)：三类测试共用的依赖、构建产物、进程模型和启动参数。
-2. [压测](development/stress.md)：标准负载、运行、聚合和 A/B。
-3. [功能测试](development/functional.md)：功能合同的选择、执行和判定。
-4. [场景测试](development/scenario.md)：持续负载、干预、恢复和证据完整性。
+## 开发与运行
 
-5. [播放调节与复现](development/playback-controls.md)：时变曲线、Poisson 到达、输出分布、逐轮保留计划及离线证据复原。
+- [编译与运行底座](development/build-and-runtime.md)
+- [功能测试](development/functional.md)与[场景测试](development/scenario.md)
+- [压测](development/stress.md)与[性能门禁](development/performance-gate.md)
+- [播放调节与复现](development/playback-controls.md)
+- [合成保真度](development/synthetic-fidelity.md)
+- [新增 case](development/adding-cases.md)
+- [命令入口](development/entrypoints.md)、[参数](development/parameters.md)、[结果与指标](development/results.md)
 
-### Whale
+## Whale 运行环境
 
-1. [CI 与部署](whale/README.md)：完整 CPU bundle、独立引擎镜像及验收链路。
-2. [配置与环境变量](whale/configuration.md)：两种拓扑和运行时配置。
+- [CI 与部署](whale/README.md)
+- [配置与环境变量](whale/configuration.md)
+- [配置与监控对齐](whale/production-alignment.md)
 
-### 参考
-
-- [参数参考](reference/parameters.md)
-- [命令入口](reference/entrypoints.md)
-- [结果与指标](reference/results.md)
-- [框架结构](reference/architecture.md)
-- [新增 case](reference/adding-cases.md)
-- `reference/cases/`：少数需要单独解释的场景合同。
-- `reference/concepts/`：P/D 生命周期与流量源等底层语义。
-
-阶段设计、验证快照和旧操作说明不进入源码树；需要时从 Git 历史读取。代码与当前 runbook 是唯一现行依据。
+数据存放、元数据与归档见 [数据规则](../data/README.md)，配置入口见 [配置目录](../config/README.md)。

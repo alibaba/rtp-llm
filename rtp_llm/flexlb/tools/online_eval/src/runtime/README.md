@@ -1,7 +1,7 @@
 # Case 框架
 
 执行关系：YAML 配置 → Python case → 编译计划 → 公共执行器 → Java Master / Mock。
-入口见 [工具导航](../../README.md)，定义见 [框架结构](../../docs/reference/architecture.md)。
+入口见 [工具导航](../../README.md)，定义见 [框架结构](../../docs/architecture/framework.md)。
 
 | 位置 | 职责 |
 |---|---|

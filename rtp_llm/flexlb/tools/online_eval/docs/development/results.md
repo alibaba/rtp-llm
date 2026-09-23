@@ -30,7 +30,7 @@
 - `FETCH_OUTPUT_STREAM=0` 的运行不能作为完整端到端 A/B。
 - 故障场景中的预期错误不等于运行无效；但缺采样、丢事件或时间线断裂属于证据问题。
 
-Mock 暴露的指标名与标签见 [`flexlb-mock-engine/METRICS.md`](../../../../flexlb-mock-engine/METRICS.md)。P/D 与 Fetch 的资源生命周期见[生命周期参考](concepts/mock-pd-fetch-lifecycle.md)。
+Mock 暴露的指标名与标签见 [`flexlb-mock-engine/METRICS.md`](../../../../flexlb-mock-engine/METRICS.md)。P/D 与 Fetch 的资源生命周期见[生命周期参考](../architecture/request-lifecycle.md)。
 
 ## A/B 最低可比条件
 

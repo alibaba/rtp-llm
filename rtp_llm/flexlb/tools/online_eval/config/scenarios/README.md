@@ -4,8 +4,8 @@
 编排与断言位于 [`case_programs/`](../../src/cases/programs)；
 公共 action 位于 `src/scenario/actions/`。已删除的扩展功能 case 仍可通过 Git 历史追溯。
 
-先读 [框架结构](../../docs/reference/architecture.md) 了解执行和资源模型；
-新增用例按 [如何添加新 case](../../docs/reference/adding-cases.md) 操作。
+先读 [框架结构](../../docs/architecture/framework.md) 了解执行和资源模型；
+新增用例按 [如何添加新 case](../../docs/development/adding-cases.md) 操作。
 
 从仓库根目录列出当前 CI 必跑实例：
 

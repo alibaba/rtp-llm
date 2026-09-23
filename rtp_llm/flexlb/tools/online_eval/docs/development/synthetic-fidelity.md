@@ -6,10 +6,6 @@
 
 ## 采用的方法
 
-接受“必须保留长度与共享深度联合结构”的问题判断。联合采样原型虽抽取 `(blocks, shared)`，
-却只使用 `blocks`，深度仍从另一个独立的家族池取得；原型评估器还把家族首次出现算作已热，
-因此其表格不代表生产输出的实际复用。联合对 bootstrap 不会保留事件顺序、原标签和时序，不能等同 trace 回放。
-
 生产 `realistic` 现有两种显式采样语义：
 
 - `sampling: independent`：默认兼容路径，长度经验 ICDF 加固定家族深度。保留旧 seed 的请求字节；只有这一份兼容实现，报告侧不再复制独立采样生成器。
@@ -27,13 +23,12 @@
 合成 source 示例：
 
 ```json
-{"kind":"synthetic","model":"realistic","version":"1","parameters":{"profile":"glm-5.3_20260921_1400_15m","sampling":"joint","seed":42,"count":10000,"output_tokens":420}}
+{"kind":"synthetic","model":"realistic","version":"1","parameters":{"profile":"<profile-name>","sampling":"joint","seed":42,"count":10000,"output_tokens":420}}
 ```
 
 `calibrate_traffic` 仍是唯一统计标定入口，导出旧字段与联合池。报告不另写一份标定逻辑。
 现有 `capture_frontend_prefix`、`fit_frontend_prefix`、`prefix_lineage`、`datasets/describe_traffic` 和
 `workload_profile` 分别承担采集、真实 DAG 拟合、编解码、文件描述和 LRU 诊断，仍有独立用途。
-本次替换的 7 个未跟踪分析原型已在仓库外归档；旧对照生成器和重复统计入口不进入正式代码。
 
 ## 使用
 
@@ -47,7 +42,7 @@ python3 scripts/commands/compare_traffic.py --out /tmp/fidelity --check
 python3 scripts/commands/compare_traffic.py --refit --out /tmp/fidelity-refit --check
 
 # 快速观察或自定义对照、阈值；省略 --count 使用每个捕获的事件数
-python3 scripts/commands/compare_traffic.py --profile data/calibration/glm-5.3_20260921_1400_15m.profile.json \
+python3 scripts/commands/compare_traffic.py --profile /path/to/profile.json \
   --count 20000 --seed 42 --out /tmp/fidelity-small
 ```
 

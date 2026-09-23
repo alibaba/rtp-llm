@@ -1,6 +1,5 @@
 # Mock Engine 的 P/D 与 Fetch 生命周期
 
-本次核对真实引擎的源码基线是 `a4744b35111b5123e43ba941e52dec7e215e4fc0`。修改范围是 Java Mock、测试启动配置和 case；没有修改 C++ 引擎或 Java master。
 
 ## 真实引擎的顺序
 
@@ -55,7 +54,7 @@ P 的计算完成事件继续按原来的时间发布。`retainComputed()` 将�
 
 Mock 用一次状态转换模拟 KV 传输，不模拟网络搬运耗时、分块传输和真实 GPU；状态观察可以验证协议顺序，不能拿它测真实 KV 网络带宽。`prefill_contexts` 统计尚未接续的 deferred context；D 开始后，取消传播由 P/D ownership 关系继续维护，不能把这个计数当作 C++ 的全部 RPC onflight。
 
-请求期限有一个未模拟到逐点一致的边界：若准备阶段已耗尽请求期限，真实引擎在发布 ACK 时同步拒绝；当前 Mock 将剩余期限下限设为 1 ms，再异步清理。本次用例验证独立的 Fetch 附着期限，不覆盖该边界。
+请求期限有一个未模拟到逐点一致的边界：若准备阶段已耗尽请求期限，真实引擎在发布 ACK 时同步拒绝；当前 Mock 将剩余期限下限设为 1 ms，再异步清理。Fetch 附着期限和请求剩余期限需要分别验证。
 
 ## 两种启动模式
 
@@ -71,26 +70,35 @@ NON_BATCH 的 `GenerateStreamCall` 本身已经建立客户端输出流，不存
 
 `no_respond` 只表示服务端 RPC 黑洞，不再承担“客户端没有 Fetch”的含义。
 
-## 用例与证据
+## 状态取证
 
-旧的 `engine_rpc_fault::no_respond` 四个实例删除。新用例为：
+Decode 计算门禁以 `active_decode_requests` 为准。`running` 和 worker running-task 集合包含
+`KV_ALLOCATED`，其中的请求可能只持有 KV 而未开始计算，不能用它证明计算槽已经占满。
+测试应分别记录 P 计算槽、deferred context、connector KV 引用、D KV 与 D 计算状态。
 
-- `request_completion::client_no_fetch::batch-window`
-- `request_completion::client_no_fetch::single-batch`
+D 提前分配后，P 入队拒绝会清理 D 的准备状态。Master 可能先收到 D 的取消终态，
+再收到 P 的拒绝 ACK；应分别核对客户端错误、引擎终态和调度记账。
 
-同一份 Python 程序依次测试延迟 Fetch、始终不 Fetch、重建为 auto-fetch 环境后三种行为。YAML 只声明拓扑、期限和 P 计算时长。每个阶段保存 `client-fetch-*.json`，包括请求 ID、P/D 落点、Fetch RPC 计数、计算状态、KV 引用和回收快照。
+## 缓存容量与所有权
 
-严格模式断言 D 提前出现且没有计算；P 算完后释放计算槽、保留上下文和 KV；不发 Fetch 的观察窗口内 D 不得完成。延迟 Fetch 应正常结束；始终没有 Fetch 时，期限到达后两侧资源必须清理，之后 Fetch 返回 `NOT_FOUND`。自动模式全程 Fetch 计数不增长，D 必须完成，资源同样清理。
+可驱逐的空闲缓存与在途请求引用的 KV 是两种占用。缓存中有键不表示它不可回收；
+引用尚未释放的块不能计入可驱逐空间。容量测试先确认单请求能够准入，再以跨请求的
+工作集超过容量构造驱逐，避免把超大请求的准入拒绝误当缓存淘汰。
 
-源码入口：
+多 Master 共用引擎时，引擎上报的负载可能来自其他 Master。Scheduler 请求数、
+Prefill ownership、Decode reservation/dispatch permit 和引擎负载应分别核账；
+单个 Master 无客户端流量不意味着共享引擎空闲。完整流量排空后再验证全局收尾。
 
-- 真实引擎：`rtp_llm/cpp/model_rpc/PrefillRpcServer.cc`、`PrefillBatchRpcServer.cc`、`DecodeRpcServer.cc`。
-- Mock：`flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPrefillSession.java`、`JavaMockEngineCluster.java`、`MockLruBlockCache.java`。
-- Python：`src/cases/programs/request_completion.py`、`src/scenario/actions/client_fetch.py`。
-- YAML：`config/scenarios/request_completion.yaml`。
+## 引擎成员与代际
 
-## 旧用例迁移时需要区分的状态
+瞬时失联、永久故障、有序缩容是不同操作。有序缩容需要先撤销发现入口，确认 Master
+不再向旧地址/旧代引擎投递，再排空已接纳请求并关进程。Mock 本地 `drained=true`
+只能证明采样时本地没有在途请求，不能证明 Master 已退出路由。
 
-测试 Decode 计算门禁时，必须先附着 Fetch，再读取 `active_decode_requests`。`running`/worker running-task 集合包含 `KV_ALLOCATED`，其中的请求可能只持有 KV 而从未开始计算；不能用它证明计算门禁已经填满。`engine_admission_gate::decode_hard_gate` 已按此调整，保持原有 280 请求、128 门禁、18 秒观察窗口和完成率断言。
+收敛预算根据实际状态保留时间、清理周期及在途状态 RPC 推导，保存配置与观测时间。
+不能只靠固定睡眠或总引擎数判断某个地址/代际已经退出。故障后的恢复请求须独立发送，
+不能用故障前晚完成的请求填充恢复样本；同地址重用必须区分代际。
 
-D 提前分配后，P 的入队拒绝也会清理 D 的准备状态。Master 可能先收到 D 的取消终态，再收到 P 的拒绝 ACK；需分别核对客户端错误、引擎终态和调度记账，不能只靠错误消息文本推断是否触发了背压。
+源码入口：真实协议在 `rtp_llm/cpp/model_rpc/`；Mock 状态机在
+`flexlb-mock-engine/src/main/java/org/flexlb/mockengine/` 的 `MockPrefillSession`、
+`JavaMockEngineCluster` 和 `MockLruBlockCache`。

@@ -13,7 +13,7 @@ request timeout can shorten it. NON_BATCH already has a client stream.
 
 The schedule-only benchmark explicitly opts into `--auto-fetch true` when
 `FETCH_OUTPUT_STREAM=0`. `no_respond` is a server RPC blackhole, not a client
-that omitted Fetch. See [protocol, ownership and case design](../tools/online_eval/docs/mock-pd-fetch-lifecycle.md).
+that omitted Fetch. See [protocol and resource ownership](../tools/online_eval/docs/architecture/request-lifecycle.md).
 
 ## WorkerStatus completion reporting
 

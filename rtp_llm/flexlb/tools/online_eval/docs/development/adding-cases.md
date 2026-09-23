@@ -35,7 +35,8 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 python3 tools/online_eval/scripts/commands/run_cases.py \
   --instances '<exact-instance-id>' --parallel 1 --dry-run
 
-python3 -m unittest discover -s tools/online_eval/tests -p 'test_*.py'
+cd tools/online_eval
+PYTHONPATH="$PWD/src:$PWD" python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 新增检查必须保存实际值、期望值和原始证据。扩大拓扑或负载后需重新验证阈值，不能复制旧 band 后直接宣称场景有效。
