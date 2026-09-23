@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include <algorithm>
 #include <charconv>
 #include <condition_variable>
@@ -185,6 +186,10 @@ void GenerateStream::recordWaitLatency() {
 void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
     if (scheduler_enqueue_time_us_ == 0) {
         scheduler_enqueue_time_us_ = time_us;
+        auto& recorder             = ExecutionRecorder::instance();
+        if (!isFakeStream() && recorder.enabled()) {
+            recorded_request_ = std::make_shared<RecordedRequest>(recorder);
+        }
     }
 }
 
@@ -1262,7 +1267,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     validateStatefulLogitsProcessorState();
 }
 
-void GenerateStream::update(const StreamUpdateInfo& update_info) {
+void GenerateStream::update(const StreamUpdateInfo& update_info, RecordedTokenTiming* timings, size_t timing_count) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
@@ -1320,6 +1325,14 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                   update_info.top_logprobs,
                   old_seq_length,
                   update_info.logprobs_offset});
+
+    // Freeze request-level TTFT after output trimming, under the same stream
+    // lock. Non-final prefill chunks / failed updates do not invent a TTFT.
+    if (timings && seqLength() > inputLength()) {
+        for (size_t i = 0; i < timing_count; ++i) {
+            timings[i].ttft_us = complete_token_ids_->firstTokenLatencyUs();
+        }
+    }
 
     // needFinish(), called by updateOutput(), can trim this packet at EOS/stop
     // words. Advance the cached phase only from tokens that were committed.
@@ -1601,8 +1614,8 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
+            collector.reuse_length       = initial_reuse_length_;
+            collector.input_token_length = inputLength();
             collector.effective_context_length =
                 std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
