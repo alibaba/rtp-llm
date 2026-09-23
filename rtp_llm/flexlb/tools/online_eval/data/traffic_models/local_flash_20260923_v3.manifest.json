@@ -1,0 +1,111 @@
+{
+  "version": 3,
+  "block_size": 512,
+  "count": 844864,
+  "realism": "EMPIRICAL_PREFIX_STRUCTURE",
+  "tail": "EXACT_LENGTH_PRIVATE_PARTIAL_BLOCK",
+  "arrival": "TRUE_TIMESTAMPS_PACED_BY_CLIENT",
+  "provenance": {
+    "missing_pod_indices": [
+      7,
+      9,
+      12,
+      15
+    ],
+    "source_start": 1790126400001,
+    "source_end": 1790127359996,
+    "capture_start": 1790126400000,
+    "capture_end": 1790127360000,
+    "source_pods": 16,
+    "expected_pods": 20
+  },
+  "manifest_schema_version": 2,
+  "bytes": 4798296,
+  "sha256": "29d0fbee8986d465b672977154ebb9aef27353d445b383fd9135656de9e911ca",
+  "codec": {
+    "name": "prefix_lineage",
+    "version": 3
+  },
+  "data_kind": "real",
+  "source": {
+    "capture": {
+      "layer": "frontend",
+      "deployment": "6aa3b6979ffe080d001c3dbb"
+    },
+    "spectrum": {
+      "identity": null,
+      "status": "unconfirmed",
+      "evidence": null
+    },
+    "model": {
+      "name": null,
+      "status": "unconfirmed",
+      "evidence": null
+    },
+    "enrichment": "manual_spectrum_lookup_not_automated"
+  },
+  "capture_window": {
+    "start": "2026-09-23T09:20:00.001000+08:00",
+    "end": "2026-09-23T09:35:59.996000+08:00",
+    "timezone": "Asia/Shanghai"
+  },
+  "statistics": {
+    "scope": "captured_requests_only_no_missing_pod_extrapolation",
+    "request_count": 844864,
+    "percentile_method": "nearest_rank",
+    "arrival": {
+      "event_span_s": 959.995,
+      "mean_qps": 880.0712503710956,
+      "requests_per_second": {
+        "count": 960,
+        "min": 656,
+        "max": 1105,
+        "mean": 880.0666666666667,
+        "p50": 876,
+        "p90": 961,
+        "p95": 985,
+        "p99": 1032
+      },
+      "bucket_origin": "first_event",
+      "bucket_ms": 1000,
+      "final_bucket": "included_even_if_partial",
+      "idle_buckets_included": true
+    },
+    "input_tokens": {
+      "count": 844864,
+      "min": 5,
+      "max": 32000,
+      "mean": 2940.1802148038028,
+      "p50": 1712,
+      "p90": 6302,
+      "p95": 10487,
+      "p99": 23482,
+      "total": 2484052417,
+      "resolution_tokens": 1
+    },
+    "prefix_structure": {
+      "shared_tokens": {
+        "count": 844864,
+        "min": 0,
+        "max": 31744,
+        "mean": 1521.81501401409,
+        "p50": 512,
+        "p90": 3584,
+        "p95": 6144,
+        "p99": 16896
+      },
+      "token_weighted_shared_fraction": 0.5175924272776729,
+      "requests_with_shared_prefix": 581593,
+      "parentless_requests": 263271,
+      "interpretation": "structural_sharing_not_observed_cache_hit_rate"
+    },
+    "output_tokens": null,
+    "outcomes": null
+  },
+  "limitations": [
+    "Input lengths are exact; original text and tokens are absent.",
+    "Output lengths and outcomes are not retained in this codec.",
+    "Prefix sharing is theoretical structure, not measured cache reuse.",
+    "Spectrum origin and model need independently confirmed manual metadata."
+  ]
+}

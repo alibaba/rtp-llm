@@ -11,21 +11,25 @@ environment:
   metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_
   prefill_cache_blocks: 21553
   decode_cache_blocks: 221484
+  config_overrides:
+    max_requests: 64
+    max_collection_wait_ms: 350
+    max_predicted_execution_ms: 350
 execution:
   timeout_s: 1000
   stage_timeout_s: 60
   cleanup_timeout_s: 90
 metadata:
-  description: Frozen 48P/192D Whale Mock regression reference; captured pre-alignment
-    input, not production capacity. Absolute provisional contract, never fitted to
-    candidate results.
+  description: Frozen 48P/192D Whale Mock regression reference; post-switch Flash
+    frontend capture from 16/20 pods, output mean from real Decode monitoring.
+    Absolute provisional contract, not production capacity.
   category: master
 variants:
 - id: flash_frozen_mock
   program: steady
 parameters:
   criteria:
-    benchmark_id: flash-whale-mock-20260922-v1
+    benchmark_id: flash-whale-mock-20260923-capture0920-output294-v3-ramp10
     warmup_s: 300
     measure_s: 180
     sample_s: 1
@@ -34,8 +38,8 @@ parameters:
     qps_tolerance: 0.05
     min_requests: 260000
     max_pacing_lag_ms: 250
-    min_input_tps: 4708800
-    min_output_tps: 500000
+    min_input_tps: 4290000
+    min_output_tps: 429000
     min_goodput_rps: 1440
     min_slo_fraction: 0.95
     max_error_rate: 0
@@ -49,7 +53,7 @@ parameters:
     engine_tps:
       rtp_llm_context_tps: 50000
       rtp_llm_context_tps_with_cache: 100000
-      rtp_llm_generate_tps: 2500
+      rtp_llm_generate_tps: 2230
   flow:
     group_id: performance
     phase_id: continuous
@@ -61,13 +65,13 @@ parameters:
       model: prefix_lineage
       version: '3'
       parameters:
-        path: ../../data/traffic_models/local_flash_20260922_v3.xz
-        sha256: 9af1904eeec09b264323ccea30d9a9969f6f3336bbecd647ee9fef09476652fb
-        count: 976045
+        path: ../../data/traffic_models/local_flash_20260923_v3.xz
+        sha256: 29d0fbee8986d465b672977154ebb9aef27353d445b383fd9135656de9e911ca
+        count: 844864
         output_tokens: 8192
         output_distribution:
           kind: geometric
-          mean_tokens: 400
+          mean_tokens: 294
           seed: 20260922
         priority: 50
         max_input_tokens: 32768
@@ -85,6 +89,7 @@ parameters:
       playback:
         mode: uniform
         qps: 1536.0
+        ramp_up_seconds: 10.0
         max_laps: 1
         identity: structural-relabel
 test:

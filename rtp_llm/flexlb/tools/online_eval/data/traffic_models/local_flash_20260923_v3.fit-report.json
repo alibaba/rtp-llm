@@ -1,0 +1,4537 @@
+{
+  "source_pods": 16,
+  "expected_pods": 20,
+  "missing_pod_indices": [
+    7,
+    9,
+    12,
+    15
+  ],
+  "sources": {
+    "pod-00.jsonl.xz": {
+      "hostname": "serverless-010064224011.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 133703,
+        "records": 52861,
+        "tokens": 154255433,
+        "status:OK": 52861
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 13893718,
+          "bytes": 104817157,
+          "first_completion": 1790127605485,
+          "last_completion": 1790128572294
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 13893691,
+          "bytes": 104839360,
+          "first_completion": 1790126580658,
+          "last_completion": 1790127605373
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 13894011,
+          "bytes": 104834871,
+          "first_completion": 1790125552498,
+          "last_completion": 1790126580657
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 13894290,
+          "bytes": 104836864,
+          "first_completion": 1790126506262,
+          "last_completion": 1790127737418
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 13894224,
+          "bytes": 104853823,
+          "first_completion": 1790125276311,
+          "last_completion": 1790126505899
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.2",
+          "inode": 13894147,
+          "bytes": 104850248,
+          "first_completion": 1790126491531,
+          "last_completion": 1790128048494
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 13894122,
+          "bytes": 104843274,
+          "first_completion": 1790124907626,
+          "last_completion": 1790126491465
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 13894111,
+          "bytes": 104849461,
+          "first_completion": 1790127315569,
+          "last_completion": 1790128155270
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.5",
+          "inode": 13894087,
+          "bytes": 104851741,
+          "first_completion": 1790126439189,
+          "last_completion": 1790127315436
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.6",
+          "inode": 13893663,
+          "bytes": 104849212,
+          "first_completion": 1790125585176,
+          "last_completion": 1790126438457
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 13894253,
+          "bytes": 104841010,
+          "first_completion": 1790126620306,
+          "last_completion": 1790127866855
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 13894229,
+          "bytes": 104852218,
+          "first_completion": 1790125297498,
+          "last_completion": 1790126619917
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 13894118,
+          "bytes": 104852481,
+          "first_completion": 1790126939475,
+          "last_completion": 1790127694678
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.6",
+          "inode": 13894140,
+          "bytes": 104837625,
+          "first_completion": 1790126180891,
+          "last_completion": 1790126939300
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 13894112,
+          "bytes": 104834491,
+          "first_completion": 1790127126185,
+          "last_completion": 1790127951831
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.5",
+          "inode": 13894089,
+          "bytes": 104839425,
+          "first_completion": 1790126273884,
+          "last_completion": 1790127125572
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 13894062,
+          "bytes": 104850374,
+          "first_completion": 1790127223880,
+          "last_completion": 1790128162132
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.5",
+          "inode": 13893738,
+          "bytes": 104857200,
+          "first_completion": 1790126237487,
+          "last_completion": 1790127223784
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.2",
+          "inode": 13894150,
+          "bytes": 104856255,
+          "first_completion": 1790126548323,
+          "last_completion": 1790128054174
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 13894123,
+          "bytes": 104850969,
+          "first_completion": 1790124914901,
+          "last_completion": 1790126547468
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 13894252,
+          "bytes": 104854469,
+          "first_completion": 1790126465648,
+          "last_completion": 1790127761441
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 13894228,
+          "bytes": 104731640,
+          "first_completion": 1790125151352,
+          "last_completion": 1790126465597
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 13894014,
+          "bytes": 104849903,
+          "first_completion": 1790127232941,
+          "last_completion": 1790128294307
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 13894337,
+          "bytes": 104835101,
+          "first_completion": 1790126155489,
+          "last_completion": 1790127232010
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.1",
+          "inode": 13894545,
+          "bytes": 104748743,
+          "first_completion": 1790125304368,
+          "last_completion": 1790128183546
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.2",
+          "inode": 13894125,
+          "bytes": 104855617,
+          "first_completion": 1790127236541,
+          "last_completion": 1790128779469
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.3",
+          "inode": 13894129,
+          "bytes": 104795399,
+          "first_completion": 1790125622143,
+          "last_completion": 1790127235394
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.2",
+          "inode": 13894315,
+          "bytes": 104843112,
+          "first_completion": 1790127618825,
+          "last_completion": 1790128777088
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 13894283,
+          "bytes": 104840448,
+          "first_completion": 1790126405025,
+          "last_completion": 1790127618778
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 13894169,
+          "bytes": 104855953,
+          "first_completion": 1790125200003,
+          "last_completion": 1790126404832
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 13894322,
+          "bytes": 104801972,
+          "first_completion": 1790127463615,
+          "last_completion": 1790128547219
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 13894294,
+          "bytes": 104786420,
+          "first_completion": 1790126273251,
+          "last_completion": 1790127463154
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 13893698,
+          "bytes": 104813780,
+          "first_completion": 1790127065564,
+          "last_completion": 1790127913277
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.5",
+          "inode": 13894071,
+          "bytes": 104851138,
+          "first_completion": 1790126161105,
+          "last_completion": 1790127065533
+        }
+      ],
+      "elapsed_s": 51.91180777549744,
+      "output_bytes": 6955156,
+      "sha256": "3972f8c8886ca6af82a2bd5047245f48dabfb21941940dfd0c7ecae8b0f4e999",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "112382f4e9e1e3f25b6d97bf973c47c98ef6b0ec91aef1783089eb807a0173e1",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-01.jsonl.xz": {
+      "hostname": "serverless-010064224031.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 137606,
+        "records": 52589,
+        "tokens": 154815338,
+        "status:OK": 52589
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 1856390,
+          "bytes": 104839460,
+          "first_completion": 1790127540413,
+          "last_completion": 1790128343807
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 1856374,
+          "bytes": 104832053,
+          "first_completion": 1790126706392,
+          "last_completion": 1790127540406
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.6",
+          "inode": 1856334,
+          "bytes": 104839617,
+          "first_completion": 1790125843934,
+          "last_completion": 1790126706121
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 1857379,
+          "bytes": 104849322,
+          "first_completion": 1790126773667,
+          "last_completion": 1790127993362
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 1857377,
+          "bytes": 104843111,
+          "first_completion": 1790125502455,
+          "last_completion": 1790126773556
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 1857437,
+          "bytes": 104850501,
+          "first_completion": 1790126944065,
+          "last_completion": 1790128143567
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 1857424,
+          "bytes": 104850392,
+          "first_completion": 1790125711937,
+          "last_completion": 1790126943965
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.2",
+          "inode": 1856448,
+          "bytes": 104808775,
+          "first_completion": 1790127080468,
+          "last_completion": 1790128444973
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 1856444,
+          "bytes": 104853438,
+          "first_completion": 1790125558961,
+          "last_completion": 1790127079638
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 1856413,
+          "bytes": 104828552,
+          "first_completion": 1790127269398,
+          "last_completion": 1790128068172
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.5",
+          "inode": 1856401,
+          "bytes": 104835006,
+          "first_completion": 1790126454593,
+          "last_completion": 1790127269355
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.6",
+          "inode": 1856386,
+          "bytes": 104840778,
+          "first_completion": 1790125593611,
+          "last_completion": 1790126454491
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.3",
+          "inode": 1857452,
+          "bytes": 104771085,
+          "first_completion": 1790126895757,
+          "last_completion": 1790128044220
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 1857430,
+          "bytes": 104815182,
+          "first_completion": 1790125710703,
+          "last_completion": 1790126895744
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.2",
+          "inode": 1856432,
+          "bytes": 104845711,
+          "first_completion": 1790127187009,
+          "last_completion": 1790128753055
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 1856405,
+          "bytes": 104857080,
+          "first_completion": 1790125662896,
+          "last_completion": 1790127185477
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.2",
+          "inode": 1856434,
+          "bytes": 104846945,
+          "first_completion": 1790127378993,
+          "last_completion": 1790128874353
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 1856407,
+          "bytes": 104834945,
+          "first_completion": 1790125779163,
+          "last_completion": 1790127378910
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 1857453,
+          "bytes": 104854656,
+          "first_completion": 1790126775733,
+          "last_completion": 1790127941767
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 1857440,
+          "bytes": 104855670,
+          "first_completion": 1790125667928,
+          "last_completion": 1790126775351
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 1857435,
+          "bytes": 104854135,
+          "first_completion": 1790126771613,
+          "last_completion": 1790127982413
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 1857373,
+          "bytes": 104850676,
+          "first_completion": 1790125558907,
+          "last_completion": 1790126770743
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 1857436,
+          "bytes": 104834594,
+          "first_completion": 1790126963501,
+          "last_completion": 1790128096267
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 1857423,
+          "bytes": 104856804,
+          "first_completion": 1790125740819,
+          "last_completion": 1790126962709
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.2",
+          "inode": 1857165,
+          "bytes": 104847825,
+          "first_completion": 1790127358178,
+          "last_completion": 1790128578210
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.3",
+          "inode": 1857158,
+          "bytes": 104829421,
+          "first_completion": 1790126064806,
+          "last_completion": 1790127357766
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 1855856,
+          "bytes": 104840575,
+          "first_completion": 1790126820446,
+          "last_completion": 1790127827474
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.5",
+          "inode": 1855831,
+          "bytes": 104843547,
+          "first_completion": 1790125822392,
+          "last_completion": 1790126819678
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 1856431,
+          "bytes": 104844039,
+          "first_completion": 1790127054800,
+          "last_completion": 1790127824399
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.6",
+          "inode": 1856419,
+          "bytes": 104821137,
+          "first_completion": 1790126256787,
+          "last_completion": 1790127054738
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 1856280,
+          "bytes": 104843613,
+          "first_completion": 1790127461419,
+          "last_completion": 1790128433165
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 1855855,
+          "bytes": 104850882,
+          "first_completion": 1790126447292,
+          "last_completion": 1790127461225
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.5",
+          "inode": 1855803,
+          "bytes": 104815078,
+          "first_completion": 1790125409579,
+          "last_completion": 1790126446783
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.2",
+          "inode": 1856364,
+          "bytes": 104782816,
+          "first_completion": 1790127323007,
+          "last_completion": 1790128907372
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 1856358,
+          "bytes": 104853671,
+          "first_completion": 1790125579607,
+          "last_completion": 1790127321761
+        }
+      ],
+      "elapsed_s": 63.0736882686615,
+      "output_bytes": 6953084,
+      "sha256": "80a9f370b8798e21e84ac00acf17515f457907db6bc086df9e016b376dca161f",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "b66cbb6f7fb3c567e5c993c1eb50ade0618f277df89d00d1dc98978a679b9524",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-02.jsonl.xz": {
+      "hostname": "serverless-010064224108.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 137250,
+        "records": 52862,
+        "tokens": 155714738,
+        "status:OK": 52862
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 7733883,
+          "bytes": 104817726,
+          "first_completion": 1790126523227,
+          "last_completion": 1790127789875
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 7733825,
+          "bytes": 104853218,
+          "first_completion": 1790125310725,
+          "last_completion": 1790126523071
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 7733618,
+          "bytes": 104840925,
+          "first_completion": 1790127409736,
+          "last_completion": 1790128326565
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.5",
+          "inode": 7733604,
+          "bytes": 104849855,
+          "first_completion": 1790126466345,
+          "last_completion": 1790127409219
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.6",
+          "inode": 7733553,
+          "bytes": 104844098,
+          "first_completion": 1790125493832,
+          "last_completion": 1790126466116
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 7733925,
+          "bytes": 104848677,
+          "first_completion": 1790127631131,
+          "last_completion": 1790128710890
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 7733919,
+          "bytes": 104853160,
+          "first_completion": 1790126490039,
+          "last_completion": 1790127631058
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 7733885,
+          "bytes": 104812640,
+          "first_completion": 1790125341003,
+          "last_completion": 1790126489761
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.5",
+          "inode": 7733721,
+          "bytes": 104849454,
+          "first_completion": 1790127040437,
+          "last_completion": 1790127794256
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.6",
+          "inode": 7733707,
+          "bytes": 104843067,
+          "first_completion": 1790126275587,
+          "last_completion": 1790127040109
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 7733884,
+          "bytes": 104835218,
+          "first_completion": 1790126579449,
+          "last_completion": 1790127814474
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 7733826,
+          "bytes": 104854343,
+          "first_completion": 1790125383766,
+          "last_completion": 1790126579185
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.1",
+          "inode": 7733509,
+          "bytes": 104845725,
+          "first_completion": 1790127533469,
+          "last_completion": 1790129612676
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.2",
+          "inode": 7734001,
+          "bytes": 104846174,
+          "first_completion": 1790125429480,
+          "last_completion": 1790127531872
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.2",
+          "inode": 7733615,
+          "bytes": 104854251,
+          "first_completion": 1790127007308,
+          "last_completion": 1790128888421
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 7733552,
+          "bytes": 104833180,
+          "first_completion": 1790125191748,
+          "last_completion": 1790127007232
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 7733555,
+          "bytes": 104829652,
+          "first_completion": 1790126721929,
+          "last_completion": 1790127723988
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.5",
+          "inode": 7733536,
+          "bytes": 104774599,
+          "first_completion": 1790125697990,
+          "last_completion": 1790126721488
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.2",
+          "inode": 7733854,
+          "bytes": 104853102,
+          "first_completion": 1790127654758,
+          "last_completion": 1790129057699
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 7733806,
+          "bytes": 104845306,
+          "first_completion": 1790126228807,
+          "last_completion": 1790127654084
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 7733621,
+          "bytes": 104854852,
+          "first_completion": 1790127231595,
+          "last_completion": 1790128084324
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.5",
+          "inode": 7733633,
+          "bytes": 104854157,
+          "first_completion": 1790126345596,
+          "last_completion": 1790127231227
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 7733719,
+          "bytes": 104853538,
+          "first_completion": 1790126700879,
+          "last_completion": 1790128270800
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 7733679,
+          "bytes": 104841789,
+          "first_completion": 1790125132535,
+          "last_completion": 1790126700265
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 7733623,
+          "bytes": 104844481,
+          "first_completion": 1790127193086,
+          "last_completion": 1790128094376
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 7733632,
+          "bytes": 104834524,
+          "first_completion": 1790126277918,
+          "last_completion": 1790127193040
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 7733715,
+          "bytes": 104853670,
+          "first_completion": 1790127603154,
+          "last_completion": 1790128384417
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.5",
+          "inode": 7733699,
+          "bytes": 104821994,
+          "first_completion": 1790126811756,
+          "last_completion": 1790127603070
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.6",
+          "inode": 7733676,
+          "bytes": 104853613,
+          "first_completion": 1790126026142,
+          "last_completion": 1790126811707
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 7733921,
+          "bytes": 104837381,
+          "first_completion": 1790126761643,
+          "last_completion": 1790127912041
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 7733888,
+          "bytes": 104817299,
+          "first_completion": 1790125579369,
+          "last_completion": 1790126761595
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 7733808,
+          "bytes": 104800127,
+          "first_completion": 1790126540036,
+          "last_completion": 1790127912448
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 7733692,
+          "bytes": 104845211,
+          "first_completion": 1790125106433,
+          "last_completion": 1790126538264
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 7733882,
+          "bytes": 104810536,
+          "first_completion": 1790126635531,
+          "last_completion": 1790127880544
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 7733869,
+          "bytes": 104805709,
+          "first_completion": 1790125390687,
+          "last_completion": 1790126635106
+        }
+      ],
+      "elapsed_s": 54.05600571632385,
+      "output_bytes": 6982440,
+      "sha256": "ceb0a9628a7e5263bca7d554aa3fd4da8493f44195709ac70c95addd4cce6af0",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "cdbdfe572726337e03319d3abeb510f82092e09129318803840d7a5f455258f4",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-03.jsonl.xz": {
+      "hostname": "serverless-010064224054.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 141473,
+        "records": 52741,
+        "tokens": 154384396,
+        "status:OK": 52741
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.2",
+          "inode": 17040153,
+          "bytes": 104851110,
+          "first_completion": 1790127468423,
+          "last_completion": 1790128696391
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 17040223,
+          "bytes": 104800772,
+          "first_completion": 1790126131997,
+          "last_completion": 1790127467888
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 17040156,
+          "bytes": 104856828,
+          "first_completion": 1790127590869,
+          "last_completion": 1790128754606
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 17040075,
+          "bytes": 104848622,
+          "first_completion": 1790126444735,
+          "last_completion": 1790127590735
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.5",
+          "inode": 17040366,
+          "bytes": 104852848,
+          "first_completion": 1790125319444,
+          "last_completion": 1790126444530
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 17039712,
+          "bytes": 104851935,
+          "first_completion": 1790127659169,
+          "last_completion": 1790128702604
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 17040254,
+          "bytes": 104854117,
+          "first_completion": 1790126565015,
+          "last_completion": 1790127658641
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 17040359,
+          "bytes": 104844758,
+          "first_completion": 1790125505037,
+          "last_completion": 1790126564692
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 17040209,
+          "bytes": 104852060,
+          "first_completion": 1790126544138,
+          "last_completion": 1790127736400
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 17040364,
+          "bytes": 104853415,
+          "first_completion": 1790125309509,
+          "last_completion": 1790126543807
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 17040096,
+          "bytes": 104848360,
+          "first_completion": 1790126889616,
+          "last_completion": 1790128046307
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 17040368,
+          "bytes": 104841663,
+          "first_completion": 1790125609005,
+          "last_completion": 1790126889522
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 17039884,
+          "bytes": 104848360,
+          "first_completion": 1790127035042,
+          "last_completion": 1790127874311
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.6",
+          "inode": 17039865,
+          "bytes": 104819955,
+          "first_completion": 1790126209646,
+          "last_completion": 1790127034878
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 17040017,
+          "bytes": 104856225,
+          "first_completion": 1790126691786,
+          "last_completion": 1790128112078
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 17039937,
+          "bytes": 104855969,
+          "first_completion": 1790125225729,
+          "last_completion": 1790126691410
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 17040389,
+          "bytes": 104791284,
+          "first_completion": 1790126556823,
+          "last_completion": 1790127789850
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 17040037,
+          "bytes": 104765888,
+          "first_completion": 1790125322056,
+          "last_completion": 1790126556760
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 17039945,
+          "bytes": 104811576,
+          "first_completion": 1790126997131,
+          "last_completion": 1790128429655
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 17039939,
+          "bytes": 104837036,
+          "first_completion": 1790125525873,
+          "last_completion": 1790126996176
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 17040206,
+          "bytes": 104844889,
+          "first_completion": 1790126498643,
+          "last_completion": 1790127678955
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 17040365,
+          "bytes": 104835968,
+          "first_completion": 1790125309892,
+          "last_completion": 1790126498547
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 17040097,
+          "bytes": 104848716,
+          "first_completion": 1790126901606,
+          "last_completion": 1790128035106
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 17040369,
+          "bytes": 104840325,
+          "first_completion": 1790125732057,
+          "last_completion": 1790126901187
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.3",
+          "inode": 17039491,
+          "bytes": 104827181,
+          "first_completion": 1790127611739,
+          "last_completion": 1790128588502
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 17039454,
+          "bytes": 104852861,
+          "first_completion": 1790126570029,
+          "last_completion": 1790127611459
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 17039713,
+          "bytes": 104848199,
+          "first_completion": 1790125562013,
+          "last_completion": 1790126568797
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.1",
+          "inode": 17040158,
+          "bytes": 104857469,
+          "first_completion": 1790127627744,
+          "last_completion": 1790129883535
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.2",
+          "inode": 17040363,
+          "bytes": 104837050,
+          "first_completion": 1790125191429,
+          "last_completion": 1790127627476
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 17039938,
+          "bytes": 104833617,
+          "first_completion": 1790127266690,
+          "last_completion": 1790128003048
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.6",
+          "inode": 17039925,
+          "bytes": 104850414,
+          "first_completion": 1790126456369,
+          "last_completion": 1790127266637
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.7",
+          "inode": 17039900,
+          "bytes": 104844281,
+          "first_completion": 1790125665236,
+          "last_completion": 1790126456261
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 17039830,
+          "bytes": 104842275,
+          "first_completion": 1790127063984,
+          "last_completion": 1790127987128
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.5",
+          "inode": 17039833,
+          "bytes": 104793112,
+          "first_completion": 1790126139605,
+          "last_completion": 1790127063943
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 17039716,
+          "bytes": 104854839,
+          "first_completion": 1790127292500,
+          "last_completion": 1790128291582
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 17040240,
+          "bytes": 104720539,
+          "first_completion": 1790126242031,
+          "last_completion": 1790127292214
+        }
+      ],
+      "elapsed_s": 68.7109763622284,
+      "output_bytes": 6945804,
+      "sha256": "0a85cd59670d0454c03eae6125a77c733ea9892cd5c00997b48a1681054ab426",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "bd50745935761f1723d3c2de618e9232b792dafc78c32283593433bab6622252",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-04.jsonl.xz": {
+      "hostname": "serverless-010064224014.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 144962,
+        "records": 52965,
+        "tokens": 156095948,
+        "status:OK": 52965
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 8132596,
+          "bytes": 104844801,
+          "first_completion": 1790127651086,
+          "last_completion": 1790128760349
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 8132560,
+          "bytes": 104848906,
+          "first_completion": 1790126556329,
+          "last_completion": 1790127650937
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 8132571,
+          "bytes": 104848390,
+          "first_completion": 1790125337650,
+          "last_completion": 1790126556132
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 8132551,
+          "bytes": 104851461,
+          "first_completion": 1790126667423,
+          "last_completion": 1790127946581
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 8132534,
+          "bytes": 104856405,
+          "first_completion": 1790125347095,
+          "last_completion": 1790126666822
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 8132587,
+          "bytes": 104855204,
+          "first_completion": 1790126612692,
+          "last_completion": 1790127760579
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 8132572,
+          "bytes": 104854433,
+          "first_completion": 1790125463226,
+          "last_completion": 1790126612466
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.2",
+          "inode": 8132527,
+          "bytes": 104843317,
+          "first_completion": 1790127226233,
+          "last_completion": 1790128621886
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 8131237,
+          "bytes": 104835141,
+          "first_completion": 1790125802164,
+          "last_completion": 1790127225386
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 8130878,
+          "bytes": 104848726,
+          "first_completion": 1790127559313,
+          "last_completion": 1790128452707
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.5",
+          "inode": 8130843,
+          "bytes": 104855003,
+          "first_completion": 1790126650540,
+          "last_completion": 1790127558918
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.6",
+          "inode": 8129095,
+          "bytes": 104851448,
+          "first_completion": 1790125717053,
+          "last_completion": 1790126650154
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 8131112,
+          "bytes": 104856756,
+          "first_completion": 1790127321815,
+          "last_completion": 1790128157529
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 8131085,
+          "bytes": 104849623,
+          "first_completion": 1790126455459,
+          "last_completion": 1790127321741
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.6",
+          "inode": 8130859,
+          "bytes": 104840386,
+          "first_completion": 1790125544575,
+          "last_completion": 1790126455145
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 8128222,
+          "bytes": 104821560,
+          "first_completion": 1790127632598,
+          "last_completion": 1790128625967
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 8132597,
+          "bytes": 104843914,
+          "first_completion": 1790126592488,
+          "last_completion": 1790127632402
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.5",
+          "inode": 8132588,
+          "bytes": 104855110,
+          "first_completion": 1790125475140,
+          "last_completion": 1790126592339
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.2",
+          "inode": 8129111,
+          "bytes": 104755172,
+          "first_completion": 1790127069040,
+          "last_completion": 1790128836970
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 8128936,
+          "bytes": 104846470,
+          "first_completion": 1790125231483,
+          "last_completion": 1790127068787
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 8128949,
+          "bytes": 104781091,
+          "first_completion": 1790127569106,
+          "last_completion": 1790128593247
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 8128773,
+          "bytes": 104856996,
+          "first_completion": 1790126549011,
+          "last_completion": 1790127568980
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 8128231,
+          "bytes": 104856524,
+          "first_completion": 1790125538374,
+          "last_completion": 1790126548882
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 8132590,
+          "bytes": 104855525,
+          "first_completion": 1790126773382,
+          "last_completion": 1790127915050
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.5",
+          "inode": 8132573,
+          "bytes": 104830909,
+          "first_completion": 1790125637366,
+          "last_completion": 1790126773205
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.2",
+          "inode": 8131113,
+          "bytes": 104856626,
+          "first_completion": 1790127339649,
+          "last_completion": 1790128946132
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 8130874,
+          "bytes": 104856696,
+          "first_completion": 1790125630658,
+          "last_completion": 1790127339414
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 8132595,
+          "bytes": 104853456,
+          "first_completion": 1790126725541,
+          "last_completion": 1790127727290
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 8132591,
+          "bytes": 104843503,
+          "first_completion": 1790125622850,
+          "last_completion": 1790126725494
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 8132589,
+          "bytes": 104819213,
+          "first_completion": 1790126771330,
+          "last_completion": 1790127877850
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.5",
+          "inode": 8132566,
+          "bytes": 104856320,
+          "first_completion": 1790125631409,
+          "last_completion": 1790126771255
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 8132594,
+          "bytes": 104841872,
+          "first_completion": 1790127000901,
+          "last_completion": 1790128117482
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 8132578,
+          "bytes": 104857360,
+          "first_completion": 1790125834264,
+          "last_completion": 1790127000835
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 8132592,
+          "bytes": 104855573,
+          "first_completion": 1790126548855,
+          "last_completion": 1790127669605
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.5",
+          "inode": 8132574,
+          "bytes": 104826408,
+          "first_completion": 1790125454818,
+          "last_completion": 1790126548599
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 8129110,
+          "bytes": 104846581,
+          "first_completion": 1790127274912,
+          "last_completion": 1790128197517
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.5",
+          "inode": 8129048,
+          "bytes": 104850172,
+          "first_completion": 1790126316291,
+          "last_completion": 1790127274644
+        }
+      ],
+      "elapsed_s": 62.688424587249756,
+      "output_bytes": 7007068,
+      "sha256": "f15ebdcb58ebaa7d6f98dc3f41b05160c8ef6150ab08130384c5134548659f7b",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "93f188c957eb6571f388bd0b01ee9877903b0f2a608d2b014eeb1f3ed7d67973",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-05.jsonl.xz": {
+      "hostname": "serverless-010064161120.na130",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 133410,
+        "records": 52752,
+        "tokens": 155130624,
+        "status:OK": 52752
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 16253879,
+          "bytes": 104854210,
+          "first_completion": 1790127233495,
+          "last_completion": 1790128118806
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 16253979,
+          "bytes": 104838779,
+          "first_completion": 1790126345022,
+          "last_completion": 1790127233181
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 16255162,
+          "bytes": 104837226,
+          "first_completion": 1790126710205,
+          "last_completion": 1790128003940
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 16255173,
+          "bytes": 104836850,
+          "first_completion": 1790125384898,
+          "last_completion": 1790126710108
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 16253998,
+          "bytes": 104845806,
+          "first_completion": 1790127034069,
+          "last_completion": 1790127915977
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 16253978,
+          "bytes": 104838514,
+          "first_completion": 1790126121141,
+          "last_completion": 1790127034056
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 16254530,
+          "bytes": 104843886,
+          "first_completion": 1790126466302,
+          "last_completion": 1790127970830
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 16254122,
+          "bytes": 104855222,
+          "first_completion": 1790124940771,
+          "last_completion": 1790126465866
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.5",
+          "inode": 16254025,
+          "bytes": 104848585,
+          "first_completion": 1790127188998,
+          "last_completion": 1790127948812
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.6",
+          "inode": 16254529,
+          "bytes": 104802074,
+          "first_completion": 1790126390723,
+          "last_completion": 1790127188994
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 16254016,
+          "bytes": 104850406,
+          "first_completion": 1790126919608,
+          "last_completion": 1790127717797
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.6",
+          "inode": 16253981,
+          "bytes": 104853042,
+          "first_completion": 1790126032889,
+          "last_completion": 1790126919285
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.2",
+          "inode": 16253965,
+          "bytes": 104855455,
+          "first_completion": 1790127343686,
+          "last_completion": 1790129103026
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 16253267,
+          "bytes": 104767406,
+          "first_completion": 1790125434554,
+          "last_completion": 1790127343482
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.1",
+          "inode": 16253925,
+          "bytes": 104843102,
+          "first_completion": 1790127233639,
+          "last_completion": 1790129241289
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.2",
+          "inode": 16256254,
+          "bytes": 104855835,
+          "first_completion": 1790125011890,
+          "last_completion": 1790127233606
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 16253270,
+          "bytes": 104847711,
+          "first_completion": 1790127638087,
+          "last_completion": 1790128583474
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 16253246,
+          "bytes": 104849459,
+          "first_completion": 1790126587165,
+          "last_completion": 1790127637947
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 16253924,
+          "bytes": 104848131,
+          "first_completion": 1790125551460,
+          "last_completion": 1790126586968
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 16253966,
+          "bytes": 104847708,
+          "first_completion": 1790127269068,
+          "last_completion": 1790128196325
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.5",
+          "inode": 16253888,
+          "bytes": 104853604,
+          "first_completion": 1790126334420,
+          "last_completion": 1790127268999
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 16253967,
+          "bytes": 104848463,
+          "first_completion": 1790127476537,
+          "last_completion": 1790128386899
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.5",
+          "inode": 16253891,
+          "bytes": 104825857,
+          "first_completion": 1790126501507,
+          "last_completion": 1790127476398
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.6",
+          "inode": 16253269,
+          "bytes": 104844400,
+          "first_completion": 1790125536520,
+          "last_completion": 1790126501341
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.3",
+          "inode": 16256255,
+          "bytes": 104846995,
+          "first_completion": 1790127567430,
+          "last_completion": 1790128751351
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 16255666,
+          "bytes": 104837663,
+          "first_completion": 1790126357112,
+          "last_completion": 1790127566409
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.3",
+          "inode": 16256168,
+          "bytes": 104843535,
+          "first_completion": 1790126570380,
+          "last_completion": 1790127746997
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 16256275,
+          "bytes": 104855524,
+          "first_completion": 1790125345685,
+          "last_completion": 1790126568594
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 16255166,
+          "bytes": 104830930,
+          "first_completion": 1790126842604,
+          "last_completion": 1790128074943
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 16255177,
+          "bytes": 104844841,
+          "first_completion": 1790125517407,
+          "last_completion": 1790126841697
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 16255161,
+          "bytes": 104776442,
+          "first_completion": 1790126606634,
+          "last_completion": 1790127959828
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 16255172,
+          "bytes": 104856959,
+          "first_completion": 1790125313547,
+          "last_completion": 1790126606211
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 16255155,
+          "bytes": 104846010,
+          "first_completion": 1790126743302,
+          "last_completion": 1790128139475
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 16255091,
+          "bytes": 104855090,
+          "first_completion": 1790125317207,
+          "last_completion": 1790126742867
+        }
+      ],
+      "elapsed_s": 59.433104038238525,
+      "output_bytes": 6974920,
+      "sha256": "02992e6115635edb10f930b4a48abc31c93ca055562c7c434164b1c1ced4e3bb",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "ea6ec396cd192d4d8087a802ec95d2de881a48a85cfcfd875838179d3a414aec",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-06.jsonl.xz": {
+      "hostname": "serverless-010064224037.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 137376,
+        "records": 52803,
+        "tokens": 156593453,
+        "status:OK": 52803
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.2",
+          "inode": 8127743,
+          "bytes": 104851681,
+          "first_completion": 1790126780043,
+          "last_completion": 1790128415158
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 8127663,
+          "bytes": 104809834,
+          "first_completion": 1790125051687,
+          "last_completion": 1790126779786
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.2",
+          "inode": 8127892,
+          "bytes": 104838153,
+          "first_completion": 1790126880548,
+          "last_completion": 1790128363013
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 8127862,
+          "bytes": 104855837,
+          "first_completion": 1790125336738,
+          "last_completion": 1790126880125
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 8127627,
+          "bytes": 104825163,
+          "first_completion": 1790127352278,
+          "last_completion": 1790128221328
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 8127657,
+          "bytes": 104855612,
+          "first_completion": 1790126484668,
+          "last_completion": 1790127352075
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.6",
+          "inode": 8127620,
+          "bytes": 104857047,
+          "first_completion": 1790125574580,
+          "last_completion": 1790126484444
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 8127652,
+          "bytes": 104835337,
+          "first_completion": 1790127490970,
+          "last_completion": 1790128336046
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.5",
+          "inode": 8127655,
+          "bytes": 104840373,
+          "first_completion": 1790126594478,
+          "last_completion": 1790127490869
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.6",
+          "inode": 8127617,
+          "bytes": 104854846,
+          "first_completion": 1790125662738,
+          "last_completion": 1790126594472
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 8127952,
+          "bytes": 104768643,
+          "first_completion": 1790126846916,
+          "last_completion": 1790128229625
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 8127871,
+          "bytes": 104729854,
+          "first_completion": 1790125362584,
+          "last_completion": 1790126846743
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 8126930,
+          "bytes": 104847279,
+          "first_completion": 1790126710738,
+          "last_completion": 1790127696203
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 8127537,
+          "bytes": 104846186,
+          "first_completion": 1790125668766,
+          "last_completion": 1790126710636
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 8129399,
+          "bytes": 104855333,
+          "first_completion": 1790126437770,
+          "last_completion": 1790127733737
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 8127903,
+          "bytes": 104819798,
+          "first_completion": 1790125114208,
+          "last_completion": 1790126437250
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 8127739,
+          "bytes": 104849110,
+          "first_completion": 1790127146506,
+          "last_completion": 1790127992065
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.5",
+          "inode": 8127691,
+          "bytes": 104844281,
+          "first_completion": 1790126298210,
+          "last_completion": 1790127146130
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 8127513,
+          "bytes": 104844929,
+          "first_completion": 1790127622650,
+          "last_completion": 1790128660535
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 8129405,
+          "bytes": 104843119,
+          "first_completion": 1790126556087,
+          "last_completion": 1790127622577
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 8129403,
+          "bytes": 104844437,
+          "first_completion": 1790125469242,
+          "last_completion": 1790126555629
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 8129404,
+          "bytes": 104809445,
+          "first_completion": 1790126534015,
+          "last_completion": 1790127871482
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 8127977,
+          "bytes": 104855007,
+          "first_completion": 1790125212780,
+          "last_completion": 1790126533896
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.5",
+          "inode": 8127659,
+          "bytes": 104830802,
+          "first_completion": 1790126796572,
+          "last_completion": 1790127671052
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.6",
+          "inode": 8127619,
+          "bytes": 104828719,
+          "first_completion": 1790125852593,
+          "last_completion": 1790126796532
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 8127023,
+          "bytes": 104852465,
+          "first_completion": 1790127015442,
+          "last_completion": 1790128004539
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 8126929,
+          "bytes": 104853678,
+          "first_completion": 1790126011196,
+          "last_completion": 1790127015433
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.2",
+          "inode": 8127745,
+          "bytes": 104853769,
+          "first_completion": 1790127512369,
+          "last_completion": 1790129148678
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.3",
+          "inode": 8127671,
+          "bytes": 104856901,
+          "first_completion": 1790125804837,
+          "last_completion": 1790127512182
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 8127510,
+          "bytes": 104852908,
+          "first_completion": 1790127398148,
+          "last_completion": 1790128439424
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 8129398,
+          "bytes": 104805811,
+          "first_completion": 1790126355353,
+          "last_completion": 1790127398013
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 8127507,
+          "bytes": 104850155,
+          "first_completion": 1790127416339,
+          "last_completion": 1790128479946
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 8129397,
+          "bytes": 104838765,
+          "first_completion": 1790126346123,
+          "last_completion": 1790127416015
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 8127954,
+          "bytes": 104839699,
+          "first_completion": 1790126812129,
+          "last_completion": 1790128196689
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 8127896,
+          "bytes": 104855409,
+          "first_completion": 1790125352965,
+          "last_completion": 1790126811977
+        }
+      ],
+      "elapsed_s": 49.19515919685364,
+      "output_bytes": 7031668,
+      "sha256": "0e57a5d20b660672b908d6a356263be5071136782d31e0a4bb17ab47af5d33c4",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "40f5b3e123a4ad311fa04e7b1fc7e1a546d992443d7c6f067a60e29e0618b5de",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-08.jsonl.xz": {
+      "hostname": "serverless-010064161179.na130",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 129329,
+        "records": 52546,
+        "tokens": 154576590,
+        "status:OK": 52546
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 14426130,
+          "bytes": 104853964,
+          "first_completion": 1790126577506,
+          "last_completion": 1790127690344
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 14424843,
+          "bytes": 104833240,
+          "first_completion": 1790125429231,
+          "last_completion": 1790126577410
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.2",
+          "inode": 14421212,
+          "bytes": 104847837,
+          "first_completion": 1790127581670,
+          "last_completion": 1790129337971
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 14421052,
+          "bytes": 104838881,
+          "first_completion": 1790125629588,
+          "last_completion": 1790127581598
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 14421065,
+          "bytes": 104807423,
+          "first_completion": 1790127272253,
+          "last_completion": 1790128250782
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 14418594,
+          "bytes": 104848580,
+          "first_completion": 1790126302442,
+          "last_completion": 1790127272173
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 14422676,
+          "bytes": 104856720,
+          "first_completion": 1790126529463,
+          "last_completion": 1790127811970
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 14426793,
+          "bytes": 104792621,
+          "first_completion": 1790125219727,
+          "last_completion": 1790126528968
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 14421094,
+          "bytes": 104854608,
+          "first_completion": 1790127615937,
+          "last_completion": 1790128624965
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 14424970,
+          "bytes": 104828403,
+          "first_completion": 1790126525052,
+          "last_completion": 1790127615290
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.5",
+          "inode": 14426503,
+          "bytes": 104828349,
+          "first_completion": 1790125413931,
+          "last_completion": 1790126524367
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.3",
+          "inode": 14426114,
+          "bytes": 104832502,
+          "first_completion": 1790127412143,
+          "last_completion": 1790128515429
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 14425568,
+          "bytes": 104838778,
+          "first_completion": 1790126256058,
+          "last_completion": 1790127412089
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 14423014,
+          "bytes": 104856069,
+          "first_completion": 1790126834990,
+          "last_completion": 1790128141814
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 14426803,
+          "bytes": 104851417,
+          "first_completion": 1790125540608,
+          "last_completion": 1790126834494
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.2",
+          "inode": 14426545,
+          "bytes": 104853603,
+          "first_completion": 1790127449812,
+          "last_completion": 1790128811615
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 14425207,
+          "bytes": 104846073,
+          "first_completion": 1790126008645,
+          "last_completion": 1790127449395
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 14421190,
+          "bytes": 104840073,
+          "first_completion": 1790126771837,
+          "last_completion": 1790127700569
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.6",
+          "inode": 14421063,
+          "bytes": 104855554,
+          "first_completion": 1790125793550,
+          "last_completion": 1790126771708
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 14421357,
+          "bytes": 104839827,
+          "first_completion": 1790127191213,
+          "last_completion": 1790128000243
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.5",
+          "inode": 14421323,
+          "bytes": 104834251,
+          "first_completion": 1790126324857,
+          "last_completion": 1790127191202
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 14426480,
+          "bytes": 104852440,
+          "first_completion": 1790126790386,
+          "last_completion": 1790127847325
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.5",
+          "inode": 14426507,
+          "bytes": 104834371,
+          "first_completion": 1790125710983,
+          "last_completion": 1790126790296
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 14424625,
+          "bytes": 104856649,
+          "first_completion": 1790126523303,
+          "last_completion": 1790127727129
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 14423080,
+          "bytes": 104749878,
+          "first_completion": 1790125290008,
+          "last_completion": 1790126522698
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.3",
+          "inode": 14426129,
+          "bytes": 104846463,
+          "first_completion": 1790126574000,
+          "last_completion": 1790127870663
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 14426781,
+          "bytes": 104825353,
+          "first_completion": 1790125250463,
+          "last_completion": 1790126573944
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 14424782,
+          "bytes": 104852492,
+          "first_completion": 1790126935862,
+          "last_completion": 1790128126186
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 14423740,
+          "bytes": 104838256,
+          "first_completion": 1790125683897,
+          "last_completion": 1790126935584
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.5",
+          "inode": 14421922,
+          "bytes": 104844100,
+          "first_completion": 1790127165292,
+          "last_completion": 1790127979822
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.6",
+          "inode": 14421383,
+          "bytes": 104849809,
+          "first_completion": 1790126338633,
+          "last_completion": 1790127164850
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 14423733,
+          "bytes": 104853550,
+          "first_completion": 1790126978044,
+          "last_completion": 1790128180427
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 14423717,
+          "bytes": 104844369,
+          "first_completion": 1790125672669,
+          "last_completion": 1790126978005
+        }
+      ],
+      "elapsed_s": 61.890493869781494,
+      "output_bytes": 6966416,
+      "sha256": "8bf88f4ab5e015c892511a16a6873bb9e67749339291e5b38252e00366cf054e",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "cf4718eb549fc894d95d7691ba69c0176c3e859a14b6eb8c8c30240be140690a",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-10.jsonl.xz": {
+      "hostname": "serverless-010064224034.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 149404,
+        "records": 52690,
+        "tokens": 155165758,
+        "status:OK": 52690
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 2884337,
+          "bytes": 104845472,
+          "first_completion": 1790126803253,
+          "last_completion": 1790127806597
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 2890940,
+          "bytes": 104846119,
+          "first_completion": 1790125764461,
+          "last_completion": 1790126803188
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 2895235,
+          "bytes": 104845707,
+          "first_completion": 1790126775139,
+          "last_completion": 1790127850972
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.5",
+          "inode": 2895092,
+          "bytes": 104839803,
+          "first_completion": 1790125642196,
+          "last_completion": 1790126774821
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.1",
+          "inode": 2890883,
+          "bytes": 104853145,
+          "first_completion": 1790127432154,
+          "last_completion": 1790129430782
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.2",
+          "inode": 2897155,
+          "bytes": 104850852,
+          "first_completion": 1790125239214,
+          "last_completion": 1790127432013
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 2890888,
+          "bytes": 104762022,
+          "first_completion": 1790127397171,
+          "last_completion": 1790128471022
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 2895133,
+          "bytes": 104842023,
+          "first_completion": 1790126334031,
+          "last_completion": 1790127396932
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 2890897,
+          "bytes": 104849805,
+          "first_completion": 1790127188768,
+          "last_completion": 1790128247212
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.5",
+          "inode": 2895106,
+          "bytes": 104848110,
+          "first_completion": 1790126121263,
+          "last_completion": 1790127188304
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 2894328,
+          "bytes": 104845649,
+          "first_completion": 1790126472498,
+          "last_completion": 1790127684993
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 2892477,
+          "bytes": 104854955,
+          "first_completion": 1790125259065,
+          "last_completion": 1790126472042
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 2890893,
+          "bytes": 104834419,
+          "first_completion": 1790127634781,
+          "last_completion": 1790128634405
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 2895368,
+          "bytes": 104844930,
+          "first_completion": 1790126597043,
+          "last_completion": 1790127634636
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.5",
+          "inode": 2895100,
+          "bytes": 104854801,
+          "first_completion": 1790125558289,
+          "last_completion": 1790126596965
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 2894332,
+          "bytes": 104854619,
+          "first_completion": 1790126701189,
+          "last_completion": 1790127871295
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 2893244,
+          "bytes": 104850761,
+          "first_completion": 1790125470585,
+          "last_completion": 1790126700339
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 2884426,
+          "bytes": 104848151,
+          "first_completion": 1790127392651,
+          "last_completion": 1790128322897
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 2890989,
+          "bytes": 104818127,
+          "first_completion": 1790126426691,
+          "last_completion": 1790127392578
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.6",
+          "inode": 2890868,
+          "bytes": 104855724,
+          "first_completion": 1790125480062,
+          "last_completion": 1790126426482
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 2890889,
+          "bytes": 104854439,
+          "first_completion": 1790127548440,
+          "last_completion": 1790128591941
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 2895214,
+          "bytes": 104854394,
+          "first_completion": 1790126487015,
+          "last_completion": 1790127548110
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.5",
+          "inode": 2895090,
+          "bytes": 104850453,
+          "first_completion": 1790125412862,
+          "last_completion": 1790126486970
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 2884428,
+          "bytes": 104846914,
+          "first_completion": 1790127334726,
+          "last_completion": 1790128235545
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.5",
+          "inode": 2890955,
+          "bytes": 104789287,
+          "first_completion": 1790126410151,
+          "last_completion": 1790127334462
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.6",
+          "inode": 2890866,
+          "bytes": 104851939,
+          "first_completion": 1790125439676,
+          "last_completion": 1790126410096
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.2",
+          "inode": 2891065,
+          "bytes": 104842269,
+          "first_completion": 1790126798260,
+          "last_completion": 1790128504301
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.3",
+          "inode": 2891023,
+          "bytes": 104850638,
+          "first_completion": 1790125045676,
+          "last_completion": 1790126798093
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 2891002,
+          "bytes": 104847783,
+          "first_completion": 1790127216314,
+          "last_completion": 1790128124006
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.5",
+          "inode": 2890987,
+          "bytes": 104849056,
+          "first_completion": 1790126244536,
+          "last_completion": 1790127216024
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 2890892,
+          "bytes": 104836158,
+          "first_completion": 1790127518774,
+          "last_completion": 1790128525849
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 2895224,
+          "bytes": 104856137,
+          "first_completion": 1790126458164,
+          "last_completion": 1790127518284
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 2895089,
+          "bytes": 104824187,
+          "first_completion": 1790125384502,
+          "last_completion": 1790126458021
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.2",
+          "inode": 2891050,
+          "bytes": 104856656,
+          "first_completion": 1790126860339,
+          "last_completion": 1790128434550
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 2891049,
+          "bytes": 104846216,
+          "first_completion": 1790125296049,
+          "last_completion": 1790126860296
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 2890887,
+          "bytes": 104852457,
+          "first_completion": 1790127621186,
+          "last_completion": 1790128642907
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 2894203,
+          "bytes": 104845255,
+          "first_completion": 1790126558063,
+          "last_completion": 1790127620297
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.5",
+          "inode": 2895098,
+          "bytes": 104813540,
+          "first_completion": 1790125497091,
+          "last_completion": 1790126557845
+        }
+      ],
+      "elapsed_s": 63.80462026596069,
+      "output_bytes": 6951840,
+      "sha256": "a75832ef966e96b7c88ba09377987ac8338fe84ea668548bf936051b6749566a",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "5f1671d53a764b0d8d8d28730a65b44e2e90fea28d968dace10e88991aa7149d",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-11.jsonl.xz": {
+      "hostname": "serverless-010064161135.na130",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 145194,
+        "records": 52835,
+        "tokens": 157236596,
+        "status:OK": 52835
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 8921559,
+          "bytes": 104849219,
+          "first_completion": 1790127385651,
+          "last_completion": 1790128597189
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 8921109,
+          "bytes": 104857179,
+          "first_completion": 1790126151295,
+          "last_completion": 1790127385618
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 8915949,
+          "bytes": 104829599,
+          "first_completion": 1790126644165,
+          "last_completion": 1790127670267
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.5",
+          "inode": 8917560,
+          "bytes": 104852545,
+          "first_completion": 1790125636972,
+          "last_completion": 1790126644046
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 8917566,
+          "bytes": 104855478,
+          "first_completion": 1790127532696,
+          "last_completion": 1790128547251
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 8922579,
+          "bytes": 104823757,
+          "first_completion": 1790126465488,
+          "last_completion": 1790127532515
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 8922799,
+          "bytes": 104823728,
+          "first_completion": 1790125375642,
+          "last_completion": 1790126465352
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 8915952,
+          "bytes": 104842018,
+          "first_completion": 1790126914088,
+          "last_completion": 1790127900246
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.5",
+          "inode": 8917553,
+          "bytes": 104833966,
+          "first_completion": 1790125859334,
+          "last_completion": 1790126913785
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 8919625,
+          "bytes": 104839904,
+          "first_completion": 1790126757017,
+          "last_completion": 1790128027906
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 8919427,
+          "bytes": 104848554,
+          "first_completion": 1790125483159,
+          "last_completion": 1790126756891
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 8918708,
+          "bytes": 104844672,
+          "first_completion": 1790127344457,
+          "last_completion": 1790128179735
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 8918585,
+          "bytes": 104810419,
+          "first_completion": 1790126535305,
+          "last_completion": 1790127344452
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.6",
+          "inode": 8918542,
+          "bytes": 104829003,
+          "first_completion": 1790125674367,
+          "last_completion": 1790126535262
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.2",
+          "inode": 8918548,
+          "bytes": 104824439,
+          "first_completion": 1790127002488,
+          "last_completion": 1790128591860
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 8917663,
+          "bytes": 104843016,
+          "first_completion": 1790125293542,
+          "last_completion": 1790127002435
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 8917504,
+          "bytes": 104845049,
+          "first_completion": 1790127434200,
+          "last_completion": 1790128502573
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 8922797,
+          "bytes": 104803274,
+          "first_completion": 1790126419048,
+          "last_completion": 1790127434051
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.5",
+          "inode": 8922800,
+          "bytes": 104843718,
+          "first_completion": 1790125329679,
+          "last_completion": 1790126418376
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 8917695,
+          "bytes": 104856158,
+          "first_completion": 1790127496445,
+          "last_completion": 1790128369612
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 8917674,
+          "bytes": 104854981,
+          "first_completion": 1790126605146,
+          "last_completion": 1790127496248
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.6",
+          "inode": 8917654,
+          "bytes": 104834784,
+          "first_completion": 1790125716129,
+          "last_completion": 1790126604077
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 8919390,
+          "bytes": 104846706,
+          "first_completion": 1790127135823,
+          "last_completion": 1790128550487
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 8918821,
+          "bytes": 104829717,
+          "first_completion": 1790125656665,
+          "last_completion": 1790127135623
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 8922803,
+          "bytes": 104824849,
+          "first_completion": 1790126971176,
+          "last_completion": 1790128080791
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 8921912,
+          "bytes": 104835172,
+          "first_completion": 1790125832111,
+          "last_completion": 1790126971101
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.3",
+          "inode": 8918838,
+          "bytes": 104852979,
+          "first_completion": 1790127070547,
+          "last_completion": 1790128480698
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 8918822,
+          "bytes": 104841530,
+          "first_completion": 1790125604433,
+          "last_completion": 1790127070479
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.2",
+          "inode": 8917657,
+          "bytes": 104847971,
+          "first_completion": 1790127507477,
+          "last_completion": 1790129323285
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.3",
+          "inode": 8917483,
+          "bytes": 104813950,
+          "first_completion": 1790125607945,
+          "last_completion": 1790127506924
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 8922392,
+          "bytes": 104840718,
+          "first_completion": 1790127595417,
+          "last_completion": 1790128724259
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 8922798,
+          "bytes": 104837866,
+          "first_completion": 1790126486425,
+          "last_completion": 1790127595358
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 8921821,
+          "bytes": 104838862,
+          "first_completion": 1790125345437,
+          "last_completion": 1790126486086
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 8922808,
+          "bytes": 104826953,
+          "first_completion": 1790126999161,
+          "last_completion": 1790128075456
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 8921904,
+          "bytes": 104844440,
+          "first_completion": 1790125844667,
+          "last_completion": 1790126998980
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.5",
+          "inode": 8917680,
+          "bytes": 104847168,
+          "first_completion": 1790126875391,
+          "last_completion": 1790127748022
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.6",
+          "inode": 8917656,
+          "bytes": 104770768,
+          "first_completion": 1790125939437,
+          "last_completion": 1790126875334
+        }
+      ],
+      "elapsed_s": 62.482640981674194,
+      "output_bytes": 7028152,
+      "sha256": "e3e1aede5f7e189b7a6d5f78dcbcb998a75b320afc367b059ecfccbd76a3c070",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "f4744f81b1d8d7fb72251cadcf5a26243107555e261d9c972f251b8393960830",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-13.jsonl.xz": {
+      "hostname": "serverless-010064161113.na130",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 141906,
+        "records": 52753,
+        "tokens": 153985561,
+        "status:OK": 52753
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.2",
+          "inode": 4719587,
+          "bytes": 104845498,
+          "first_completion": 1790127359868,
+          "last_completion": 1790129041468
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 4719516,
+          "bytes": 104854498,
+          "first_completion": 1790125603418,
+          "last_completion": 1790127359460
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 4722119,
+          "bytes": 104844662,
+          "first_completion": 1790127635719,
+          "last_completion": 1790128852770
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 4721954,
+          "bytes": 104838922,
+          "first_completion": 1790126403862,
+          "last_completion": 1790127635412
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.5",
+          "inode": 4719757,
+          "bytes": 104854987,
+          "first_completion": 1790125245360,
+          "last_completion": 1790126403452
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 4722186,
+          "bytes": 104851965,
+          "first_completion": 1790126656738,
+          "last_completion": 1790127759113
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 4722104,
+          "bytes": 104848818,
+          "first_completion": 1790125473706,
+          "last_completion": 1790126656571
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 4719435,
+          "bytes": 104847058,
+          "first_completion": 1790127384443,
+          "last_completion": 1790128430134
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 4722106,
+          "bytes": 104836534,
+          "first_completion": 1790126345954,
+          "last_completion": 1790127384234
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 4719521,
+          "bytes": 104844966,
+          "first_completion": 1790127042586,
+          "last_completion": 1790128001713
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.5",
+          "inode": 4719470,
+          "bytes": 104820089,
+          "first_completion": 1790126099289,
+          "last_completion": 1790127042468
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.2",
+          "inode": 4719529,
+          "bytes": 104730057,
+          "first_completion": 1790127341936,
+          "last_completion": 1790129111338
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.3",
+          "inode": 4719382,
+          "bytes": 104855199,
+          "first_completion": 1790125446027,
+          "last_completion": 1790127341639
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.5",
+          "inode": 4719682,
+          "bytes": 104856750,
+          "first_completion": 1790127555167,
+          "last_completion": 1790128313695
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.6",
+          "inode": 4719617,
+          "bytes": 104833781,
+          "first_completion": 1790126779482,
+          "last_completion": 1790127554951
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.7",
+          "inode": 4719577,
+          "bytes": 104856631,
+          "first_completion": 1790126021600,
+          "last_completion": 1790126779439
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 4719434,
+          "bytes": 104832692,
+          "first_completion": 1790127431216,
+          "last_completion": 1790128468662
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 4721079,
+          "bytes": 104851319,
+          "first_completion": 1790126322014,
+          "last_completion": 1790127431077
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 4719527,
+          "bytes": 104844518,
+          "first_completion": 1790127283003,
+          "last_completion": 1790128169353
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 4719539,
+          "bytes": 104843059,
+          "first_completion": 1790126386252,
+          "last_completion": 1790127282860
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 4719601,
+          "bytes": 104847510,
+          "first_completion": 1790126743772,
+          "last_completion": 1790128274676
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 4719626,
+          "bytes": 104853175,
+          "first_completion": 1790125185718,
+          "last_completion": 1790126743654
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 4719760,
+          "bytes": 104839742,
+          "first_completion": 1790126884518,
+          "last_completion": 1790128249058
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 4719689,
+          "bytes": 104843253,
+          "first_completion": 1790125432377,
+          "last_completion": 1790126883945
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 4719664,
+          "bytes": 104826394,
+          "first_completion": 1790127608825,
+          "last_completion": 1790128415822
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 4719637,
+          "bytes": 104849948,
+          "first_completion": 1790126810112,
+          "last_completion": 1790127608771
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.6",
+          "inode": 4719603,
+          "bytes": 104852387,
+          "first_completion": 1790125976884,
+          "last_completion": 1790126809930
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.2",
+          "inode": 4719668,
+          "bytes": 104773074,
+          "first_completion": 1790127019430,
+          "last_completion": 1790128517657
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.3",
+          "inode": 4719627,
+          "bytes": 104846037,
+          "first_completion": 1790125403122,
+          "last_completion": 1790127019135
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 4722122,
+          "bytes": 104835542,
+          "first_completion": 1790126611694,
+          "last_completion": 1790127770405
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 4722086,
+          "bytes": 104856374,
+          "first_completion": 1790125385522,
+          "last_completion": 1790126611606
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 4719394,
+          "bytes": 104851861,
+          "first_completion": 1790127512925,
+          "last_completion": 1790128481033
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 4718843,
+          "bytes": 104856618,
+          "first_completion": 1790126510298,
+          "last_completion": 1790127512611
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.5",
+          "inode": 4719443,
+          "bytes": 104716386,
+          "first_completion": 1790125502217,
+          "last_completion": 1790126509759
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 4722077,
+          "bytes": 104850925,
+          "first_completion": 1790126781335,
+          "last_completion": 1790127993972
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 4719775,
+          "bytes": 104844768,
+          "first_completion": 1790125507469,
+          "last_completion": 1790126781172
+        }
+      ],
+      "elapsed_s": 63.53818392753601,
+      "output_bytes": 6928940,
+      "sha256": "b10d51aab4e56de945775c46ea430ebbe3a4a5c03b7b2351f07774d121e3f2a2",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "e7345a1b4c47f1466c3ef724869989ca023ef4b38536abe5180ea713b43f9b96",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-14.jsonl.xz": {
+      "hostname": "serverless-010064161162.na130",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 138425,
+        "records": 52829,
+        "tokens": 155599917,
+        "status:OK": 52829
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 17694814,
+          "bytes": 104846278,
+          "first_completion": 1790127252728,
+          "last_completion": 1790128207298
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 17694789,
+          "bytes": 104856856,
+          "first_completion": 1790126311812,
+          "last_completion": 1790127252718
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.2",
+          "inode": 17694970,
+          "bytes": 104830686,
+          "first_completion": 1790127055302,
+          "last_completion": 1790128739138
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 17694975,
+          "bytes": 104856542,
+          "first_completion": 1790125326129,
+          "last_completion": 1790127055227
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 17694794,
+          "bytes": 104799984,
+          "first_completion": 1790127405597,
+          "last_completion": 1790128355642
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.5",
+          "inode": 17694796,
+          "bytes": 104845525,
+          "first_completion": 1790126374754,
+          "last_completion": 1790127405353
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 17694965,
+          "bytes": 104851673,
+          "first_completion": 1790126587926,
+          "last_completion": 1790127965020
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 17694972,
+          "bytes": 104792367,
+          "first_completion": 1790125112232,
+          "last_completion": 1790126587834
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 17694777,
+          "bytes": 104851123,
+          "first_completion": 1790127418517,
+          "last_completion": 1790128498509
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 17694765,
+          "bytes": 104844399,
+          "first_completion": 1790126261076,
+          "last_completion": 1790127418248
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.1",
+          "inode": 17694966,
+          "bytes": 104813335,
+          "first_completion": 1790127317646,
+          "last_completion": 1790129384331
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.2",
+          "inode": 17694973,
+          "bytes": 104854962,
+          "first_completion": 1790125218572,
+          "last_completion": 1790127316062
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 17694823,
+          "bytes": 104840869,
+          "first_completion": 1790127530098,
+          "last_completion": 1790128504814
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.5",
+          "inode": 17694810,
+          "bytes": 104842920,
+          "first_completion": 1790126594331,
+          "last_completion": 1790127529888
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.6",
+          "inode": 17694800,
+          "bytes": 104847050,
+          "first_completion": 1790125602568,
+          "last_completion": 1790126594257
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 17694836,
+          "bytes": 104841399,
+          "first_completion": 1790127160697,
+          "last_completion": 1790128041842
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.5",
+          "inode": 17694817,
+          "bytes": 104839896,
+          "first_completion": 1790126253326,
+          "last_completion": 1790127160564
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 17694819,
+          "bytes": 104843079,
+          "first_completion": 1790127151820,
+          "last_completion": 1790128065284
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 17694809,
+          "bytes": 104855972,
+          "first_completion": 1790126171821,
+          "last_completion": 1790127151686
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.2",
+          "inode": 17694967,
+          "bytes": 104851998,
+          "first_completion": 1790126686505,
+          "last_completion": 1790128434382
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 17694963,
+          "bytes": 104827522,
+          "first_completion": 1790124953152,
+          "last_completion": 1790126686497
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 17694745,
+          "bytes": 104850536,
+          "first_completion": 1790126588658,
+          "last_completion": 1790127785965
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 17694728,
+          "bytes": 104836273,
+          "first_completion": 1790125317132,
+          "last_completion": 1790126588564
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.3",
+          "inode": 17694969,
+          "bytes": 104855903,
+          "first_completion": 1790126881160,
+          "last_completion": 1790128390567
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 17694974,
+          "bytes": 104853537,
+          "first_completion": 1790125321767,
+          "last_completion": 1790126880641
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.3",
+          "inode": 17694764,
+          "bytes": 104849577,
+          "first_completion": 1790127644295,
+          "last_completion": 1790128869038
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 17694744,
+          "bytes": 104849910,
+          "first_completion": 1790126385190,
+          "last_completion": 1790127644113
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 17694813,
+          "bytes": 104850784,
+          "first_completion": 1790127581253,
+          "last_completion": 1790128582338
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 17694801,
+          "bytes": 104852283,
+          "first_completion": 1790126589843,
+          "last_completion": 1790127581130
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 17694787,
+          "bytes": 104847599,
+          "first_completion": 1790125559407,
+          "last_completion": 1790126589642
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.6",
+          "inode": 17694771,
+          "bytes": 104846984,
+          "first_completion": 1790127461298,
+          "last_completion": 1790128015067
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.7",
+          "inode": 17694766,
+          "bytes": 104834644,
+          "first_completion": 1790126886875,
+          "last_completion": 1790127460935
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.8",
+          "inode": 17694759,
+          "bytes": 104852983,
+          "first_completion": 1790126311577,
+          "last_completion": 1790126886813
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.2",
+          "inode": 17694968,
+          "bytes": 104850691,
+          "first_completion": 1790126784430,
+          "last_completion": 1790128441049
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 17694971,
+          "bytes": 104824857,
+          "first_completion": 1790124987987,
+          "last_completion": 1790126784198
+        }
+      ],
+      "elapsed_s": 52.738070487976074,
+      "output_bytes": 6988696,
+      "sha256": "7284667160a8ea7e62f4625336b938a4eebd5e6fc0bf026d5e4cbce905b4e348",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "23c636ac23f66f1246f7c2c0c69d976311557bfccb7a83cbb3edaacd5b94c199",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-16.jsonl.xz": {
+      "hostname": "serverless-010064224043.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 138252,
+        "records": 52859,
+        "tokens": 152663167,
+        "status:OK": 52859
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.2",
+          "inode": 14685967,
+          "bytes": 104844691,
+          "first_completion": 1790126940042,
+          "last_completion": 1790128741782
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 14682014,
+          "bytes": 104813949,
+          "first_completion": 1790125030864,
+          "last_completion": 1790126939347
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 14682051,
+          "bytes": 104851263,
+          "first_completion": 1790127472844,
+          "last_completion": 1790128451339
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 14681350,
+          "bytes": 104855844,
+          "first_completion": 1790126439852,
+          "last_completion": 1790127472800
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.5",
+          "inode": 14685887,
+          "bytes": 104837343,
+          "first_completion": 1790125386686,
+          "last_completion": 1790126439756
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.2",
+          "inode": 14686095,
+          "bytes": 104841342,
+          "first_completion": 1790127051083,
+          "last_completion": 1790128573376
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 14686052,
+          "bytes": 104816258,
+          "first_completion": 1790125488204,
+          "last_completion": 1790127050933
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 14693147,
+          "bytes": 104844404,
+          "first_completion": 1790126826371,
+          "last_completion": 1790128196885
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 14686062,
+          "bytes": 104836958,
+          "first_completion": 1790125402267,
+          "last_completion": 1790126825726
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 14694059,
+          "bytes": 104844278,
+          "first_completion": 1790126573592,
+          "last_completion": 1790127820618
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 14693834,
+          "bytes": 104838178,
+          "first_completion": 1790125366906,
+          "last_completion": 1790126572642
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.3",
+          "inode": 14685893,
+          "bytes": 104834538,
+          "first_completion": 1790127554012,
+          "last_completion": 1790128578150
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 14695283,
+          "bytes": 104856469,
+          "first_completion": 1790126494255,
+          "last_completion": 1790127553921
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 14695269,
+          "bytes": 104850663,
+          "first_completion": 1790125434822,
+          "last_completion": 1790126494179
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 14693874,
+          "bytes": 104761941,
+          "first_completion": 1790126662456,
+          "last_completion": 1790127916673
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 14693826,
+          "bytes": 104838059,
+          "first_completion": 1790125438291,
+          "last_completion": 1790126662002
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.5",
+          "inode": 14686094,
+          "bytes": 104857191,
+          "first_completion": 1790127071613,
+          "last_completion": 1790127860949
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.6",
+          "inode": 14686077,
+          "bytes": 104849599,
+          "first_completion": 1790126269164,
+          "last_completion": 1790127071538
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 14693148,
+          "bytes": 104855886,
+          "first_completion": 1790127158764,
+          "last_completion": 1790128544611
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 14686105,
+          "bytes": 104852541,
+          "first_completion": 1790125688866,
+          "last_completion": 1790127158509
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.2",
+          "inode": 14686059,
+          "bytes": 104847567,
+          "first_completion": 1790127020136,
+          "last_completion": 1790128496647
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 14686050,
+          "bytes": 104845681,
+          "first_completion": 1790125443730,
+          "last_completion": 1790127019463
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.5",
+          "inode": 14686057,
+          "bytes": 104846422,
+          "first_completion": 1790127139216,
+          "last_completion": 1790127933548
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.6",
+          "inode": 14686042,
+          "bytes": 104847770,
+          "first_completion": 1790126328129,
+          "last_completion": 1790127139213
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 14686034,
+          "bytes": 104844677,
+          "first_completion": 1790126939016,
+          "last_completion": 1790127787408
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.6",
+          "inode": 14685985,
+          "bytes": 104845853,
+          "first_completion": 1790126061074,
+          "last_completion": 1790126938741
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.3",
+          "inode": 14695284,
+          "bytes": 104831591,
+          "first_completion": 1790127657567,
+          "last_completion": 1790128759695
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 14694195,
+          "bytes": 104857349,
+          "first_completion": 1790126557442,
+          "last_completion": 1790127657547
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.5",
+          "inode": 14694061,
+          "bytes": 104852590,
+          "first_completion": 1790125410761,
+          "last_completion": 1790126557317
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 14686041,
+          "bytes": 104827737,
+          "first_completion": 1790127088078,
+          "last_completion": 1790127884409
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.6",
+          "inode": 14686048,
+          "bytes": 104844592,
+          "first_completion": 1790126265410,
+          "last_completion": 1790127087903
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 14693141,
+          "bytes": 104857327,
+          "first_completion": 1790126931320,
+          "last_completion": 1790128346142
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 14686061,
+          "bytes": 104848554,
+          "first_completion": 1790125441173,
+          "last_completion": 1790126931106
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 14693679,
+          "bytes": 104852832,
+          "first_completion": 1790127249811,
+          "last_completion": 1790128506370
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.4",
+          "inode": 14693159,
+          "bytes": 104828048,
+          "first_completion": 1790125902641,
+          "last_completion": 1790127249262
+        }
+      ],
+      "elapsed_s": 71.10310864448547,
+      "output_bytes": 6903016,
+      "sha256": "d379d2da73270bb031a4346302b96be3a7d53f14abbac625de060bbed2bd058c",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "0d7f6d8bfb21985ff42b68ab60f5781ffd805df840f652ab8dedcf3f6d94237b",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-17.jsonl.xz": {
+      "hostname": "serverless-010064161170.na130",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 132863,
+        "records": 53182,
+        "tokens": 157763935,
+        "status:OK": 53182
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 3158490,
+          "bytes": 104852146,
+          "first_completion": 1790126825397,
+          "last_completion": 1790127969827
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 3158345,
+          "bytes": 104801462,
+          "first_completion": 1790125620713,
+          "last_completion": 1790126825297
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.2",
+          "inode": 3157074,
+          "bytes": 104849907,
+          "first_completion": 1790127123168,
+          "last_completion": 1790128498201
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 3147294,
+          "bytes": 104835253,
+          "first_completion": 1790125696887,
+          "last_completion": 1790127122791
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.2",
+          "inode": 3146874,
+          "bytes": 104825782,
+          "first_completion": 1790127173185,
+          "last_completion": 1790128677380
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 3146677,
+          "bytes": 104835291,
+          "first_completion": 1790125608402,
+          "last_completion": 1790127172641
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.3",
+          "inode": 3157843,
+          "bytes": 104852918,
+          "first_completion": 1790126755152,
+          "last_completion": 1790128029745
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 3157710,
+          "bytes": 104828361,
+          "first_completion": 1790125427931,
+          "last_completion": 1790126753886
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 3149582,
+          "bytes": 104847203,
+          "first_completion": 1790126972370,
+          "last_completion": 1790127996446
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.4",
+          "inode": 3158476,
+          "bytes": 104842712,
+          "first_completion": 1790125910184,
+          "last_completion": 1790126972353
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.3",
+          "inode": 3146222,
+          "bytes": 104857300,
+          "first_completion": 1790127624590,
+          "last_completion": 1790128564789
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 3145897,
+          "bytes": 104849623,
+          "first_completion": 1790126672186,
+          "last_completion": 1790127624488
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 3146180,
+          "bytes": 104839414,
+          "first_completion": 1790125644032,
+          "last_completion": 1790126672016
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.2",
+          "inode": 3160471,
+          "bytes": 104838309,
+          "first_completion": 1790125565176,
+          "last_completion": 1790128105670
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 3158480,
+          "bytes": 104793241,
+          "first_completion": 1790126545674,
+          "last_completion": 1790127745722
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 3158341,
+          "bytes": 104852199,
+          "first_completion": 1790125347065,
+          "last_completion": 1790126545051
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 3149026,
+          "bytes": 104843413,
+          "first_completion": 1790126597884,
+          "last_completion": 1790127666359
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 3160466,
+          "bytes": 104856920,
+          "first_completion": 1790125500779,
+          "last_completion": 1790126597848
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 3160448,
+          "bytes": 104850207,
+          "first_completion": 1790126613139,
+          "last_completion": 1790127755381
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 3158361,
+          "bytes": 104765053,
+          "first_completion": 1790125463177,
+          "last_completion": 1790126613087
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 3146220,
+          "bytes": 104851661,
+          "first_completion": 1790127544625,
+          "last_completion": 1790128523833
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 3145890,
+          "bytes": 104833711,
+          "first_completion": 1790126560894,
+          "last_completion": 1790127544150
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.5",
+          "inode": 3146203,
+          "bytes": 104771098,
+          "first_completion": 1790125574843,
+          "last_completion": 1790126560773
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.3",
+          "inode": 3146221,
+          "bytes": 104847277,
+          "first_completion": 1790127473624,
+          "last_completion": 1790128441602
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 3145896,
+          "bytes": 104841396,
+          "first_completion": 1790126522736,
+          "last_completion": 1790127473608
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 3146179,
+          "bytes": 104835852,
+          "first_completion": 1790125521344,
+          "last_completion": 1790126522426
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 3149578,
+          "bytes": 104845637,
+          "first_completion": 1790126731936,
+          "last_completion": 1790127778929
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.5",
+          "inode": 3160503,
+          "bytes": 104837082,
+          "first_completion": 1790125677742,
+          "last_completion": 1790126731775
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 3149580,
+          "bytes": 104848916,
+          "first_completion": 1790126784714,
+          "last_completion": 1790127879504
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 3160501,
+          "bytes": 104808737,
+          "first_completion": 1790125706818,
+          "last_completion": 1790126784355
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 3146266,
+          "bytes": 104842353,
+          "first_completion": 1790126742329,
+          "last_completion": 1790127685701
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.5",
+          "inode": 3146173,
+          "bytes": 104849547,
+          "first_completion": 1790125771128,
+          "last_completion": 1790126742185
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.5",
+          "inode": 3146730,
+          "bytes": 104856518,
+          "first_completion": 1790127021066,
+          "last_completion": 1790127802802
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.6",
+          "inode": 3146634,
+          "bytes": 104856813,
+          "first_completion": 1790126197087,
+          "last_completion": 1790127021062
+        }
+      ],
+      "elapsed_s": 65.00272631645203,
+      "output_bytes": 7071440,
+      "sha256": "913563f0b8e7ee1acaa9bab3e68250c67e44cc1bd7ed4d81d2f0b6d6e98156ad",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "a8eefea80122e7f24c72bb0a62673975e046034d84948d5e2f505da433921145",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-18.jsonl.xz": {
+      "hostname": "serverless-010064224109.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 129623,
+        "records": 52534,
+        "tokens": 154094329,
+        "status:OK": 52534
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 9437623,
+          "bytes": 104845980,
+          "first_completion": 1790127067541,
+          "last_completion": 1790127989891
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 9437594,
+          "bytes": 104849793,
+          "first_completion": 1790126100263,
+          "last_completion": 1790127067189
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.3",
+          "inode": 9438131,
+          "bytes": 104856963,
+          "first_completion": 1790126582494,
+          "last_completion": 1790128011575
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 9438107,
+          "bytes": 104848173,
+          "first_completion": 1790125162020,
+          "last_completion": 1790126582211
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 9438132,
+          "bytes": 104832239,
+          "first_completion": 1790126759785,
+          "last_completion": 1790128177661
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 9438109,
+          "bytes": 104856843,
+          "first_completion": 1790125317056,
+          "last_completion": 1790126759295
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.1",
+          "inode": 9438289,
+          "bytes": 104852578,
+          "first_completion": 1790127418812,
+          "last_completion": 1790129752875
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.2",
+          "inode": 9438290,
+          "bytes": 104827173,
+          "first_completion": 1790124898625,
+          "last_completion": 1790127418288
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.5",
+          "inode": 9437876,
+          "bytes": 104740701,
+          "first_completion": 1790127104129,
+          "last_completion": 1790127915089
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.6",
+          "inode": 9437863,
+          "bytes": 104830498,
+          "first_completion": 1790126260947,
+          "last_completion": 1790127103903
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.3",
+          "inode": 9438210,
+          "bytes": 104857524,
+          "first_completion": 1790126685491,
+          "last_completion": 1790127903209
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 9438142,
+          "bytes": 104853053,
+          "first_completion": 1790125464136,
+          "last_completion": 1790126685410
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.3",
+          "inode": 9438234,
+          "bytes": 104849632,
+          "first_completion": 1790127177760,
+          "last_completion": 1790128314085
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 9438217,
+          "bytes": 104841367,
+          "first_completion": 1790126012936,
+          "last_completion": 1790127177387
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.3",
+          "inode": 9438199,
+          "bytes": 104856726,
+          "first_completion": 1790126895232,
+          "last_completion": 1790128051081
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 9438194,
+          "bytes": 104852106,
+          "first_completion": 1790125688849,
+          "last_completion": 1790126894607
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.5",
+          "inode": 9438083,
+          "bytes": 104828324,
+          "first_completion": 1790127096757,
+          "last_completion": 1790127877486
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.6",
+          "inode": 9437886,
+          "bytes": 104811209,
+          "first_completion": 1790126251614,
+          "last_completion": 1790127096505
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 9437624,
+          "bytes": 104846119,
+          "first_completion": 1790126831467,
+          "last_completion": 1790127763383
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.5",
+          "inode": 9437854,
+          "bytes": 104846982,
+          "first_completion": 1790125887824,
+          "last_completion": 1790126831070
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 9438213,
+          "bytes": 104845932,
+          "first_completion": 1790126892183,
+          "last_completion": 1790128098215
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 9438193,
+          "bytes": 104845995,
+          "first_completion": 1790125662025,
+          "last_completion": 1790126891691
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 9438233,
+          "bytes": 104851639,
+          "first_completion": 1790126724394,
+          "last_completion": 1790127824014
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 9438216,
+          "bytes": 104838412,
+          "first_completion": 1790125576485,
+          "last_completion": 1790126724180
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 9438247,
+          "bytes": 104845037,
+          "first_completion": 1790126820778,
+          "last_completion": 1790127911577
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.5",
+          "inode": 9438238,
+          "bytes": 104835147,
+          "first_completion": 1790125734610,
+          "last_completion": 1790126820726
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 9438245,
+          "bytes": 104838073,
+          "first_completion": 1790126733722,
+          "last_completion": 1790127819004
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 9438235,
+          "bytes": 104842221,
+          "first_completion": 1790125638019,
+          "last_completion": 1790126733532
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 9437727,
+          "bytes": 104836238,
+          "first_completion": 1790127584132,
+          "last_completion": 1790128487955
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.5",
+          "inode": 9437626,
+          "bytes": 104834847,
+          "first_completion": 1790126678656,
+          "last_completion": 1790127583470
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.6",
+          "inode": 9437595,
+          "bytes": 104823021,
+          "first_completion": 1790125726846,
+          "last_completion": 1790126677809
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.2",
+          "inode": 9437875,
+          "bytes": 104842411,
+          "first_completion": 1790127020829,
+          "last_completion": 1790128628204
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 9437852,
+          "bytes": 104849211,
+          "first_completion": 1790125264572,
+          "last_completion": 1790127020369
+        }
+      ],
+      "elapsed_s": 61.31231617927551,
+      "output_bytes": 6921812,
+      "sha256": "0bb862654fb467a580603d600bd1a5083185ce5a271e1da24125eb37d9274d0e",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "fce088410cbf09456ddae032079f7c996c174cb32bb0ed38e27443d6ad6ada5e",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    },
+    "pod-19.jsonl.xz": {
+      "hostname": "serverless-010064224021.na131",
+      "start": 1790126400000,
+      "end": 1790127360000,
+      "stats": {
+        "scanned": 141336,
+        "records": 53063,
+        "tokens": 155976634,
+        "status:OK": 53063
+      },
+      "files": [
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.3",
+          "inode": 1049582,
+          "bytes": 104853901,
+          "first_completion": 1790127617454,
+          "last_completion": 1790128646691
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.4",
+          "inode": 1050837,
+          "bytes": 104842720,
+          "first_completion": 1790126553653,
+          "last_completion": 1790127617224
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s0.log.5",
+          "inode": 1050824,
+          "bytes": 104843228,
+          "first_completion": 1790125452370,
+          "last_completion": 1790126553498
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.4",
+          "inode": 1050826,
+          "bytes": 104830299,
+          "first_completion": 1790126609746,
+          "last_completion": 1790127752658
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s1.log.5",
+          "inode": 1050792,
+          "bytes": 104812112,
+          "first_completion": 1790125462093,
+          "last_completion": 1790126609693
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.3",
+          "inode": 1050834,
+          "bytes": 104818222,
+          "first_completion": 1790127279888,
+          "last_completion": 1790128349318
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s10.log.4",
+          "inode": 1050794,
+          "bytes": 104839811,
+          "first_completion": 1790126180257,
+          "last_completion": 1790127279182
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.4",
+          "inode": 1049610,
+          "bytes": 104851809,
+          "first_completion": 1790127259013,
+          "last_completion": 1790128234862
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s11.log.5",
+          "inode": 1049524,
+          "bytes": 104837514,
+          "first_completion": 1790126306892,
+          "last_completion": 1790127258866
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.2",
+          "inode": 1050646,
+          "bytes": 104781602,
+          "first_completion": 1790127428496,
+          "last_completion": 1790129033610
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s12.log.3",
+          "inode": 1050125,
+          "bytes": 104708575,
+          "first_completion": 1790125738095,
+          "last_completion": 1790127428331
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.4",
+          "inode": 1049606,
+          "bytes": 104753682,
+          "first_completion": 1790127181901,
+          "last_completion": 1790128070105
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s13.log.5",
+          "inode": 1049431,
+          "bytes": 104801069,
+          "first_completion": 1790126275310,
+          "last_completion": 1790127181741
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.4",
+          "inode": 1049563,
+          "bytes": 104851251,
+          "first_completion": 1790127160849,
+          "last_completion": 1790128108271
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s14.log.5",
+          "inode": 1049430,
+          "bytes": 104844071,
+          "first_completion": 1790126168652,
+          "last_completion": 1790127160783
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.4",
+          "inode": 1049612,
+          "bytes": 104838002,
+          "first_completion": 1790127368251,
+          "last_completion": 1790128294199
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s15.log.5",
+          "inode": 1049527,
+          "bytes": 104851455,
+          "first_completion": 1790126358613,
+          "last_completion": 1790127367776
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.3",
+          "inode": 1050780,
+          "bytes": 104805651,
+          "first_completion": 1790126580084,
+          "last_completion": 1790127879603
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s2.log.4",
+          "inode": 1050763,
+          "bytes": 104829503,
+          "first_completion": 1790125243091,
+          "last_completion": 1790126579850
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.3",
+          "inode": 1050836,
+          "bytes": 104852458,
+          "first_completion": 1790127515468,
+          "last_completion": 1790128594590
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s3.log.4",
+          "inode": 1050822,
+          "bytes": 104852896,
+          "first_completion": 1790126375365,
+          "last_completion": 1790127515347
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.3",
+          "inode": 1050680,
+          "bytes": 104851417,
+          "first_completion": 1790126772653,
+          "last_completion": 1790128264532
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s4.log.4",
+          "inode": 1050654,
+          "bytes": 104849185,
+          "first_completion": 1790125195880,
+          "last_completion": 1790126772289
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.3",
+          "inode": 1048861,
+          "bytes": 104782407,
+          "first_completion": 1790127611546,
+          "last_completion": 1790128594288
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.4",
+          "inode": 1048836,
+          "bytes": 104856661,
+          "first_completion": 1790126631254,
+          "last_completion": 1790127611220
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s5.log.5",
+          "inode": 1049573,
+          "bytes": 104844029,
+          "first_completion": 1790125591575,
+          "last_completion": 1790126631229
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.4",
+          "inode": 1049560,
+          "bytes": 104848872,
+          "first_completion": 1790127350880,
+          "last_completion": 1790128251198
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.5",
+          "inode": 1049521,
+          "bytes": 104824673,
+          "first_completion": 1790126430560,
+          "last_completion": 1790127350862
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s6.log.6",
+          "inode": 1048856,
+          "bytes": 104818622,
+          "first_completion": 1790125488385,
+          "last_completion": 1790126430494
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.3",
+          "inode": 1049569,
+          "bytes": 104855734,
+          "first_completion": 1790127588361,
+          "last_completion": 1790128596480
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.4",
+          "inode": 1050841,
+          "bytes": 104838636,
+          "first_completion": 1790126567384,
+          "last_completion": 1790127588301
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s7.log.5",
+          "inode": 1050825,
+          "bytes": 104830940,
+          "first_completion": 1790125452498,
+          "last_completion": 1790126567367
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.3",
+          "inode": 1050811,
+          "bytes": 104807528,
+          "first_completion": 1790126728651,
+          "last_completion": 1790127961222
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s8.log.4",
+          "inode": 1050788,
+          "bytes": 104853134,
+          "first_completion": 1790125507469,
+          "last_completion": 1790126728618
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.2",
+          "inode": 1049568,
+          "bytes": 104837191,
+          "first_completion": 1790127214573,
+          "last_completion": 1790129212026
+        },
+        {
+          "path": "logs/dash_sc_grpc_access_r0_s9.log.3",
+          "inode": 1050874,
+          "bytes": 104801677,
+          "first_completion": 1790125099496,
+          "last_completion": 1790127214467
+        }
+      ],
+      "elapsed_s": 63.78784203529358,
+      "output_bytes": 7015196,
+      "sha256": "e3a1e2e5aeb22f83c120ef1d28012e155a588c411bd590a31cf96e8f630412de",
+      "hash": "SHA256 prefix, 128 bit, little-endian int32, 512 tokens",
+      "schema_version": 1,
+      "block_size": 512,
+      "complete": true,
+      "truncated": false,
+      "errors": [],
+      "conversion": {
+        "kind": "validated_schema1_annotation",
+        "original_capture_sha256": "bb181e9a19a15870bbfbb1648445558a8e80549ee446688b05eb8b2be466ecbd",
+        "original_capture_script_sha256": "7f577b0665a11ab4fc50e0f69657671c4cb301efbd99851b8690e1fa5eba3b56",
+        "note": "Existing fields and digest semantics checked against schema 1; only schema_version and block_size added."
+      }
+    }
+  },
+  "requests": 844864,
+  "source_start": 1790126400001,
+  "source_end": 1790127359996,
+  "source_qps": 880.0666666666667,
+  "mean_input_tokens": 2940.1802148038028,
+  "input_quantiles": {
+    "0": 5,
+    "0.5": 1712,
+    "0.9": 6302,
+    "0.95": 10487,
+    "0.99": 23482,
+    "1": 32000
+  },
+  "status": {
+    "OK": 844864
+  },
+  "infinite_history_token_reuse": 0.5175924272776729,
+  "distinct_prefix_blocks": 1944133,
+  "family_4k_count": 717234,
+  "family_4k_top5_share": 0.02983675479130369,
+  "nearest_prefix_repeat_gap_ms": {
+    "0.5": 456,
+    "0.9": 34215,
+    "0.99": 301075
+  },
+  "source_minute_windows": {
+    "0": {
+      "requests": 52099,
+      "tokens": 153308089,
+      "potential_tokens": 70155776,
+      "errors": 0
+    },
+    "1": {
+      "requests": 53929,
+      "tokens": 157752126,
+      "potential_tokens": 78831616,
+      "errors": 0
+    },
+    "2": {
+      "requests": 53231,
+      "tokens": 157881646,
+      "potential_tokens": 80018944,
+      "errors": 0
+    },
+    "3": {
+      "requests": 52088,
+      "tokens": 157277410,
+      "potential_tokens": 80582144,
+      "errors": 0
+    },
+    "4": {
+      "requests": 52989,
+      "tokens": 155768605,
+      "potential_tokens": 80812544,
+      "errors": 0
+    },
+    "5": {
+      "requests": 52315,
+      "tokens": 153901844,
+      "potential_tokens": 80561664,
+      "errors": 0
+    },
+    "6": {
+      "requests": 52240,
+      "tokens": 152731003,
+      "potential_tokens": 81492992,
+      "errors": 0
+    },
+    "7": {
+      "requests": 51757,
+      "tokens": 153651456,
+      "potential_tokens": 82565632,
+      "errors": 0
+    },
+    "8": {
+      "requests": 52078,
+      "tokens": 153198019,
+      "potential_tokens": 81033216,
+      "errors": 0
+    },
+    "9": {
+      "requests": 52485,
+      "tokens": 152861947,
+      "potential_tokens": 80675840,
+      "errors": 0
+    },
+    "10": {
+      "requests": 53642,
+      "tokens": 164846568,
+      "potential_tokens": 85778432,
+      "errors": 0
+    },
+    "11": {
+      "requests": 53491,
+      "tokens": 157353915,
+      "potential_tokens": 82694656,
+      "errors": 0
+    },
+    "12": {
+      "requests": 51016,
+      "tokens": 151707512,
+      "potential_tokens": 79064064,
+      "errors": 0
+    },
+    "13": {
+      "requests": 53245,
+      "tokens": 152005396,
+      "potential_tokens": 78912000,
+      "errors": 0
+    },
+    "14": {
+      "requests": 54904,
+      "tokens": 157393062,
+      "potential_tokens": 82584576,
+      "errors": 0
+    },
+    "15": {
+      "requests": 53355,
+      "tokens": 152413819,
+      "potential_tokens": 79962624,
+      "errors": 0
+    }
+  },
+  "cross_pod_duplicate_identity_count": 0,
+  "plan_sha256": "b741979ea6b07eded4fe3a27f8f34cefcc7df0ea3b73e22f2d8eb2f25c9dfe1d",
+  "plan_bytes": 148337225,
+  "model_bytes": 4798296,
+  "realism": "EMPIRICAL_PREFIX_STRUCTURE_PARTIAL_FLEET",
+  "limitations": [
+    "Missing frontend pods: [7, 9, 12, 15]",
+    "Capture interval: (1790126400000, 1790127360000)",
+    "Output cap supplied independently; error-censored outputs are not fitted",
+    "512-token equivalence preserved; sub-block token content not reconstructed",
+    "Empirical prefix-lineage event model; no held-out statistical generalization claim",
+    "True source timestamps retained; pacing controlled by the client"
+  ]
+}

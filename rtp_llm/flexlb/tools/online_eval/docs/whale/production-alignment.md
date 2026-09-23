@@ -63,6 +63,8 @@ VIPServer 调整只限测试部署实际引用的域名，保留其他注册参�
 
 同一测试/生产窗口保留逐引擎曲线、引擎均值与合理的集群总量。真实 D 保留 dp_rank；寄生 Mock 全在一 Pod，必须按 engine / engine_port 拆分。逐引擎 TPS 与 Pod 总和不可比较；吞吐总量不能由混有 standby 的平均值替代。保留零负载点；监控缺点与零值分开处理。priority 的归并严格按 panel transformation 执行。
 
+`context_tps_with_cache` 的分母是有输入 token 的 P 批次执行耗时，并非自然时间。排查其偏低时，同时比较输入 wall TPS、实际 context batch size 和 model forward 耗时；输入 wall TPS 接近而执行 TPS 不同时，先核对 Master 的 `maxRequests`、collection wait 与提前派发条件，再判断缓存预热或宿主机开销。缓存命中率会改变 compute token 数和执行耗时，但不能仅凭命中率比值推算 `context_tps_with_cache`。
+
 ## 发现偏差时
 
 先检查流量画像、实际 worker 数、配置生效、指标标签与窗口，再分析调度行为。使用 asish 实时解析测试 Master Pod 并打开终端，定位实际运行目录和启动进程，查看 Master / Mock 日志、已实现的只读 debug/metrics 接口。关联请求 ID、P/D worker、batch、cache 命中与等待时间，不仅依赖汇总曲线推断原因。
