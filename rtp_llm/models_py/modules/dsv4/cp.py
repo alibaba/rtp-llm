@@ -27,6 +27,7 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
@@ -119,6 +120,8 @@ class CPContext:
     # straight to the local pool. Plumbed from
     # ``parallelism_config.prefill_cp_config.kv_cache_sharded``.
     kv_cache_sharded: bool = False
+    # Set only by the validated per-forward builder under the default-off flag.
+    compact_geometry_verified: bool = False
 
 
 @dataclass
@@ -545,7 +548,7 @@ def build_cp_context(
     else:
         seq_len_total = prefix_length + seq_len_full
 
-    return CPContext(
+    context = CPContext(
         cp_size=int(cp_size),
         cp_rank=int(cp_rank),
         chunk_length=int(chunk_length),
@@ -566,6 +569,15 @@ def build_cp_context(
         chunk_lengths_per_req=tuple(chunk_lengths),
         kv_cache_sharded=bool(kv_cache_sharded),
     )
+    if os.environ.get("DSV4_CP_COMPACT_COMPRESSOR", "0") == "1":
+        from rtp_llm.models_py.modules.dsv4.fp8._compact_cp_runtime import (
+            verified_geometry,
+        )
+
+        context.compact_geometry_verified = verified_geometry(
+            context, padding_mask, restore_indices
+        )
+    return context
 
 
 def _cp_gather_2d(

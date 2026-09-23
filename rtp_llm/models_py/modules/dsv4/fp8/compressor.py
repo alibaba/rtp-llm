@@ -428,6 +428,7 @@ class _CompressorPending:
     out_dim: int
     profile_label: Optional[str] = None
     restored_buf: Optional[torch.Tensor] = None
+    compact_handle: Optional[Any] = None
 
 
 class _CompressorNorm(nn.Module):
@@ -859,6 +860,8 @@ class CompressorFP8(PoolBackedModule):
         score_flat: torch.Tensor,  # [N, coff*head_dim] fp32
         meta: CompressorMeta,
         seq_start: Optional[int] = None,
+        *,
+        boundary_meta: Optional[CompressorMeta] = None,
     ) -> None:
         """Launch the two vLLM kernels (state write + boundary KV write).
 
@@ -937,18 +940,22 @@ class CompressorFP8(PoolBackedModule):
                     )
                 )
 
+        # Compact transport keeps the full original state-write grid but
+        # executes only owned compression boundaries. The original fused
+        # kernel's late invalid-slot check cannot guard unstaged raw reads.
+        writer_meta = meta if boundary_meta is None else boundary_meta
         with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
             run_fused_compress_kv_write(
                 state_cache_for_read,
-                meta.token_to_req,
-                meta.positions,
-                meta.state_slots,
+                writer_meta.token_to_req,
+                writer_meta.positions,
+                writer_meta.state_slots,
                 state_block_table_for_read,
                 self.norm.weight,
                 self.norm_eps,
                 cos_sin_cache,
                 self._kv_pool_view,
-                meta.kv_slots,
+                writer_meta.kv_slots,
                 kv_flat,
                 score_flat,
                 self.ape,
@@ -1041,6 +1048,7 @@ class CompressorFP8(PoolBackedModule):
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
         fused_gather_handle = None
+        compact_handle = None
         if cp_gather:
             assert cp_ctx is not None
             assert meta is not None, (
@@ -1066,14 +1074,28 @@ class CompressorFP8(PoolBackedModule):
                     f"dsv4.fp8.compressor.prefill.{profile_label}.cp_gather_kv_score"
                 )
             with record_function_range(gather_range):
-                fused_gather_handle = cp_all_gather_full_async(
+                from rtp_llm.models_py.modules.dsv4.fp8._compact_cp_runtime import (
+                    start as compact_start,
+                )
+
+                compact_handle = compact_start(
+                    self,
                     fused_flat,
                     cp_ctx,
-                    stream=gather_stream,
-                    profile_name=profile_name,
-                    workspace=workspace,
-                    cp_role=self._cp_role,
+                    meta,
+                    workspace,
+                    self._cp_role,
+                    gather_stream,
                 )
+                if compact_handle is None:
+                    fused_gather_handle = cp_all_gather_full_async(
+                        fused_flat,
+                        cp_ctx,
+                        stream=gather_stream,
+                        profile_name=profile_name,
+                        workspace=workspace,
+                        cp_role=self._cp_role,
+                    )
 
         return _CompressorPending(
             fused_flat=fused_flat,
@@ -1081,10 +1103,11 @@ class CompressorFP8(PoolBackedModule):
             sp=sp,
             bsz=bsz,
             seqlen=seqlen,
-            meta=meta,
+            meta=compact_handle.meta if compact_handle is not None else meta,
             out_dim=out_dim,
             profile_label=profile_label,
             restored_buf=None,
+            compact_handle=compact_handle,
         )
 
     def wait_prefill_gather(self, pending: Optional[_CompressorPending]) -> None:
@@ -1094,6 +1117,9 @@ class CompressorFP8(PoolBackedModule):
         completed before indexer score/topk, while preserving the baseline
         order where the main CSA pool write happens after indexer topk.
         """
+        if pending is not None and pending.compact_handle is not None:
+            pending.fused_flat = pending.compact_handle.stage()
+            return
         if pending is None or pending.fused_gather_handle is None:
             return
         wait_range = "dsv4.fp8.compressor.prefill.cp_wait_kv_score"
@@ -1115,6 +1141,8 @@ class CompressorFP8(PoolBackedModule):
         if pending is None:
             return  # warmup, mirrors forward()'s early return
         self.wait_prefill_gather(pending)
+        if pending.compact_handle is not None:
+            pending.compact_handle.assert_binding(self)
         fused_flat = pending.fused_flat
         out_dim = pending.out_dim
         meta = pending.meta
@@ -1143,8 +1171,25 @@ class CompressorFP8(PoolBackedModule):
                 )
 
         seq_start = None if meta.is_batched else pending.sp
-        with record_function_range("dsv4.fp8.compressor.prefill.launch"):
-            self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+        try:
+            with record_function_range("dsv4.fp8.compressor.prefill.launch"):
+                if pending.compact_handle is None:
+                    self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+                else:
+                    self._launch(
+                        kv_flat,
+                        score_flat,
+                        meta,
+                        seq_start=seq_start,
+                        boundary_meta=pending.compact_handle.owned_meta(),
+                    )
+            if pending.compact_handle is not None:
+                with record_function_range("dsv4.cp.compact.replicate"):
+                    pending.compact_handle.replicate(self)
+        except Exception:
+            if pending.compact_handle is not None:
+                pending.compact_handle.fail()
+            raise
 
     # ----------------------------------------------------------------------
     # Forward (prefill)
@@ -1171,6 +1216,17 @@ class CompressorFP8(PoolBackedModule):
         share the same positions/b_idx. When ``None`` the compressor falls
         back to the in-body compute path (warmup / standalone / UT).
         """
+        from rtp_llm.models_py.modules.dsv4.fp8._compact_cp_runtime import (
+            enabled as compact_enabled,
+        )
+
+        if compact_enabled() and cp_should_gather(self._cp_ctx, start_pos):
+            # Same split-phase entry in sequential and overlapped orchestration;
+            # unsupported geometry still selects the unchanged full gather.
+            self.finish_prefill(
+                self.start_prefill(x, start_pos, meta=meta, workspace=workspace)
+            )
+            return None
         del sequence_lengths  # not needed: positions derived from start_pos+arange
         # Phase-3a: accept either flat ``[T_total, dim]`` (vLLM-native /
         # batched prefill) or legacy ``[B, S, dim]``. The compressor kernels
@@ -1340,9 +1396,7 @@ class CompressorFP8(PoolBackedModule):
                     b_idx,
                     has_prefix=True,
                     is_batched=q_len > 1,
-                    seq_start_per_req=position_ids_2d[:, 0]
-                    .to(torch.long)
-                    .contiguous(),
+                    seq_start_per_req=position_ids_2d[:, 0].to(torch.long).contiguous(),
                     cu_seq_per_req=cu_seq_per_req,
                 )
         self._launch(kv_flat, score_flat, meta)

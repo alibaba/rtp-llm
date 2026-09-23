@@ -184,3 +184,14 @@ py_test(
     exec_properties = {"gpu": "H20"},
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+        deps = ["//rtp_llm:torch"],
+        env = {"CUDA_VISIBLE_DEVICES": ""},
+    )
+    for name in ["test_compact_cp_contract_cpu", "test_compact_cp_runtime_cpu"]
+]
