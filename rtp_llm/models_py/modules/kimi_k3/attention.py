@@ -7,13 +7,13 @@ from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_gather,
-    reduce_scatter,
 )
 from rtp_llm.models_py.model_desc.kimi_linear import (
     KimiLinearKDADecode,
     KimiLinearKDAPrefill,
 )
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
+from rtp_llm.models_py.modules.kimi_k3.collectives import reduce_scatter
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.utils.model_weight import W
 
