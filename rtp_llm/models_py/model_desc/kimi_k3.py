@@ -215,14 +215,21 @@ class KimiK3Model(GptModelBase):
         self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
     ):
         primary = get_primary_attention_inputs(inputs, self.kv_cache)
-        if not (primary.is_target_verify or primary.is_mtp_draft_update):
+        if primary.is_target_verify or primary.is_mtp_draft_update:
+            from rtp_llm.models_py.modules.kimi_k3.mla_verify import KimiK3MlaVerifyImpl
+
+            implementation = KimiK3MlaVerifyImpl
+        elif primary.is_prefill:
+            from rtp_llm.models_py.modules.kimi_k3.mla_prefill import KimiK3MlaPrefillImpl
+
+            implementation = KimiK3MlaPrefillImpl
+        else:
             return super().prepare_fmha_impl(
                 inputs, is_cuda_graph, cuda_graph_selection_mode
             )
-        from rtp_llm.models_py.modules.kimi_k3.mla_verify import KimiK3MlaVerifyImpl
 
         def create(attention_inputs):
-            return KimiK3MlaVerifyImpl(
+            return implementation(
                 self.config,
                 self.parallelism_config,
                 self.weight,
@@ -233,7 +240,8 @@ class KimiK3Model(GptModelBase):
 
         tagged = get_attention_inputs_value(inputs)
         if isinstance(tagged, Mapping):
-            return {tag: create(tagged[tag]) for tag in self._get_fmha_group_tags()}
+            tags = self._get_fmha_group_tags()
+            return {tag: create(tagged[tag]) for tag in (tagged if tags is None else tags)}
         return create(tagged)
 
     def _get_fmha_group_tags(self):
