@@ -239,9 +239,12 @@ class FrontendServer(object):
         try:
             if isinstance(request, str):
                 request = json.loads(request)
-            kmonitor.report(
-                AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
-            )
+            metric_tags = {
+                "rank_id": self.rank_id,
+                "server_id": self.server_id,
+                "source": request.get("source", "unknown"),
+            }
+            kmonitor.report(AccMetrics.QPS_METRIC, 1, metric_tags)
             sequence = self._global_controller.increment() % 4096  # 12 bits
             request[request_id_field_name] = generate_request_id(
                 self.py_env_configs.server_config.ip,
@@ -267,7 +270,7 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.SUCCESS_QPS_METRIC,
                 1,
-                {"source": request.get("source", "unknown")},
+                metric_tags,
             )
             usage = result.get("usage", {})
             if not isinstance(usage, dict):
