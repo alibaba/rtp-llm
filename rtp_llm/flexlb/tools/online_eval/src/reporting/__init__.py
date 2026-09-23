@@ -6,6 +6,7 @@ changes a decision. report-spec.json alone is sufficient for offline rendering.
 
 from reporting.core import (
     bundle_path,
+    discover_reports,
     details,
     table,
     links,
@@ -19,6 +20,7 @@ from reporting.core import (
 
 __all__ = [
     "bundle_path",
+    "discover_reports",
     "details",
     "table",
     "links",

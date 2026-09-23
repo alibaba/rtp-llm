@@ -138,6 +138,11 @@ class CacheGateTest(unittest.TestCase):
         e = self.evidence(0.1)
         with tempfile.TemporaryDirectory() as d:
             write_report(d, e, analyze(e))
+            from reporting import discover_reports
+
+            self.assertEqual(discover_reports(d, role="gate"), [
+                str((Path(d) / "reports/run/cache-scale-in/report.html").resolve())
+            ])
             self.assertEqual(
                 json.loads(
                     (Path(d) / "reports/run/cache-scale-in/analysis.json").read_text()

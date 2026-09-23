@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from flexlb_cfg import PROFILE_SPECS, STRESS_PROFILE
+from flexlb_profile_data import REGISTERED_PROFILE_SPECS as PROFILE_SPECS
 
 _ROOT = Path(__file__).resolve().parent
 # The Whale bundle copies these two files without the source-tree config directory.
@@ -57,10 +57,14 @@ def load_mode_tables(path: Path = TABLE_PATH) -> dict:
             "workload", "orchestration", "collector", "assertion"
         }:
             raise ValueError(f"{name}: incomplete feature table")
-        if "default_profile" in mode:
+        if "default_profile" in mode or "default_master_mode" in mode:
             default_mode = mode.get("default_master_mode")
-            if mode["default_profile"] != STRESS_PROFILE or default_mode != "wb":
-                raise ValueError(f"{name}: unsupported default profile/axis override")
+            profile = mode.get("default_profile")
+            if profile not in PROFILE_SPECS or default_mode not in master:
+                raise ValueError(f"{name}: unknown default profile/master mode")
+            if any(PROFILE_SPECS[profile][axis] != master[default_mode][axis].lower()
+                   for axis in ("decision", "dispatcher")):
+                raise ValueError(f"{name}: default profile axes disagree with master mode")
     return doc
 
 
@@ -154,10 +158,10 @@ def render_shell_defaults(runtime: str) -> str:
 
 
 def master_mode_for_profile(profile: str) -> str:
-    if profile == STRESS_PROFILE:
-        return "wb"
+    spec = PROFILE_SPECS.get(profile)
     matches = [name for name, mode in load_mode_tables()["master_modes"].items()
-               if mode["profile"] == profile]
+               if spec and all(mode[axis].lower() == spec[axis]
+                               for axis in ("decision", "dispatcher"))]
     if len(matches) != 1:
         raise ValueError(f"profile has no unique master mode: {profile}")
     return matches[0]

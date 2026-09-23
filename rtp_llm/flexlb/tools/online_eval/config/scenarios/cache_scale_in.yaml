@@ -79,7 +79,6 @@ parameters:
         max_laps: 1
         identity: structural-relabel
 analysis:
-  comparison: cache_scale_in
   alignment_event: withdraw_start
 
 test:

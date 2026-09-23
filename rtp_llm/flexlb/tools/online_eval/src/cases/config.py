@@ -136,10 +136,31 @@ def _merge_environment(base, patch):
     return result
 
 
-def configure_program(config, source):
-    """Build an internal plan using an allowlisted Python entry point, without I/O."""
+def program_module(name, source):
     from cases.programs import PROGRAMS
 
+    if not isinstance(name, str) or name not in PROGRAMS:
+        raise ScenarioError(f"{source}: unknown registered Python case {name!r}")
+    return importlib.import_module(PROGRAMS[name])
+
+
+def validate_analysis(config, source, *, module=None):
+    """Resolve analysis capability from registered Python code, never YAML flags."""
+    _data_only(config, source)
+    if type(config.get("schema_version")) is not int or config["schema_version"] != 2:
+        raise ScenarioError(f"{source}: analysis requires schema_version 2")
+    module = module or program_module(config.get("case"), source)
+    validator = getattr(module, "ANALYSIS_POLICY_VALIDATOR", None)
+    if not callable(validator):
+        raise ScenarioError(f"{source}: Python program does not support analysis")
+    try:
+        return validator(config["analysis"])
+    except ValueError as exc:
+        raise ScenarioError(f"{source}.analysis: {exc}") from exc
+
+
+def configure_program(config, source):
+    """Build an internal plan using an allowlisted Python entry point, without I/O."""
     _data_only(config, source)
     _mapping(
         config,
@@ -164,18 +185,9 @@ def configure_program(config, source):
             f"{source}: only data-only schema_version 2 is accepted; move orchestration into Python"
         )
     name = config.get("case")
+    module = program_module(name, source)
     if "analysis" in config:
-        from workload.cache_comparison_config import validate_policy
-        try:
-            if name != "cache_scale_in":
-                raise ValueError("analysis policy is only supported for cache_scale_in")
-            validate_policy(config["analysis"])
-        except ValueError as exc:
-            raise ScenarioError(f"{source}.analysis: {exc}") from exc
-    if not isinstance(name, str) or name not in PROGRAMS:
-        raise ScenarioError(f"{source}: unknown registered Python case {name!r}")
-    # The module path is code-owned. Configuration cannot import arbitrary modules.
-    module = importlib.import_module(PROGRAMS[name])
+        validate_analysis(config, source, module=module)
     environment = config.get("environment", {})
     parameters = config.get("parameters", {})
     if not isinstance(parameters, dict):

@@ -139,7 +139,7 @@ def _atomic(path, content):
     temporary.replace(path)
 
 
-def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None):
+def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None):
     """Publish one canonical report; manifest is written last as the commit record."""
     directory = bundle_path(root, kind, identity)
     directory.mkdir(parents=True, exist_ok=True)
@@ -182,8 +182,25 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
             for name, content in outputs.items()
         },
     )
+    if role is not None:
+        manifest["role"] = role
     _atomic(directory / "manifest.json", _json(manifest))
     return directory
+
+
+def discover_reports(root, *, role):
+    """Find committed run reports by producer-declared role, independent of identity."""
+    reports = []
+    for path in sorted((Path(root) / "reports" / "run").glob("*/manifest.json")):
+        manifest = json.loads(path.read_text())
+        if manifest.get("role") != role:
+            continue
+        directory = read_bundle(path)
+        entrypoint = manifest["entrypoint"]
+        if entrypoint not in manifest["files"]:
+            raise ValueError("report entrypoint is not a verified bundle file")
+        reports.append(str((directory / entrypoint).resolve()))
+    return reports
 
 
 def read_bundle(path):

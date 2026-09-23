@@ -8,6 +8,16 @@
 
 在 `src/cases/programs/` 增加 Python program，并在显式目录中注册。Python 通过 `CaseBuilder` 读取 YAML 数据，声明步骤、输出引用和检查；公共动作不足时才在 `src/scenario/actions/` 增加有类型的 handler。
 
+## Analysis 与 gate 报告
+
+需要接受顶层 `analysis` 参数时，program 模块声明可调用的 `ANALYSIS_POLICY_VALIDATOR`。校验函数接收参数映射，返回校验后的映射，非法输入抛出 `ValueError`；未声明的 program 不接受 `analysis`。场景加载和报告策略加载共用此声明，YAML 不能声明或开启能力。
+
+缓存 A/B 策略只接受 `alignment_event`（非空事件名或 null），不接受 `comparison` 字段。独立策略文件直接保存这些参数；从场景文件提取时，还会检查注册 program 的能力声明。
+
+Gate 报告由 Python 生产者调用 `write_bundle(..., role="gate")` 发布。汇总器按 manifest 的角色发现并校验当前运行目录下的全部 gate bundle，不依赖 case 名或 bundle 目录名。没有角色声明的旧 bundle 仍可直接打开，但不会自动列入 gate 链接。
+
+Runtime mode 的 `default_profile` 和 `default_master_mode` 必须成对声明。Profile 必须在 `flexlb_profile_data.REGISTERED_PROFILE_SPECS` 中注册，decision / dispatcher 轴必须与所选 master mode 一致。
+
 ## 分类
 
 - 少量确定请求验证返回码、状态或边界：`functional`。

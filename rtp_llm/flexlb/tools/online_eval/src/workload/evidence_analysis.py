@@ -328,10 +328,8 @@ def analyze_report(directory, result, evidence):
             "configuration_sha256"
         ),
     )
-    payload["gate_report"] = None
-    from reporting import bundle_path
+    from reporting import discover_reports
 
-    gate = bundle_path(directory, "run", "cache-scale-in") / "report.html"
-    if gate.is_file():
-        payload["gate_report"] = str(gate.resolve())
+    payload["gate_reports"] = discover_reports(directory, role="gate")
+    payload["gate_report"] = next(iter(payload["gate_reports"]), None)
     return payload

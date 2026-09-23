@@ -205,3 +205,12 @@ STRESS_BASE: dict = {
         "decision": {"lifetime": 2.0},
     },
 }
+
+# All renderable profiles, including workload defaults, share axis metadata.
+REGISTERED_PROFILE_SPECS = {
+    **PROFILE_SPECS,
+    STRESS_PROFILE: {
+        "decision": STRESS_BASE["scheduler"]["decision"]["type"].lower(),
+        "dispatcher": STRESS_BASE["dispatcher"]["type"].lower(),
+    },
+}

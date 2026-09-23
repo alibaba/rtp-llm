@@ -436,6 +436,7 @@ def write_report(directory, evidence, result):
         spec,
         meta=meta,
         producer="cache-gate",
+        role="gate",
     )
     return spec
 

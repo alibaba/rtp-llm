@@ -2,6 +2,9 @@
 
 from cases.config import output
 from traffic.playback_config import normalize
+from workload.cache_comparison_config import validate_policy
+
+ANALYSIS_POLICY_VALIDATOR = validate_policy
 
 
 def step(case):

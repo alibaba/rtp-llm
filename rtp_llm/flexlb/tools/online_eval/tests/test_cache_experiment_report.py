@@ -29,7 +29,7 @@ class CacheExperimentReportTest(unittest.TestCase):
             root = Path(d)
             a, b = root/'a.json', root/'b.json'
             policy = root/'policy.yaml'
-            policy.write_text('comparison: cache_scale_in\nalignment_event: custom_event\n')
+            policy.write_text('alignment_event: custom_event\n')
             for hits in ((.8,.8), (.1,.1), (.8,.1), (.1,.8)):
                 ea, eb = map(self.evidence, hits)
                 # Deliberate control difference is information, not an experiment verdict.

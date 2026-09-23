@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import os
+from pathlib import Path
 from reporting import (
     bundle_path,
     details,
@@ -42,11 +43,14 @@ def build_spec(payload, directory):
             dict(label=title, href=os.path.relpath(path, target))
             for title, path in reports
         ]
-    if payload.get("gate_report"):
+    gates = payload.get("gate_reports")
+    if gates is None:
+        gates = [payload["gate_report"]] if payload.get("gate_report") else []
+    for gate in gates:
         items.append(
             dict(
-                label="P scale-in cache gate",
-                href=os.path.relpath(payload["gate_report"], target),
+                label="Gate · " + Path(gate).parent.name,
+                href=os.path.relpath(gate, target),
             )
         )
     return dict(

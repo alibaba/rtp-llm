@@ -14,7 +14,7 @@ from workload.cache_gate_ab import load_comparison_policy
 class AbCurvesTest(unittest.TestCase):
     def test_scale_in_analysis_policy_from_runnable_scenario(self):
         policy = load_comparison_policy(ROOT / "config/scenarios/cache_scale_in.yaml")
-        self.assertEqual(policy, {"comparison": "cache_scale_in", "alignment_event": "withdraw_start"})
+        self.assertEqual(policy, {"alignment_event": "withdraw_start"})
         from workload.cache_comparison_config import validate_policy
         from cases.config import configure_program
         original = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
@@ -30,7 +30,9 @@ class AbCurvesTest(unittest.TestCase):
                 path.write_text(yaml.safe_dump(bad))
                 with self.assertRaisesRegex(ValueError, "unknown cache comparison fields"):
                     load_comparison_policy(path)
-        self.assertEqual(validate_policy({"comparison": "cache_scale_in"}), {"comparison": "cache_scale_in"})
+        self.assertEqual(validate_policy({}), {})
+        with self.assertRaisesRegex(ValueError, "unknown cache comparison fields"):
+            validate_policy({"comparison": "cache_scale_in"})
 
     def test_shared_axis_missing_sample_is_gap(self):
         a = {"label": "a", "aggregate": {"per_second": [

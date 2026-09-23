@@ -53,7 +53,7 @@ def _controls(e):
 
 
 def compare(a_path, b_path, output, *, alignment_event=None):
-    validate_policy(dict(comparison="cache_scale_in", alignment_event=alignment_event))
+    validate_policy(dict(alignment_event=alignment_event))
     resolved = [_load(p) for p in (a_path, b_path)]
     paths, evidence = zip(*resolved)
     identities = [e["provenance"].get("master_artifact") or {} for e in evidence]
@@ -192,9 +192,9 @@ def load_comparison_policy(path: Path) -> dict:
     if not isinstance(config, dict):
         raise ValueError("comparison config must be a mapping")
     if "analysis" in config:
-        if config.get("schema_version") != 2 or config.get("case") != "cache_scale_in":
-            raise ValueError("comparison policy must belong to a cache_scale_in scenario")
-        policy = config["analysis"]
+        from cases.config import validate_analysis
+
+        policy = validate_analysis(config, str(path))
     else:
         policy = config
     return validate_policy(policy)
