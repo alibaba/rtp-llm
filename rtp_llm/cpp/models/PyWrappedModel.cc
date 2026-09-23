@@ -206,14 +206,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         }
     }
 #endif
-    // MTP draft-prefill hands in a CUDA prefix_lengths (device-state fast path)
-    // while the rest of the host pipeline stays CPU-resident. Normalize it to
-    // host here so downstream host helpers (padding offset, cu_seqlens) keep
-    // their host-tensor contract; prefix_lengths_device below restores the
-    // CUDA copy for device consumers.
-    if (py_attn_inputs.input_lengths.defined() && !py_attn_inputs.input_lengths.is_cuda()
-        && py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.is_cuda()) {
-        py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
+    auto& input_lengths  = py_attn_inputs.input_lengths;
+    auto& prefix_lengths = py_attn_inputs.prefix_lengths;
+    if (input_lengths.defined() && prefix_lengths.defined() && prefix_lengths.numel() > 0
+        && input_lengths.is_cuda() != prefix_lengths.is_cuda()) {
+        auto& device_lengths = input_lengths.is_cuda() ? input_lengths : prefix_lengths;
+        device_lengths       = normalize_i32(device_lengths.cpu());
     }
     py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
     py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);

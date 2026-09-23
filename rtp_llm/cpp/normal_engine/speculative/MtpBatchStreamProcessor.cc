@@ -870,8 +870,9 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
         ++stream_it;
     }
 
-    model_input.input_lengths = toCudaInt32(input_lengths_cpu, host_holder);
-    model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
+    model_input.input_lengths  = toCudaInt32(input_lengths_cpu, host_holder);
+    model_input.combo_tokens   = toCudaInt32(combo_tokens_cpu, host_holder);
+    model_input.prefix_lengths = toCudaInt32(model_input.prefix_lengths, host_holder);
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors) {
