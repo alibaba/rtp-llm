@@ -38,6 +38,15 @@ from rtp_llm.ops import MMPreprocessConfig, MMRdmaEncoderOp, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
 
 
+def _rpc_timeout_ms(context, default_ms: int) -> int:
+    remaining = context.time_remaining()
+    return (
+        default_ms
+        if remaining is None
+        else max(0, min(default_ms, int(remaining * 1000)))
+    )
+
+
 def trans_output(res: MMEmbeddingRes):
     return build_multimodal_output_pb(res.embeddings, res.position_ids, res.extra_input)
 
@@ -67,6 +76,8 @@ def _abort_ft_runtime(context, error: FtRuntimeException) -> None:
         status = grpc.StatusCode.DEADLINE_EXCEEDED
     elif error.exception_type == ExceptionType.CANCELLED_ERROR:
         status = grpc.StatusCode.CANCELLED
+    elif error.exception_type == ExceptionType.UNSAFE_INPUT_CONTENT:
+        status = grpc.StatusCode.PERMISSION_DENIED
     else:
         status = grpc.StatusCode.INTERNAL
     context.abort(status, f"[{error.exception_type.name}] {error.message}")
@@ -86,9 +97,15 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     self._rdma = rdma
                     logging.info("[VIT] mm rdma encoder enabled")
                 else:
-                    logging.warning("[VIT] mm rdma requested but unavailable, fall back to bytes")
-            except Exception as e:  # noqa: BLE001 - never let rdma init break the bytes path
-                logging.warning("[VIT] init mm rdma encoder failed: %s, fall back to bytes", e)
+                    logging.warning(
+                        "[VIT] mm rdma requested but unavailable, fall back to bytes"
+                    )
+            except (
+                Exception
+            ) as e:  # noqa: BLE001 - never let rdma init break the bytes path
+                logging.warning(
+                    "[VIT] init mm rdma encoder failed: %s, fall back to bytes", e
+                )
 
     def _trans_output_rdma(self, res: MMEmbeddingRes):
         """Export the whole output of one request (embedding + pos_id + every extra_input)
@@ -140,15 +157,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 output_pb.output_rdma_chunks.add().CopyFrom(desc)
         return output_pb
 
-    def _register_queue_cancellation(self, request_id: int, context):
+    def _register_rpc_completion(self, context):
         rpc_done = threading.Event()
-
-        def cancel_queued_work() -> None:
+        # gRPC callbacks also run on success. Cancel only if an active wait
+        # observes completion, not after a successful GreenNet RPC returns.
+        if not context.add_callback(rpc_done.set):
             rpc_done.set()
-            self.engine.cancel_queued_request(request_id)
-
-        if not context.add_callback(cancel_queued_work):
-            cancel_queued_work()
         return rpc_done
 
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
@@ -156,6 +170,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             converted_inputs = trans_mm_input(multimodal_inputs)
             self.engine.async_submit(converted_inputs, multimodal_inputs.request_id)
             return EmptyPB()
+        except TimeoutError as error:
+            _abort_ft_runtime(
+                context, FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, str(error))
+            )
         except FtRuntimeException as error:
             _abort_ft_runtime(context, error)
 
@@ -166,13 +184,16 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         client reconstructs the exact FtRuntimeException."""
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
-            cancellation_event = self._register_queue_cancellation(
-                multimodal_inputs.request_id, context
-            )
+            cancellation_event = self._register_rpc_completion(context)
             verdict = self.engine.wait_greennet_verdict(
                 converted_inputs,
+                timeout_ms=_rpc_timeout_ms(context, 60000),
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
+            )
+        except TimeoutError as error:
+            _abort_ft_runtime(
+                context, FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, str(error))
             )
         except FtRuntimeException as error:
             _abort_ft_runtime(context, error)
@@ -196,11 +217,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
-            cancellation_event = self._register_queue_cancellation(
-                multimodal_inputs.request_id, context
-            )
+            cancellation_event = self._register_rpc_completion(context)
             results = self.engine.get_embedding_result(
                 converted_inputs,
+                timeout_ms=_rpc_timeout_ms(context, 120000),
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
             )
@@ -219,6 +239,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 if rdma_out is not None:
                     return rdma_out
             return trans_output(merged)
+        except TimeoutError as error:
+            _abort_ft_runtime(
+                context, FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, str(error))
+            )
         except FtRuntimeException as error:
             _abort_ft_runtime(context, error)
         except Exception as e:

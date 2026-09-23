@@ -33,7 +33,7 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
             if (tensor.is_cuda()) {
                 auto options =
                     torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
-                tensor = tensor.to(options, /*non_blocking=*/true);
+                tensor = tensor.to(options, /*non_blocking=*/false);
             } else {
                 tensor = tensor.pin_memory();
             }

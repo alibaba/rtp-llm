@@ -30,11 +30,15 @@ class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
     RemoteMultimodalProcessor(const MMModelConfig& mm_model_config,
                               int64_t              max_seq_len,
-                              const VitConfig&     vit_config = VitConfig()):
+                              const VitConfig&     vit_config = VitConfig(),
+                              int                  tp_rank = 0):
         MultimodalProcessor(py::none(), mm_model_config, max_seq_len) {
         // LLM consumer side of the encoder<->LLM RDMA fast path. nullptr when disabled /
         // unavailable, in which case every request transparently uses the inline-bytes path.
-        rdma_transport_         = createMMRdmaTransport(vit_config, MMRdmaRole::LLM_CLIENT);
+        // Only each TP group root fetches ViT outputs; siblings use TP broadcast.
+        if (tp_rank == 0) {
+            rdma_transport_ = createMMRdmaTransport(vit_config, MMRdmaRole::LLM_CLIENT);
+        }
         rdma_release_timeout_ms_ = vit_config.mm_rdma_release_timeout_ms;
     }
 
@@ -292,8 +296,8 @@ private:
                                 descs.size());
             request.set_support_rdma(false);
             MultimodalOutputPB  fallback_pb;
-            grpc::ClientContext fallback_context;
-            auto fallback_status = stub->RemoteMultimodalEmbedding(&fallback_context, request, &fallback_pb);
+            auto fallback_context = makeClientContext(server_context);
+            auto fallback_status = stub->RemoteMultimodalEmbedding(fallback_context.get(), request, &fallback_pb);
             if (!fallback_status.ok()) {
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
                                  "rdma read failed and inline-bytes fallback also failed: "

@@ -94,3 +94,9 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "mm_result_cancellation_test",
+    srcs = ["mm_result_cancellation_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

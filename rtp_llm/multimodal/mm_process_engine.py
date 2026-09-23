@@ -809,20 +809,35 @@ class MMProcessEngine:
         if not self._greennet_enabled():
             return GreenNetVerdict(passed=True)
 
-        valid_inputs = [mm_input for mm_input in mm_inputs if mm_input.url != ""]
-        claims = self._claim_and_submit_async(
-            valid_inputs,
-            request_id=request_id,
-            queue_timeout_ms=timeout_ms,
-            cancellation_event=cancellation_event,
-        )
         deadline = time.monotonic() + timeout_ms / 1000.0
-        for _, entry in claims:
-            remaining = max(0.0, deadline - time.monotonic())
-            verdict = entry.wait_greennet(timeout=remaining)
-            if verdict is not None and not verdict.passed:
-                return verdict
-        return GreenNetVerdict(passed=True)
+        try:
+            self._raise_if_async_request_cancelled(request_id, cancellation_event)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("ViT inspection deadline expired before submission")
+            valid_inputs = [mm_input for mm_input in mm_inputs if mm_input.url != ""]
+            claims = self._claim_and_submit_async(
+                valid_inputs,
+                request_id=request_id,
+                queue_timeout_ms=max(1, int((deadline - time.monotonic()) * 1000)),
+                cancellation_event=cancellation_event,
+            )
+            for _, entry in claims:
+                verdict = entry.wait_greennet(
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    cancellation_event=cancellation_event,
+                )
+                if verdict is not None and not verdict.passed:
+                    self.cancel_queued_request(request_id)
+                    return verdict
+            return GreenNetVerdict(passed=True)
+        except Exception as error:
+            self.cancel_queued_request(request_id)
+            if isinstance(error, concurrent.futures.CancelledError):
+                raise FtRuntimeException(
+                    ExceptionType.CANCELLED_ERROR,
+                    f"ViT request {request_id} was cancelled",
+                ) from error
+            raise
 
     def mm_embedding_rpc(self, mm_inputs: MultimodalInputsPB) -> MMEmbeddingRes:
         """Process multimodal inputs from RPC protocol buffer."""
@@ -1041,21 +1056,34 @@ class MMProcessEngine:
         If in-progress, blocks until the computing thread finishes.
         If complete, returns immediately.
         """
-        self.mm_part.validate_inputs(mm_inputs)
-        claims = self._claim_and_submit_async(
-            mm_inputs,
-            request_id=request_id,
-            queue_timeout_ms=timeout_ms,
-            cancellation_event=cancellation_event,
-        )
         deadline = time.monotonic() + timeout_ms / 1000.0
-        results = []
-        for _, entry in claims:
-            remaining = max(0.0, deadline - time.monotonic())
-            raw_result = entry.wait(timeout=remaining)
-            results.append(self._work_item_result_to_response(raw_result))
-
-        return results
+        try:
+            self.mm_part.validate_inputs(mm_inputs)
+            self._raise_if_async_request_cancelled(request_id, cancellation_event)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("ViT request deadline expired before submission")
+            claims = self._claim_and_submit_async(
+                mm_inputs,
+                request_id=request_id,
+                queue_timeout_ms=max(1, int((deadline - time.monotonic()) * 1000)),
+                cancellation_event=cancellation_event,
+            )
+            results = []
+            for _, entry in claims:
+                raw_result = entry.wait(
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    cancellation_event=cancellation_event,
+                )
+                results.append(self._work_item_result_to_response(raw_result))
+            return results
+        except Exception as error:
+            self.cancel_queued_request(request_id)
+            if isinstance(error, concurrent.futures.CancelledError):
+                raise FtRuntimeException(
+                    ExceptionType.CANCELLED_ERROR,
+                    f"ViT request {request_id} was cancelled",
+                ) from error
+            raise
 
     def _claim_and_submit_async(
         self,

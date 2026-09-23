@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import OrderedDict
+from concurrent.futures import CancelledError
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
@@ -9,6 +11,21 @@ import torch
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+
+
+def _wait_event(event, timeout, cancellation_event):
+    if cancellation_event is None:
+        return event.wait(timeout=timeout)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        if cancellation_event.is_set():
+            raise CancelledError("ViT result wait was cancelled")
+        if event.is_set():
+            return True
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return False
+        event.wait(timeout=0.05 if remaining is None else min(0.05, remaining))
 
 
 def _embedding_result_cost(result: Any) -> Tuple[int, int]:
@@ -68,8 +85,8 @@ class MMEmbeddingCacheEntry:
         self._greennet_event = threading.Event()
         self._greennet_verdict: Optional[GreenNetVerdict] = None
 
-    def wait(self, timeout: Optional[float] = None) -> Any:
-        if not self._event.wait(timeout=timeout):
+    def wait(self, timeout: Optional[float] = None, cancellation_event=None) -> Any:
+        if not _wait_event(self._event, timeout, cancellation_event):
             raise TimeoutError("Waiting for embedding result timed out")
         if self.error is not None:
             raise self.error
@@ -109,8 +126,10 @@ class MMEmbeddingCacheEntry:
         self._greennet_verdict = verdict
         self._greennet_event.set()
 
-    def wait_greennet(self, timeout: Optional[float] = None) -> GreenNetVerdict:
-        if not self._greennet_event.wait(timeout=timeout):
+    def wait_greennet(
+        self, timeout: Optional[float] = None, cancellation_event=None
+    ) -> GreenNetVerdict:
+        if not _wait_event(self._greennet_event, timeout, cancellation_event):
             raise TimeoutError("Waiting for greennet verdict timed out")
         return self._greennet_verdict
 
