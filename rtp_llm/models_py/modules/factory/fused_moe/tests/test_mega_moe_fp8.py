@@ -2,6 +2,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import torch
+
+from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ExpertGatePayload,
+    FusedMoe,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
     MegaMoeFp8Executor,
 )
@@ -97,8 +104,18 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
                 False,
                 {"n_shared_experts": 1, "has_shared_expert_gate": True},
             ),
-            (CudaMegaMoeFp8SEStrategy, "mega_moe_fp8_se", False, {"n_shared_experts": 0}),
-            (CudaMegaMoeFp8SEStrategy, "mega_moe_fp8_se", False, {"n_shared_experts": 1}),
+            (
+                CudaMegaMoeFp8SEStrategy,
+                "mega_moe_fp8_se",
+                False,
+                {"n_shared_experts": 0},
+            ),
+            (
+                CudaMegaMoeFp8SEStrategy,
+                "mega_moe_fp8_se",
+                False,
+                {"n_shared_experts": 1},
+            ),
         ]
         for strategy_cls, value, expected, extra in cases:
             with self.subTest(
@@ -115,6 +132,19 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
     def test_supported_parallelism(self):
         self.assertTrue(self.check_executor())
         self.assertTrue(self.check_executor(enable_cuda_graph=True))
+        for tp_size in (2, 4):
+            self.assertTrue(self.check_executor(tp_size=tp_size))
+            self.assertTrue(
+                self.check_executor(tp_size=tp_size, enable_cuda_graph=True)
+            )
+            self.assertFalse(
+                self.check_executor(
+                    MegaMoeFp8SEExecutor,
+                    tp_size=tp_size,
+                    n_shared_experts=1,
+                    has_shared_expert_gate=True,
+                )
+            )
         self.assertTrue(
             self.check_executor(
                 MegaMoeFp8SEExecutor,
@@ -133,7 +163,9 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
         )
         for invalid in [
             dict(swiglu_limit=1.0),
-            dict(tp_size=2),
+            dict(tp_size=0),
+            dict(tp_size=3),
+            dict(tp_size=8),
             dict(ep_size=1),
             dict(world_size=8),
             dict(world_rank=1),
@@ -172,6 +204,10 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
         ):
             self.assertEqual(
                 registry.get_strategy(self.config()).strategy_name, "mega_moe_fp8"
+            )
+            self.assertEqual(
+                registry.get_strategy(self.config(tp_size=4)).strategy_name,
+                "mega_moe_fp8",
             )
             self.assertEqual(
                 registry.get_strategy(
@@ -223,6 +259,158 @@ class MegaMoeFp8SelectionTest(unittest.TestCase):
         with patch.dict("sys.modules", {"deep_gemm": deep_gemm}):
             self.assertEqual(executor._block_m(123), 64)
         get_block_m.assert_called_once_with(4, 512, 32768, 123, 8)
+
+
+class _ReferenceMegaMoeFp8Executor(MegaMoeFp8Executor):
+    """Exercise the real executor adapter without launching the CUDA kernel."""
+
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        self.input_rows = []
+
+    @staticmethod
+    def reference(x, weights, indices):
+        return x * (weights * (indices + 1)).sum(dim=-1, keepdim=True)
+
+    def forward(self, x, weights, indices):
+        self.input_rows.append(x.size(0))
+        return self.reference(x, weights, indices)
+
+    def forward_gate_pack(self, x, gate_payload):
+        weights, indices = torch.topk(
+            gate_payload.scores.softmax(dim=-1), gate_payload.topk, dim=-1
+        )
+        return self.forward(x, weights, indices), weights, indices
+
+
+class MegaMoeFp8TpRouterTest(unittest.TestCase):
+    def router(self, tp_size, tp_rank):
+        return MegaMoeFp8Router(SimpleNamespace(tp_size=tp_size, tp_rank=tp_rank), None)
+
+    def test_tp_restores_outputs_without_repeating_tokens(self):
+        # Each rank starts with the same attention output. Expert dispatch must
+        # consume every token exactly once, including short and uneven batches.
+        for tp_size in (1, 2, 4):
+            for tokens in (0, 1, 2, 3, 4, 5, 7, 8, 9, 129):
+                for gate_pack in (False, True):
+                    with self.subTest(tp=tp_size, tokens=tokens, gate_pack=gate_pack):
+                        x = torch.arange(tokens * 8, dtype=torch.float32).reshape(
+                            tokens, 8
+                        )
+                        scores = (
+                            torch.arange(tokens * 6, dtype=torch.float32).reshape(
+                                tokens, 6
+                            )
+                            / 17
+                        )
+                        weights, indices = torch.topk(scores.softmax(dim=-1), 2, dim=-1)
+                        gate = ExpertGatePayload(
+                            scores=scores,
+                            topk=2,
+                            score_func="softmax",
+                            route_scale=1.0,
+                        )
+                        routers = [
+                            self.router(tp_size, rank) for rank in range(tp_size)
+                        ]
+                        payloads = [
+                            (
+                                router.prepare_gate_pack(x, gate)
+                                if gate_pack
+                                else router.prepare(x, None, None, weights, indices)
+                            )
+                            for router in routers
+                        ]
+                        self.assertEqual(
+                            sum(payload.expert_x.size(0) for payload in payloads),
+                            tokens,
+                        )
+                        torch.testing.assert_close(
+                            torch.cat([payload.expert_x for payload in payloads]), x
+                        )
+                        chunk_size = (tokens + tp_size - 1) // tp_size
+                        local_outputs = []
+                        for payload in payloads:
+                            local_weights, local_ids = (
+                                torch.topk(
+                                    payload.gate_payload.scores.softmax(dim=-1),
+                                    2,
+                                    dim=-1,
+                                )
+                                if gate_pack
+                                else (
+                                    payload.expert_topk_weights,
+                                    payload.expert_topk_ids,
+                                )
+                            )
+                            local = _ReferenceMegaMoeFp8Executor.reference(
+                                payload.expert_x, local_weights, local_ids
+                            )
+                            padded = x.new_zeros((chunk_size, x.size(1)))
+                            padded[: local.size(0)].copy_(local)
+                            local_outputs.append(padded)
+                        gathered = torch.cat(local_outputs)
+                        expected = _ReferenceMegaMoeFp8Executor.reference(
+                            x, weights, indices
+                        )
+                        for rank, router in enumerate(routers):
+                            executor = _ReferenceMegaMoeFp8Executor()
+                            moe = FusedMoe(router, executor, expert_num=6)
+
+                            def gather(local, group):
+                                self.assertEqual(group, Group.TP)
+                                torch.testing.assert_close(local, local_outputs[rank])
+                                return gathered
+
+                            with patch(
+                                "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.mega_moe_fp8.all_gather",
+                                side_effect=gather,
+                            ) as collective:
+                                output = (
+                                    moe.forward_gate_pack(x, gate)
+                                    if gate_pack
+                                    else moe(x, weights, indices)
+                                )
+                            torch.testing.assert_close(output, expected)
+                            # Empty source ranks must still enter MegaMoE's EP
+                            # collective, even when they have no local tokens.
+                            self.assertEqual(
+                                executor.input_rows, [payloads[rank].expert_x.size(0)]
+                            )
+                            self.assertEqual(
+                                collective.call_count, int(tp_size > 1 and tokens > 0)
+                            )
+
+    def test_gate_pack_slices_token_metadata_only(self):
+        x = torch.arange(40, dtype=torch.float32).reshape(5, 8)
+        scores = torch.arange(30, dtype=torch.float32).reshape(5, 6)
+        input_ids = torch.arange(5)
+        bias = torch.ones(6)
+        tid2eid = torch.arange(20).reshape(10, 2)
+        gate = ExpertGatePayload(
+            scores=scores,
+            topk=2,
+            score_func="hash",
+            route_scale=2.0,
+            norm_eps=1e-8,
+            bias=bias,
+            input_ids=input_ids,
+            tid2eid=tid2eid,
+        )
+        local = self.router(4, 1).prepare_gate_pack(x, gate)
+        torch.testing.assert_close(local.expert_x, x[2:4])
+        torch.testing.assert_close(local.gate_payload.scores, scores[2:4])
+        torch.testing.assert_close(local.gate_payload.input_ids, input_ids[2:4])
+        self.assertIs(local.gate_payload.bias, bias)
+        self.assertIs(local.gate_payload.tid2eid, tid2eid)
+        self.assertEqual(local.gate_payload.route_scale, gate.route_scale)
+        self.assertEqual(local.gate_payload.norm_eps, gate.norm_eps)
+        self.assertIs(gate.scores, scores)
+        self.assertIs(gate.input_ids, input_ids)
+        passthrough = self.router(1, 0).prepare_gate_pack(x, gate)
+        self.assertIs(passthrough.gate_payload, gate)
+        self.assertIs(passthrough.expert_x, x)
+
 
 class MegaMoeFp8ScaleLifetimeTest(unittest.TestCase):
     def test_checkpoint_scales_released_only_after_success(self):

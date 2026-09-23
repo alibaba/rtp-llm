@@ -76,7 +76,7 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         checker.check(MoeConfigResolver().get_quant_method(config) == "FP8_PER_BLOCK")
         checker.check(MoeConfigResolver().is_bf16(config))
         checker.check(config.ep_size > 1)
-        checker.check(config.tp_size == 1)
+        checker.check(config.tp_size >= 1 and config.world_size % config.tp_size == 0)
         checker.check(config.world_size == config.ep_size)
         checker.check(config.world_rank == config.ep_rank)
         checker.check(not config.has_redundant_experts)

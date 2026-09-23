@@ -48,8 +48,7 @@ def mega_moe_fp8_se_available():
     except ImportError:
         return False
     return (
-        "shared_expert_gates"
-        in inspect.signature(mega_fp8.fp8_fp8_mega_moe).parameters
+        "shared_expert_gates" in inspect.signature(mega_fp8.fp8_fp8_mega_moe).parameters
         and getattr(mega_fp8, "RTP_GATED_SHARED_EXPERT_SEMANTICS", 0) == 1
     )
 
@@ -61,6 +60,9 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
     @classmethod
     def check_conditions(cls, checker, config):
         super().check_conditions(checker, config)
+        # Fused shared experts need complete weights on each rank. Ordinary
+        # mega_moe_fp8 keeps TP-sharded shared experts in GenericMoeLayer.
+        checker.check(config.tp_size == 1)
         checker.check(getattr(config, "n_shared_experts", 0) == 1)
         checker.check(bool(getattr(config, "has_shared_expert_gate", False)))
         checker.check(mega_moe_fp8_se_available())
@@ -228,9 +230,7 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             or shared_gates.device != device
             or not shared_gates.is_contiguous()
         ):
-            raise ValueError(
-                "Shared gates must be contiguous CUDA FP32 [local_tokens]"
-            )
+            raise ValueError("Shared gates must be contiguous CUDA FP32 [local_tokens]")
         return dict(
             shared_l1_weights=self.shared_l1,
             shared_l2_weights=self.shared_l2,
@@ -245,7 +245,10 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
         self._launch(
-            y, tokens, x.device, **self._shared_kwargs(extra_expert_args, tokens, x.device)
+            y,
+            tokens,
+            x.device,
+            **self._shared_kwargs(extra_expert_args, tokens, x.device),
         )
         return y
 
@@ -292,7 +295,10 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         )
         y = self._mega_y[:tokens]
         self._launch(
-            y, tokens, x.device, **self._shared_kwargs(extra_expert_args, tokens, x.device)
+            y,
+            tokens,
+            x.device,
+            **self._shared_kwargs(extra_expert_args, tokens, x.device),
         )
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
