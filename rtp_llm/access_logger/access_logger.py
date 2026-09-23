@@ -43,7 +43,17 @@ class AccessLogger:
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
         async_mode: bool = True,
+        disable_access_log: bool = False,
     ) -> None:
+        self.async_mode = async_mode
+        self.rank_id = rank_id
+        self.server_id = server_id
+        self.logger: Optional[logging.Logger] = None
+        self.query_logger: Optional[logging.Logger] = None
+        # Disable before creating handlers/threads, and before serializing any
+        # request or response. A no-op file handler alone still pays that cost.
+        if disable_access_log:
+            return
         init_logger(
             ACCESS_LOGGER_NAME,
             "access.log",
@@ -64,9 +74,6 @@ class AccessLogger:
         )
         self.logger = logging.getLogger(ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
-        self.async_mode = async_mode
-        self.rank_id = rank_id
-        self.server_id = server_id
         logging.info(
             f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}"
         )
@@ -76,6 +83,8 @@ class AccessLogger:
         return request.get("private_request", False)
 
     def log_access(self, request: Dict[str, Any], response: ResponseLog) -> None:
+        if self.logger is None:
+            return
         request_log = RequestLog.from_request(request)
         access_log = PyAccessLog(
             request=request_log, response=response, id=request[request_id_field_name]
@@ -83,6 +92,8 @@ class AccessLogger:
         self.logger.info(dump_json(access_log))
 
     def log_query_access(self, request: Dict[str, Any]) -> None:
+        if self.query_logger is None:
+            return
         if not self.is_private_request(request):
             request_log = RequestLog.from_request(request)
             response_log = ResponseLog()
@@ -94,6 +105,8 @@ class AccessLogger:
             self.query_logger.info(dump_json(access_log))
 
     def log_success_access(self, request: Dict[str, Any], response: Any) -> None:
+        if self.logger is None:
+            return
         if not self.is_private_request(request):
             response_log = ResponseLog()
             response_log.add_response(response)
@@ -105,6 +118,8 @@ class AccessLogger:
         exception: BaseException,
         response: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if self.logger is None:
+            return
         response_log = ResponseLog()
         if response is not None:
             response_log.add_response(response)
