@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/HostCacheShm.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/NumaMemoryPolicy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -15,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -246,16 +248,23 @@ private:
     std::vector<std::thread> workers_;
 };
 
-torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, size_t prefault_threads) {
+torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes,
+                                          bool   interleave_numa_nodes,
+                                          size_t prefault_threads,
+                                          bool   use_shm = false) {
 #if USING_CUDA
-    void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    auto  shm = use_shm ? std::make_shared<HostCacheShm>(size_bytes) : nullptr;
+    void* ptr =
+        shm ? shm->data() : mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) {
         throw std::runtime_error(std::string("anonymous mmap failed: ") + std::strerror(errno));
     }
     if (interleave_numa_nodes) {
         const auto numa_result = applyAllowedNumaInterleavePolicy(ptr, size_bytes);
         if (!numa_result.success) {
-            (void)munmap(ptr, size_bytes);
+            if (!shm) {
+                (void)munmap(ptr, size_bytes);
+            }
             throw std::runtime_error("failed to set NUMA policy for registered host block pool: "
                                      + numa_result.error_message);
         }
@@ -285,18 +294,48 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_num
         // Prefaulting runs concurrently with the registration below; the scope
         // guarantees the threads are joined before any munmap of the arena.
         HostArenaPrefaulter prefaulter(ptr, size_bytes, prefault_threads);
-        err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
+        err = cudaHostRegister(ptr, size_bytes, use_shm ? cudaHostRegisterMapped : cudaHostRegisterDefault);
     }
     if (err != cudaSuccess) {
-        (void)munmap(ptr, size_bytes);
+        if (!shm) {
+            (void)munmap(ptr, size_bytes);
+        }
         throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(err));
     }
-    auto deleter = [size_bytes](void* registered_ptr) {
+    if (shm) {
+        // MLA kernels use the CPU tensor's data_ptr directly, including in graphs.
+        void* device_ptr = nullptr;
+        err              = cudaHostGetDevicePointer(&device_ptr, ptr, 0);
+        if (err != cudaSuccess || device_ptr != ptr) {
+            (void)cudaHostUnregister(ptr);
+            throw std::runtime_error("SCR host shm requires the same CPU/GPU virtual address: "
+                                     + std::string(cudaGetErrorString(err)));
+        }
+        RTP_LLM_LOG_INFO("SCR host KV shm registered: path=%s ptr=%p size=%zu; keep file linked and prepare "
+                         "backing file before CRIU restore; /dev/shm backup exclusion is controller-owned",
+                         shm->path().c_str(),
+                         ptr,
+                         size_bytes);
+    }
+    auto deleter = [size_bytes, shm](void* registered_ptr) mutable {
         if (registered_ptr != nullptr) {
             (void)cudaHostUnregister(registered_ptr);
-            (void)munmap(registered_ptr, size_bytes);
+            if (!shm) {
+                (void)munmap(registered_ptr, size_bytes);
+            }
+            shm.reset();
         }
     };
+    if (shm) {
+        // Also unregister if constructing the Tensor metadata throws. The
+        // mapping must never be unmapped while CUDA still owns its pages.
+        auto owner = std::shared_ptr<void>(ptr, std::move(deleter));
+        return torch::from_blob(
+            ptr,
+            {static_cast<int64_t>(size_bytes)},
+            [owner = std::move(owner)](void*) {},
+            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+    }
     return torch::from_blob(ptr,
                             {static_cast<int64_t>(size_bytes)},
                             std::move(deleter),
@@ -433,8 +472,10 @@ void BlockPool::initializeCacheBuffer() {
     } else if (config_.mla_tiered_cache) {
         // The caching pinned allocator rounds large arenas up to a power of two.
         // Register the exact budget instead, using the existing NUMA policy.
-        cache_aligned_buffer_ = allocateRegisteredCpuTensor(
-            config_.total_size_bytes, shouldInterleaveRegisteredHostBlockPool(), hostBlockPoolPrefaultThreads());
+        cache_aligned_buffer_         = allocateRegisteredCpuTensor(config_.total_size_bytes,
+                                                            shouldInterleaveRegisteredHostBlockPool(),
+                                                            hostBlockPoolPrefaultThreads(),
+                                                            useScrHostCacheShm());
         cache_buffer_registered_host_ = true;
         markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else if (use_pinned_cpu_backing_) {
