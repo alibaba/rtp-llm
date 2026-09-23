@@ -21,6 +21,7 @@ def run(args, cwd):
 
 def build(output, internal, spec_path, master_config_path):
     spec = json.loads(spec_path.read_text())
+    schema_version = spec.get("schema_version", 1)
     # CI checks out a shallow tree. rev-parse of a literal SHA does not prove
     # the object exists; fetch that exact revision before archiving it.
     revision = spec["source_commit"] + "^{commit}"
@@ -44,22 +45,25 @@ def build(output, internal, spec_path, master_config_path):
         adapter_tests = project / "flexlb-common/src/test/java/org/flexlb/mockdiscovery"
         adapter_tests.mkdir(parents=True)
         shutil.copyfile(ROOT / "discovery_adapter/WhaleFileDiscoveryTest.java", adapter_tests / "WhaleFileDiscoveryTest.java")
-        pom = project / "flexlb-api/pom.xml"
-        text = pom.read_text()
-        text = text.replace("<profiles>", """<profiles>
+
+        if schema_version >= 1:
+            # Schema-1 master: inject kmonitor profile and validate config parsing.
+            pom = project / "flexlb-api/pom.xml"
+            text = pom.read_text()
+            text = text.replace("<profiles>", """<profiles>
           <profile><id>whale-bundle</id><dependencies><dependency>
             <groupId>org.flexlb</groupId><artifactId>kmonitor</artifactId>
           </dependency></dependencies></profile>""", 1)
-        pom.write_text(text)
-        tests = project / "flexlb-common/src/test/java/org/flexlb/config"
-        dispatcher_type = json.loads(master_config_path.read_text())["dispatcher"]["type"]
-        dispatcher_class = {
-            "BATCH": "BatchDispatcherConfig",
-            "NON_BATCH": "NonBatchDispatcherConfig",
-        }.get(dispatcher_type)
-        if dispatcher_class is None:
-            raise ValueError("unsupported legacy dispatcher type: " + dispatcher_type)
-        (tests / "WhaleLegacyConfigTest.java").write_text("""package org.flexlb.config;
+            pom.write_text(text)
+            tests = project / "flexlb-common/src/test/java/org/flexlb/config"
+            dispatcher_type = json.loads(master_config_path.read_text())["dispatcher"]["type"]
+            dispatcher_class = {
+                "BATCH": "BatchDispatcherConfig",
+                "NON_BATCH": "NonBatchDispatcherConfig",
+            }.get(dispatcher_type)
+            if dispatcher_class is None:
+                raise ValueError("unsupported legacy dispatcher type: " + dispatcher_type)
+            (tests / "WhaleLegacyConfigTest.java").write_text("""package org.flexlb.config;
 import org.junit.jupiter.api.Test;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -72,17 +76,27 @@ class WhaleLegacyConfigTest {
  }
 }
 """.replace("DISPATCHER_CLASS", dispatcher_class))
-        shutil.copyfile(master_config_path, project / "flexlb-common/inner-master.json")
-        run(["mvn", "-B", "-Popensource,!internal", "-pl", "flexlb-common", "-am", "install",
-             "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
-        run(["mvn", "-B", "-pl", "kmonitor", "-am", "install", "-DskipTests"], internal / "java")
-        run(["mvn", "-B", "-Popensource,!internal,whale-bundle", "-pl", "flexlb-api", "-am", "package",
-             "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+            shutil.copyfile(master_config_path, project / "flexlb-common/inner-master.json")
+            run(["mvn", "-B", "-Popensource,!internal", "-pl", "flexlb-common", "-am", "install",
+                 "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+            run(["mvn", "-B", "-pl", "kmonitor", "-am", "install", "-DskipTests"], internal / "java")
+            run(["mvn", "-B", "-Popensource,!internal,whale-bundle", "-pl", "flexlb-api", "-am", "package",
+                 "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+        else:
+            # Schema-0 (pre-schema) master: flat FlexlbConfig, no kmonitor module.
+            # Only inject WhaleFileDiscovery; skip config validation test.
+            run(["mvn", "-B", "-Popensource,!internal", "-pl", "flexlb-common", "-am", "install",
+                 "-Dtest=WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+            run(["mvn", "-B", "-Popensource,!internal", "-pl", "flexlb-api", "-am", "package",
+                 "-Dtest=WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+
         output.mkdir(parents=True, exist_ok=True)
         target = output / spec["jar"]
         shutil.copyfile(project / "flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar", target)
         spec["jar_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
-        spec["packaging"] = "opensource plus KMonitor and opt-in WhaleFileDiscovery; original production Java sources unchanged"
+        spec["packaging"] = ("opensource plus KMonitor and opt-in WhaleFileDiscovery; original production Java sources unchanged"
+                             if schema_version >= 1 else
+                             "opensource plus opt-in WhaleFileDiscovery; flat config, no KMonitor; original production Java sources unchanged")
         (output / "legacy-master-build.json").write_text(json.dumps(spec, indent=2))
 
 
