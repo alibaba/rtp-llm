@@ -1,6 +1,7 @@
 import importlib
 import os
 import sys
+from types import SimpleNamespace
 from unittest import TestCase, main
 
 
@@ -18,6 +19,33 @@ class ServerArgsSetTest(TestCase):
         os.environ.clear()
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
+
+    def test_grammar_sandbox_memory_default_and_overrides(self):
+        from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
+        from rtp_llm.server.server_args.grammar_group_args import (
+            init_grammar_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        self.assertEqual(GrammarAdmissionConfig().sandbox_process_memory_limit_mb, 8192)
+        env_name = "DS_LLM_GRAMMAR_SANDBOX_PROCESS_MEMORY_LIMIT_MB"
+        flag = "--grammar_admission_sandbox_process_memory_limit_mb"
+        for env_value, cli_args, expected in (
+            (None, [], 8192),
+            ("4096", [], 4096),
+            ("4096", [flag, "16384"], 16384),
+            (None, [flag, "0"], 0),
+        ):
+            with self.subTest(env_value=env_value, cli_args=cli_args):
+                os.environ.pop(env_name, None)
+                if env_value is not None:
+                    os.environ[env_name] = env_value
+                admission = GrammarAdmissionConfig()
+                parser = EnvArgumentParser()
+                parser.set_root_config(SimpleNamespace())
+                init_grammar_group_args(parser, SimpleNamespace(), admission)
+                parser.parse_args(cli_args)
+                self.assertEqual(admission.sandbox_process_memory_limit_mb, expected)
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""

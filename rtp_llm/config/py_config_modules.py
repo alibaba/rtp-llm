@@ -446,7 +446,7 @@ class GrammarAdmissionConfig:
     queue_timeout_s: float = 30.0
     compile_timeout_s: float = 30.0
     sandbox_pool_size: int = 0
-    sandbox_process_memory_limit_mb: int = 1024
+    sandbox_process_memory_limit_mb: int = 8192
     compiler_cache_bytes: int = 1024 * 1024 * 1024
     result_cache_max_entries: int = 2048
 
