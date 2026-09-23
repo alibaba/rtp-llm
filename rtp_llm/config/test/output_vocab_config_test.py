@@ -206,16 +206,36 @@ class OutputVocabConfigTest(unittest.TestCase):
                 [0, 2, 7],
             )
 
-    def test_reports_missing_or_invalid_manifest(self):
+    def test_missing_manifest_disables_pruning_and_logs_path(self):
         with tempfile.TemporaryDirectory() as checkpoint_path:
-            with self.assertRaisesRegex(ValueError, OUTPUT_TOKENS_FILENAME):
-                load_output_vocab_ids(checkpoint_path, model_vocab_size=10)
+            with self.assertLogs(level="INFO") as logs:
+                self.assertEqual(
+                    load_output_vocab_config(
+                        checkpoint_path, model_vocab_size=10, extra_token_ids=(0,)
+                    ),
+                    ([], []),
+                )
+            self.assertIn(
+                os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME), logs.output[0]
+            )
+            self.assertIn("skipping output vocabulary pruning", logs.output[0])
+            self.assertEqual(
+                load_output_vocab_ids(checkpoint_path, model_vocab_size=10), []
+            )
 
+    def test_reports_invalid_manifest(self):
+        with tempfile.TemporaryDirectory() as checkpoint_path:
             config_path = os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME)
             with open(config_path, "w", encoding="utf-8") as writer:
                 writer.write("not-json")
             with self.assertRaisesRegex(ValueError, OUTPUT_TOKENS_FILENAME):
                 load_output_vocab_ids(checkpoint_path, model_vocab_size=10)
+
+    def test_unreadable_manifest_is_not_treated_as_missing(self):
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            os.mkdir(os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME))
+            with self.assertRaisesRegex(ValueError, OUTPUT_TOKENS_FILENAME):
+                load_output_vocab_config(checkpoint_path, model_vocab_size=10)
 
 
 if __name__ == "__main__":

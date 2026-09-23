@@ -477,9 +477,6 @@ class BaseModel(object):
         if not self.model_config.enable_output_vocab_pruning:
             return
 
-        if not self.model_config.has_lm_head:
-            raise ValueError("output vocabulary pruning requires a model LM head")
-
         eos_token_id = self.model_config.special_tokens.eos_token_id
         output_vocab_ids, output_vocab_groups = load_output_vocab_config(
             self.model_config.ckpt_path,
@@ -488,6 +485,11 @@ class BaseModel(object):
             tokenizer=self.tokenizer.get_real_tokenizer(),
             extra_token_ids=(eos_token_id,),
         )
+        if not output_vocab_ids:
+            self.model_config.enable_output_vocab_pruning = False
+            return
+        if not self.model_config.has_lm_head:
+            raise ValueError("output vocabulary pruning requires a model LM head")
         self.model_config.output_vocab_ids = output_vocab_ids
         self.model_config.output_vocab_groups = output_vocab_groups
 

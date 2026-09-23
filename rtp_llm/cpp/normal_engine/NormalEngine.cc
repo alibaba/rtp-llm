@@ -26,6 +26,7 @@
 #include <limits>
 #include <list>
 #include <memory>
+#include <string>
 #include <thread>
 #include <random>
 
@@ -55,8 +56,7 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config,
-                                         const CacheStoreConfig& cache_store_config) {
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
     // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
     // raw device allocation backing out of direct KVCacheManager users and non-RDMA
     // paths so PyTorch allocator behavior is unchanged elsewhere.
@@ -229,6 +229,17 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
             CodebookLogitsProcessor::createMasks(model_config_.output_vocab_groups,
                                                  model_config_.output_vocab_ids.size())
                 .to(torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(device_id)));
+        std::string group_sizes;
+        for (const auto& group : model_config_.output_vocab_groups) {
+            if (!group_sizes.empty()) {
+                group_sizes += ",";
+            }
+            group_sizes += std::to_string(group.size());
+        }
+        RTP_LLM_LOG_INFO("codebook level mask enabled: levels=%zu, group_sizes=[%s], union_vocab_size=%zu",
+                         model_config_.output_vocab_groups.size(),
+                         group_sizes.c_str(),
+                         model_config_.output_vocab_ids.size());
     }
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
@@ -634,8 +645,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    const bool use_device_malloc_block_pool =
-        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,

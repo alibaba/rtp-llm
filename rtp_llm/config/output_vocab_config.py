@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from collections.abc import Iterable, Mapping
 from typing import Any, Optional
@@ -173,11 +174,18 @@ def load_output_vocab_config(
     Multiple nested groups enable per-level masking. Each group is deduplicated
     and mapped to compact IDs. Extra tokens stay in the union but are excluded
     from generation levels.
+    A missing manifest returns empty IDs/groups to disable pruning.
     """
     config_path = os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME)
     try:
         with open(config_path, "r", encoding="utf-8") as reader:
             raw_tokens = json.load(reader)
+    except FileNotFoundError:
+        logging.info(
+            "output token manifest %s not found; skipping output vocabulary pruning",
+            config_path,
+        )
+        return [], []
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(
             f"failed to read output token manifest {config_path}: {error}"
