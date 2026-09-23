@@ -59,6 +59,12 @@ except ImportError:
     _HAS_DEEP_GEMM = False
     _HAS_DEEP_GEMM_MQA = False
 
+# SM120 defaults to the BF16 fallback. DSV4_INDEXER_FP8_DEEPGEMM=1 opts
+# into DeepGEMM's FP8 logits path without dequantizing the operands first.
+# The selected provider must support this kernel on SM120; exporting the
+# Python symbol alone does not establish device support.
+_FP8_DEEPGEMM_ON_SM120 = os.environ.get("DSV4_INDEXER_FP8_DEEPGEMM", "0") == "1"
+
 
 def _has_sm120_fallback(
     device: Optional[torch.device | str | int] = None,
@@ -322,7 +328,7 @@ def fp8_mqa_indexer_score(
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
-    if q_fp8.is_cuda and is_sm120(q_fp8.device):
+    if q_fp8.is_cuda and is_sm120(q_fp8.device) and not _FP8_DEEPGEMM_ON_SM120:
         from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
             v4_indexer_score,
         )
