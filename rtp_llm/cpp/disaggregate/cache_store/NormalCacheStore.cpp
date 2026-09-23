@@ -354,6 +354,10 @@ void NormalCacheStore::markRequestEnd(const std::string& requestid) {
     request_block_buffer_store_->delRequestBlockBuffer(requestid);
 }
 
+std::shared_ptr<RequestBlockBuffer> NormalCacheStore::getOrCreateRequestBlockBuffer(const std::string& request_id) {
+    return request_block_buffer_store_->getOrInsertRequestBlockBuffer(request_id);
+}
+
 bool NormalCacheStore::regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {
     return request_block_buffer_store_->regUserBuffers(buffers);
 }

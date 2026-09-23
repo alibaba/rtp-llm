@@ -1339,6 +1339,8 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
          [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
         {"return_all_probs",
          [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"custom_output",
+         [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
         {"multimodal",
          [](GenerateInput& input, GenerateConfig&) {
              input.multimodal_features = std::vector<torch::Tensor>{torch::Tensor()};
@@ -1362,6 +1364,14 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
         });
     ASSERT_FALSE(non_chunked_force_batch_stream->chunkedPrefillEnabled());
     ASSERT_FALSE(non_chunked_force_batch_stream->hasError());
+
+    auto non_chunked_custom_output_stream = builder.createChunkedContextStream(
+        input_ids,
+        RoleType::PREFILL,
+        /*chunk_size=*/0,
+        [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; });
+    ASSERT_FALSE(non_chunked_custom_output_stream->chunkedPrefillEnabled());
+    ASSERT_FALSE(non_chunked_custom_output_stream->hasError());
 }
 
 }  // namespace rtp_llm

@@ -649,8 +649,12 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
                 const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
                 if (config_.group(tag).policy.group_type == CacheGroupType::LINEAR) {
                     auto& group = static_cast<LinearCacheManager&>(*kv_cache_groups_[static_cast<size_t>(group_id)]);
+                    const int group_prefix_len =
+                        cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, malloc_info.computed_prefix_len);
+                    const int group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
                     group.removeSkippedBlocksBefore(kv_resource->mutableBlockIds(b, tag),
-                                                    malloc_info.computed_prefix_len,
+                                                    group_prefix_len,
+                                                    group_seq_len,
                                                     malloc_info.reuse_cache);
                 }
             }

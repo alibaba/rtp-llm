@@ -30,7 +30,10 @@ public:
                 const RequiredPositions& required_positions   = {}) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    void           removeSkippedBlocksBefore(BlockIds& block_ids, int prefix_len, bool enable_reuse_cache);
+    void           removeSkippedBlocksBefore(BlockIds& block_ids,
+                                             int       prefix_len,
+                                             int       next_seq_len,
+                                             bool      enable_reuse_cache);
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,

@@ -288,10 +288,14 @@ void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     removeSkippedBlocksThrough(block_ids, last_position, enable_reuse_cache);
 }
 
-void LinearCacheManager::removeSkippedBlocksBefore(BlockIds& block_ids, int prefix_len, bool enable_reuse_cache) {
-    // Keep the state loaded by this forward, even if its grant crosses several
-    // blocks. Later slots include the destination and the admission-time tail.
-    const int last_position = prefix_len > 0 ? (prefix_len - 1) / seqSizePerBlock() - 1 : -1;
+void LinearCacheManager::removeSkippedBlocksBefore(
+    BlockIds& block_ids, int prefix_len, int next_seq_len, bool enable_reuse_cache) {
+    // Keep the last computed state for this forward and every state in the
+    // next grant's active tail. A short grant can need states older than the
+    // last computed block when active_tail_blocks is greater than two.
+    const int last_computed_position = needBlocksNum(prefix_len, 0) - 1;
+    const int first_tail_position    = std::max(0, needBlocksNum(next_seq_len, 0) - materializedTailBlockCount());
+    const int last_position          = std::min(last_computed_position, first_tail_position) - 1;
     removeSkippedBlocksThrough(block_ids, last_position, enable_reuse_cache);
 }
 
