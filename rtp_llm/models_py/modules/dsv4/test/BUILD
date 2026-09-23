@@ -201,6 +201,14 @@ py_test(
 )
 
 py_test(
+    name = "test_dspark_metadata",
+    srcs = ["test_dspark_metadata.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_dspark_runtime_config",
     srcs = ["test_dspark_runtime_config.py"],
     deps = [

@@ -39,6 +39,10 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4 import _profiler
+from rtp_llm.models_py.modules.dsv4._dspark_metadata_triton import (
+    DSparkMetadata,
+    try_build_dspark_metadata,
+)
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
@@ -400,6 +404,56 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         )
         return global_slots.to(torch.int32), topk_length
 
+    def _proposal_metadata(
+        self,
+        query_positions: torch.Tensor,
+        prefix_lengths: torch.Tensor,
+        active_requests: torch.Tensor,
+        block_table: torch.Tensor,
+        entries_per_block: int,
+        tokens_per_block: int,
+        metadata_by_geometry: dict[Tuple[int, int], DSparkMetadata],
+    ) -> DSparkMetadata:
+        geometry = (entries_per_block, tokens_per_block)
+        metadata = metadata_by_geometry.get(geometry)
+        if metadata is not None:
+            return metadata
+
+        metadata = try_build_dspark_metadata(
+            query_positions,
+            prefix_lengths,
+            active_requests,
+            block_table,
+            gamma=self._gen_num_per_cycle,
+            window_size=int(self._v4_args.window_size),
+            entries_per_block=entries_per_block,
+            tokens_per_block=tokens_per_block,
+        )
+        if metadata is not None:
+            # All layers share this forward's inputs and block table. Only
+            # pool geometry can change their slot and attention indices.
+            metadata_by_geometry[geometry] = metadata
+            return metadata
+
+        query_req_ids = torch.arange(
+            prefix_lengths.numel(), device=query_positions.device, dtype=torch.long
+        ).repeat_interleave(self._gen_num_per_cycle)
+        query_slots = self._global_pool_slots(
+            block_table,
+            query_req_ids,
+            query_positions.reshape(-1),
+            entries_per_block,
+            tokens_per_block,
+        )
+        global_indices, topk_length = self._build_noncausal_indices(
+            prefix_lengths,
+            active_requests,
+            block_table,
+            entries_per_block,
+            tokens_per_block,
+        )
+        return DSparkMetadata(query_slots, global_indices, topk_length)
+
     # ------------------------------------------------------------------
     # DSpark attention / block forward
     # ------------------------------------------------------------------
@@ -670,6 +724,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
+        metadata_by_geometry: dict[Tuple[int, int], DSparkMetadata],
     ) -> torch.Tensor:
         batch_size, gamma, _ = x.shape
         if batch_size == 0:
@@ -685,15 +740,14 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             # Project and insert all query KVs before attention so each query
             # can read every other query position, including future noise.
             qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
-            query_req_ids = torch.arange(
-                batch_size, device=x.device, dtype=torch.long
-            ).repeat_interleave(gamma)
-            query_slots = self._global_pool_slots(
+            query_slots, global_indices, topk_length = self._proposal_metadata(
+                query_positions,
+                prefix_lengths,
+                active_requests,
                 block_table,
-                query_req_ids,
-                query_positions.reshape(-1),
                 entries_per_block,
                 tokens_per_block,
+                metadata_by_geometry,
             )
             _write_dspark_swa(
                 kv=qkv.kv,
@@ -704,13 +758,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 head_dim=int(attn.head_dim),
             )
 
-            global_indices, topk_length = self._build_noncausal_indices(
-                prefix_lengths,
-                active_requests,
-                block_table,
-                entries_per_block,
-                tokens_per_block,
-            )
             topk = int(global_indices.shape[-1])
             global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
 
@@ -749,6 +796,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     ) -> torch.Tensor:
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
+        metadata_by_geometry: dict[Tuple[int, int], DSparkMetadata] = {}
 
         # The hyper-connection choreography lives in Block.forward_decode;
         # only the attention call is substituted with the non-causal
@@ -769,6 +817,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         block_table,
                         tokens_per_block,
                         graph_metadata,
+                        metadata_by_geometry,
                     ),
                 )
 

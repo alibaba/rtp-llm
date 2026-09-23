@@ -85,6 +85,97 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertEqual(tuple(indices.shape), (6, 256))
         self.assertEqual(topk_length.tolist(), [13, 0])
 
+    def test_proposal_metadata_fallback_preserves_padding(self) -> None:
+        model = _dspark_harness(gamma=3)
+        query_positions = torch.tensor([[10, 11, 12], [-1, -1, -1]])
+        prefix_lengths = torch.tensor([10, 0], dtype=torch.int32)
+        active = torch.tensor([True, False])
+        block_table = torch.tensor([[1], [0]], dtype=torch.int32)
+        cache = {}
+
+        with patch.object(
+            dspark_model_module, "try_build_dspark_metadata", return_value=None
+        ):
+            metadata = model._proposal_metadata(
+                query_positions, prefix_lengths, active, block_table, 256, 256, cache
+            )
+
+        self.assertEqual(metadata.query_slots.tolist(), [266, 267, 268, -1, -1, -1])
+        self.assertEqual(metadata.topk_length.tolist(), [13, 0])
+        self.assertTrue(torch.all(metadata.global_indices[3:] == -1))
+        self.assertEqual(cache, {})
+
+    def test_proposal_metadata_reuse_is_scoped_to_forward_and_geometry(self) -> None:
+        model = _dspark_harness(gamma=3)
+        prefix_lengths = torch.tensor([10], dtype=torch.int32)
+        query_positions = torch.tensor([[10, 11, 12]])
+        active = torch.tensor([True])
+        block_table = torch.tensor([[1]], dtype=torch.int32)
+        cache = {}
+
+        def build_reference(
+            positions,
+            prefixes,
+            active_rows,
+            table,
+            *,
+            entries_per_block,
+            tokens_per_block,
+            **_kwargs,
+        ):
+            indices, lengths = model._build_noncausal_indices(
+                prefixes, active_rows, table, entries_per_block, tokens_per_block
+            )
+            slots = model._global_pool_slots(
+                table,
+                torch.zeros(3, dtype=torch.long),
+                positions.reshape(-1),
+                entries_per_block,
+                tokens_per_block,
+            )
+            return dspark_model_module.DSparkMetadata(slots, indices, lengths)
+
+        with patch.object(
+            dspark_model_module,
+            "try_build_dspark_metadata",
+            side_effect=build_reference,
+        ) as build:
+            first = model._proposal_metadata(
+                query_positions, prefix_lengths, active, block_table, 256, 256, cache
+            )
+            for _ in range(2):
+                self.assertIs(
+                    model._proposal_metadata(
+                        query_positions,
+                        prefix_lengths,
+                        active,
+                        block_table,
+                        256,
+                        256,
+                        cache,
+                    ),
+                    first,
+                )
+            self.assertEqual(build.call_count, 1)
+
+            other_geometry = model._proposal_metadata(
+                query_positions, prefix_lengths, active, block_table, 134, 256, cache
+            )
+            self.assertEqual(other_geometry.query_slots.tolist(), [144, 145, 146])
+            self.assertEqual(build.call_count, 2)
+
+            next_forward = model._proposal_metadata(
+                query_positions + 1,
+                prefix_lengths + 1,
+                active,
+                block_table,
+                256,
+                256,
+                {},
+            )
+            self.assertEqual(next_forward.query_slots.tolist(), [267, 268, 269])
+            self.assertEqual(build.call_count, 3)
+
     def test_runtime_gamma_controls_output_width(self) -> None:
         model = _dspark_harness(gamma=3)
         model.init_dspark_proposer(
