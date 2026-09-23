@@ -230,13 +230,21 @@ cc_library(
     srcs = [
         "RegisterCudaOps.cc",
     ],
-    copts = copts() + ["-fno-strict-aliasing"],
+    copts = copts() + ["-fno-strict-aliasing"] + select({
+        "@//:using_cuda13_x86": ["-DRTP_K3_NATIVE_ATTNRES"],
+        "@//:using_cuda13_arm": ["-DRTP_K3_NATIVE_ATTNRES"],
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
     ] + select({
+        "@//:using_cuda13_x86": ["//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_attn_res"],
+        "@//:using_cuda13_arm": ["//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_attn_res"],
+        "//conditions:default": [],
+    }) + select({
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],

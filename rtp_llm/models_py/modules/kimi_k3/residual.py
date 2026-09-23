@@ -52,6 +52,28 @@ class KimiK3AttentionResidual(nn.Module):
             raise ValueError("AttnRes valid block count is outside the residual bank")
         if block_write_idx < -1 or block_write_idx >= block_residual.shape[1]:
             raise ValueError("AttnRes block write index is outside the residual bank")
+        if output_norm_weight is not None and output_norm_eps is None:
+            raise ValueError(
+                "output_norm_eps is required when output RMSNorm is requested"
+            )
+        if (
+            prefix_sum.is_cuda
+            and prefix_sum.dtype == torch.bfloat16
+            and prefix_sum.shape[1] == 7168
+            and torch.cuda.get_device_capability(prefix_sum.device)[0] == 10
+        ):
+            from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+            if not hasattr(rtp_llm_ops, "kimi_k3_attn_res"):
+                raise RuntimeError("Native K3 AttnRes requires the CUDA 13 RTP build")
+            output = torch.empty_like(prefix_sum)
+            rtp_llm_ops.kimi_k3_attn_res(
+                prefix_sum, delta, block_residual, self.norm_weight,
+                self.projection_weight, output_norm_weight, output,
+                active_blocks, block_write_idx, self.eps,
+                0.0 if output_norm_eps is None else float(output_norm_eps),
+            )
+            return output
         if delta is not None:
             prefix_sum.add_(delta)
         if block_write_idx >= 0:
@@ -72,20 +94,16 @@ class KimiK3AttentionResidual(nn.Module):
             probabilities = torch.softmax(
                 (normalized * score_weight).sum(dim=-1), dim=-1
             )
-            output = torch.einsum("tb,tbd->td", probabilities, candidates_float).to(
-                dtype=prefix_sum.dtype
-            )
+            # Keep the mixture in FP32 through a fused output RMSNorm. Rounding
+            # it to BF16 first changes the K3 decoder's normalization input.
+            output = torch.einsum("tb,tbd->td", probabilities, candidates_float)
         if output_norm_weight is None:
-            return output
-        if output_norm_eps is None:
-            raise ValueError(
-                "output_norm_eps is required when output RMSNorm is requested"
-            )
+            return output.to(dtype=prefix_sum.dtype)
         output_float = output.float()
         normalized = output_float * torch.rsqrt(
             output_float.square().mean(dim=-1, keepdim=True) + output_norm_eps
         )
-        return output_norm_weight * normalized.to(dtype=output.dtype)
+        return (output_norm_weight.float() * normalized).to(dtype=prefix_sum.dtype)
 
 
 __all__ = ["KimiK3AttentionResidual"]

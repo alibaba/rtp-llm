@@ -96,22 +96,28 @@ class KimiK3DecoderLayer(nn.Module):
         if self.block_size:
             previous = (self.index + self.block_size - 1) // self.block_size
             writes = self.index % self.block_size == 0
-            attn_input = self.attention_residual(hidden, anchors, num_blocks=previous)
+            attn_input = self.attention_residual(
+                hidden, anchors, num_blocks=previous,
+                output_norm_weight=self.attention_norm.weight,
+                output_norm_eps=self.attention_norm.variance_epsilon,
+            )
             if writes:
                 anchors[:, previous].copy_(hidden)
             attended = self.attention(
-                self.attention_norm(attn_input), fmha, cache, attention_inputs, metadata
+                attn_input, fmha, cache, attention_inputs, metadata
             )
             hidden = attended if writes else hidden + attended
             mlp_input = self.mlp_residual(
-                hidden, anchors, num_blocks=previous + int(writes)
+                hidden, anchors, num_blocks=previous + int(writes),
+                output_norm_weight=self.mlp_norm.weight,
+                output_norm_eps=self.mlp_norm.variance_epsilon,
             )
         else:
             hidden = hidden + self.attention(
                 self.attention_norm(hidden), fmha, cache, attention_inputs, metadata
             )
-            mlp_input = hidden
-        return hidden + self.mlp(self.mlp_norm(mlp_input), valid_mask)
+            mlp_input = self.mlp_norm(hidden)
+        return hidden + self.mlp(mlp_input, valid_mask)
 
 
 class KimiK3Model(GptModelBase):

@@ -336,3 +336,23 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+# Native K3 AttnRes uses Blackwell TMEM instructions. Keep its architecture
+# flags local so other operators and model defaults retain their build policy.
+cc_library(
+    name = "kimi_k3_attn_res",
+    srcs = ["kimi_k3_attn_res.cu"],
+    hdrs = ["kimi_k3_attn_res.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        # Match the pinned vLLM AttnRes translation unit's math and arch flags.
+        # These affect reciprocal/RMSNorm rounding; do not apply globally.
+        "-nvcc_options=use_fast_math",
+        "-nvcc_options=extended-lambda",
+        "--cuda-gpu-arch=sm_100f",
+    ],
+)

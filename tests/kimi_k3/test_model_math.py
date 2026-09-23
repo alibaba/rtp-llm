@@ -215,3 +215,26 @@ def test_mtp_checkpoint_rejects_corrupted_weight(tiny_mtp_checkpoint, corruption
             output.truncate((root / "weights.safetensors").stat().st_size - 1)
     with pytest.raises(ValueError):
         checkpoint.validate_checkpoint(root)
+
+
+def test_fused_attnres_keeps_mixture_precision():
+    # Equal scores make the mixture exact, isolating the extra BF16 rounding
+    # from softmax and reduction error. Half of the outputs change if the
+    # mixture is rounded before output normalization.
+    width = 7168
+    prefix = torch.ones(1, width, dtype=torch.bfloat16)
+    prefix[:, width // 2:] = 3
+    bank = prefix.unsqueeze(1).clone()
+    bank[:, 0, :width // 2] = 1 + 1 / 128
+    module = Residual(torch.ones(width, dtype=torch.bfloat16),
+                      torch.zeros(width, dtype=torch.bfloat16), 1e-6)
+    actual = module(prefix, bank, output_norm_weight=torch.ones(width, dtype=torch.bfloat16),
+                    output_norm_eps=1e-6)
+    mixture = (prefix.double() + bank[:, 0].double()) / 2
+    expected = (mixture * torch.rsqrt(mixture.square().mean(-1, keepdim=True) + 1e-6)).bfloat16()
+    rounded = mixture.bfloat16().double()
+    split = (rounded * torch.rsqrt(rounded.square().mean(-1, keepdim=True) + 1e-6)).bfloat16()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert int((actual != split).sum()) == width // 2
+    # The final residual still exposes its BF16 pre-norm input to MTP.
+    torch.testing.assert_close(module(prefix, bank), mixture.bfloat16(), rtol=0, atol=0)
