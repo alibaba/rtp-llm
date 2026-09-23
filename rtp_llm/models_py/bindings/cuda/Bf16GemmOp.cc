@@ -101,7 +101,9 @@ private:
 
 }  // namespace
 
-at::Tensor cublas_gemm_bf16_fp32_accum(const at::Tensor& input, const at::Tensor& weight) {
+static at::Tensor bf16_gemm_impl(const at::Tensor& input,
+                                 const at::Tensor& weight,
+                                 const at::Tensor* residual) {
     TORCH_CHECK(input.is_cuda() && weight.is_cuda(), "BF16 GEMM requires CUDA input and weight");
     TORCH_CHECK(input.scalar_type() == at::kBFloat16 && weight.scalar_type() == at::kBFloat16,
                 "BF16 GEMM requires bfloat16 input and weight");
@@ -109,15 +111,24 @@ at::Tensor cublas_gemm_bf16_fp32_accum(const at::Tensor& input, const at::Tensor
     TORCH_CHECK(input.get_device() == weight.get_device(), "BF16 GEMM requires a single CUDA device");
     TORCH_CHECK(input.size(1) == weight.size(1), "BF16 GEMM inner dimensions must match");
     const int64_t m = input.size(0), n = weight.size(0), k = input.size(1);
+    if (residual != nullptr) {
+        TORCH_CHECK(residual->is_cuda() && residual->get_device() == input.get_device(),
+                    "BF16 GEMM residual must share the input CUDA device");
+        TORCH_CHECK(residual->scalar_type() == at::kBFloat16,
+                    "BF16 GEMM residual must be bfloat16");
+        TORCH_CHECK(residual->dim() == 2 && residual->size(0) == m && residual->size(1) == n,
+                    "BF16 GEMM residual shape must match the output");
+    }
     const int64_t int_max = std::numeric_limits<int>::max();
     TORCH_CHECK(m <= int_max && n <= int_max && k <= int_max, "BF16 GEMM dimensions exceed int32");
     const c10::cuda::CUDAGuard device_guard(input.device());
-    auto out = at::empty({m, n}, input.options());
+    auto out = residual != nullptr ? residual->contiguous().clone()
+                                   : at::empty({m, n}, input.options());
     if (out.numel() == 0) {
         return out;
     }
     if (k == 0) {
-        return out.zero_();
+        return residual != nullptr ? out : out.zero_();
     }
     auto x = input.contiguous();
     // RTP linear weights are commonly a [K,N] allocation viewed as [N,K].
@@ -132,7 +143,7 @@ at::Tensor cublas_gemm_bf16_fp32_accum(const at::Tensor& input, const at::Tensor
     cublasPointerMode_t pointer_mode;
     TORCH_CUDABLAS_CHECK(cublasGetPointerMode(handle, &pointer_mode));
     TORCH_CHECK(pointer_mode == CUBLAS_POINTER_MODE_HOST, "BF16 GEMM requires ATen's host pointer mode");
-    const float alpha = 1.0f, beta = 0.0f;
+    const float alpha = 1.0f, beta = residual != nullptr ? 1.0f : 0.0f;
     ScopedBf16Accumulation accumulation(handle);
     const auto status = cublasGemmEx(handle,
                                      column_major ? CUBLAS_OP_N : CUBLAS_OP_T, CUBLAS_OP_N,
@@ -144,6 +155,18 @@ at::Tensor cublas_gemm_bf16_fp32_accum(const at::Tensor& input, const at::Tensor
     accumulation.restore();
     TORCH_CUDABLAS_CHECK(status);
     return out;
+}
+
+at::Tensor cublas_gemm_bf16_fp32_accum(const at::Tensor& input, const at::Tensor& weight) {
+    return bf16_gemm_impl(input, weight, nullptr);
+}
+
+at::Tensor cublas_gemm_bf16_fp32_accum_add(const at::Tensor& input,
+                                        const at::Tensor& weight,
+                                        const at::Tensor& residual) {
+    // Match native addmm's beta epilogue with the FP32 reduction policy.
+    // The caller's residual remains unchanged, including during Graph replay.
+    return bf16_gemm_impl(input, weight, &residual);
 }
 
 }  // namespace torch_ext

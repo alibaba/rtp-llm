@@ -13,7 +13,7 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import MoeConfig
 from .attention import linear
 from .router import KimiK3RouterProjection
-from .linear import bf16_linear
+from .linear import KimiK3Bf16Linear, bf16_linear
 
 
 def situ(gate, up, beta, linear_beta, *, inplace=False):
@@ -123,6 +123,10 @@ class KimiK3LatentMoE(nn.Module):
         routed = self.experts(self.down(hidden), routing, ids, activation="situ")
         if self.norm is not None:
             routed = self.norm(routed.contiguous())
-        routed = self.up(routed)
         gate, up = bf16_linear(hidden, self.shared_gate_up).chunk(2, dim=-1)
-        return routed + self.shared_down(situ(gate, up, self.beta, self.linear_beta))
+        shared = self.shared_down(situ(gate, up, self.beta, self.linear_beta))
+        if isinstance(self.up, KimiK3Bf16Linear):
+            # Match native K3: combine the routed projection and shared
+            # output in a single addmm GEMM call.
+            return self.up(routed, residual=shared)
+        return self.up(routed) + shared

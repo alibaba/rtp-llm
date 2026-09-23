@@ -27,6 +27,11 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                  py::arg("eps"), py::arg("output_norm_eps"));
 #endif
 
+    rtp_ops_m.def("cublas_gemm_bf16_fp32_accum_add",
+                  &torch_ext::cublas_gemm_bf16_fp32_accum_add,
+                  "BF16 GEMM with FP32 reduction policy and native addmm residual semantics",
+                  py::arg("input"), py::arg("weight"), py::arg("residual"));
+
     rtp_ops_m.def("cublas_gemm_bf16_fp32_accum",
                   &torch_ext::cublas_gemm_bf16_fp32_accum,
                   "BF16 GEMM with FP32 intermediate reductions and BF16 output",
