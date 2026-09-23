@@ -175,6 +175,7 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+
 # Source-level policy tests deliberately do not import GPU modules.
 filegroup(
     name = "prefill_policy_source_data",
@@ -185,3 +186,24 @@ filegroup(
     ],
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "prefill_optimization_source_data",
+    srcs = glob(["modules/dsv4/**/*.py", "modules/dsv4/*.py"]),
+    visibility = ["//visibility:public"],
+)
+
+[
+    py_test(
+        name = name,
+        srcs = [source],
+        main = source,
+        data = [":prefill_optimization_source_data", "//rtp_llm/models_py/distributed:rank_layout"],
+        deps = ["//rtp_llm:torch"],
+        env = {"CUDA_VISIBLE_DEVICES": ""},
+    )
+    for name, source in [
+        ("test_nccl_ep_mxfp8_ttft_port_cpu", "modules/dsv4/moe/strategies/test_nccl_ep_mxfp8_ttft_port_cpu.py"),
+        ("test_nccl_ep_mxfp8_dispatch_pack_cpu", "modules/dsv4/moe/test_nccl_ep_mxfp8_dispatch_pack_cpu.py"),
+    ]
+]

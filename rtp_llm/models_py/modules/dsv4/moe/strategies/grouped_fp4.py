@@ -18,6 +18,7 @@ Forward is the 4-opt prefill path:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Dict, Optional
 
@@ -53,6 +54,15 @@ _GROUPED_ALIGNMENT = 128
 # sf_offsets.item() per layer per forward (each was a pipeline drain).
 # Default off = the host-counts path.
 _GROUPED_FP4_ASYNC = os.environ.get("DSV4_GROUPED_FP4_ASYNC", "0") == "1"
+# Capacity-shaped storage driven by device-only per-expert prefixes.  Default OFF.
+# Removes the two eager host-value readbacks without changing the selected FI64
+# grouped-GEMM arithmetic.
+_MOE_DEVICE_META = os.environ.get("DSV4_MOE_DEVICE_META", "0") == "1"
+# Fuse active-row scale scatter with FlashInfer 128x4 interleave. Default OFF.
+_MOE_ACTIVE_SCALE_FUSION = os.environ.get("DSV4_MOE_ACTIVE_SCALE_FUSION", "0") == "1"
+_MOE_ACTIVE_SCALE_FUSION_REQUIRED = (
+    os.environ.get("DSV4_MOE_ACTIVE_SCALE_FUSION_REQUIRED", "0") == "1"
+)
 # Optional SM120 grouped-GEMM N tile. Keep FlashInfer's default of 128;
 # alternative values are validated by the selected FlashInfer backend.
 _MOE_TILE_N = int(os.environ.get("DSV4_MOE_TILE_N", "128"))
@@ -394,6 +404,13 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         self, x, weights, indices, input_scale: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Run the SM120 eager path, optionally consuming pre-quantized input."""
+        if _MOE_DEVICE_META and _GROUPED_FP4_ASYNC:
+            raise RuntimeError(
+                "DSV4_MOE_DEVICE_META requires the FI eager route and is mutually "
+                "exclusive with DSV4_GROUPED_FP4_ASYNC"
+            )
+        if _MOE_DEVICE_META:
+            return self._forward_sm120_device_meta(x, weights, indices, input_scale)
         from flashinfer import block_scale_interleave, mxfp8_quantize
         from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
 
@@ -501,6 +518,133 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         hidden_q, hidden_scale_packed = silu_mul_fp8_quant_packed_from_parts(
             gate, up, clamp_limit=cfg.swiglu_limit, group_size=FP4_BLOCK
         )
+        hidden_scale = (
+            hidden_scale_packed.contiguous()
+            .view(torch.uint8)
+            .reshape(total_rows, inter // FP4_BLOCK)
+        )
+        down = gemm(hidden_q, hidden_scale, self._w2.view(torch.uint8), self._s2_sm120)
+        output = torch.empty((n, d), dtype=torch.float32, device=device)
+        ep_gather(down, adjusted_ids, weights, output_index, output)
+        return output
+
+    def _forward_sm120_device_meta(
+        self, x, weights, indices, input_scale=None
+    ) -> torch.Tensor:
+        """Use capacity storage but bound GEMM work by device prefixes.
+
+        Zero packed scales because contiguous() reads their full backing view."""
+        from .._active_rows import (
+            pack_active_scale,
+            pack_active_scale_interleaved,
+            validate_active_inputs,
+        )
+
+        total_rows, sf_rows = validate_active_inputs(
+            self, x, weights, indices, input_scale
+        )
+        cfg = self.cfg
+        n, d = x.shape
+        e, inter = cfg.n_routed_experts, cfg.moe_inter_dim
+        device = x.device
+        if n == 0:
+            return torch.zeros((n, d), dtype=torch.float32, device=device)
+        from flashinfer import block_scale_interleave, mxfp8_quantize
+        from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
+
+        routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
+        adjusted_ids, counts = recompute_topk_ids_sum_expert_count(
+            routed_ids, current_expert_start_id=0, num_local_experts=e
+        )
+        aligned = (counts + 3) & ~3
+        indptr = torch.zeros(e + 1, dtype=torch.int32, device=device)
+        torch.cumsum(aligned, 0, dtype=torch.int32, out=indptr[1:])
+        expert_start = torch.empty(e, dtype=torch.int32, device=device)
+        m_indices = torch.zeros(
+            align(total_rows, 128), dtype=torch.int32, device=device
+        )
+        output_index = torch.full_like(adjusted_ids, -1)
+        if input_scale is None:
+            x_q, linear_scale = mxfp8_quantize(
+                x.contiguous(), is_sf_swizzled_layout=False
+            )
+            linear_scale = linear_scale.reshape(n, d // FP4_BLOCK).view(torch.uint8)
+        else:
+            x_q = x
+            linear_scale = input_scale.reshape(n, d // FP4_BLOCK).view(torch.uint8)
+        # Match production allocation behavior.  Per-expert align-4 padding is
+        # still inside the FI group problem and retains the production zero-scale
+        # masking contract; capacity-only rows are excluded by indptr.
+        routed_q = torch.empty(total_rows, d, dtype=x_q.dtype, device=device)
+        routed_scale = torch.zeros(
+            total_rows, d // FP4_BLOCK, dtype=torch.uint8, device=device
+        )
+        ep_scatter(
+            x_q,
+            linear_scale,
+            adjusted_ids,
+            aligned,
+            expert_start,
+            routed_q,
+            routed_scale,
+            m_indices,
+            output_index,
+        )
+
+        fused_active_scale = _MOE_ACTIVE_SCALE_FUSION
+        if _MOE_ACTIVE_SCALE_FUSION_REQUIRED and not fused_active_scale:
+            raise RuntimeError(
+                "DSV4_MOE_ACTIVE_SCALE_FUSION_REQUIRED=1 requires "
+                "DSV4_MOE_ACTIVE_SCALE_FUSION=1"
+            )
+
+        def gemm(inp_q, inp_scale, expert_weight, expert_scale):
+            if fused_active_scale:
+                packed = pack_active_scale_interleaved(
+                    inp_scale, indptr, m_indices, sf_rows
+                )
+                engagements = getattr(self, "_active_scale_fusion_engagements", 0) + 1
+                self._active_scale_fusion_engagements = engagements
+                if engagements <= 2:
+                    logging.info(
+                        "[DSV4 MoE] active-scale fusion engaged: layer=%d pass=%d "
+                        "capacity=%d sf_rows=%d cols=%d",
+                        int(cfg.layer_id),
+                        engagements,
+                        int(inp_scale.size(0)),
+                        int(sf_rows),
+                        int(inp_scale.size(1)),
+                    )
+            else:
+                packed = pack_active_scale(inp_scale, indptr, m_indices, sf_rows)
+                packed = block_scale_interleave(packed).reshape(
+                    sf_rows, inp_scale.size(1)
+                )
+            return group_gemm_mxfp4_nt_groupwise(
+                inp_q,
+                expert_weight,
+                packed,
+                expert_scale,
+                indptr,
+                tile_n=_MOE_TILE_N,
+                out_dtype=torch.bfloat16,
+            )
+
+        gate_up = gemm(
+            routed_q, routed_scale, self._w13.view(torch.uint8), self._s13_sm120
+        )
+        up, gate = gate_up[:, :inter], gate_up[:, inter:]
+        hidden_q, hidden_scale_packed = silu_mul_fp8_quant_packed_from_parts(
+            gate,
+            up,
+            clamp_limit=cfg.swiglu_limit,
+            group_size=FP4_BLOCK,
+            active_indptr=indptr,
+            zero_inactive_q=False,
+            zero_inactive_scale=True,
+        )
+        # This is deliberately the production consumer spelling.  The repaired
+        # packed-scale tail is defined before this capacity-wide materialization.
         hidden_scale = (
             hidden_scale_packed.contiguous()
             .view(torch.uint8)

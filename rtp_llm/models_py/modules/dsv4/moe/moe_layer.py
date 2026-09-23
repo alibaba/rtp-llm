@@ -415,11 +415,20 @@ class MoE(nn.Module):
         out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
         for token_start in range(0, schedule_tokens, chunk_tokens):
             token_end = min(token_start + chunk_tokens, T)
-            self._run_chunk(
-                x[token_start:token_end],
-                input_ids_flat[token_start:token_end],
-                out[token_start:token_end],
-            )
+            subchunk_scope = getattr(self._strategy, "forward_subchunk_scope", None)
+            if subchunk_scope is None:
+                self._run_chunk(
+                    x[token_start:token_end],
+                    input_ids_flat[token_start:token_end],
+                    out[token_start:token_end],
+                )
+            else:
+                with subchunk_scope(token_start, chunk_tokens, T):
+                    self._run_chunk(
+                        x[token_start:token_end],
+                        input_ids_flat[token_start:token_end],
+                        out[token_start:token_end],
+                    )
         return out.view(shape)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:

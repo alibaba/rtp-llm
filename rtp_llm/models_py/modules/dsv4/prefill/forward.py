@@ -130,6 +130,8 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 
+from ..moe.forward_ep_plan import prefill_forward_scope
+
 if TYPE_CHECKING:
     # Kept behind TYPE_CHECKING to avoid an import cycle — ``transformer``
     # doesn't depend on ``prefill`` today but this guard makes that
@@ -489,7 +491,10 @@ def forward_layers(
             )
 
     try:
-        with record_range_ctx():
+        with (
+            record_range_ctx(),
+            prefill_forward_scope(v4, cp_ctx, int(input_ids.numel()), input_ids.device),
+        ):
             # Two callable chains intentionally coexist:
             #   * normal ``Block.forward`` keeps debug checks and fallback layouts;
             #   * cached fast callables are validated once for the FP8 production
