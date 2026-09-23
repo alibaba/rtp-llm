@@ -463,6 +463,16 @@ class MiniMaxM3MTPSharedWeightTest(unittest.TestCase):
         model.weight.set_global_weight(W.lm_head, lm_head)
         return model
 
+    def test_weight_loading_does_not_require_colocated_target(self):
+        embedding, lm_head = torch.randn(16, 8), torch.randn(4, 8)
+        draft = self._model(MiniMaxM3MTP, embedding, lm_head, is_mtp=True)
+        with patch.object(DeepSeekV2, "_load"):
+            draft._load("cpu")
+        self.assertIs(draft.weight.get_global_weight(W.embedding), embedding)
+        self.assertIs(draft.weight.get_global_weight(W.lm_head), lm_head)
+        self.assertFalse(_TARGET_EMBEDDING_BY_DEVICE)
+        self.assertFalse(_TARGET_LM_HEAD_BY_DEVICE)
+
     def test_mtp_reuses_target_embedding_and_lm_head_storage(self):
         # These shapes also model CP: embedding is full while lm_head is the
         # vocabulary shard owned by this physical rank.
@@ -477,7 +487,7 @@ class MiniMaxM3MTPSharedWeightTest(unittest.TestCase):
             "rtp_llm.models.minimax_m3_mtp.ModelLoader.force_clean_cuda_memory"
         ) as clean_cuda_memory:
             target._load("cpu")
-            draft._load("cpu")
+            draft._bind_colocated_weights("cpu")
 
         self.assertIs(draft.weight.get_global_weight(W.embedding), target_embedding)
         self.assertIs(draft.weight.get_global_weight(W.lm_head), target_lm_head)
@@ -504,7 +514,7 @@ class MiniMaxM3MTPSharedWeightTest(unittest.TestCase):
         with patch.object(DeepSeekV2, "_load"):
             target._load("cpu")
             with self.assertRaisesRegex(RuntimeError, "embedding.*matching shape"):
-                draft._load("cpu")
+                draft._bind_colocated_weights("cpu")
 
     def test_mtp_rejects_mismatched_target_lm_head_shard(self):
         target = self._model(
@@ -517,7 +527,7 @@ class MiniMaxM3MTPSharedWeightTest(unittest.TestCase):
         with patch.object(DeepSeekV2, "_load"):
             target._load("cpu")
             with self.assertRaisesRegex(RuntimeError, "lm_head.*matching shape"):
-                draft._load("cpu")
+                draft._bind_colocated_weights("cpu")
 
 
 class _FakeDecoderLayer(nn.Module):
