@@ -369,7 +369,11 @@ class MiniMaxM3ReasoningParserTest(TestCase):
 class FakeTokenizer:
     eos_token_id = 200001
     chat_template = "{{ payload | tojson(ensure_ascii=False) }}|{{ flag | tojson }}"
-    special_tokens_map = {"eos_token": "[e~[", "bos_token": "]~b]"}
+    special_tokens_map = {
+        "eos_token": "[e~[",
+        "bos_token": "]~b]",
+        "additional_special_tokens": [NS_TOKEN, "<mm:think>", "</mm:think>"],
+    }
 
     def encode(self, text: str, **kwargs) -> List[int]:
         return [1] * len(text)

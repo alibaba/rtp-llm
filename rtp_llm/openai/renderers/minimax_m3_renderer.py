@@ -42,6 +42,8 @@ class MiniMaxM3Renderer(ReasoningToolBaseRenderer):
         # call markers (`]<]minimax[>[`, `<mm:think>`) and truncate every tool call.
         special_tokens_map = getattr(self.tokenizer, "special_tokens_map", None) or {}
         for name, token in special_tokens_map.items():
+            if name == "additional_special_tokens":
+                continue
             if isinstance(token, str):
                 tokens = [token]
             elif isinstance(token, list):
