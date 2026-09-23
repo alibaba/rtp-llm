@@ -2376,9 +2376,9 @@ class MSAAttention(nn.Module):
         if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
             max_kv = self._cuda_graph_max_kv(attn_inputs)
             pos = torch.arange(max_kv, device=device, dtype=torch.int32)
-            row_offsets = (
-                torch.arange(bsz, device=device, dtype=torch.int32)[:, None] * max_kv
-            )
+            row_offsets = torch.arange(bsz, device=device, dtype=torch.int32)[
+                :, None
+            ] * int(self._scratch_seq_len)
             req_to_token = row_offsets + pos[None, :]
             slot_ids = torch.arange(bsz, device=device, dtype=torch.int64)
             positions = prefix.to(device=device, dtype=torch.int32)
@@ -3137,9 +3137,7 @@ class MSAAttention(nn.Module):
         # while scattering, matching the legacy prefix dequantization contract.
         # CPU/BF16 is the unit-test path: index_copy does not implement float8.
         if not k_paged.is_cuda:
-            src_pages = (
-                None if gather_plan is None else gather_plan.restore_indices
-            )
+            src_pages = None if gather_plan is None else gather_plan.restore_indices
             page_size = int(self.page_size)
             for logical_idx, dst_page in enumerate(dst_pages.tolist()):
                 src_page = (

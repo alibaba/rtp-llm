@@ -16,6 +16,30 @@ _MSA_MODULE = "rtp_llm.models_py.modules.hybrid.msa_attention"
 
 class TestMSACpShardedPrefixRestore(unittest.TestCase):
 
+    def test_compact_decode_slots_use_scratch_stride(self):
+        attn = MSAAttention.__new__(MSAAttention)
+        torch.nn.Module.__init__(attn)
+        attn.cp_enabled, attn._kv_sharded = True, False
+        attn.page_size = 4
+        attn._cuda_graph_max_seq_len = 6
+        attn._scratch_batch_size = attn._scratch_seq_len = attn._scratch_slots = 0
+        blocks = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
+        attn._physical_block_table = lambda _: blocks
+        inputs = SimpleNamespace(
+            is_prefill=False, sequence_lengths_plus_1_device=torch.tensor([6, 6])
+        )
+        # Cover both allocation rounding and a retained larger scratch stride.
+        for capacity in (6, 512):
+            attn._ensure_scratch_addressing_capacity(bsz=2, max_kv=capacity)
+            for graph_active in (False, True):
+                with self.subTest(capacity=capacity, graph=graph_active), patch.object(
+                    attn, "_cuda_graph_forward_active", return_value=graph_active
+                ):
+                    addressing = attn._build_compact_addressing(inputs, "cpu")
+                    slots = attn._kernel_slots_to_paged(addressing[4], inputs)
+                    # Position 5 is offset 1 in the second physical page of each request.
+                    torch.testing.assert_close(slots, torch.tensor([45, 85]))
+
     def test_direct_paged_live_shape_does_not_cross_multiply_old_cp_high_watermarks(
         self,
     ):
