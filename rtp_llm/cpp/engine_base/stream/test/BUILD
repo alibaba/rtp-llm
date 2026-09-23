@@ -96,3 +96,14 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+# CPU tensors only: exercises real stream metadata and the MTP fake-prefill factory.
+cc_test(
+    name = "fake_context_chunk_test",
+    srcs = ["FakeContextChunkTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

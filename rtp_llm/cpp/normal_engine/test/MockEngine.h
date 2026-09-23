@@ -43,6 +43,7 @@ private:
 
 struct CustomConfig {
     bool                                    reuse_cache        = false;
+    bool                                    enable_fast_gen    = false;
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
@@ -74,6 +75,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     runtime_config.max_generate_batch_size                      = 128;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 4096;
+    runtime_config.fifo_scheduler_config.enable_fast_gen        = config.enable_fast_gen;
     model_config.attn_config.kv_cache_dtype =
         config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE;
     model_config.special_tokens.eos_token_id = -1;  // never eos

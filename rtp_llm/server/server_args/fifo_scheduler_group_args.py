@@ -16,6 +16,23 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="（设备参数）为设备参数设置的最大 context batch size，影响默认调度器的凑批决策。",
     )
     fifo_scheduler_group.add_argument(
+        "--enable_fast_gen",
+        env_name="ENABLE_FAST_GEN",
+        bind_to=[(fifo_scheduler_config, "enable_fast_gen")],
+        type=str2bool,
+        default=False,
+        help="若为 True，长请求会被拆分为 chunks 并分步处理（three-cursor chunked prefill）。",
+    )
+    # 与被删除的历史实现同名同 env；-1 表示未设置，由 engine_config 派生默认 chunk。
+    fifo_scheduler_group.add_argument(
+        "--fast_gen_context_budget",
+        env_name="FAST_GEN_MAX_CONTEXT_LEN",  # 和参数名不一致（历史遗留）
+        bind_to=[(fifo_scheduler_config, "fast_gen_max_context_len")],
+        type=int,
+        default=-1,
+        help="当 ENABLE_FAST_GEN 启用时，拆分成的 chunk 大小（全局 chunk）。",
+    )
+    fifo_scheduler_group.add_argument(
         "--max_batch_tokens_size",
         env_name="MAX_BATCH_TOKENS_SIZE",
         bind_to=[(fifo_scheduler_config, "max_batch_tokens_size")],

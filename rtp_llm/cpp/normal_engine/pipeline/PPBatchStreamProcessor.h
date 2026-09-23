@@ -9,6 +9,16 @@
 
 namespace rtp_llm {
 
+// Dispatch-time geometry: live fastgen cursors can be several rounds ahead
+// when the first stage consumes a PP result. Never infer finality at result time.
+struct PPStreamRoundSnapshot {
+    int64_t batch_size         = 0;
+    int64_t execute_token_size = 0;
+    bool    intermediate_chunk = false;
+    // Paired with the scheduler reservation, independent of mutable stream phase.
+    bool tracks_chunk_result = false;
+};
+
 class PPBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
     PPBatchStreamProcessor(const ModelConfig&                 model_config,
@@ -40,18 +50,24 @@ public:
                              const SamplerOutput&   sampler_output,
                              PPExecutionResult&     result) const;
 
+    // Synchronous callers only; PPExecutor always passes its captured snapshot.
     absl::Status dispatchExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
+    absl::Status dispatchExecutionResult(const StreamGroups&                       stream_groups,
+                                         const PPExecutionResult&                  result,
+                                         const std::vector<PPStreamRoundSnapshot>& round_snapshot) const;
 
-    torch::Tensor gatherDraftNextPositionIds(const StreamGroups& stream_groups, const GptModelInputs& model_input) const;
+    torch::Tensor gatherDraftNextPositionIds(const StreamGroups&   stream_groups,
+                                             const GptModelInputs& model_input) const;
 
-    absl::StatusOr<GptModelInputs>
-    gatherTargetVerifyModelInput(const StreamGroups& stream_groups, size_t propose_step, TensorHolder& host_holder) const;
+    absl::StatusOr<GptModelInputs> gatherTargetVerifyModelInput(const StreamGroups& stream_groups,
+                                                                size_t              propose_step,
+                                                                TensorHolder&       host_holder) const;
 
 private:
     SamplerInputs allocateSamplerInputs(const PPSamplingPlan& sampling_plan,
-                                       const PPOutputConfig& output_config,
-                                       size_t                total_batch_size,
-                                       size_t                propose_step) const;
+                                        const PPOutputConfig& output_config,
+                                        size_t                total_batch_size,
+                                        size_t                propose_step) const;
 
     void fillSamplerInputs(SamplerInputs&        sampler_inputs,
                            const PPSamplingPlan& sampling_plan,
@@ -67,8 +83,9 @@ private:
 
     void validateExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
 
-    absl::Status dispatchNormalExecutionResult(const StreamGroups& stream_groups,
-                                               const PPExecutionResult& result) const;
+    absl::Status dispatchNormalExecutionResult(const StreamGroups&                       stream_groups,
+                                               const PPExecutionResult&                  result,
+                                               const std::vector<PPStreamRoundSnapshot>& round_snapshot) const;
 
     void dispatchNormalSingleStream(const GenerateStreamPtr& stream,
                                     const PPExecutionResult& result,
@@ -78,15 +95,16 @@ private:
                                     int64_t                  token_offset,
                                     int64_t                  token_size,
                                     int64_t                  loss_offset,
-                                    int64_t                  loss_size) const;
+                                    int64_t                  loss_size,
+                                    bool                     intermediate_chunk) const;
 
-    absl::Status dispatchSpeculativeExecutionResult(const StreamGroups& stream_groups,
-                                                   const PPExecutionResult& result) const;
+    absl::Status dispatchSpeculativeExecutionResult(const StreamGroups&      stream_groups,
+                                                    const PPExecutionResult& result) const;
 
 private:
-    const bool                sp_enabled_;
+    const bool                 sp_enabled_;
     const std::vector<int64_t> output_vocab_ids_;
-    const int64_t             processor_eos_token_id_;
+    const int64_t              processor_eos_token_id_;
 };
 
 }  // namespace rtp_llm

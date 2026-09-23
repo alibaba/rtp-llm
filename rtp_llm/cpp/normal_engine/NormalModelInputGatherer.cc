@@ -193,8 +193,7 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
                 sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len);
             if (!current_extra_input.is_cuda()) {
                 host_holder.hold_host(current_extra_input);
-                gathered_mm_extra_input.emplace_back(
-                    current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
+                gathered_mm_extra_input.emplace_back(current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
             } else {
                 gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
             }
@@ -256,17 +255,16 @@ torch::Tensor buildLmOutputIndexesOnHost(const GptModelInputs& model_input, cons
     const auto total_batch_size         = static_cast<int64_t>(stream_groups.totalModelBatchSize());
     const auto total_decode_batch_size  = static_cast<int64_t>(stream_groups.totalDecodeBatchSize());
     const auto total_context_batch_size = total_batch_size - total_decode_batch_size;
-    auto       indexes =
-        torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto* dst = indexes.data_ptr<int32_t>();
+    auto       indexes = torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto*      dst     = indexes.data_ptr<int32_t>();
     for (int64_t i = 0; i < total_decode_batch_size; ++i) {
         dst[i] = static_cast<int32_t>(i);
     }
     if (total_context_batch_size > 0) {
-        auto input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
-                                                                  model_input.input_lengths.contiguous();
-        const auto* lengths = input_lengths.data_ptr<int32_t>();
-        int32_t     offset  = static_cast<int32_t>(total_decode_batch_size);
+        auto        input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
+                                                                          model_input.input_lengths.contiguous();
+        const auto* lengths       = input_lengths.data_ptr<int32_t>();
+        int32_t     offset        = static_cast<int32_t>(total_decode_batch_size);
         for (int64_t i = 0; i < total_context_batch_size; ++i) {
             offset += lengths[total_decode_batch_size + i];
             dst[total_decode_batch_size + i] = offset - 1;
@@ -385,8 +383,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const char* device_input_env = std::getenv("RTP_LLM_DEVICE_INPUT");
-    bool use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
+    const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
+    bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
                                    && stream_groups.totalContextBatchSize() == 0
                                    && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
     if (use_normal_device_state) {
@@ -472,10 +470,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
-    const auto context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
-    auto prefix_lengths_host =
+    const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
+    auto                       prefix_lengths_host =
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
+    auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
 
     for (const auto& stream : stream_groups.contextStreams()) {
@@ -516,10 +514,23 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
-                int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
-                memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
-                       context_pos_ids.data_ptr<int>() + reuse_offset,
-                       (context_pos_ids.numel() - reuse_offset) * sizeof(int));
+                // prefixLength(), not reuseLength(): under chunked prefill this
+                // round covers [prefixLength, prefixLength + contextLength), and
+                // the generated range spans the whole input. Copying all of it
+                // overruns the destination row, which is sized for this round.
+                const int64_t factor     = config_.position_id_len_factor;
+                const int64_t src_offset = static_cast<int64_t>(stream->prefixLength()) * factor;
+                const int64_t copy_count = static_cast<int64_t>(input_tokens.size()) * factor;
+                RTP_LLM_CHECK_WITH_INFO(src_offset >= 0 && copy_count >= 0
+                                            && src_offset + copy_count <= context_pos_ids.numel(),
+                                        "stream [%ld] position ids out of range: offset=%ld count=%ld numel=%ld",
+                                        stream->streamId(),
+                                        static_cast<long>(src_offset),
+                                        static_cast<long>(copy_count),
+                                        static_cast<long>(context_pos_ids.numel()));
+                memcpy(ctx.combo_position_ids + ctx.token_idx * factor,
+                       context_pos_ids.data_ptr<int>() + src_offset,
+                       copy_count * sizeof(int));
             }
 
             copyKvCacheBlocksToModelInput(
@@ -633,8 +644,10 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     for (const auto& stream : stream_groups.allStreams()) {
         auto& cache = *stream->kvCachePtr();
         // Restored prefix blocks already contain cache data before the first forward.
-        const size_t initialized_prefix_blocks = config_.seq_size_per_block
-            ? (stream->prefixLength() + config_.seq_size_per_block - 1) / config_.seq_size_per_block : 0;
+        const size_t initialized_prefix_blocks =
+            config_.seq_size_per_block ?
+                (stream->prefixLength() + config_.seq_size_per_block - 1) / config_.seq_size_per_block :
+                0;
         for (int batch = 0; batch < cache.batchSize(); ++batch) {
             for (int gid = 0; gid < cache.groupNums(); ++gid) {
                 auto ids = cache.mutableBlockIds(batch, gid).takeBlocksToZero(initialized_prefix_blocks);
@@ -645,9 +658,10 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     if (!blocks_to_zero.empty()) {
         std::sort(blocks_to_zero.begin(), blocks_to_zero.end());
         blocks_to_zero.erase(std::unique(blocks_to_zero.begin(), blocks_to_zero.end()), blocks_to_zero.end());
-        model_input.kv_cache_blocks_to_zero = torch::empty(
-            {static_cast<int64_t>(blocks_to_zero.size())}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
-        std::copy(blocks_to_zero.begin(), blocks_to_zero.end(), model_input.kv_cache_blocks_to_zero.data_ptr<int64_t>());
+        model_input.kv_cache_blocks_to_zero = torch::empty({static_cast<int64_t>(blocks_to_zero.size())},
+                                                           torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        std::copy(
+            blocks_to_zero.begin(), blocks_to_zero.end(), model_input.kv_cache_blocks_to_zero.data_ptr<int64_t>());
     }
     return model_input;
 }

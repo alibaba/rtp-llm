@@ -279,6 +279,9 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          nullptr,
                                                          0,
                                                          mode == preRunMode::prefill_warm_up);
+    if (parallelism_config.pp_size == 1 && mode != preRunMode::decode_warm_up && stream->isChunkStream()) {
+        stream->initNonChunkedContext();
+    }
     stream->setReserveStep(reserve_step_);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
@@ -439,6 +442,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
+    stream->initFakeContextChunk();
     if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
         auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -753,19 +757,26 @@ absl::Status NormalEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    // Fast-gen chunk windows belong to PPScheduler/PPExecutor. Non-pipeline
+    // schedulers have no intermediate-chunk result protocol and need the full
+    // context before their admission accounting or model-input gathering.
+    if (parallelism_config.pp_size == 1 && stream->isChunkStream()) {
+        stream->initNonChunkedContext();
+    }
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
+    if (parallelism_config.pp_size == 1 && stream->isContextStream() && stream->isChunkStream()) {
+        stream->initNonChunkedContext();
+    }
     stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    auto stream = makeStream(input);
+    enqueue(stream);
     return stream;
 }
 
@@ -774,8 +785,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     std::vector<GenerateStreamPtr> streams;
     streams.reserve(inputs.size());
     for (auto& inp : inputs) {
-        auto stream = std::make_shared<NormalGenerateStream>(
-            inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        auto stream = makeStream(inp);
         stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
     }

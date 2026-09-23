@@ -347,6 +347,7 @@ std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_
     fake_stream->setIsFakeStream(true);
     fake_stream->setMetricsReporter(nullptr);
     fake_stream->fakeInitKVBlock(reserved_blocks);
+    fake_stream->initFakeContextChunk();
 
     return fake_stream;
 }

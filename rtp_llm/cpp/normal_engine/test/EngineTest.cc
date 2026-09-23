@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
@@ -21,6 +22,61 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, fakeStreamsHaveExecutableChunksWithFastGen) {
+    for (const bool fast_gen : {false, true}) {
+        CustomConfig config;
+        config.enable_fast_gen = fast_gen;
+        auto engine            = createMockEngine(config);
+        auto decode            = engine->createMinFakeStream(3);
+        EXPECT_TRUE(decode->isFakeStream());
+        EXPECT_FALSE(decode->isContextStream());
+        EXPECT_FALSE(decode->isChunkStream());
+        EXPECT_EQ(decode->seqLength(), 2);
+        EXPECT_EQ(decode->currentExecuteTokens(0).size(), 1);
+        EXPECT_TRUE(engine->stop().ok());
+    }
+}
+
+TEST_F(NormalEngineTest, realStreamsHaveExecutableContextWithFastGen) {
+    for (const bool fast_gen : {false, true}) {
+        CustomConfig config;
+        config.enable_fast_gen = fast_gen;
+        auto       engine      = createMockEngine(config);
+        const auto make_input  = [] {
+            auto input                             = std::make_shared<GenerateInput>();
+            input->input_ids                       = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+            input->generate_config                 = std::make_shared<GenerateConfig>();
+            input->generate_config->max_new_tokens = 1;
+            input->generate_config->is_streaming   = false;
+            return input;
+        };
+        auto stream = engine->makeStream(make_input());
+        ASSERT_FALSE(stream->isFakeStream());
+        ASSERT_TRUE(stream->isContextStream());
+        EXPECT_EQ(stream->contextLength(), 7);
+        EXPECT_EQ(stream->currentExecuteTokens(), std::vector<int>({1, 2, 3, 4, 5, 6, 7}));
+        EXPECT_FALSE(stream->isChunkStream());
+        EXPECT_EQ(stream->enable_fast_gen_, fast_gen);
+        auto warmup = engine->preRun(make_input(), preRunMode::prefill_warm_up);
+        ASSERT_TRUE(warmup.ok()) << warmup.status().ToString();
+        // An externally constructed stream must receive the same preparation.
+        auto external = std::make_shared<NormalGenerateStream>(
+            make_input(), engine->model_config_, engine->runtime_config, engine->resource_context_, nullptr);
+        std::shared_ptr<GenerateStream> external_base = external;
+        engine->enqueue(external_base);
+        ASSERT_TRUE(external_base->nextOutput().ok());
+        auto single = engine->enqueue(make_input());
+        ASSERT_TRUE(single->nextOutput().ok());
+        auto batch = engine->enqueueMultiple({make_input(), make_input()});
+        ASSERT_EQ(batch.first, std::vector<bool>({true, true}));
+        ASSERT_EQ(batch.second.size(), 2);
+        for (auto& grouped : batch.second) {
+            ASSERT_TRUE(grouped->nextOutput().ok());
+        }
+        EXPECT_TRUE(engine->stop().ok());
+    }
+}
 
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
