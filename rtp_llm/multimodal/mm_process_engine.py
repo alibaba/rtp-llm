@@ -842,6 +842,7 @@ class MMProcessEngine:
         self._access_logger = MMAccessLogger(
             get_log_path(),
             profiling_debug_logging_config.log_file_backup_count,
+            disable_access_log=vit_config.disable_access_log,
         )
 
         url_data_cache_.resize_cache(self.vit_config.url_cache_item_num)

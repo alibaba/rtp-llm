@@ -31,6 +31,7 @@ class BackendManager(object):
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
             py_env_configs.server_config.rank_id,
             py_env_configs.server_config.frontend_server_id,
+            disable_access_log=py_env_configs.misc_config.disable_access_log,
         )
         self._distributed_server = DistributedServer(py_env_configs)
         self.thread_lock_ = threading.Lock()
