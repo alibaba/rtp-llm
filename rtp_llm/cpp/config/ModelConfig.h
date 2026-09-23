@@ -88,6 +88,8 @@ public:
     // Output vocab pruning contract: empty means disabled; otherwise ids must be strictly
     // ascending and deduplicated, each in [0, vocab_size), and output_vocab_padded_size >= ids.size().
     std::vector<int64_t> output_vocab_ids;
+    // Nested manifest levels in compact output_vocab_ids index space. Empty means static-union behavior.
+    std::vector<std::vector<int64_t>> output_vocab_groups;
     int64_t              output_vocab_padded_size   = 0;
     int64_t              input_vocab_size           = 0;  // 0 if not set
     int64_t              type_vocab_size            = 0;

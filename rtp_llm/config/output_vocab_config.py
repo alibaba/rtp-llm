@@ -149,6 +149,31 @@ def load_output_vocab_ids(
     tokenizer: Optional[Any] = None,
     extra_token_ids: Iterable[int] = (),
 ) -> list[int]:
+    """Load the canonical union, preserving the legacy flat return API."""
+    output_vocab_ids, _ = load_output_vocab_config(
+        checkpoint_path,
+        model_vocab_size,
+        input_vocab_size,
+        tokenizer,
+        extra_token_ids,
+    )
+    return output_vocab_ids
+
+
+def load_output_vocab_config(
+    checkpoint_path: str,
+    model_vocab_size: int,
+    input_vocab_size: Optional[int] = None,
+    tokenizer: Optional[Any] = None,
+    extra_token_ids: Iterable[int] = (),
+) -> tuple[list[int], list[list[int]]]:
+    """Load the canonical union and nested groups expressed in compact IDs.
+
+    Flat and single-group manifests use static pruning and return no groups.
+    Multiple nested groups enable per-level masking. Each group is deduplicated
+    and mapped to compact IDs. Extra tokens stay in the union but are excluded
+    from generation levels.
+    """
     config_path = os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME)
     try:
         with open(config_path, "r", encoding="utf-8") as reader:
@@ -180,9 +205,41 @@ def load_output_vocab_ids(
         if source_kind == "text"
         else values
     )
-    return _normalize_output_vocab_ids(
+    extra_ids = [
+        _require_int(value, f"extra token ID at index {index}")
+        for index, value in enumerate(extra_token_ids)
+    ]
+    output_vocab_ids = _normalize_output_vocab_ids(
         token_ids,
-        extra_token_ids,
+        extra_ids,
         model_vocab_size,
         input_vocab_size,
     )
+
+    is_nested = all(isinstance(item, list) for item in raw_tokens)
+    if not is_nested or len(raw_tokens) == 1:
+        return output_vocab_ids, []
+
+    canonical_groups: list[list[int]] = []
+    offset = 0
+    for group in raw_tokens:
+        group_size = len(group)
+        canonical_group = token_ids[offset : offset + group_size]
+        offset += group_size
+        forbidden_ids = sorted(set(canonical_group).intersection(extra_ids))
+        if forbidden_ids:
+            raise ValueError(
+                "output_tokens.json groups must not contain EOS/extra token IDs: "
+                f"{forbidden_ids}"
+            )
+        canonical_groups.append(sorted(set(canonical_group)))
+
+    compact_id_by_canonical_id = {
+        canonical_id: compact_id
+        for compact_id, canonical_id in enumerate(output_vocab_ids)
+    }
+    output_vocab_groups = [
+        [compact_id_by_canonical_id[token_id] for token_id in group]
+        for group in canonical_groups
+    ]
+    return output_vocab_ids, output_vocab_groups

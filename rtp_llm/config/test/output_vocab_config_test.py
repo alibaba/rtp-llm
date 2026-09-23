@@ -5,6 +5,7 @@ import unittest
 
 from rtp_llm.config.output_vocab_config import (
     OUTPUT_TOKENS_FILENAME,
+    load_output_vocab_config,
     load_output_vocab_ids,
     parse_output_tokens,
 )
@@ -120,6 +121,74 @@ class OutputVocabConfigTest(unittest.TestCase):
                     extra_token_ids=(0,),
                 ),
                 [0, 2, 4, 6, 8],
+            )
+
+            self.assertEqual(
+                load_output_vocab_config(
+                    checkpoint_path,
+                    model_vocab_size=10,
+                    tokenizer=FakeTokenizer({"C0": 6, "C1": 4, "C2": 8, "C3": 2}),
+                    extra_token_ids=(0,),
+                ),
+                ([0, 2, 4, 6, 8], [[2, 3], [1, 4]]),
+            )
+
+    def test_nested_groups_are_sorted_deduplicated_and_may_overlap(self):
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            config_path = os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME)
+            with open(config_path, "w", encoding="utf-8") as writer:
+                json.dump([[7, 2, 7], [5, 2]], writer)
+
+            self.assertEqual(
+                load_output_vocab_config(
+                    checkpoint_path,
+                    model_vocab_size=10,
+                    extra_token_ids=(0,),
+                ),
+                ([0, 2, 5, 7], [[1, 3], [1, 2]]),
+            )
+
+    def test_flat_manifest_has_no_level_groups(self):
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            config_path = os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME)
+            with open(config_path, "w", encoding="utf-8") as writer:
+                json.dump([7, 2, 7], writer)
+
+            self.assertEqual(
+                load_output_vocab_config(
+                    checkpoint_path,
+                    model_vocab_size=10,
+                    extra_token_ids=(0,),
+                ),
+                ([0, 2, 7], []),
+            )
+
+    def test_nested_group_rejects_eos_or_other_extra_token(self):
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            config_path = os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME)
+            with open(config_path, "w", encoding="utf-8") as writer:
+                json.dump([[1, 0], [2]], writer)
+
+            with self.assertRaisesRegex(ValueError, "EOS/extra token IDs"):
+                load_output_vocab_config(
+                    checkpoint_path,
+                    model_vocab_size=10,
+                    extra_token_ids=(0,),
+                )
+
+    def test_single_group_is_static_union_and_may_contain_eos(self):
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            config_path = os.path.join(checkpoint_path, OUTPUT_TOKENS_FILENAME)
+            with open(config_path, "w", encoding="utf-8") as writer:
+                json.dump([[1, 0, 2]], writer)
+
+            self.assertEqual(
+                load_output_vocab_config(
+                    checkpoint_path,
+                    model_vocab_size=10,
+                    extra_token_ids=(0,),
+                ),
+                ([0, 1, 2], []),
             )
 
     def test_id_file_does_not_require_tokenizer_vocab(self):
