@@ -290,6 +290,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         """The DSpARK commit call must not reconstruct positions from a QSL."""
 
         class FakeAttention:
+            layer_id = 0
             compress_ratio = 0
             rope_head_dim = 2
             head_dim = 4
@@ -379,6 +380,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         """CP gathers projected KV and honors replicated/byte-sliced pools."""
 
         class FakeAttention:
+            layer_id = 0
             compress_ratio = 0
             rope_head_dim = 2
             head_dim = 4

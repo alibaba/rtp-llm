@@ -35,16 +35,11 @@ class V41MXFP8Linear(torch.nn.Module):
             scales.float().index_select(0, rows)
         )
 
-    def forward(self, x: torch.Tensor, out=None):
-        import deep_gemm
-
+    def _quantize_input(self, x: torch.Tensor):
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )
 
-        shape = (*x.shape[:-1], self.N)
-        if x.numel() == 0:
-            return out if out is not None else x.new_empty(shape)
         flat = x.reshape(-1, self.K).contiguous()
         quantized, scales = sgl_per_token_group_quant_fp8(
             flat,
@@ -54,35 +49,24 @@ class V41MXFP8Linear(torch.nn.Module):
             scale_tma_aligned=True,
             scale_ue8m0=True,
         )
-        output = (
-            out
-            if out is not None
-            else torch.empty(shape, device=x.device, dtype=torch.bfloat16)
-        )
-        deep_gemm.fp8_fp4_gemm_nt(
-            (quantized, scales),
-            (self.weight, self.weight_scales),
-            output.reshape(-1, self.N),
-            recipe=(1, 1, 32),
-        )
-        return output
+        return quantized.view(x.shape), scales
 
     def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
-        """Consume flat group32 E4M3/packed UE8M0 without another quantization.
+        """Consume group32 E4M3/packed UE8M0 without another quantization.
 
         Deliberately no quantize_input method: the V4 input-reuse gate must
         remain closed for this linear. The caller owns the BF16 norm tensor.
         """
         if (
-            x_q.ndim != 2
-            or x_q.shape[1] != self.K
+            x_q.ndim < 1
+            or x_q.shape[-1] != self.K
             or x_q.dtype != torch.float8_e4m3fn
             or not x_q.is_cuda
             or x_q.device != self.weight.device
             or not x_q.is_contiguous()
         ):
-            raise ValueError("expected contiguous CUDA E4M3 [M,K] input")
-        m = x_q.shape[0]
+            raise ValueError("expected contiguous CUDA E4M3 [...,K] input")
+        m = x_q.numel() // self.K
         if (
             x_s.dtype != torch.int32
             or x_s.device != x_q.device
@@ -90,7 +74,7 @@ class V41MXFP8Linear(torch.nn.Module):
             or x_s.stride() != (1, max(1, (m + 3) // 4 * 4))
         ):
             raise ValueError("expected group32 column-major TMA packed UE8M0 scales")
-        shape = (m, self.N)
+        shape = (*x_q.shape[:-1], self.N)
         if out is not None and any(
             torch._C._overlaps(out, source)
             for source in (x_q, x_s, self.weight, self.weight_scales)
@@ -104,7 +88,7 @@ class V41MXFP8Linear(torch.nn.Module):
             or out.device != x_q.device
             or not out.is_contiguous()
         ):
-            raise ValueError("out must be contiguous BF16 [M,N] on the input device")
+            raise ValueError("out must be contiguous BF16 [...,N] on the input device")
         output = (
             out
             if out is not None
@@ -114,12 +98,17 @@ class V41MXFP8Linear(torch.nn.Module):
             import deep_gemm
 
             deep_gemm.fp8_fp4_gemm_nt(
-                (x_q, x_s),
+                (x_q.reshape(m, self.K), x_s),
                 (self.weight, self.weight_scales),
-                output,
+                output.reshape(m, self.N),
                 recipe=(1, 1, 32),
             )
         return output
+
+    def forward(self, x: torch.Tensor, out=None):
+        if x.numel() == 0:
+            return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        return self.forward_quantized(*self._quantize_input(x), out=out)
 
 
 def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:

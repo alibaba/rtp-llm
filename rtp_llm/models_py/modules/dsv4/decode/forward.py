@@ -39,6 +39,7 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv4.hc.decode_transition import forward_decode_layer
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import swa_region_for_layer
 
 
@@ -344,7 +345,17 @@ def forward_layers(
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
-            h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+            h = forward_decode_layer(
+                layer,
+                h,
+                attn_metadata,
+                input_ids,
+                next_layer=(
+                    v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None
+                ),
+                preserve_output=layer_idx in capture_ids or _rt_on,
+                kv_cache=kv_cache,
+            )
             if layer_idx in capture_ids:
                 v4.capture_aux_hidden(layer_idx, h)
             if _rt_on:

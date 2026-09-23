@@ -76,7 +76,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         // Draft q applies request temperature only. Materialize that exact
         // dense distribution once, sample from it with FlashInfer, and pass
         // the same q to rejection sampling. Request top-k/top-p stay target-side.
-        auto sampling_probabilities = torch::softmax(logits, -1);
+        auto sampling_probabilities = execDSparkSoftmax(logits);
         auto sampled_tokens         = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
         all_probabilities.select(1, step).copy_(sampling_probabilities);
         token_columns.push_back(sampled_tokens);

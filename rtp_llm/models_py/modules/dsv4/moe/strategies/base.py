@@ -22,6 +22,7 @@ A model can override the auto-pick via:
   - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
   - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg)
   - ``DSV4_USE_MEGA_MOE_SE=0`` to disable the default fused shared expert
+  - ``DSV41_MEGA_SHARED_EXPERT=1`` to opt native group-32 decode into Mega-SE
   - legacy ``DSV4_USE_MEGA_MOE=0`` / ``DSV4_USE_GROUPED_FP4=0|1`` toggles
     (translated to forced=... internally; conflicting toggles → RuntimeError)
 """
@@ -57,6 +58,7 @@ class MoeCfg:
     local_expert_end: int
     max_tokens_per_rank: int
     shared_fp8_block_size: int = 128
+    is_decode_role: bool = False
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -260,15 +262,36 @@ def select_strategy(
     explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     explicit_env = bool(explicit_env and explicit_env != "auto")
 
-    # The fused shared-expert Mega kernels hardcode a 128-wide activation
-    # recipe. V4.1 stores MXFP8 shared experts in 32x32 blocks and runs them
-    # separately, while retaining the same native FP4 routed Mega kernel.
+    # Native shared activations use K32 for both weight recipes. V4.1's
+    # 32x32 checkpoint scales need a different weight layout from V4's
+    # block-128 scales. Keep its new fusion opt-in and decode-only.
     separate_shared = cfg.shared_fp8_block_size == 32
-    if separate_shared and forced in ("mega_se", "mega_fused"):
+    native_shared_enabled = (
+        separate_shared
+        and cfg.is_decode_role
+        and os.environ.get("DSV41_MEGA_SHARED_EXPERT", "0") == "1"
+        and os.environ.get("DSV4_USE_MEGA_MOE_SE", "1") != "0"
+    )
+    if separate_shared and forced == "mega_fused":
         raise ValueError(
-            "V4.1 MXFP8 shared experts require DSV4_MOE_STRATEGY=mega; "
-            "mega_se/mega_fused use an incompatible block-128 recipe"
+            "V4.1 MXFP8 shared experts cannot use mega_fused's block-128 "
+            "weight recipe; use DSV4_MOE_STRATEGY=mega"
         )
+    if separate_shared and forced == "mega_se" and not native_shared_enabled:
+        raise ValueError(
+            "V4.1 MegaMoE-SE requires a decode role, "
+            "DSV41_MEGA_SHARED_EXPERT=1 and DSV4_USE_MEGA_MOE_SE!=0"
+        )
+    if (
+        cfg.ep_size > 1
+        and native_shared_enabled
+        and forced in (None, "mega", "mega_se")
+    ):
+        if os.environ.get("DSV4_USE_MEGA_MOE_FUSED", "0") == "1":
+            raise RuntimeError(
+                "DSV41_MEGA_SHARED_EXPERT=1 conflicts with DSV4_USE_MEGA_MOE_FUSED=1"
+            )
+        forced, strict = "mega_se", True
 
     # The current DeepGEMM shared-expert API and the older experimental fused
     # API use incompatible buffers. Never allow both variants to race.

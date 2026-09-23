@@ -26,6 +26,19 @@ using namespace std;
 
 namespace rtp_llm {
 
+torch::Tensor dsparkSoftmax(const torch::Tensor& logits) {
+#if USING_CUDA
+    const auto* enabled = std::getenv("DSV41_FUSED_DSPARK_SOFTMAX");
+    if (logits.is_cuda() && (enabled == nullptr || std::strcmp(enabled, "0") != 0)) {
+        pybind11::gil_scoped_acquire gil;
+        static pybind11::object      function =
+            pybind11::module_::import("rtp_llm.models_py.modules.dsv4.dspark_softmax").attr("dspark_softmax");
+        return function(logits).cast<torch::Tensor>();
+    }
+#endif
+    return torch::softmax(logits, -1);
+}
+
 torch::Tensor prepareDSparkLogits(const torch::Tensor& base_logits,
                                   const torch::Tensor& markov_bias,
                                   const torch::Tensor& temperature) {
