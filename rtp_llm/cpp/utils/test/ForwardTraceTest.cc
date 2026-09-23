@@ -13,7 +13,7 @@ int main() {
         assert(!off);
     }
     std::cerr << "disabled path passed" << std::endl;
-    ForwardTraceSession session(1024, 4);
+    ForwardTraceSession session(0, 4);
     setActiveForwardTrace(&session);
     std::cerr << "session ready" << std::endl;
     auto lengths = torch::tensor({8192, 128}, torch::kInt32);
@@ -62,6 +62,13 @@ int main() {
     assert(normalizeForwardTraceLengths(shape, q, prefix));
     assert(q == std::vector<int64_t>({8192, 128}));
     assert(q[1] + prefix[1] == 32768);
+    // A mixed batch keeps decode rows first, followed by context rows.
+    shape.arrays["input_lengths"].host = {4096, 128};
+    shape.arrays["sequence_lengths"].host = {8191};
+    shape.arrays["prefix_lengths"].host = {32640};
+    assert(normalizeForwardTraceLengths(shape, q, prefix));
+    assert(q == std::vector<int64_t>({1, 128}));
+    assert(prefix == std::vector<int64_t>({8191, 32640}));
     // Decode's original prompt lengths must NOT become Q lengths.
     shape.arrays["sequence_lengths"].host = {32767, 8191};
     shape.arrays["prefix_lengths"].host = {};

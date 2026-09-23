@@ -1274,6 +1274,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         r.integers["mla_ops_type"] = static_cast<int64_t>(mla_ops_type_);
         r.strings["phase"] = inputs.is_target_verify ? "target_verify" :
             inputs.is_mtp_draft_update ? "draft_update" :
+            decode && decode < batch ? (model_id_ == 0 ? "mixed_target" : "mixed_draft") :
             decode ? (model_id_ == 0 ? "decode_target" : "decode_draft") :
                      (model_id_ == 0 ? "prefill_target" : "prefill_draft");
         // MTP device-state paths may have stale host bookkeeping. Always take

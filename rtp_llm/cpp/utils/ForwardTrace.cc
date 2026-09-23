@@ -22,7 +22,9 @@ ForwardTraceSession::ForwardTraceSession(int64_t value_capacity, int64_t record_
     records.reserve(record_capacity);
     sources_.reserve(record_capacity);
 #if USING_CUDA
-    arena_ = torch::empty({value_capacity}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    if (value_capacity > 0) {
+        arena_ = torch::empty({value_capacity}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    }
     producer_streams_.reserve(16);
     ready_events_.reserve(16);
 #endif
@@ -64,6 +66,7 @@ void ForwardTraceSession::snapshot(ForwardTraceRecord& record, const std::string
 #if USING_CUDA
     if (values.is_cuda() && arena_.defined() && values.device() == arena_.device()
         && used_ + out.count <= arena_.numel()) {
+        RECORD_FUNCTION("RTP::forward_metadata.snapshot_d2d", {});
         // This is D2D on the producer's current stream, before its next write.
         // Both buffers already exist; no host read, stream wait or allocator call.
         const auto stream = c10::cuda::getCurrentCUDAStream(values.get_device());

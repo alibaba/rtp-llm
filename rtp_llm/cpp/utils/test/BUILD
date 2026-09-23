@@ -1,6 +1,24 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
+cc_test(
+    name = "forward_trace_test",
+    srcs = ["ForwardTraceTest.cc"],
+    deps = ["//rtp_llm/cpp/utils:forward_trace_state"],
+    copts = copts() + ["-UNDEBUG"],
+)
+
+cc_test(
+    name = "forward_trace_export_test",
+    srcs = ["ForwardTraceExportTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/utils:forward_trace_state",
+        "//rtp_llm/cpp/utils:forward_trace_export",
+        "@havenask//aios/autil:json",
+    ],
+    copts = copts() + ["-UNDEBUG"],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

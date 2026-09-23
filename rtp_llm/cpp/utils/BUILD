@@ -265,10 +265,3 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
-
-cc_test(
-    name = "forward_trace_test",
-    srcs = ["test/ForwardTraceTest.cc"],
-    deps = [":forward_trace_state"],
-    copts = copts(),
-)

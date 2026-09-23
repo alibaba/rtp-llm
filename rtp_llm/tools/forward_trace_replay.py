@@ -98,7 +98,8 @@ def main() -> None:
         metadata = trace.get("rtp_forward_metadata", {})
         print(json.dumps({"complete": metadata.get("complete"), "forwards": [
             {key: item.get(key) for key in ("forward_id", "parent_forward_id", "phase",
-             "logical_sequences", "total_q_tokens", "physical_tokens", "q_lens", "kv_lens", "lengths_complete")}
+             "request_count", "logical_sequences", "total_q_tokens", "physical_tokens",
+             "q_lens", "prefix_lens", "kv_lens", "lengths_complete")}
             for item in metadata.get("forwards", [])
         ]}, ensure_ascii=False, indent=2))
         return
