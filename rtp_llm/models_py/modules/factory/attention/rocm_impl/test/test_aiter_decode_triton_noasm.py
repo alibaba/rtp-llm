@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -129,6 +130,54 @@ def physical_value_for_triton(semantic_value: torch.Tensor) -> torch.Tensor:
 @unittest.skipUnless(torch.cuda.is_available() and _IS_ROCM_BUILD, "Requires ROCm GPU")
 @unittest.skipUnless(_ROCM_IMPORTS_AVAILABLE, "Requires ROCm attention modules")
 class AiterDecodeLayoutParityTest(unittest.TestCase):
+    def test_nonasm_reads_blocks_above_two_gib(self):
+        # Interleaved BF16 K/V gives a 65536-byte block stride. ATREX used
+        # to silently read zeros at block 32768, despite valid cache contents.
+        config = make_config()
+        config.head_num = 16
+        config.kv_head_num = 8
+        config.size_per_head = 128
+        config.max_seq_len = 4096
+        op = AiterDecodeAttnOpNonAsm(config)
+        op.enable_cuda_graph = False
+        cache = LayerKVCache()
+        cache.kv_cache_base = torch.zeros(
+            (32769, 2, 8, 16, 128), dtype=torch.bfloat16, device="cuda"
+        )
+        cache.kv_cache_base[32767, 1].fill_(3)
+        cache.kv_cache_base[32768, 1].fill_(7)
+        cache.kv_scale_base = torch.empty(0, device="cuda")
+        query = torch.zeros((2, 16, 128), dtype=torch.bfloat16, device="cuda")
+        table = (
+            torch.tensor([[32767], [32768]], dtype=torch.int32, device="cuda")
+            .expand(2, 256)
+            .contiguous()
+        )
+        params = SimpleNamespace(
+            seq_lens=torch.tensor([16, 16], dtype=torch.int32, device="cuda"),
+            kv_cache_block_id_device=table,
+            max_seq_len=4096,
+        )
+        expected = torch.tensor([3, 7], device="cuda", dtype=torch.bfloat16)
+        expected = expected[:, None].expand(2, 16 * 128)
+        torch.testing.assert_close(
+            op.forward(query, cache, params), expected, rtol=0, atol=0
+        )
+
+        # Graph replay must keep reading the current high-address values.
+        op.enable_cuda_graph = True
+        for _ in range(3):
+            op.forward(query, cache, params)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            result = op.forward(query, cache, params)
+        cache.kv_cache_base[32768, 1].fill_(9)
+        graph.replay()
+        expected = torch.tensor([3, 9], device="cuda", dtype=torch.bfloat16)
+        torch.testing.assert_close(
+            result, expected[:, None].expand_as(result), rtol=0, atol=0
+        )
+
     @staticmethod
     def _relative_l2(actual: torch.Tensor, reference: torch.Tensor) -> float:
         reference = reference.float().flatten()

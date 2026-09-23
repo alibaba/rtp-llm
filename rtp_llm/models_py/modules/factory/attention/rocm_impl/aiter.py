@@ -1495,8 +1495,20 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         num_seqs, num_heads, head_size = query.shape
         block_size = value_cache.shape[2]
         output = self._get_output(query).view((num_seqs, num_heads, head_size))
+        # The embedded ATREX kernels bound their buffer loads to 2 GiB.
+        # Higher physical blocks silently read as zero. Include the K/V gap
+        # in the span: these views are interleaved, so numel() undercounts it.
+        # Use metadata only, including during graph capture; the AITER fallback
+        # below uses 64-bit physical-block addressing.
+        kv_cache_byte_span = max(
+            cache.shape[0] * cache.stride(0) * cache.element_size()
+            for cache in (key_cache, value_cache)
+        )
         use_512_partition = (
-            max_seq_len <= 16384 and (not using_fp8_kvcache) and head_size <= 128
+            max_seq_len <= 16384
+            and (not using_fp8_kvcache)
+            and head_size <= 128
+            and kv_cache_byte_span <= 0x7FFFFFFE
         )
         _PARTITION_SIZE_ROCM = 512 if use_512_partition else 256
         if _PARTITION_SIZE_ROCM % block_size:
