@@ -8,7 +8,7 @@
 
 | 目录 | 内容 |
 |---|---|
-| `traffic_trace/` | 真实流量的匿名 prefix DAG 压缩文件及同名 manifest；保留请求顺序、到达间隔和 prefix 结构，不含真实文本或 token。Java 回归夹具按需从固定快照派生；拟合诊断和完成状态归入 `run/` 或仓库外实验归档。 |
+| `traffic_trace/` | 真实流量的匿名 prefix DAG 压缩文件及同名 manifest；保留请求顺序、到达间隔和 prefix 结构，不含真实文本或 token。Java 回归夹具按需从固定快照派生；拟合诊断和完成状态留在未入库的 `run/` 或仓库外实验归档。 |
 | `synthetic_parameters/` | 参数化合成流量的统计画像。即使画像来自真实数据，生成的请求也是合成流量，不是原请求回放。 |
 | `performance/` | 引擎计算耗时模型，与流量来源分类独立；预设名称由 `config/performance_presets.json` 解析。 |
 
