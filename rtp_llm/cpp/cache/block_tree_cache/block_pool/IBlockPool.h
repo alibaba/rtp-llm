@@ -41,6 +41,16 @@ struct BlockPoolConfigBase {
     size_t        physical_block_count{0};
 };
 
+struct BlockDiagnosticSnapshot {
+    bool                                         query_ok{false};
+    bool                                         valid{false};
+    bool                                         allocated{false};
+    bool                                         external_reference{false};
+    uint64_t                                     allocation_generation{0};
+    uint32_t                                     tree_references{0};
+    std::array<uint32_t, kBlockTreeRefTypeCount> references_by_type{};
+};
+
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
 // DeviceBlockPool adds request-like outer ownership through the protected Tree edge hooks.
 class IBlockPool {
@@ -65,8 +75,11 @@ public:
     // Number of distinct blocks carrying at least one tree reference of this type.
     size_t referencedBlocksNum(BlockTreeRefType ref_type) const;
 
-    bool validBlock(BlockIdxType block) const;
-    bool isAllocated(BlockIdxType block) const;
+    // Unlike refCount(), diagnostics must also be able to describe an already
+    // released block. Snapshot all ownership fields under the same pool lock.
+    BlockDiagnosticSnapshot diagnosticSnapshot(BlockIdxType block) const noexcept;
+    bool                    validBlock(BlockIdxType block) const;
+    bool                    isAllocated(BlockIdxType block) const;
 
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
@@ -152,6 +165,7 @@ private:
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;
+    std::vector<uint64_t>                                     allocation_generations_;
     std::vector<uint32_t>                                     tree_refcounts_;
     std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
     std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};

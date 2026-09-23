@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/CudacoreFlightRecorder.h"
 
 #include <algorithm>
 #include <atomic>
@@ -17,6 +19,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <execinfo.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -27,6 +30,10 @@
 
 namespace rtp_llm {
 namespace {
+
+thread_local CudacoreCopyScope* current_copy_scope = nullptr;
+std::atomic<uint64_t>           next_copy_id{1};
+std::atomic<uint64_t>           next_error_id{1};
 
 // ---------------------------------------------------------------------------
 // Driver ABI mirrors
@@ -65,10 +72,10 @@ constexpr int kFatalBadAddressSpace  = 717;
 constexpr int kFatalInvalidPc        = 718;
 constexpr int kFatalLaunchFailed     = 719;
 
-constexpr const char* kSchemaVersion = "rtp_llm.cudacore_manifest.v1";
+constexpr const char* kSchemaVersion      = "rtp_llm.cudacore_manifest.v1";
 constexpr const char* kLeaseSchemaVersion = "rtp_llm.cudacore_lease.v1";
 // Minimum spacing between evidence (manifest) rewrites while a window is open.
-constexpr int64_t     kEvidenceWriteIntervalMs = 500;
+constexpr int64_t kEvidenceWriteIntervalMs = 500;
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -220,7 +227,7 @@ bool ensureDirectory(const std::string& path) {
     size_t      start = path.front() == '/' ? 1 : 0;
     for (size_t index = start; index <= path.size(); ++index) {
         if (index == path.size() || path[index] == '/') {
-            partial   = path.substr(0, index);
+            partial = path.substr(0, index);
             if (partial.empty() || partial == "/") {
                 continue;
             }
@@ -270,7 +277,7 @@ bool writeExclusive(const std::string& path, const std::string& content, bool* e
 
 // Atomic replace through a temporary file in the same directory.
 bool writeAtomicReplace(const std::string& path, const std::string& content) {
-    const std::string temporary = path + ".tmp." + std::to_string(static_cast<long>(::getpid()));
+    const std::string temporary  = path + ".tmp." + std::to_string(static_cast<long>(::getpid()));
     int               descriptor = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (descriptor < 0) {
         return false;
@@ -309,7 +316,7 @@ using DeviceGetFn    = int (*)(int* device, int ordinal);
 using UuidFn         = int (*)(void* uuid, int device);
 
 struct DriverSymbols {
-    void*         handle{nullptr};
+    void*          handle{nullptr};
     AttributeGetFn get_attribute_global{nullptr};
     AttributeGetFn get_attribute{nullptr};
     VersionGetFn   driver_get_version{nullptr};
@@ -338,15 +345,15 @@ const DriverSymbols& driverSymbols() {
             reinterpret_cast<AttributeGetFn>(::dlsym(resolved.handle, "cuCoredumpGetAttributeGlobal"));
         resolved.get_attribute = reinterpret_cast<AttributeGetFn>(::dlsym(resolved.handle, "cuCoredumpGetAttribute"));
         resolved.driver_get_version = reinterpret_cast<VersionGetFn>(::dlsym(resolved.handle, "cuDriverGetVersion"));
-        resolved.device_get        = reinterpret_cast<DeviceGetFn>(::dlsym(resolved.handle, "cuDeviceGet"));
-        resolved.device_get_uuid   = reinterpret_cast<UuidFn>(::dlsym(resolved.handle, "cuDeviceGetUuid"));
+        resolved.device_get         = reinterpret_cast<DeviceGetFn>(::dlsym(resolved.handle, "cuDeviceGet"));
+        resolved.device_get_uuid    = reinterpret_cast<UuidFn>(::dlsym(resolved.handle, "cuDeviceGetUuid"));
         return resolved;
     }();
     return symbols;
 }
 
 int runtimeApiVersion() {
-    using RuntimeVersionFn = int (*)(int* version);
+    using RuntimeVersionFn                            = int (*)(int* version);
     static const RuntimeVersionFn runtime_get_version = [] {
         for (const char* name : {"libcudart.so.13", "libcudart.so.12", "libcudart.so"}) {
             void* handle = ::dlopen(name, RTLD_NOW | RTLD_LOCAL);
@@ -397,16 +404,16 @@ CudacoreAttributeStatus statusFromApiCode(int code) {
 
 CudacoreBoolAttribute queryBool(bool global_scope, int attrib) {
     CudacoreBoolAttribute attribute;
-    const AttributeGetFn fn = global_scope ? driverSymbols().get_attribute_global : driverSymbols().get_attribute;
+    const AttributeGetFn  fn = global_scope ? driverSymbols().get_attribute_global : driverSymbols().get_attribute;
     if (usingTestAttributeApi()) {
         const AttributeGetFn test_fn = global_scope ? testAttributeApi().get_global : testAttributeApi().get;
         if (test_fn == nullptr) {
             attribute.status = CudacoreAttributeStatus::Unsupported;
             return attribute;
         }
-        bool   value = false;
-        size_t size  = sizeof(value);
-        const int code = test_fn(attrib, &value, &size);
+        bool      value    = false;
+        size_t    size     = sizeof(value);
+        const int code     = test_fn(attrib, &value, &size);
         attribute.api_code = code;
         attribute.status   = statusFromApiCode(code);
         attribute.value    = value;
@@ -416,9 +423,9 @@ CudacoreBoolAttribute queryBool(bool global_scope, int attrib) {
         attribute.status = CudacoreAttributeStatus::Unsupported;
         return attribute;
     }
-    bool   value = false;
-    size_t size  = sizeof(value);
-    const int code = fn(attrib, &value, &size);
+    bool      value    = false;
+    size_t    size     = sizeof(value);
+    const int code     = fn(attrib, &value, &size);
     attribute.api_code = code;
     attribute.status   = statusFromApiCode(code);
     attribute.value    = value;
@@ -437,15 +444,15 @@ CudacoreStringAttribute queryString(bool global_scope, int attrib) {
 
     // Ask for the required size first; drivers that do not answer the probe fall
     // back to one bounded read.
-    size_t required = 0;
-    int    code     = active(attrib, nullptr, &required);
+    size_t required    = 0;
+    int    code        = active(attrib, nullptr, &required);
     attribute.api_code = code;
     if (code != kCuSuccess || required == 0) {
         required = 0;
     }
     const size_t capacity = std::min<size_t>(std::max<size_t>(required, 1), CudacoreDiagConstants::kMaxAttributeBytes);
     std::string  buffer(capacity, '\0');
-    size_t       size    = capacity;
+    size_t       size      = capacity;
     const int    read_code = active(attrib, buffer.data(), &size);
     attribute.api_code     = read_code;
     attribute.status       = statusFromApiCode(read_code);
@@ -460,17 +467,16 @@ CudacoreStringAttribute queryString(bool global_scope, int attrib) {
 
 CudacoreFlagsAttribute queryFlags(bool global_scope, int attrib) {
     CudacoreFlagsAttribute attribute;
-    const AttributeGetFn   fn =
-        global_scope ? driverSymbols().get_attribute_global : driverSymbols().get_attribute;
-    const AttributeGetFn test_fn = global_scope ? testAttributeApi().get_global : testAttributeApi().get;
-    const AttributeGetFn active  = usingTestAttributeApi() ? test_fn : fn;
+    const AttributeGetFn   fn = global_scope ? driverSymbols().get_attribute_global : driverSymbols().get_attribute;
+    const AttributeGetFn   test_fn = global_scope ? testAttributeApi().get_global : testAttributeApi().get;
+    const AttributeGetFn   active  = usingTestAttributeApi() ? test_fn : fn;
     if (active == nullptr) {
         attribute.status = CudacoreAttributeStatus::Unsupported;
         return attribute;
     }
-    uint64_t value = 0;
-    size_t   size  = sizeof(value);
-    const int code = active(attrib, &value, &size);
+    uint64_t  value    = 0;
+    size_t    size     = sizeof(value);
+    const int code     = active(attrib, &value, &size);
     attribute.api_code = code;
     attribute.status   = statusFromApiCode(code);
     attribute.value    = value;
@@ -509,8 +515,8 @@ std::string stringAttributeJson(const char* name, const CudacoreStringAttribute&
     std::string json = std::string("\"") + name + "\":{\"status\":" + jsonString(statusName(attribute.status))
                        + ",\"api_code\":" + std::to_string(attribute.api_code);
     if (attribute.status == CudacoreAttributeStatus::Ok) {
-        json += ",\"value\":" + jsonString(attribute.value)
-                + ",\"truncated\":" + (attribute.truncated ? "true" : "false");
+        json +=
+            ",\"value\":" + jsonString(attribute.value) + ",\"truncated\":" + (attribute.truncated ? "true" : "false");
     }
     json += "}";
     return json;
@@ -586,10 +592,9 @@ bool isPlainFileTemplate(const std::string& template_path) {
     if (template_path.find('|') != std::string::npos) {
         return false;
     }
-    const std::string directory = parentDirectory(template_path);
-    const std::string name      = directory.empty() ? template_path
-                                                    : template_path.substr(directory.size() + 1);
-    const size_t      percent   = name.find('%');
+    const std::string directory     = parentDirectory(template_path);
+    const std::string name          = directory.empty() ? template_path : template_path.substr(directory.size() + 1);
+    const size_t      percent       = name.find('%');
     const std::string static_prefix = percent == std::string::npos ? name : name.substr(0, percent);
     if (static_prefix.empty()) {
         return false;
@@ -626,22 +631,23 @@ struct SharedState {
 
     // Lock-free mirrors for the per-step / per-transfer gates: the steady-state
     // path must not pay for a mutex on every call.
-    std::atomic<bool>        incident_flag{false};
-    std::atomic<bool>        terminal_flag{false};
+    std::atomic<bool>    incident_flag{false};
+    std::atomic<bool>    terminal_flag{false};
+    std::atomic<int64_t> deadline_mono_atomic{0};
 
-    bool                   has_record{false};
-    FatalCudaErrorRecord   record;
-    int64_t                deadline_mono_ms{0};
-    int64_t                deadline_wall_ms{0};
-    int64_t                incident_wall_ms{0};
-    int64_t                incident_mono_ms{0};
-    std::string            incident_id;
-    bool                   collector_started{false};
-    bool                   collector_stop{false};
-    bool                   inline_claimed{false};
-    uint64_t               incident_generation{0};
-    int64_t                collection_window_ms{0};  // 0 => fixed default (test seam)
-    bool                   terminal{false};
+    bool                      has_record{false};
+    FatalCudaErrorRecord      record;
+    int64_t                   deadline_mono_ms{0};
+    int64_t                   deadline_wall_ms{0};
+    int64_t                   incident_wall_ms{0};
+    int64_t                   incident_mono_ms{0};
+    std::string               incident_id;
+    bool                      collector_started{false};
+    bool                      collector_stop{false};
+    bool                      inline_claimed{false};
+    uint64_t                  incident_generation{0};
+    int64_t                   collection_window_ms{0};  // 0 => fixed default (test seam)
+    bool                      terminal{false};
     CudacoreCollectionOutcome outcome;
     std::condition_variable   collector_wakeup;
     std::condition_variable   finished;
@@ -653,13 +659,37 @@ SharedState& sharedState() {
     return *state;
 }
 
+std::atomic<std::terminate_handler> previous_terminate_handler{nullptr};
+
+void cudacoreTerminateHandler() noexcept {
+    // The watchdog and destructor paths can terminate outside the engine catch.
+    // This handler only reads atomics and sleeps; the collector does the I/O.
+    SharedState& state = sharedState();
+    if (state.incident_flag.load(std::memory_order_acquire)) {
+        static constexpr char waiting[] = "[CudacoreDiag] terminate guard waiting for collection\n";
+        (void)::write(STDERR_FILENO, waiting, sizeof(waiting) - 1);
+        const int64_t deadline = state.deadline_mono_atomic.load(std::memory_order_acquire);
+        while (!state.terminal_flag.load(std::memory_order_acquire) && nowMonoMs() < deadline) {
+            const struct timespec pause = {0, 20 * 1000 * 1000};
+            (void)::nanosleep(&pause, nullptr);
+        }
+        static constexpr char done[] = "[CudacoreDiag] terminate guard collection window closed\n";
+        (void)::write(STDERR_FILENO, done, sizeof(done) - 1);
+    }
+    const auto previous = previous_terminate_handler.load(std::memory_order_acquire);
+    if (previous != nullptr && previous != &cudacoreTerminateHandler) {
+        previous();
+    }
+    std::abort();
+}
+
 // Caller holds state.mutex (or is the only writer) when reading the override.
 int64_t effectiveWindowMs(const SharedState& state) {
     return state.collection_window_ms > 0 ? state.collection_window_ms : CudacoreDiagConstants::kCollectionDeadlineMs;
 }
 
 DiagnosticsConfig resolveDiagnosticsConfig() {
-    SharedState&         state = sharedState();
+    SharedState&                state = sharedState();
     std::lock_guard<std::mutex> lock(state.mutex);
     if (!state.dir_override.empty()) {
         return {state.dir_override, "test_override"};
@@ -700,9 +730,8 @@ std::string resolveDiagnosticsDir() {
 std::string manifestBaseName(const SharedState& state) {
     const std::string host = sanitizeComponent(hostnameCached());
     const std::string pid  = std::to_string(static_cast<long>(::getpid()));
-    const std::string start = sanitizeComponent(state.identity.worker_start_id.empty()
-                                                    ? processStartId()
-                                                    : state.identity.worker_start_id);
+    const std::string start =
+        sanitizeComponent(state.identity.worker_start_id.empty() ? processStartId() : state.identity.worker_start_id);
     return host + "." + pid + "." + start;
 }
 
@@ -720,6 +749,8 @@ const char* domainName(FatalCudaErrorDomain domain) {
             return "cublas";
         case FatalCudaErrorDomain::TorchException:
             return "torch_exception";
+        case FatalCudaErrorDomain::HostCopy:
+            return "host_copy";
         case FatalCudaErrorDomain::Unknown:
             return "unknown";
     }
@@ -814,6 +845,11 @@ std::string firstErrorJson(const FatalCudaErrorRecord& record) {
     json += ",\"host_bytes\":" + std::to_string(record.host_bytes);
     json += ",\"direction\":" + jsonString(record.direction == nullptr ? "none" : record.direction);
     json += "}";
+    json += ",\"operation\":" + jsonString(record.operation);
+    json +=
+        ",\"operation_context\":" + (record.operation_context_json.empty() ? "null" : record.operation_context_json);
+    json += ",\"copy_id\":" + std::to_string(record.copy_id);
+    json += ",\"evidence_file\":" + jsonString(record.evidence_file);
     json += ",\"tile_total\":" + std::to_string(record.tile_total);
     json += ",\"bytes_total\":" + std::to_string(record.bytes_total);
     json += ",\"tiles_truncated\":" + std::string(record.tiles_truncated ? "true" : "false");
@@ -824,8 +860,13 @@ std::string firstErrorJson(const FatalCudaErrorRecord& record) {
             json += ",";
         }
         json += "{\"dst\":" + std::to_string(record.tiles[index].dst) + ",\"src\":"
-                + std::to_string(record.tiles[index].src) + ",\"bytes\":"
-                + std::to_string(record.tiles[index].bytes) + "}";
+                + std::to_string(record.tiles[index].src) + ",\"bytes\":" + std::to_string(record.tiles[index].bytes);
+        const auto& tile = record.tiles[index];
+        json +=
+            ",\"src_end\":" + (tile.bytes <= UINTPTR_MAX - tile.src ? std::to_string(tile.src + tile.bytes) : "null");
+        json +=
+            ",\"dst_end\":" + (tile.bytes <= UINTPTR_MAX - tile.dst ? std::to_string(tile.dst + tile.bytes) : "null");
+        json += "}";
     }
     json += "]}";
     return json;
@@ -842,9 +883,8 @@ struct ManifestInputs {
     int64_t                   deadline_epoch_ms{0};
 };
 
-std::string buildManifest(const ManifestInputs&            inputs,
-                          const CudacoreCollectionOutcome& outcome,
-                          const std::string&               phase) {
+std::string
+buildManifest(const ManifestInputs& inputs, const CudacoreCollectionOutcome& outcome, const std::string& phase) {
     const FatalCudaErrorRecord& record = inputs.record;
     std::string                 json   = "{";
     json += "\"schema_version\":" + jsonString(kSchemaVersion);
@@ -868,6 +908,7 @@ std::string buildManifest(const ManifestInputs&            inputs,
         json += ",\"attribute_query_status\":null";
     }
     json += ",\"first_error\":" + firstErrorJson(record);
+    json += ",\"recent_cuda_submissions\":" + snapshotCudacoreFlightRecorderJson();
     json += ",\"window_ms\":" + std::to_string(inputs.window_ms);
     json += ",\"deadline_epoch_ms\":" + std::to_string(inputs.deadline_epoch_ms);
     json += ",\"lease_path\":" + jsonString(outcome.lease_path);
@@ -888,8 +929,8 @@ std::string buildManifest(const ManifestInputs&            inputs,
     json += "}";
     json += ",\"collector_terminal_state\":" + jsonString(terminalName(outcome.terminal));
     json += ",\"waited_ms\":" + std::to_string(outcome.waited_ms);
-    json += ",\"target_exit\":{\"observed\":false,\"note\":" +
-            jsonString("worker exit is observed by the parent process, not from inside the worker") + "}";
+    json += ",\"target_exit\":{\"observed\":false,\"note\":"
+            + jsonString("worker exit is observed by the parent process, not from inside the worker") + "}";
     json += ",\"note\":" + jsonString(outcome.note);
     json += ",\"offline_validation_result\":" + jsonString("pending");
     json += "}";
@@ -947,15 +988,15 @@ std::string writeManifest(const std::string&               dir,
 // configured user-trigger pipe must have the expected type *before* a fault, so
 // a later failure cannot be blamed on missing permissions or a wrong path.
 CudacoreReadiness checkCudacoreReadinessImpl() {
-    CudacoreReadiness readiness;
+    CudacoreReadiness       readiness;
     const DiagnosticsConfig config = resolveDiagnosticsConfig();
-    readiness.dir         = config.dir;
-    readiness.dir_reason  = config.reason;
-    readiness.dir_ok      = ensureDirectory(readiness.dir);
+    readiness.dir                  = config.dir;
+    readiness.dir_reason           = config.reason;
+    readiness.dir_ok               = ensureDirectory(readiness.dir);
     if (readiness.dir_ok) {
         const std::string probe =
             readiness.dir + "/.cudacore_write_probe." + std::to_string(static_cast<long>(::getpid()));
-        const int         fd    = ::open(probe.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        const int fd = ::open(probe.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd >= 0) {
             (void)::close(fd);
             (void)::unlink(probe.c_str());
@@ -1008,15 +1049,15 @@ std::string writeLeaseFile(const std::string& dir, SharedState& state) {
     if (dir.empty() || !ensureDirectory(dir)) {
         return {};
     }
-    std::string            base;
-    std::string            incident_id;
+    std::string             base;
+    std::string             incident_id;
     CudacoreProcessIdentity identity;
-    int                    rank          = -1;
-    int64_t                created_wall  = 0;
-    int64_t                deadline_wall = 0;
-    int64_t                created_mono  = 0;
-    int64_t                deadline_mono = 0;
-    int64_t                window_ms     = 0;
+    int                     rank          = -1;
+    int64_t                 created_wall  = 0;
+    int64_t                 deadline_wall = 0;
+    int64_t                 created_mono  = 0;
+    int64_t                 deadline_mono = 0;
+    int64_t                 window_ms     = 0;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
         base          = manifestBaseName(state);
@@ -1079,7 +1120,7 @@ std::string writeStartupManifest(const CudacoreAttributeSnapshot& snapshot,
     json += ",\"readiness\":" + readinessJson(readiness);
     json += "}";
 
-    const std::string path = dir + "/" + base + ".json";
+    const std::string path    = dir + "/" + base + ".json";
     bool              existed = false;
     if (writeExclusive(path, json, &existed) || existed) {
         return path;
@@ -1097,11 +1138,11 @@ std::string writeStartupManifest(const CudacoreAttributeSnapshot& snapshot,
 
 CudacoreProcessIdentity buildIdentity(int rank, int device_ordinal) {
     CudacoreProcessIdentity identity;
-    identity.hostname       = hostnameCached();
-    identity.pid            = static_cast<long>(::getpid());
-    identity.pid_namespace  = pidNamespaceId();
-    identity.rank           = rank;
-    identity.device_ordinal = device_ordinal;
+    identity.hostname        = hostnameCached();
+    identity.pid             = static_cast<long>(::getpid());
+    identity.pid_namespace   = pidNamespaceId();
+    identity.rank            = rank;
+    identity.device_ordinal  = device_ordinal;
     identity.worker_start_id = processStartId();
 
     const char* image = ::getenv("RTP_LLM_IMAGE_VERSION");
@@ -1109,7 +1150,7 @@ CudacoreProcessIdentity buildIdentity(int rank, int device_ordinal) {
         identity.image_version = image;
     }
 
-    const DriverSymbols& symbols = driverSymbols();
+    const DriverSymbols& symbols        = driverSymbols();
     int                  driver_version = 0;
     if (symbols.driver_get_version != nullptr) {
         (void)symbols.driver_get_version(&driver_version);
@@ -1118,9 +1159,9 @@ CudacoreProcessIdentity buildIdentity(int rank, int device_ordinal) {
     identity.runtime_version = runtimeApiVersion();
 
     if (symbols.device_get != nullptr && symbols.device_get_uuid != nullptr && device_ordinal >= 0) {
-        int    device = 0;
-        int    code   = symbols.device_get(&device, device_ordinal);
-        char   uuid[16] = {};
+        int  device   = 0;
+        int  code     = symbols.device_get(&device, device_ordinal);
+        char uuid[16] = {};
         if (code == kCuSuccess) {
             code = symbols.device_get_uuid(uuid, device);
         }
@@ -1180,7 +1221,7 @@ struct TriggerResult {
 };
 
 ssize_t writeIgnoringSigpipe(int descriptor, const void* data, size_t bytes, int* error_number) {
-    sigset_t blocked = {};
+    sigset_t blocked  = {};
     sigset_t previous = {};
     ::sigemptyset(&blocked);
     ::sigaddset(&blocked, SIGPIPE);
@@ -1205,7 +1246,7 @@ TriggerResult triggerUserCoredumpRaw(const std::string& pipe_path, int64_t budge
         return result;
     }
 
-    const int64_t deadline  = nowMonoMs() + std::max<int64_t>(budget_ms, 1);
+    const int64_t deadline = nowMonoMs() + std::max<int64_t>(budget_ms, 1);
     while (true) {
         const int descriptor = ::open(pipe_path.c_str(), O_WRONLY | O_NONBLOCK);
         if (descriptor >= 0) {
@@ -1258,7 +1299,7 @@ TriggerResult triggerUserCoredumpRaw(const std::string& pipe_path, int64_t budge
 // keep one module state per DSO, so the right to trigger is claimed through an
 // exclusive file that is shared by every copy inside the process.
 TriggerResult triggerUserCoredump(const std::string& pipe_path, int64_t budget_ms) {
-    const std::string dir = resolveDiagnosticsDir();
+    const std::string dir   = resolveDiagnosticsDir();
     SharedState&      state = sharedState();
     if (ensureDirectory(dir)) {
         std::string base;
@@ -1304,7 +1345,7 @@ DumpWatch buildDumpWatch(const std::string& template_path) {
             position += value.size();
         }
     }
-    const size_t      percent = expanded.find('%');
+    const size_t      percent   = expanded.find('%');
     const std::string directory = parentDirectory(expanded);
     watch.directory             = directory.empty() ? startupCwd() : directory;
     if (percent == std::string::npos) {
@@ -1374,7 +1415,7 @@ ObservedFile scanForDumpFile(const DumpWatch& watch, int64_t not_before_wall_ms)
 }
 
 bool startupDumpDefinitelyDisabled() {
-    SharedState& state = sharedState();
+    SharedState&                state = sharedState();
     std::lock_guard<std::mutex> lock(state.mutex);
     if (!state.has_snapshot) {
         return false;
@@ -1388,10 +1429,10 @@ bool startupDumpDefinitelyDisabled() {
 }
 
 bool userTriggerDefinitelyDisabled() {
-    SharedState& state = sharedState();
+    SharedState&                state = sharedState();
     std::lock_guard<std::mutex> lock(state.mutex);
-    const bool attribute_off = state.has_snapshot && state.snapshot.global.enable_user_trigger.status
-                                                     == CudacoreAttributeStatus::Ok
+    const bool                  attribute_off = state.has_snapshot
+                               && state.snapshot.global.enable_user_trigger.status == CudacoreAttributeStatus::Ok
                                && !state.snapshot.global.enable_user_trigger.value;
     const char* env_value = ::getenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP");
     const bool  env_on    = env_value != nullptr && env_value[0] == '1';
@@ -1427,8 +1468,8 @@ void runCollectionWindow(CudacoreCollectionOutcome& outcome) noexcept {
     const DumpWatch watch      = buildDumpWatch(template_path);
     const int64_t   start_mono = nowMonoMs();
 
-    const bool dump_disabled  = startupDumpDefinitelyDisabled();
-    const bool trigger_off    = userTriggerDefinitelyDisabled();
+    const bool dump_disabled   = startupDumpDefinitelyDisabled();
+    const bool trigger_off     = userTriggerDefinitelyDisabled();
     const bool nothing_to_wait = dump_disabled && trigger_off && !watch.watchable;
     if (nothing_to_wait) {
         outcome.terminal = CudacoreTerminalState::NoMechanismAvailable;
@@ -1452,8 +1493,8 @@ void runCollectionWindow(CudacoreCollectionOutcome& outcome) noexcept {
     } else if (!trigger_off && nowMonoMs() < deadline) {
         const int64_t trigger_budget =
             std::min<int64_t>(CudacoreDiagConstants::kTriggerIoBudgetMs, deadline - nowMonoMs());
-        const TriggerResult trigger = trigger_budget > 0 ? triggerUserCoredump(pipe_path, trigger_budget)
-                                                         : TriggerResult{};
+        const TriggerResult trigger =
+            trigger_budget > 0 ? triggerUserCoredump(pipe_path, trigger_budget) : TriggerResult{};
         outcome.trigger           = trigger.status;
         outcome.trigger_errno     = trigger.error_number;
         outcome.trigger_attempted = trigger.attempted;
@@ -1465,14 +1506,14 @@ void runCollectionWindow(CudacoreCollectionOutcome& outcome) noexcept {
     // The window always runs to the shared deadline. A stable file size is only
     // an observation: segmented dumps pause for longer than the poll interval,
     // and releasing the process early would truncate the dump.
-    uint64_t    last_size          = 0;
+    uint64_t    last_size = 0;
     std::string last_path;
     bool        dirty              = true;  // Persist trigger/lease even before a file appears.
     int64_t     last_evidence_mono = 0;
-    auto observe = [&](const ObservedFile& observed) {
-        const bool stable = observed.seen && observed.bytes > 0 && observed.path == last_path
-                            && observed.bytes == last_size;
-        dirty = dirty || outcome.file_size_stable != stable;
+    auto        observe            = [&](const ObservedFile& observed) {
+        const bool stable =
+            observed.seen && observed.bytes > 0 && observed.path == last_path && observed.bytes == last_size;
+        dirty                    = dirty || outcome.file_size_stable != stable;
         outcome.file_size_stable = stable;
         if (observed.seen) {
             dirty = dirty || !outcome.file_seen || observed.path != outcome.observed_file
@@ -1493,11 +1534,11 @@ void runCollectionWindow(CudacoreCollectionOutcome& outcome) noexcept {
         // Changes suppressed by the throttle remain dirty until persisted. The
         // driver may abort the process before this window returns.
         if (dirty && nowMonoMs() - last_evidence_mono >= kEvidenceWriteIntervalMs) {
-            last_evidence_mono = nowMonoMs();
+            last_evidence_mono         = nowMonoMs();
             const std::string progress = writeManifest(diagnostics_dir, state, outcome, "progress");
             if (!progress.empty()) {
                 outcome.manifest_path = progress;
-                dirty = false;
+                dirty                 = false;
             }
         }
         const int64_t remaining = deadline - nowMonoMs();
@@ -1513,7 +1554,7 @@ void runCollectionWindow(CudacoreCollectionOutcome& outcome) noexcept {
     // the output was temporarily stable. Offline validation remains necessary.
     outcome.terminal          = CudacoreTerminalState::DeadlineExceeded;
     outcome.deadline_exceeded = true;
-    outcome.waited_ms = nowMonoMs() - start_mono;
+    outcome.waited_ms         = nowMonoMs() - start_mono;
     // Completeness is not proven by existence or size: offline cuda-gdb
     // validation stays pending and is recorded separately.
 }
@@ -1566,17 +1607,16 @@ bool hasFatalMarker(const std::string& message) {
 
 void setCudacoreProcessIdentity(int rank, int device_ordinal) noexcept {
     try {
-        SharedState& state = sharedState();
+        SharedState&                  state    = sharedState();
         const CudacoreProcessIdentity identity = buildIdentity(rank, device_ordinal);
-        std::lock_guard<std::mutex> lock(state.mutex);
+        std::lock_guard<std::mutex>   lock(state.mutex);
         state.identity = identity;
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 CudacoreProcessIdentity cudacoreProcessIdentity() noexcept {
     try {
-        SharedState& state = sharedState();
+        SharedState&                state = sharedState();
         std::lock_guard<std::mutex> lock(state.mutex);
         if (state.identity.worker_start_id.empty()) {
             state.identity = buildIdentity(state.identity.rank, state.identity.device_ordinal);
@@ -1617,15 +1657,14 @@ CudacoreAttributeSnapshot queryCudacoreAttributes(bool context_valid) noexcept {
             snapshot.context.generation_flags.status    = CudacoreAttributeStatus::Skipped;
         }
 
-        const DriverSymbols& symbols = driverSymbols();
+        const DriverSymbols& symbols        = driverSymbols();
         int                  driver_version = 0;
         if (symbols.driver_get_version != nullptr) {
             (void)symbols.driver_get_version(&driver_version);
         }
         snapshot.driver_version  = driver_version;
         snapshot.runtime_version = runtimeApiVersion();
-    } catch (...) {
-    }
+    } catch (...) {}
     return snapshot;
 }
 
@@ -1655,20 +1694,20 @@ void auditCudacoreAttributesAtStartup() noexcept {
         // The collection executor must exist before any fault: it performs the
         // trigger and the evidence writes on its own thread.
         startCudacoreCollector();
-        CudacoreProcessIdentity identity = cudacoreProcessIdentity();
+        CudacoreProcessIdentity         identity = cudacoreProcessIdentity();
         const CudacoreAttributeSnapshot snapshot = queryCudacoreAttributes(/*context_valid=*/true);
         {
-            SharedState& state = sharedState();
+            SharedState&                state = sharedState();
             std::lock_guard<std::mutex> lock(state.mutex);
-            state.snapshot     = snapshot;
-            state.has_snapshot = true;
-            identity.rank      = state.identity.rank;
+            state.snapshot          = snapshot;
+            state.has_snapshot      = true;
+            identity.rank           = state.identity.rank;
             identity.device_ordinal = state.identity.device_ordinal;
         }
-        const std::string        audit_json = formatCudacoreAttributeAudit(snapshot, identity);
-        const CudacoreReadiness  readiness  = checkCudacoreReadiness();
-        const std::string        manifest   = writeStartupManifest(snapshot, identity, readiness);
-        const int64_t            elapsed_ms = nowMonoMs() - begin_mono;
+        const std::string       audit_json = formatCudacoreAttributeAudit(snapshot, identity);
+        const CudacoreReadiness readiness  = checkCudacoreReadiness();
+        const std::string       manifest   = writeStartupManifest(snapshot, identity, readiness);
+        const int64_t           elapsed_ms = nowMonoMs() - begin_mono;
         RTP_LLM_LOG_INFO("[CudacoreDiag] startup audit elapsed_ms=%lld manifest=%s readiness=%s %s",
                          static_cast<long long>(elapsed_ms),
                          manifest.empty() ? "<none>" : manifest.c_str(),
@@ -1747,10 +1786,10 @@ bool isFatalCudaException(const std::exception& exception) noexcept {
 namespace {
 
 void fillTimestamps(FatalCudaErrorRecord& record) {
-    record.wall_ms  = nowWallMs();
-    record.mono_ms  = nowMonoMs();
-    record.thread_id = threadIdString();
-    SharedState& state = sharedState();
+    record.wall_ms                    = nowWallMs();
+    record.mono_ms                    = nowMonoMs();
+    record.thread_id                  = threadIdString();
+    SharedState&                state = sharedState();
     std::lock_guard<std::mutex> lock(state.mutex);
     record.rank = state.identity.rank;
 }
@@ -1758,11 +1797,17 @@ void fillTimestamps(FatalCudaErrorRecord& record) {
 // Fixed metadata budget: first identity fields, then as many tiles as fit in
 // kMaxMetadataBytes. Totals and truncation flags are always kept.
 void applyMetadataBudget(FatalCudaErrorRecord& record) {
-    record.message      = truncateText(record.message);
-    record.code_name    = truncateText(record.code_name);
-    record.source_file  = truncateText(record.source_file, 256);
-    record.thread_id    = truncateText(record.thread_id, 64);
-    record.stream       = truncateText(record.stream, 128);
+    // Full operation metadata is in the independent evidence file; do not grow
+    // the periodically rewritten incident summary with per-tile staging data.
+    if (!record.operation_context_json.empty()) {
+        record.operation_context_json.clear();
+        record.metadata_truncated = true;
+    }
+    record.message     = truncateText(record.message);
+    record.code_name   = truncateText(record.code_name);
+    record.source_file = truncateText(record.source_file, 256);
+    record.thread_id   = truncateText(record.thread_id, 64);
+    record.stream      = truncateText(record.stream, 128);
 
     if (record.tile_total == 0) {
         record.tile_total = record.tiles.size();
@@ -1772,8 +1817,8 @@ void applyMetadataBudget(FatalCudaErrorRecord& record) {
         record.tiles_truncated = true;
     }
     constexpr size_t kTileRecordBytes = sizeof(FatalCudaTileRecord);
-    size_t           used             = record.message.size() + record.code_name.size() + record.source_file.size()
-                            + record.thread_id.size() + record.stream.size();
+    size_t used = record.message.size() + record.code_name.size() + record.source_file.size() + record.thread_id.size()
+                  + record.stream.size();
     size_t kept = 0;
     while (kept < record.tiles.size() && used + kTileRecordBytes <= CudacoreDiagConstants::kMaxMetadataBytes) {
         used += kTileRecordBytes;
@@ -1787,11 +1832,8 @@ void applyMetadataBudget(FatalCudaErrorRecord& record) {
 
 }  // namespace
 
-FatalCudaErrorRecord buildCudaRuntimeErrorRecord(int                cuda_error,
-                                                 FatalCudaErrorSite site,
-                                                 const char*        file,
-                                                 int                line,
-                                                 int                device_index) noexcept {
+FatalCudaErrorRecord buildCudaRuntimeErrorRecord(
+    int cuda_error, FatalCudaErrorSite site, const char* file, int line, int device_index) noexcept {
     FatalCudaErrorRecord record;
     try {
         record.domain       = FatalCudaErrorDomain::CudaRuntime;
@@ -1803,16 +1845,12 @@ FatalCudaErrorRecord buildCudaRuntimeErrorRecord(int                cuda_error,
         record.source_line  = line;
         record.device_index = device_index;
         fillTimestamps(record);
-    } catch (...) {
-    }
+    } catch (...) {}
     return record;
 }
 
-FatalCudaErrorRecord buildCudaDriverErrorRecord(int                cu_result,
-                                                FatalCudaErrorSite site,
-                                                const char*        file,
-                                                int                line,
-                                                int                device_index) noexcept {
+FatalCudaErrorRecord buildCudaDriverErrorRecord(
+    int cu_result, FatalCudaErrorSite site, const char* file, int line, int device_index) noexcept {
     FatalCudaErrorRecord record;
     try {
         record.domain       = FatalCudaErrorDomain::CudaDriver;
@@ -1824,8 +1862,7 @@ FatalCudaErrorRecord buildCudaDriverErrorRecord(int                cu_result,
         record.source_line  = line;
         record.device_index = device_index;
         fillTimestamps(record);
-    } catch (...) {
-    }
+    } catch (...) {}
     return record;
 }
 
@@ -1837,74 +1874,265 @@ FatalCudaErrorRecord buildCudaExceptionRecord(const std::exception& exception,
     try {
         record.domain         = FatalCudaErrorDomain::TorchException;
         record.code           = -1;
-        record.message        = truncateText(exception.what() == nullptr ? "" : exception.what());
+        record.message        = exception.what() == nullptr ? "" : exception.what();
         record.site           = site;
         record.source_file    = file == nullptr ? "" : file;
         record.source_line    = line;
         record.low_confidence = true;  // classified from text, not from a numeric code
         fillTimestamps(record);
-    } catch (...) {
-    }
+    } catch (...) {}
     return record;
 }
 
-bool recordFirstFatalCudaError(FatalCudaErrorRecord record) noexcept {
-    try {
-        SharedState&                state = sharedState();
-        std::lock_guard<std::mutex> lock(state.mutex);
-        if (state.has_record) {
-            return false;  // first error wins; the deadline is never extended
-        }
-        if (record.wall_ms == 0) {
-            record.wall_ms = nowWallMs();
-        }
-        if (record.mono_ms == 0) {
-            record.mono_ms = nowMonoMs();
-        }
-        if (record.rank < 0) {
-            record.rank = state.identity.rank;
-        }
-        if (record.device_index < 0) {
-            record.device_index = state.identity.device_ordinal;
-        }
-        if (record.thread_id.empty()) {
-            record.thread_id = threadIdString();
-        }
-        applyMetadataBudget(record);
-        ++state.incident_generation;
-        state.has_record        = true;
-        state.terminal          = false;
-        state.terminal_flag.store(false, std::memory_order_release);
-        state.record            = std::move(record);
-        state.incident_wall_ms  = state.record.wall_ms;
-        state.incident_mono_ms  = state.record.mono_ms;
-        state.deadline_mono_ms  = state.record.mono_ms + effectiveWindowMs(state);
-        state.deadline_wall_ms  = state.record.wall_ms + effectiveWindowMs(state);
-        state.incident_flag.store(true, std::memory_order_release);
-        const std::string base  = manifestBaseName(state);
-        state.incident_id       = base + "." + std::to_string(state.record.mono_ms);
-        const FatalCudaErrorRecord& stored = state.record;
-        RTP_LLM_LOG_ERROR(
-            "[CudacoreDiag] first fatal CUDA error: domain=%s code=%d site=%s device=%d rank=%d file=%s:%d "
-            "tiles=%llu bytes=%llu low_confidence=%d incident_id=%s",
-            domainName(stored.domain),
-            stored.code,
-            siteName(stored.site),
-            stored.device_index,
-            stored.rank,
-            stored.source_file.c_str(),
-            stored.source_line,
-            static_cast<unsigned long long>(stored.tile_total),
-            static_cast<unsigned long long>(stored.bytes_total),
-            stored.low_confidence ? 1 : 0,
-            state.incident_id.c_str());
-        // Wake the collection executor immediately: the trigger and the evidence
-        // must not depend on the engine thread ever reaching a wait call.
-        state.collector_wakeup.notify_all();
-        return true;
-    } catch (...) {
-        return false;
+CudacoreCopyScope::CudacoreCopyScope(const void* data, Provider provider, const char* strategy) noexcept:
+    data_(data),
+    provider_(provider),
+    strategy_(strategy),
+    id_(next_copy_id.fetch_add(1, std::memory_order_relaxed)),
+    previous_(current_copy_scope) {
+    current_copy_scope = this;
+}
+
+CudacoreCopyScope::~CudacoreCopyScope() {
+    current_copy_scope = previous_;
+}
+
+uint64_t currentCudacoreCopyId() noexcept {
+    return current_copy_scope == nullptr ? 0 : current_copy_scope->id();
+}
+
+namespace {
+std::string procEvidenceJson(const char* path, size_t limit) {
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return "{\"errno\":" + std::to_string(errno) + "}";
     }
+    struct CloseDescriptor {
+        int fd;
+        ~CloseDescriptor() {
+            ::close(fd);
+        }
+    } close_descriptor{fd};
+    std::string content;
+    char        buffer[4096];
+    int         read_error = 0;
+    bool        truncated  = false;
+    while (true) {
+        const ssize_t count = ::read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count < 0) {
+            read_error = errno;
+            break;
+        }
+        if (count == 0) {
+            break;
+        }
+        const size_t keep = std::min(static_cast<size_t>(count), limit - content.size());
+        content.append(buffer, keep);
+        if (keep != static_cast<size_t>(count)) {
+            truncated = true;
+            break;
+        }
+    }
+    return "{\"errno\":" + std::to_string(read_error) + ",\"truncated\":" + (truncated ? "true" : "false")
+           + ",\"text\":\"" + escapeJson(content) + "\"}";
+}
+
+std::string hostStackJson() {
+    void*       frames[64];
+    const int   count = ::backtrace(frames, 64);
+    std::string json  = "[";
+    for (int i = 0; i < count; ++i) {
+        if (i) {
+            json += ',';
+        }
+        const auto pc = reinterpret_cast<uintptr_t>(frames[i]);
+        json += "{\"pc\":" + std::to_string(pc);
+        Dl_info info = {};
+        if (::dladdr(frames[i], &info) != 0) {
+            json += ",\"module\":" + jsonString(info.dli_fname ? info.dli_fname : "");
+            json += ",\"module_base\":" + std::to_string(reinterpret_cast<uintptr_t>(info.dli_fbase));
+            json += ",\"module_offset\":" + std::to_string(pc - reinterpret_cast<uintptr_t>(info.dli_fbase));
+            json += ",\"symbol\":" + jsonString(info.dli_sname ? info.dli_sname : "");
+        }
+        json += '}';
+    }
+    return json + ']';
+}
+
+std::string processEvidenceJson() {
+    std::string json = "{\"maps\":" + procEvidenceJson("/proc/self/maps", 2 * 1024 * 1024);
+    json += ",\"status\":" + procEvidenceJson("/proc/self/status", 64 * 1024);
+    json += ",\"nvidia_driver_version\":" + procEvidenceJson("/proc/driver/nvidia/version", 16 * 1024);
+    json += ",\"kernel_version\":" + procEvidenceJson("/proc/version", 16 * 1024);
+    json += ",\"selected_environment\":{";
+    bool first = true;
+    for (const char* key : {"CUDA_VISIBLE_DEVICES",
+                            "CUDA_ENABLE_COREDUMP_ON_EXCEPTION",
+                            "CUDA_ENABLE_USER_TRIGGERED_COREDUMP",
+                            "CUDA_COREDUMP_FILE",
+                            "CUDA_COREDUMP_PIPE",
+                            "CUDA_COREDUMP_GENERATION_FLAGS",
+                            "CUDA_DEVICE_WAITS_ON_EXCEPTION",
+                            "CUDA_LAUNCH_BLOCKING",
+                            "BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY"}) {
+        if (!first) {
+            json += ',';
+        }
+        first             = false;
+        const char* value = ::getenv(key);
+        json += jsonString(key) + ":" + (value ? jsonString(value) : "null");
+    }
+    return json + "}}";
+}
+
+// This file is independent of the collector and the GPU core. Persist all
+// concurrent failing batches, not just the winner of the first-error race.
+std::string writeFatalEvidence(const FatalCudaErrorRecord& record, bool first) noexcept {
+    std::string path;
+    bool        basic_written = false;
+    try {
+        const std::string dir = resolveDiagnosticsDir();
+        if (!ensureDirectory(dir)) {
+            RTP_LLM_LOG_ERROR("[CudacoreDiag] cannot create error evidence directory: %s errno=%d", dir.c_str(), errno);
+            return {};
+        }
+        const auto identity = cudacoreProcessIdentity();
+        path                = dir + "/cudacore_error." + sanitizeComponent(hostnameCached()) + "."
+               + sanitizeComponent(processStartId()) + "." + std::to_string(::syscall(SYS_gettid)) + "."
+               + std::to_string(next_error_id.fetch_add(1, std::memory_order_relaxed)) + ".json";
+        std::string json = "{\"schema_version\":\"rtp_llm.cudacore_error.v1\",\"pid\":" + std::to_string(::getpid());
+        json += ",\"worker_start_id\":" + jsonString(identity.worker_start_id);
+        json += ",\"pid_namespace\":" + jsonString(identity.pid_namespace);
+        json += ",\"gpu_uuid\":" + jsonString(identity.gpu_uuid);
+        json += ",\"error\":" + firstErrorJson(record);
+        // Keep the full exception text in the supplemental file, beyond the
+        // bounded incident summary. Copy metadata never dereferences GPU memory.
+        json += ",\"full_message\":\"" + escapeJson(record.message) + "\"";
+        json += ",\"strategy\":" + jsonString(current_copy_scope ? current_copy_scope->strategy() : "unknown");
+        // Save independently usable basic evidence before optional stack/pool
+        // inspection. An interrupted/failed enrichment leaves valid JSON.
+        basic_written = writeExclusive(path, json + ",\"complete\":false}\n");
+        if (!basic_written) {
+            RTP_LLM_LOG_ERROR("[CudacoreDiag] basic error evidence write failed: %s errno=%d", path.c_str(), errno);
+            return {};
+        }
+        json += ",\"copy\":" + (current_copy_scope ? current_copy_scope->snapshot() : "null");
+        json += ",\"recent_cuda_submissions\":" + snapshotCudacoreFlightRecorderJson();
+        json += ",\"host_stack\":" + hostStackJson();
+        json += ",\"process_at_first_error\":" + (first ? processEvidenceJson() : "null");
+        json += ",\"complete\":true}\n";
+        if (!writeAtomicReplace(path, json)) {
+            RTP_LLM_LOG_ERROR(
+                "[CudacoreDiag] full error evidence write failed (basic retained): %s errno=%d", path.c_str(), errno);
+            return path;
+        }
+        RTP_LLM_LOG_ERROR("[CudacoreDiag] error evidence copy_id=%llu path=%s",
+                          static_cast<unsigned long long>(record.copy_id),
+                          path.c_str());
+        return path;
+    } catch (...) {
+        static constexpr char message[] = "[CudacoreDiag] failed to serialize full error evidence\n";
+        (void)::write(STDERR_FILENO, message, sizeof(message) - 1);
+        return basic_written ? path : std::string{};
+    }
+}
+}  // namespace
+
+[[noreturn]] void
+failCopyWithDiagnostics(const char* category, const char* file, int line, const std::string& message) {
+    try {
+        FatalCudaErrorRecord record;
+        record.domain      = FatalCudaErrorDomain::HostCopy;
+        record.code_name   = category;
+        record.message     = message;
+        record.operation   = category;
+        record.site        = FatalCudaErrorSite::DeviceHostCopy;
+        record.source_file = file;
+        record.source_line = line;
+        record.copy_id     = currentCudacoreCopyId();
+        fillTimestamps(record);
+        // Independent CPU evidence, including process maps. Do not arm the GPU
+        // collector for a host invariant which was caught before submission.
+        (void)writeFatalEvidence(record, true);
+    } catch (...) {
+        static constexpr char warning[] = "[CudacoreDiag] copy failure evidence unavailable\n";
+        (void)::write(STDERR_FILENO, warning, sizeof(warning) - 1);
+    }
+    if (fatalCudacoreIncidentActive()) {
+        (void)waitForCudacoreCollection();
+    }
+    RTP_LLM_FAIL("copy %s at %s:%d: %s", category, file, line, message.c_str());
+}
+
+bool recordFirstFatalCudaError(FatalCudaErrorRecord record) noexcept {
+    installCudacoreTerminateGuard();
+    bool first = false;
+    try {
+        SharedState& state = sharedState();
+        record.copy_id     = currentCudacoreCopyId();
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            if (record.wall_ms == 0) {
+                record.wall_ms = nowWallMs();
+            }
+            if (record.mono_ms == 0) {
+                record.mono_ms = nowMonoMs();
+            }
+            if (record.rank < 0) {
+                record.rank = state.identity.rank;
+            }
+            if (record.device_index < 0) {
+                record.device_index = state.identity.device_ordinal;
+            }
+            if (record.thread_id.empty()) {
+                record.thread_id = threadIdString();
+            }
+            if (!state.has_record) {
+                first = true;
+                ++state.incident_generation;
+                state.record = record;
+                applyMetadataBudget(state.record);
+                state.has_record = true;
+                state.terminal   = false;
+                state.terminal_flag.store(false, std::memory_order_release);
+                state.incident_wall_ms = record.wall_ms;
+                state.incident_mono_ms = record.mono_ms;
+                state.deadline_mono_ms = record.mono_ms + effectiveWindowMs(state);
+                state.deadline_mono_atomic.store(state.deadline_mono_ms, std::memory_order_release);
+                state.deadline_wall_ms = record.wall_ms + effectiveWindowMs(state);
+                state.incident_id      = manifestBaseName(state) + "." + std::to_string(record.mono_ms);
+                state.incident_flag.store(true, std::memory_order_release);
+            }
+        }
+        freezeCudacoreFlightRecorder();
+        // No state/flight mutex is held while formatting metadata or doing I/O.
+        const auto evidence_file = writeFatalEvidence(record, first);
+        if (first) {
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                state.record.evidence_file = evidence_file;
+            }
+            RTP_LLM_LOG_ERROR("[CudacoreDiag] first fatal CUDA error: code=%d site=%s device=%d rank=%d "
+                              "file=%s:%d tiles=%llu bytes=%llu copy_id=%llu",
+                              record.code,
+                              siteName(record.site),
+                              record.device_index,
+                              record.rank,
+                              record.source_file.c_str(),
+                              record.source_line,
+                              static_cast<unsigned long long>(record.tile_total),
+                              static_cast<unsigned long long>(record.bytes_total),
+                              static_cast<unsigned long long>(record.copy_id));
+        }
+        state.collector_wakeup.notify_all();
+    } catch (...) {
+        // A metadata failure must not prevent an already-armed collector running.
+        sharedState().collector_wakeup.notify_all();
+    }
+    return first;
 }
 
 void annotateFatalCudaTransferContext(uint64_t  group_set_id,
@@ -1914,7 +2142,9 @@ void annotateFatalCudaTransferContext(uint64_t  group_set_id,
     try {
         SharedState&                state = sharedState();
         std::lock_guard<std::mutex> lock(state.mutex);
-        if (!state.has_record) {
+        // Multiple copy streams can report the same device fault. Only the
+        // thread that claimed the first error may attach its transfer context.
+        if (!state.has_record || state.record.thread_id != threadIdString()) {
             return;
         }
         if (!state.record.has_group_set_id) {
@@ -1927,8 +2157,7 @@ void annotateFatalCudaTransferContext(uint64_t  group_set_id,
             state.record.host_bytes    = host_bytes;
             state.record.direction     = device_to_host ? "D2H" : "H2D";
         }
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 bool fatalCudacoreIncidentActive() noexcept {
@@ -1947,6 +2176,50 @@ bool fatalCudacoreCollectionInProgress() noexcept {
     } catch (...) {
         return false;
     }
+}
+
+void installCudacoreTerminateGuard() noexcept {
+    try {
+        static std::mutex           install_mutex;
+        std::lock_guard<std::mutex> lock(install_mutex);
+        (void)sharedState();
+        // PyTorch or another library may have replaced the handler since warmup.
+        // Reinstall only on a fatal error or the first copy entry point.
+        if (std::get_terminate() != &cudacoreTerminateHandler) {
+            const auto previous = std::set_terminate(&cudacoreTerminateHandler);
+            previous_terminate_handler.store(previous, std::memory_order_release);
+        }
+    } catch (...) {}
+}
+
+void recordCudacorePoolLifetime(
+    const char* pool_name, uintptr_t base, uint64_t bytes, int device_index, bool initialized) noexcept {
+    try {
+        if (base == 0 || bytes == 0) {
+            return;
+        }
+        const std::string dir = resolveDiagnosticsDir();
+        if (!ensureDirectory(dir)) {
+            return;
+        }
+        const std::string path = dir + "/cudacore_allocations." + sanitizeComponent(hostnameCached()) + "."
+                                 + std::to_string(static_cast<long>(::getpid())) + "."
+                                 + sanitizeComponent(processStartId()) + ".jsonl";
+        std::string entry = "{\"event\":" + jsonString(initialized ? "pool_initialized" : "pool_destroyed");
+        entry += ",\"time_mono_ms\":" + std::to_string(nowMonoMs());
+        entry += ",\"pool\":" + jsonString(pool_name == nullptr ? "" : pool_name);
+        entry += ",\"base\":" + std::to_string(base);
+        entry += ",\"bytes\":" + std::to_string(bytes);
+        entry += ",\"end\":" + (bytes <= UINTPTR_MAX - base ? std::to_string(base + bytes) : "null");
+        entry += ",\"device_index\":" + std::to_string(device_index);
+        entry += "}\n";
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            return;
+        }
+        (void)::write(fd, entry.data(), entry.size());
+        (void)::close(fd);
+    } catch (...) {}
 }
 
 bool fatalCudacoreErrorRecord(FatalCudaErrorRecord& out) noexcept {
@@ -1972,7 +2245,7 @@ namespace {
 // Runs the whole collection once and publishes the outcome. Executed either by
 // the collector thread or, when no collector was started, by the first waiter.
 void runCollectionAndPublish() {
-    SharedState& state = sharedState();
+    SharedState& state      = sharedState();
     uint64_t     generation = 0;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -1984,9 +2257,9 @@ void runCollectionAndPublish() {
 
     CudacoreCollectionOutcome outcome;
     try {
-        const std::string dir = resolveDiagnosticsDir();
+        const std::string dir   = resolveDiagnosticsDir();
         outcome.diagnostics_dir = dir;
-        outcome.manifest_path = writeManifest(dir, state, outcome, "fault");
+        outcome.manifest_path   = writeManifest(dir, state, outcome, "fault");
         runCollectionWindow(outcome);
         const std::string completed = writeManifest(dir, state, outcome, "complete");
         if (!completed.empty()) {
@@ -2089,7 +2362,7 @@ CudacoreCollectionOutcome waitForCudacoreCollection() noexcept {
 namespace cudacore_test {
 
 void installAttributeApi(const AttributeApi& api) noexcept {
-    testAttributeApi() = api;
+    testAttributeApi()           = api;
     testAttributeApi().installed = true;
 }
 
@@ -2103,8 +2376,7 @@ void setDiagnosticsDirOverride(const std::string& dir) noexcept {
         std::lock_guard<std::mutex> lock(state.mutex);
         state.dir_override = dir;
         state.resolved_dir.clear();
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 void resetDiagnosticsDirOverride() noexcept {
@@ -2113,8 +2385,7 @@ void resetDiagnosticsDirOverride() noexcept {
         std::lock_guard<std::mutex> lock(state.mutex);
         state.dir_override.clear();
         state.resolved_dir.clear();
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 void resetIncidentState() noexcept {
@@ -2122,20 +2393,21 @@ void resetIncidentState() noexcept {
         SharedState&                state = sharedState();
         std::lock_guard<std::mutex> lock(state.mutex);
         ++state.incident_generation;
-        state.has_record      = false;
-        state.record          = FatalCudaErrorRecord{};
+        state.has_record       = false;
+        state.record           = FatalCudaErrorRecord{};
         state.deadline_mono_ms = 0;
+        state.deadline_mono_atomic.store(0, std::memory_order_release);
         state.deadline_wall_ms = 0;
         state.incident_wall_ms = 0;
         state.incident_mono_ms = 0;
         state.incident_id.clear();
-        state.inline_claimed  = false;
-        state.terminal        = false;
-        state.outcome         = CudacoreCollectionOutcome{};
+        state.inline_claimed = false;
+        state.terminal       = false;
+        state.outcome        = CudacoreCollectionOutcome{};
         state.incident_flag.store(false, std::memory_order_release);
+        cudacore_test::resetFlightRecorder();
         state.terminal_flag.store(false, std::memory_order_release);
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 void setCollectionWindowMsForTest(int64_t window_ms) noexcept {
@@ -2143,8 +2415,7 @@ void setCollectionWindowMsForTest(int64_t window_ms) noexcept {
         SharedState&                state = sharedState();
         std::lock_guard<std::mutex> lock(state.mutex);
         state.collection_window_ms = window_ms > 0 ? window_ms : 0;
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 void setStartupAttributeSnapshot(const CudacoreAttributeSnapshot& snapshot) noexcept {
@@ -2153,13 +2424,11 @@ void setStartupAttributeSnapshot(const CudacoreAttributeSnapshot& snapshot) noex
         std::lock_guard<std::mutex> lock(state.mutex);
         state.snapshot     = snapshot;
         state.has_snapshot = true;
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
-CudacoreTriggerStatus triggerUserCoredumpForTest(const std::string& pipe_path,
-                                                 int64_t            budget_ms,
-                                                 int*               error_number) noexcept {
+CudacoreTriggerStatus
+triggerUserCoredumpForTest(const std::string& pipe_path, int64_t budget_ms, int* error_number) noexcept {
     try {
         const TriggerResult result = triggerUserCoredumpRaw(pipe_path, budget_ms);
         if (error_number != nullptr) {

@@ -13,27 +13,27 @@
 // P1: structured first fatal error record, at most one bounded user-trigger
 //     attempt, a process-wide bounded collection window and an on-disk manifest.
 //
-// Every entry point is noexcept: the module never throws, never aborts, never
-// creates a CUDA context and never calls a coredump setter. All numbers below
-// are constants on purpose - the patch is rolled out per instance through the
-// image version, not through new RTP options.
+// Diagnostic API entry points are noexcept and do not create a CUDA context or
+// call a coredump setter. The terminate guard delegates to the previous handler
+// after its bounded wait, or aborts if none is installed. All numbers below are
+// constants on purpose; rollout is controlled by the image version.
 
 namespace rtp_llm {
 
 struct CudacoreDiagConstants {
     // One process-wide monotonic deadline per incident, measured from the first
     // fatal error. Not an NVIDIA guarantee; adjust the constant and re-verify.
-    static constexpr int64_t     kCollectionDeadlineMs   = 30000;
+    static constexpr int64_t kCollectionDeadlineMs = 30000;
     // Open + wait-for-reader + write retries share this budget (no extra time).
-    static constexpr int64_t     kTriggerIoBudgetMs      = 1000;
-    static constexpr int64_t     kStatusPollIntervalMs   = 100;
+    static constexpr int64_t kTriggerIoBudgetMs    = 1000;
+    static constexpr int64_t kStatusPollIntervalMs = 100;
     // Upper bound on bounded first-error tile metadata.
-    static constexpr std::size_t kMaxTileMetadata        = 256;
-    static constexpr std::size_t kMaxMetadataBytes       = 256 * 1024;
+    static constexpr std::size_t kMaxTileMetadata  = 1024;
+    static constexpr std::size_t kMaxMetadataBytes = 256 * 1024;
     // Caps for driver attribute strings / manifest text fields.
-    static constexpr std::size_t kMaxAttributeBytes      = 4096;
-    static constexpr std::size_t kMaxTextBytes           = 1024;
-    static constexpr const char* kDiagnosticsDirName     = "cudacore_diagnostics";
+    static constexpr std::size_t kMaxAttributeBytes  = 4096;
+    static constexpr std::size_t kMaxTextBytes       = 1024;
+    static constexpr const char* kDiagnosticsDirName = "cudacore_diagnostics";
 };
 
 // ---------------------------------------------------------------------------
@@ -95,17 +95,17 @@ struct CudacoreAttributeSnapshot {
     int                       runtime_version{0};
     // "driver" when the real driver symbols were resolved, "unavailable" when
     // no CUDA driver was reachable, "stub" when a test API was installed.
-    std::string               symbols_source{"unavailable"};
+    std::string symbols_source{"unavailable"};
 };
 
 struct CudacoreProcessIdentity {
     std::string hostname;
     long        pid{0};
-    std::string pid_namespace;   // best effort, empty when unavailable
+    std::string pid_namespace;  // best effort, empty when unavailable
     int         rank{-1};
     int         device_ordinal{-1};
-    std::string gpu_uuid;        // empty when the driver query failed
-    std::string image_version;   // from the image/version env, empty when unset
+    std::string gpu_uuid;       // empty when the driver query failed
+    std::string image_version;  // from the image/version env, empty when unset
     int         driver_version{0};
     int         runtime_version{0};
     // pid + process start time: stable inside one process, distinct after PID reuse.
@@ -114,7 +114,7 @@ struct CudacoreProcessIdentity {
 
 // Process-wide identity used by the audit and the manifest. Safe to call once
 // per process after CUDA initialization; later calls update rank/device only.
-void setCudacoreProcessIdentity(int rank, int device_ordinal) noexcept;
+void                    setCudacoreProcessIdentity(int rank, int device_ordinal) noexcept;
 CudacoreProcessIdentity cudacoreProcessIdentity() noexcept;
 
 // Query the effective configuration. context_valid must reflect whether the
@@ -156,6 +156,7 @@ enum class FatalCudaErrorDomain {
     CudaDriver,
     Cublas,
     TorchException,
+    HostCopy,  // host-side copy invariant/execution failure; not a CUDA error code
     Unknown,
 };
 
@@ -179,33 +180,37 @@ struct FatalCudaTileRecord {
 // kMaxMetadataBytes of text/tile payload. Metadata is copied on the faulting
 // thread before the objects can die, and never by reading GPU memory.
 struct FatalCudaErrorRecord {
-    FatalCudaErrorDomain domain{FatalCudaErrorDomain::Unknown};
-    int                  code{-1};  // numeric code, -1 when only text was available
-    std::string          code_name;
-    std::string          message;
-    FatalCudaErrorSite   site{FatalCudaErrorSite::Unknown};
-    std::string          source_file;
-    int                  source_line{0};
-    int                  device_index{-1};
-    int                  rank{-1};
-    std::string          stream;
-    bool                 has_group_set_id{false};
-    uint64_t             group_set_id{0};
-    bool                 has_host_span{false};
-    uintptr_t            host_base{0};
-    uint64_t             host_bytes{0};
-    const char*          direction{"none"};
-    std::string          thread_id;
+    FatalCudaErrorDomain             domain{FatalCudaErrorDomain::Unknown};
+    int                              code{-1};  // numeric code, -1 when only text was available
+    std::string                      code_name;
+    std::string                      message;
+    FatalCudaErrorSite               site{FatalCudaErrorSite::Unknown};
+    std::string                      source_file;
+    int                              source_line{0};
+    int                              device_index{-1};
+    int                              rank{-1};
+    std::string                      stream;
+    bool                             has_group_set_id{false};
+    uint64_t                         group_set_id{0};
+    bool                             has_host_span{false};
+    uintptr_t                        host_base{0};
+    uint64_t                         host_bytes{0};
+    const char*                      direction{"none"};
+    std::string                      thread_id;
     std::vector<FatalCudaTileRecord> tiles;
-    uint64_t             tile_total{0};
-    uint64_t             bytes_total{0};
-    bool                 tiles_truncated{false};
-    bool                 metadata_truncated{false};
+    uint64_t                         tile_total{0};
+    uint64_t                         bytes_total{0};
+    uint64_t                         copy_id{0};
+    std::string                      evidence_file;
+    std::string                      operation;
+    std::string                      operation_context_json;  // internally generated numeric metadata only
+    bool                             tiles_truncated{false};
+    bool                             metadata_truncated{false};
     // True when the classification relies on message text instead of a numeric
     // code (e.g. a PyTorch wrapper that lost the CUDA error code).
-    bool                        low_confidence{false};
-    int64_t                     wall_ms{0};
-    int64_t                     mono_ms{0};
+    bool    low_confidence{false};
+    int64_t wall_ms{0};
+    int64_t mono_ms{0};
 };
 
 // Fatal whitelists. Ordinary OOM, invalid arguments and other recoverable
@@ -215,31 +220,59 @@ bool isFatalCudaDriverError(int cu_result) noexcept;
 // Structured reason first, message text second (low confidence when matched).
 bool isFatalCudaException(const std::exception& exception) noexcept;
 
-FatalCudaErrorRecord buildCudaRuntimeErrorRecord(int                  cuda_error,
-                                                 FatalCudaErrorSite   site,
-                                                 const char*          file,
-                                                 int                  line,
-                                                 int                  device_index) noexcept;
-FatalCudaErrorRecord buildCudaDriverErrorRecord(int                cu_result,
-                                                FatalCudaErrorSite site,
-                                                const char*        file,
-                                                int                line,
-                                                int                device_index) noexcept;
-FatalCudaErrorRecord buildCudaExceptionRecord(const std::exception& exception,
-                                              FatalCudaErrorSite    site,
-                                              const char*           file,
-                                              int                   line) noexcept;
+FatalCudaErrorRecord buildCudaRuntimeErrorRecord(
+    int cuda_error, FatalCudaErrorSite site, const char* file, int line, int device_index) noexcept;
+FatalCudaErrorRecord buildCudaDriverErrorRecord(
+    int cu_result, FatalCudaErrorSite site, const char* file, int line, int device_index) noexcept;
+FatalCudaErrorRecord
+buildCudaExceptionRecord(const std::exception& exception, FatalCudaErrorSite site, const char* file, int line) noexcept;
 
-// Process-wide, first-wins. Returns true when this call claimed the incident.
-// Later errors are dropped: the first record and the first deadline are kept.
+// A thread-local, non-owning context valid for one synchronous copy call.
+// Healthy path: one ID and pointer registration, no JSON / file / CUDA work.
+// The provider is invoked only on failure, before the plan goes out of scope.
+class CudacoreCopyScope {
+public:
+    using Provider = std::string (*)(const void*);
+    CudacoreCopyScope(const void* data, Provider provider, const char* strategy) noexcept;
+    ~CudacoreCopyScope();
+    CudacoreCopyScope(const CudacoreCopyScope&)            = delete;
+    CudacoreCopyScope& operator=(const CudacoreCopyScope&) = delete;
+    uint64_t           id() const noexcept {
+        return id_;
+    }
+    const char* strategy() const noexcept {
+        return strategy_;
+    }
+    std::string snapshot() const {
+        return provider_ == nullptr ? "null" : provider_(data_);
+    }
+
+private:
+    const void*        data_;
+    Provider           provider_;
+    const char*        strategy_;
+    uint64_t           id_;
+    CudacoreCopyScope* previous_;
+};
+uint64_t currentCudacoreCopyId() noexcept;
+
+// Process-wide, first-wins for incident identity and deadline. Every call also
+// writes an independent full error/copy evidence file, including later failures.
+// Returns true when this call claimed the incident.
 bool recordFirstFatalCudaError(FatalCudaErrorRecord record) noexcept;
+
+// Persist the current copy scope before RTP_LLM_FAIL. Host validation alone
+// must not fabricate/trigger a fatal CUDA incident. If a real CUDA incident is
+// already active, preserve its bounded collection window before failing.
+// RTP_LLM_FAIL aborts or throws according to user_ft_core_dump_on_exception.
+[[noreturn]] void failCopyWithDiagnostics(const char* category, const char* file, int line, const std::string& message);
 
 // Attach transfer identity to the stored record without overwriting an
 // existing annotation. Used by the copy strategies that know the block ids.
-void annotateFatalCudaTransferContext(uint64_t             group_set_id,
-                                      bool                 device_to_host,
-                                      uintptr_t            host_base,
-                                      uint64_t             host_bytes) noexcept;
+void annotateFatalCudaTransferContext(uint64_t  group_set_id,
+                                      bool      device_to_host,
+                                      uintptr_t host_base,
+                                      uint64_t  host_bytes) noexcept;
 
 // True once an incident was recorded; the instance must not accept new work.
 bool fatalCudacoreIncidentActive() noexcept;
@@ -249,11 +282,21 @@ bool fatalCudacoreCollectionInProgress() noexcept;
 // Snapshot of the stored record, for logging/manifest/tests.
 bool fatalCudacoreErrorRecord(FatalCudaErrorRecord& out) noexcept;
 
+// Install once in the CUDA copy module before faults occur. On an uncaught
+// exception after a fatal CUDA error, give the collector its remaining bounded
+// window, then delegate to the original terminate handler. No CUDA or locks.
+void installCudacoreTerminateGuard() noexcept;
+
+// Cold-path allocation provenance for checking first-error pointers against
+// pool ranges without querying a poisoned CUDA context.
+void recordCudacorePoolLifetime(
+    const char* pool_name, uintptr_t base, uint64_t bytes, int device_index, bool initialized) noexcept;
+
 enum class CudacoreTriggerStatus {
     NotAttempted,
-    Sent,                    // write succeeded; NOT a dump-succeeded signal
-    AlreadyObservedProgress, // an automatic dump had already started
-    AlreadyAttemptedByPeer,  // another copy of this module already triggered
+    Sent,                     // write succeeded; NOT a dump-succeeded signal
+    AlreadyObservedProgress,  // an automatic dump had already started
+    AlreadyAttemptedByPeer,   // another copy of this module already triggered
     PipeNotConfigured,
     PipeMissing,
     NoReader,

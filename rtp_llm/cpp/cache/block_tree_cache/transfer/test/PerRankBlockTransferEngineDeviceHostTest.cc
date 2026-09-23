@@ -8,7 +8,14 @@
 #include <cstring>
 #include <cstdlib>
 #include <future>
+#include <fstream>
+#include <iterator>
+#include <unistd.h>
+#include <dirent.h>
+#include <signal.h>
+#include <sys/resource.h>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
@@ -21,6 +28,9 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
+#include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
@@ -46,6 +56,182 @@ using block_transfer_engine_test::makeTransferTask;
 using block_transfer_engine_test::poolMalloc;
 using block_transfer_engine_test::releasePoolBlock;
 using block_transfer_engine_test::executeSucceeded;
+
+class CopyFailureTestScope {
+public:
+    CopyFailureTestScope(): directory("copy_failure"), previous_(StaticConfig::user_ft_core_dump_on_exception) {
+        StaticConfig::user_ft_core_dump_on_exception = false;
+        cudacore_test::resetIncidentState();
+        cudacore_test::setDiagnosticsDirOverride(directory.path);
+    }
+    ~CopyFailureTestScope() {
+        cudacore_test::resetIncidentState();
+        cudacore_test::resetDiagnosticsDirOverride();
+        StaticConfig::user_ft_core_dump_on_exception = previous_;
+    }
+    TempDirGuard directory;
+
+private:
+    bool previous_;
+};
+
+static std::string readCopyFailureEvidence(const std::string& path) {
+    std::string result;
+    DIR*        dir = ::opendir(path.c_str());
+    if (!dir)
+        return result;
+    while (const auto* entry = ::readdir(dir)) {
+        if (std::string(entry->d_name).rfind("cudacore_error.", 0) == 0) {
+            std::ifstream file(path + "/" + entry->d_name);
+            result.append(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+    }
+    ::closedir(dir);
+    return result;
+}
+
+static DeviceHostCopyPlan diagnosticPlan() {
+    DeviceHostCopyPlan   plan;
+    DeviceHostCopyOrigin origin;
+    origin.host              = {reinterpret_cast<void*>(0x1000), 128, 256};
+    origin.device_pool_base  = 0x10000;
+    origin.device_pool_bytes = 4096;
+    origin.layer_stride      = 64;
+    origin.kv_bytes          = 64;
+    origin.device_block      = 3;
+    origin.other_block       = 5;
+    origin.source_tier       = Tier::HOST;
+    origin.target_tier       = Tier::DEVICE;
+    plan.origins.push_back(origin);
+    plan.copy_tiles.push_back(
+        {reinterpret_cast<void*>(0x1000), reinterpret_cast<void*>(0x10000), 0, 64, 0, 0, 0, 0, 0, 64, 0});
+    return plan;
+}
+
+TEST(DeviceHostCopyPlanDiagnosticsTest, RejectsInvalidTilesBeforeAnyCudaSubmission) {
+    CopyFailureTestScope scope;
+    auto                 plan = diagnosticPlan();
+    ASSERT_TRUE(validateDeviceHostCopyPlan(plan));
+    auto prefix                              = plan;
+    prefix.copy_tiles[0].device_buffer_bytes = 128;
+    EXPECT_TRUE(validateDeviceHostCopyPlan(prefix));
+    CudaBatchDeviceHostCopyStrategy batch;
+    DeviceHostCopyOptions           options;
+    auto                            reject = [&](DeviceHostCopyPlan invalid) {
+        EXPECT_FALSE(validateDeviceHostCopyPlan(invalid));
+        EXPECT_THROW(batch.tryExecute(invalid, options), std::exception);
+        EXPECT_FALSE(fatalCudacoreIncidentActive());  // CPU check must not invent a GPU fault
+    };
+    auto invalid                              = plan;
+    invalid.copy_tiles[0].device_buffer_bytes = 4097;  // copy fits, physical view exceeds pool
+    reject(invalid);
+    invalid = plan;
+    invalid.copy_tiles.push_back(invalid.copy_tiles.front());
+    invalid.copy_tiles.back().device_index = 1;
+    reject(invalid);
+    invalid                            = plan;
+    invalid.copy_tiles[0].layer_offset = 1;  // 1 + 64 exceeds layer stride
+    reject(invalid);
+    invalid                                   = plan;
+    invalid.copy_tiles[0].device_buffer_bytes = 32;
+    reject(invalid);
+    invalid                           = plan;
+    invalid.copy_tiles[0].host_offset = 100;  // 100 + 64 exceeds payload, even though within capacity
+    invalid.copy_tiles[0].host_addr   = reinterpret_cast<void*>(0x1064);
+    reject(invalid);
+    invalid                           = plan;
+    invalid.copy_tiles[0].device_addr = reinterpret_cast<void*>(0x10fe0);
+    reject(invalid);
+    invalid                         = plan;
+    invalid.copy_tiles[0].host_addr = reinterpret_cast<void*>(UINTPTR_MAX - 16);
+    reject(invalid);
+    invalid                     = plan;
+    invalid.copy_tiles[0].bytes = SIZE_MAX;
+    reject(invalid);
+    invalid                            = plan;
+    invalid.copy_tiles[0].origin_index = 99;
+    reject(invalid);
+    reject(DeviceHostCopyPlan{});
+}
+
+TEST(DeviceHostCopyPlanDeathTest, AllStrategiesPersistEvidenceBeforeConfiguredAbort) {
+    CopyFailureTestScope  scope;
+    DeviceHostCopyOptions options;
+    options.staged_sm_min_tile_count = 0;
+    options.staged_sm_min_bytes      = 0;
+    auto plan                        = diagnosticPlan();
+    plan.copy_tiles[0].layer_offset  = 1;
+    GenericMultiCopyDeviceHostCopyStrategy generic;
+    CudaBatchDeviceHostCopyStrategy        batch;
+    StagedSmDeviceHostCopyStrategy         staged;
+    for (auto* strategy : std::vector<DeviceHostCopyStrategy*>{&generic, &batch, &staged}) {
+        EXPECT_EXIT(
+            {
+                struct rlimit limit = {};
+                ::setrlimit(RLIMIT_CORE, &limit);  // test SIGABRT without writing large CPU cores
+                StaticConfig::user_ft_core_dump_on_exception = true;
+                strategy->tryExecute(plan, options);
+                ::_exit(99);
+            },
+            ::testing::KilledBySignal(SIGABRT),
+            "");
+    }
+    const auto json = readCopyFailureEvidence(scope.directory.path);
+    EXPECT_NE(json.find("\"domain\":\"host_copy\""), std::string::npos);
+    EXPECT_NE(json.find("\"within_layer_offset\":1"), std::string::npos);
+    EXPECT_NE(json.find("\"complete\":true"), std::string::npos);
+    for (const auto* name : {"generic", "cuda_batch", "staged_sm"}) {
+        EXPECT_NE(json.find(std::string("\"strategy\":\"") + name + "\""), std::string::npos);
+    }
+}
+
+TEST(DeviceHostCopyPlanDiagnosticsTest, StagedInvalidInputsAreRejectedBeforeCudaAccess) {
+    StagedMemoryCopyParams params;
+    params.device_index = 0;
+    params.host_base    = reinterpret_cast<void*>(0x1000);
+    params.host_bytes   = 32;
+    params.tiles.push_back({reinterpret_cast<void*>(0x2000), 16, 32});
+    EXPECT_EQ(execStagedMemoryCopy(params), StagedMemoryCopyStatus::INVALID_ARGUMENT);
+    params.tiles[0] = {nullptr, 0, 32};
+    EXPECT_EQ(execStagedMemoryCopy(params), StagedMemoryCopyStatus::INVALID_ARGUMENT);
+}
+
+TEST(DeviceHostCopyPlanDiagnosticsTest, SerializesEveryDescriptorAndTileAndBothOverlapDirections) {
+    auto plan               = diagnosticPlan();
+    plan.mixed_descriptors  = true;
+    auto second             = plan.origins.front();
+    second.descriptor_index = 1;
+    second.other_block      = 9;
+    second.host             = {reinterpret_cast<void*>(0x9000), 128, 256};
+    plan.origins.push_back(second);
+    auto tile         = plan.copy_tiles.front();
+    tile.origin_index = 1;
+    tile.host_addr    = second.host.base;
+    plan.copy_tiles.push_back(tile);  // same GPU destination, distinct host source
+    auto json = deviceHostCopyPlanJson(plan);
+    EXPECT_NE(json.find("\"other_block\":9"), std::string::npos);
+    EXPECT_NE(json.find("\"start\":36864,\"len\":128,\"end\":36992"), std::string::npos);
+    EXPECT_NE(json.find("\"destination_overlap_examples\":[[0,1]]"), std::string::npos);
+    EXPECT_NE(json.find("\"source_overlap_examples\":[]"), std::string::npos);
+    plan.device_to_host = true;
+    json                = deviceHostCopyPlanJson(plan);
+    EXPECT_NE(json.find("\"source_overlap_examples\":[[0,1]]"), std::string::npos);
+    EXPECT_NE(json.find("\"destination_overlap_examples\":[]"), std::string::npos);
+    plan.copy_tiles.resize(1500, tile);
+    json = deviceHostCopyPlanJson(plan);
+    EXPECT_NE(json.find("\"index\":1499,"), std::string::npos);
+    EXPECT_NE(json.find("\"tiles_truncated\":false"), std::string::npos);
+}
+
+TEST(DeviceHostCopyPlanDiagnosticsTest, RejectsMalformedBatchDimensionsWithoutGpuAccess) {
+    BlockTreeTaskPool          pool(1, 8, "CopyPlanDiagnosticsTest");
+    DeviceHostTransferExecutor executor(pool, 4);
+    EXPECT_EQ(executor.generatePlan({}, {}, {}).first, TransferStatus::INVALID_ARGS);
+    auto descriptor = TransferDescriptor::hostToDevice(0, 1, {1});
+    EXPECT_EQ(executor.generatePlan({}, {descriptor}, {nullptr}).first, TransferStatus::INVALID_ARGS);
+    EXPECT_EQ(executor.generatePlan({{reinterpret_cast<void*>(0x1000), 64, 64}}, {descriptor}, {nullptr}).first,
+              TransferStatus::INVALID_ARGS);
+}
 
 struct DeviceLayerBufferSpec {
     size_t kv_bytes{0};
@@ -265,7 +451,7 @@ class ScopedCopyPriorityEnv {
 public:
     explicit ScopedCopyPriorityEnv(const char* value) {
         const char* original = std::getenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY");
-        had_original_ = original != nullptr;
+        had_original_        = original != nullptr;
         if (had_original_) {
             original_ = original;
         }
@@ -309,7 +495,7 @@ static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::
 }
 
 TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
-    ScopedCopyPriorityEnv priority(nullptr);
+    ScopedCopyPriorityEnv      priority(nullptr);
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
@@ -321,11 +507,15 @@ TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGener
 }
 
 TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyAtInitialization) {
-    const std::pair<const char*, const char*> cases[] = {
-        {nullptr, "BSG"},       {"", "BSG"},           {"cuda_batch", "BSG"},
-        {"sm", "SBG"},         {"generic", "GBS"},    {"cuda_3d_batch", "BSG"},
-        {"unknown", "BSG"},    {"SM", "BSG"}};
-    BlockTreeTaskPool task_pool(1, 8, "CopyPriorityTest");
+    const std::pair<const char*, const char*> cases[] = {{nullptr, "BSG"},
+                                                         {"", "BSG"},
+                                                         {"cuda_batch", "BSG"},
+                                                         {"sm", "SBG"},
+                                                         {"generic", "GBS"},
+                                                         {"cuda_3d_batch", "BSG"},
+                                                         {"unknown", "BSG"},
+                                                         {"SM", "BSG"}};
+    BlockTreeTaskPool                         task_pool(1, 8, "CopyPriorityTest");
     for (const auto& [value, expected] : cases) {
         SCOPED_TRACE(value != nullptr ? value : "<unset>");
         ScopedCopyPriorityEnv priority(value);
@@ -340,6 +530,32 @@ TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyA
         EXPECT_EQ(copyStrategyOrder(later), "GBS");
     }
 }
+
+class OutcomeStagedStrategy: public StagedSmDeviceHostCopyStrategy {
+public:
+    explicit OutcomeStagedStrategy(StagedMemoryCopyStatus status): status_(status) {}
+
+protected:
+    StagedMemoryCopyStatus executeStagedCopy(const StagedMemoryCopyParams&, StagedMemoryCopyScratch* scratch) override {
+        scratch->device_index = -1;  // no CUDA allocation was made by this test double
+        return status_;
+    }
+
+private:
+    StagedMemoryCopyStatus status_;
+};
+
+class CountingNoCopyStrategy: public DeviceHostCopyStrategy {
+public:
+    explicit CountingNoCopyStrategy(int& calls): calls_(calls) {}
+    StrategyResult tryExecute(const DeviceHostCopyPlan&, const DeviceHostCopyOptions&) override {
+        ++calls_;
+        return StrategyResult::done();
+    }
+
+private:
+    int& calls_;
+};
 
 // ---- PerRankBlockTransferEngine submit() tests (real CUDA) ----
 
@@ -373,6 +589,56 @@ protected:
     std::vector<BlockIdxType>                   device_blocks_;
     GroupSetPtr                                 group_set_;
 };
+
+TEST_F(PerRankBlockTransferEngineTest, StagedFailureOnlyFallsBackBeforeSubmission) {
+    CopyFailureTestScope  scope;
+    BlockTreeTaskPool     task_pool(1, 8, "StagedFailurePolicyTest");
+    DeviceHostCopyOptions options;
+    options.staged_sm_min_tile_count = 0;
+    options.staged_sm_min_bytes      = 0;
+    const auto           block       = poolMalloc(*host_pool_);
+    const auto           buffer      = host_pool_->blockBuffer(block);
+    const HostBufferView host{buffer.addr, buffer.payload_bytes, buffer.stride_bytes};
+    const auto           descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, block);
+    for (const auto status : {StagedMemoryCopyStatus::NOT_SUPPORTED,
+                              StagedMemoryCopyStatus::RESOURCE_EXHAUSTED,
+                              StagedMemoryCopyStatus::INVALID_ARGUMENT,
+                              StagedMemoryCopyStatus::EXECUTION_FAILED}) {
+        DeviceHostTransferExecutor executor(task_pool, 8, options);
+        int                        fallback_calls = 0;
+        executor.strategies_.clear();
+        executor.strategies_.push_back(std::make_unique<OutcomeStagedStrategy>(status));
+        executor.strategies_.push_back(std::make_unique<CountingNoCopyStrategy>(fallback_calls));
+        if (status == StagedMemoryCopyStatus::NOT_SUPPORTED || status == StagedMemoryCopyStatus::RESOURCE_EXHAUSTED) {
+            EXPECT_EQ(executor.executeBatch({host}, {descriptor}, {group_set_.get()}), TransferStatus::OK);
+            EXPECT_EQ(fallback_calls, 1);
+        } else {
+            EXPECT_THROW(executor.executeBatch({host}, {descriptor}, {group_set_.get()}), std::exception);
+            EXPECT_EQ(fallback_calls, 0);
+        }
+    }
+    releasePoolBlock(*host_pool_, block);
+}
+
+TEST_F(PerRankBlockTransferEngineTest, PlanningHostBoundsFailurePersistsInputAndNeverRunsStrategy) {
+    CopyFailureTestScope       scope;
+    BlockTreeTaskPool          task_pool(1, 8, "PlanningInvariantTest");
+    DeviceHostTransferExecutor executor(task_pool, 8);
+    int                        calls = 0;
+    executor.strategies_.clear();
+    executor.strategies_.push_back(std::make_unique<CountingNoCopyStrategy>(calls));
+    const auto           block  = poolMalloc(*host_pool_);
+    const auto           buffer = host_pool_->blockBuffer(block);
+    const HostBufferView invalid{buffer.addr, buffer.payload_bytes, buffer.payload_bytes - 1};
+    const auto           descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, block);
+    EXPECT_THROW(executor.executeBatch({invalid}, {descriptor}, {group_set_.get()}), std::exception);
+    EXPECT_EQ(calls, 0);
+    const auto json = readCopyFailureEvidence(scope.directory.path);
+    EXPECT_NE(json.find("\"phase\":\"generate_plan\""), std::string::npos);
+    EXPECT_NE(json.find("\"host_capacity_bytes\":299"), std::string::npos);
+    EXPECT_FALSE(fatalCudacoreIncidentActive());
+    releasePoolBlock(*host_pool_, block);
+}
 
 TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout) {
     fillDeviceLayerSequential(device_pool_, 0, device_block_);
@@ -1470,7 +1736,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceSameLaneTasksMayUseAva
 class PerRankBlockTransferEngineStrategyTest: public ::testing::Test {
 protected:
     ScopedCopyPriorityEnv copy_priority_{nullptr};
-    void SetUp() override {
+    void                  SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
 
         layer_bytes_     = {128, 128};

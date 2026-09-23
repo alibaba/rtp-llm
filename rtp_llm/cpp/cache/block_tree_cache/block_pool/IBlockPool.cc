@@ -10,6 +10,7 @@ IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): confi
     RTP_LLM_CHECK(config_ != nullptr);
     RTP_LLM_CHECK(config_->physical_block_count > 1);
     allocated_.assign(config_->physical_block_count, 0);
+    allocation_generations_.assign(config_->physical_block_count, 0);
     tree_refcounts_.assign(config_->physical_block_count, 0);
     for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
         typed_refcounts.assign(config_->physical_block_count, 0);
@@ -75,7 +76,8 @@ std::optional<BlockIdList> IBlockPool::malloc(size_t n) {
     for (const auto block : result) {
         const bool was_available = isAvailableNoLock(block);
         assert(was_available);
-        allocated_[block]      = 1;
+        allocated_[block] = 1;
+        ++allocation_generations_[block];
         tree_refcounts_[block] = 0;
         for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
             typed_refcounts[block] = 0;
@@ -176,6 +178,25 @@ bool IBlockPool::isAllocated(BlockIdxType block) const {
         return false;
     }
     return allocated_[block] != 0;
+}
+
+BlockDiagnosticSnapshot IBlockPool::diagnosticSnapshot(BlockIdxType block) const noexcept {
+    BlockDiagnosticSnapshot result;
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        result.query_ok = initialized_;
+        result.valid    = initialized_ && validBlockNoLock(block);
+        if (result.valid) {
+            result.allocated             = allocated_[block] != 0;
+            result.allocation_generation = allocation_generations_[block];
+            result.tree_references       = tree_refcounts_[block];
+            for (size_t i = 0; i < kBlockTreeRefTypeCount; ++i) {
+                result.references_by_type[i] = tree_refcounts_by_type_[i][block];
+            }
+            result.external_reference = hasExternalRefNoLock(block);
+        }
+    } catch (...) {}
+    return result;
 }
 
 size_t IBlockPool::totalBlocksNum() const {

@@ -40,6 +40,14 @@ public:
     // the pool is not initialized or the block index is out of range.
     HostBlockBuffer blockBuffer(BlockIdxType block) const;
 
+    // Immutable backing range, including reserved block 0 and stride padding.
+    void* getBaseAddress() const {
+        return backing_ ? backing_->data() : nullptr;
+    }
+    size_t getTotalSizeBytes() const {
+        return config().physical_block_count * config().stride_bytes;
+    }
+
     size_t payloadBytes() const;
     size_t strideBytes() const;
     size_t blockSizeBytes() const override;

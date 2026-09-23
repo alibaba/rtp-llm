@@ -109,6 +109,25 @@ cc_test(
     name = "cudacore_incident_test",
     srcs = ["CudacoreIncidentTest.cc"],
     copts = test_copts,
+    deps = google_test_deps + [
+        "//rtp_llm/cpp/utils:cudacore_diagnostics",
+        "//rtp_llm/cpp/utils:cudacore_flight_recorder",
+    ],
+    timeout = "short",
+)
+
+cc_test(
+    name = "cudacore_flight_recorder_test",
+    srcs = ["CudacoreFlightRecorderTest.cc"],
+    copts = test_copts,
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:cudacore_flight_recorder"],
+    timeout = "short",
+)
+
+cc_test(
+    name = "cudacore_terminate_guard_test",
+    srcs = ["CudacoreTerminateGuardTest.cc"],
+    copts = test_copts,
     deps = google_test_deps + ["//rtp_llm/cpp/utils:cudacore_diagnostics"],
     timeout = "short",
 )

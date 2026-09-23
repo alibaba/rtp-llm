@@ -34,6 +34,14 @@ enum class BatchedMemoryCopyStatus {
     EXECUTION_FAILED,
 };
 
+enum class StagedMemoryCopyStatus {
+    SUCCESS,
+    NOT_SUPPORTED,
+    RESOURCE_EXHAUSTED,  // scratch allocation OOM before any copy submission
+    INVALID_ARGUMENT,
+    EXECUTION_FAILED,  // must not fall back, even if the CUDA error is non-fatal
+};
+
 enum class StagedMemoryCopyDirection {
     H2D = 0,
     D2H = 1,
@@ -87,10 +95,13 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.
 // scratch is optional; passing one lets callers reuse pinned host staging and device metadata buffers.
+// Only NOT_SUPPORTED / RESOURCE_EXHAUSTED allow fallback. INVALID_ARGUMENT is
+// an internal layout violation; EXECUTION_FAILED may have submitted partial work.
 // H2D: compact host payload -> GPU staging -> tile.gpu by tile.host_offset.
 // D2H: tile.gpu -> GPU staging by tile.host_offset -> compact host payload.
-bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch = nullptr);
-void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch);
+StagedMemoryCopyStatus execStagedMemoryCopy(const StagedMemoryCopyParams& params,
+                                            StagedMemoryCopyScratch*      scratch = nullptr);
+void                   releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch);
 
 // Warmup split-KV copy kernels. No-op on non-CUDA / PPU devices.
 // Must be called after cudaSetDevice + setCurrentCUDAStream.

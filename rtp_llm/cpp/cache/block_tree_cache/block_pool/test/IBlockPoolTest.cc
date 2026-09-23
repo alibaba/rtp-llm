@@ -53,6 +53,29 @@ std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count) {
 
 }  // namespace
 
+TEST(IBlockPoolTest, DiagnosticSnapshotDistinguishesReleaseAndReallocationAtSameAddress) {
+    auto pool  = makeInitializedPool(2);  // one reusable block
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incTreeRef(*block, BlockTreeRefType::LOAD);
+    const auto before = pool->diagnosticSnapshot(*block);
+    EXPECT_TRUE(before.query_ok);
+    EXPECT_TRUE(before.allocated);
+    EXPECT_EQ(before.references_by_type[static_cast<size_t>(BlockTreeRefType::LOAD)], 1);
+    pool->decTreeRef(*block, BlockTreeRefType::LOAD);
+    const auto released = pool->diagnosticSnapshot(*block);
+    EXPECT_FALSE(released.allocated);
+    EXPECT_EQ(released.allocation_generation, before.allocation_generation);
+    EXPECT_EQ(released.tree_references, 0);
+    auto reused = pool->malloc();
+    ASSERT_EQ(reused, block);
+    const auto after = pool->diagnosticSnapshot(*reused);
+    EXPECT_TRUE(after.allocated);
+    EXPECT_EQ(after.allocation_generation, before.allocation_generation + 1);
+    EXPECT_FALSE(pool->diagnosticSnapshot(0).valid);
+    EXPECT_FALSE(pool->diagnosticSnapshot(NULL_BLOCK_IDX).valid);
+}
+
 TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
     auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4));
     ASSERT_TRUE(pool.init());

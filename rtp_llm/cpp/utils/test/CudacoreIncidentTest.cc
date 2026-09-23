@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
+#include "rtp_llm/cpp/utils/CudacoreFlightRecorder.h"
 
 #include <atomic>
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -27,11 +29,15 @@ bool readFile(const std::string& path, std::string& content) {
     if (file == nullptr) {
         return false;
     }
-    char   buffer[4096] = {};
-    size_t read         = ::fread(buffer, 1, sizeof(buffer) - 1, file);
-    content.assign(buffer, read);
+    content.clear();
+    char   buffer[4096];
+    size_t read = 0;
+    while ((read = ::fread(buffer, 1, sizeof(buffer), file)) != 0) {
+        content.append(buffer, read);
+    }
+    const bool success = ::ferror(file) == 0;
     ::fclose(file);
-    return true;
+    return success;
 }
 
 std::string findIncidentManifest(const std::string& dir) {
@@ -60,7 +66,8 @@ std::string findIncidentManifest(const std::string& dir) {
 class CudacoreIncidentTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        dir_ = ::testing::TempDir() + "/cudacore_incident_" + std::to_string(g_dir_counter.fetch_add(1));
+        dir_ = ::testing::TempDir() + "/cudacore_incident_" + std::to_string(::getpid()) + "_"
+               + std::to_string(g_dir_counter.fetch_add(1));
         ::mkdir(dir_.c_str(), 0755);
         cudacore_test::setDiagnosticsDirOverride(dir_);
         cudacore_test::resetIncidentState();
@@ -102,6 +109,155 @@ protected:
     std::string dir_;
 };
 
+TEST_F(CudacoreIncidentTest, ManifestIncludesRecentCopyAndPoolProvenance) {
+    CudacoreFlightEvent event;
+    event.kind              = CudacoreFlightKind::BatchSubmit;
+    event.device_index      = 2;
+    event.stream            = 0x1234;
+    event.tile_count        = 88;
+    const uint64_t sequence = recordCudacoreFlightEvent(event);
+    ASSERT_NE(sequence, 0);
+    recordCudacorePoolLifetime("kv_pool", 0x100000, 0x200000, 2, true);
+    recordCudacorePoolLifetime("kv_pool", 0x100000, 0x200000, 2, false);
+
+    cudacore_test::setCollectionWindowMsForTest(100);
+    ASSERT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
+    EXPECT_NE(recordCudacoreFlightEvent(event), 0);
+    (void)waitForCudacoreCollection();
+
+    std::string manifest;
+    ASSERT_TRUE(readFile(findIncidentManifest(dir_), manifest));
+    EXPECT_NE(manifest.find("\"recent_cuda_submissions\":"), std::string::npos);
+    EXPECT_NE(manifest.find("\"kind\":\"batch_submit\""), std::string::npos);
+
+    DIR* directory = ::opendir(dir_.c_str());
+    ASSERT_NE(directory, nullptr);
+    std::string allocation_path;
+    while (struct dirent* entry = ::readdir(directory)) {
+        const std::string name = entry->d_name;
+        if (name.rfind("cudacore_allocations.", 0) == 0) {
+            allocation_path = dir_ + "/" + name;
+            break;
+        }
+    }
+    ::closedir(directory);
+    std::string allocations;
+    ASSERT_TRUE(readFile(allocation_path, allocations));
+    EXPECT_NE(allocations.find("\"event\":\"pool_initialized\""), std::string::npos);
+    EXPECT_NE(allocations.find("\"event\":\"pool_destroyed\""), std::string::npos);
+}
+
+TEST_F(CudacoreIncidentTest, CopyFailWaitsForExistingCudaIncidentBeforeThrowing) {
+    cudacore_test::setCollectionWindowMsForTest(100);
+    ASSERT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
+    ASSERT_TRUE(fatalCudacoreCollectionInProgress());
+    EXPECT_THROW(failCopyWithDiagnostics("execution", __FILE__, __LINE__, "copy failed after submission"),
+                 std::exception);
+    EXPECT_FALSE(fatalCudacoreCollectionInProgress());
+    FatalCudaErrorRecord first;
+    ASSERT_TRUE(fatalCudacoreErrorRecord(first));
+    EXPECT_EQ(first.code, 719);  // host failure does not replace the original CUDA error
+    const auto  path = findIncidentManifest(dir_);
+    std::string json;
+    ASSERT_TRUE(readFile(path, json));
+    EXPECT_NE(json.find("\"phase\":\"complete\""), std::string::npos);
+}
+
+TEST_F(CudacoreIncidentTest, FullEvidenceSurvivesSummaryTruncationAndLaterErrors) {
+    const std::string context  = "{\"descriptor_count\":4,\"last_gpu_end\":987654321}";
+    const auto        provider = [](const void* data) { return *static_cast<const std::string*>(data); };
+    uint64_t          first_id;
+    {
+        CudacoreCopyScope scope(&context, provider, "cuda_batch");
+        first_id    = scope.id();
+        auto record = runtimeRecord(719);
+        for (size_t i = 0; i < 1500; ++i) {
+            record.tiles.push_back({0x10000 + i * 32, 0x20000 + i * 32, 32});
+        }
+        record.tile_total  = record.tiles.size();
+        record.bytes_total = record.tile_total * 32;
+        record.message     = std::string(2000, 'x') + "END_OF_FULL_MESSAGE";
+        ASSERT_TRUE(recordFirstFatalCudaError(std::move(record)));
+    }
+    EXPECT_EQ(currentCudacoreCopyId(), 0);
+    FatalCudaErrorRecord summary;
+    ASSERT_TRUE(fatalCudacoreErrorRecord(summary));
+    EXPECT_EQ(summary.copy_id, first_id);
+    EXPECT_EQ(summary.tiles.size(), CudacoreDiagConstants::kMaxTileMetadata);
+    EXPECT_TRUE(summary.tiles_truncated);
+    std::string evidence;
+    ASSERT_TRUE(readFile(summary.evidence_file, evidence));
+    EXPECT_NE(evidence.find("\"dst\":113504"), std::string::npos);  // final tile, beyond summary cap
+    EXPECT_NE(evidence.find("END_OF_FULL_MESSAGE"), std::string::npos);
+    EXPECT_NE(evidence.find("\"last_gpu_end\":987654321"), std::string::npos);
+    EXPECT_NE(evidence.find("\"complete\":true"), std::string::npos);
+
+    std::vector<std::thread> peers;
+    for (int i = 0; i < 4; ++i) {
+        peers.emplace_back([&] {
+            CudacoreCopyScope scope(&context, provider, "cuda_batch");
+            EXPECT_FALSE(recordFirstFatalCudaError(runtimeRecord(700)));
+        });
+    }
+    for (auto& peer : peers) {
+        peer.join();
+    }
+    size_t files     = 0;
+    DIR*   directory = ::opendir(dir_.c_str());
+    ASSERT_NE(directory, nullptr);
+    while (const auto* entry = ::readdir(directory)) {
+        if (std::string(entry->d_name).rfind("cudacore_error.", 0) == 0) {
+            ASSERT_TRUE(readFile(dir_ + "/" + entry->d_name, evidence));
+            EXPECT_NE(evidence.find("\"complete\":true"), std::string::npos);
+            ++files;
+        }
+    }
+    ::closedir(directory);
+    EXPECT_EQ(files, 5);
+    ASSERT_TRUE(fatalCudacoreErrorRecord(summary));
+    EXPECT_EQ(summary.code, 719);
+    EXPECT_EQ(summary.copy_id, first_id);
+}
+
+TEST_F(CudacoreIncidentTest, BasicEvidenceSurvivesFailedEnrichment) {
+    const auto        provider = [](const void*) -> std::string { throw std::runtime_error("snapshot unavailable"); };
+    CudacoreCopyScope scope(nullptr, provider, "cuda_batch");
+    ASSERT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
+    FatalCudaErrorRecord summary;
+    ASSERT_TRUE(fatalCudacoreErrorRecord(summary));
+    std::string evidence;
+    ASSERT_TRUE(readFile(summary.evidence_file, evidence));
+    EXPECT_NE(evidence.find("\"code\":719"), std::string::npos);
+    EXPECT_NE(evidence.find("\"complete\":false"), std::string::npos);
+    EXPECT_TRUE(fatalCudacoreIncidentActive());
+}
+
+TEST_F(CudacoreIncidentTest, ExceptionBuilderPreservesFullMessageUntilSummary) {
+    const std::runtime_error error(std::string(3000, 'x') + "unspecified launch failure");
+    const auto record = buildCudaExceptionRecord(error, FatalCudaErrorSite::DeviceHostCopy, __FILE__, __LINE__);
+    EXPECT_EQ(record.message, error.what());
+}
+
+TEST_F(CudacoreIncidentTest, CopyScopeIsLazyNestedAndThreadLocal) {
+    const auto fail_if_called = [](const void*) -> std::string {
+        ADD_FAILURE() << "healthy copy must not format evidence";
+        return "null";
+    };
+    EXPECT_EQ(currentCudacoreCopyId(), 0);
+    {
+        CudacoreCopyScope outer(nullptr, fail_if_called, "generic");
+        {
+            CudacoreCopyScope inner(nullptr, fail_if_called, "cuda_batch");
+            EXPECT_NE(inner.id(), outer.id());
+            EXPECT_EQ(currentCudacoreCopyId(), inner.id());
+        }
+        EXPECT_EQ(currentCudacoreCopyId(), outer.id());
+        std::thread peer([] { EXPECT_EQ(currentCudacoreCopyId(), 0); });
+        peer.join();
+    }
+    EXPECT_EQ(currentCudacoreCopyId(), 0);
+}
+
 TEST_F(CudacoreIncidentTest, FirstFatalErrorWinsAndIsNeverOverwritten) {
     EXPECT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
     EXPECT_FALSE(recordFirstFatalCudaError(runtimeRecord(700)));
@@ -118,8 +274,8 @@ TEST_F(CudacoreIncidentTest, FirstFatalErrorWinsAndIsNeverOverwritten) {
 }
 
 TEST_F(CudacoreIncidentTest, ConcurrentFirstErrorsProduceSingleIncident) {
-    constexpr int kThreads = 8;
-    std::atomic<int> claims{0};
+    constexpr int            kThreads = 8;
+    std::atomic<int>         claims{0};
     std::vector<std::thread> threads;
     for (int index = 0; index < kThreads; ++index) {
         threads.emplace_back([&, index] {
@@ -141,7 +297,7 @@ TEST_F(CudacoreIncidentTest, ConcurrentFirstErrorsProduceSingleIncident) {
 
 TEST_F(CudacoreIncidentTest, TileMetadataIsBoundedButKeepsTotals) {
     FatalCudaErrorRecord record = runtimeRecord(719);
-    for (int index = 0; index < 1000; ++index) {
+    for (int index = 0; index < 1500; ++index) {
         FatalCudaTileRecord tile;
         tile.dst   = static_cast<uintptr_t>(0x1000 + index);
         tile.src   = static_cast<uintptr_t>(0x2000 + index);
@@ -153,8 +309,25 @@ TEST_F(CudacoreIncidentTest, TileMetadataIsBoundedButKeepsTotals) {
     FatalCudaErrorRecord stored;
     ASSERT_TRUE(fatalCudacoreErrorRecord(stored));
     EXPECT_EQ(stored.tiles.size(), CudacoreDiagConstants::kMaxTileMetadata);
-    EXPECT_EQ(stored.tile_total, 1000u);
+    EXPECT_EQ(stored.tile_total, 1500u);
     EXPECT_TRUE(stored.tiles_truncated);
+}
+
+TEST_F(CudacoreIncidentTest, RetainsAllTilesFromObservedLargeBatch) {
+    FatalCudaErrorRecord record = runtimeRecord(719);
+    for (int index = 0; index < 310; ++index) {
+        FatalCudaTileRecord tile;
+        tile.dst   = static_cast<uintptr_t>(0x1000 + index * 4096);
+        tile.src   = static_cast<uintptr_t>(0x2000 + index * 4096);
+        tile.bytes = 4096;
+        record.tiles.push_back(tile);
+    }
+    ASSERT_TRUE(recordFirstFatalCudaError(record));
+
+    FatalCudaErrorRecord stored;
+    ASSERT_TRUE(fatalCudacoreErrorRecord(stored));
+    EXPECT_EQ(stored.tiles.size(), 310u);
+    EXPECT_FALSE(stored.tiles_truncated);
 }
 
 TEST_F(CudacoreIncidentTest, TransferAnnotationIsAppliedOnce) {
@@ -169,6 +342,22 @@ TEST_F(CudacoreIncidentTest, TransferAnnotationIsAppliedOnce) {
     EXPECT_TRUE(stored.has_host_span);
     EXPECT_EQ(stored.host_base, 0x1000u);
     EXPECT_STREQ(stored.direction, "D2H");
+}
+
+TEST_F(CudacoreIncidentTest, OtherCopyThreadCannotAnnotateFirstError) {
+    ASSERT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
+    std::thread other(
+        [] { annotateFatalCudaTransferContext(/*group_set_id=*/99, /*device_to_host=*/false, 0x2000, 8192); });
+    other.join();
+
+    FatalCudaErrorRecord stored;
+    ASSERT_TRUE(fatalCudacoreErrorRecord(stored));
+    EXPECT_FALSE(stored.has_group_set_id);
+    EXPECT_FALSE(stored.has_host_span);
+    annotateFatalCudaTransferContext(/*group_set_id=*/42, /*device_to_host=*/true, 0x1000, 4096);
+    ASSERT_TRUE(fatalCudacoreErrorRecord(stored));
+    EXPECT_TRUE(stored.has_group_set_id);
+    EXPECT_EQ(stored.group_set_id, 42u);
 }
 
 TEST_F(CudacoreIncidentTest, FatalClassificationSeparatesOrdinaryErrors) {
@@ -198,7 +387,7 @@ TEST_F(CudacoreIncidentTest, FatalClassificationSeparatesOrdinaryErrors) {
 }
 
 TEST_F(CudacoreIncidentTest, TriggerReportsMissingPipe) {
-    int error_number = 0;
+    int                         error_number = 0;
     const CudacoreTriggerStatus status =
         cudacore_test::triggerUserCoredumpForTest(dir_ + "/does_not_exist.pipe", 200, &error_number);
     EXPECT_EQ(status, CudacoreTriggerStatus::PipeMissing);
@@ -209,8 +398,8 @@ TEST_F(CudacoreIncidentTest, TriggerWithoutReaderIsBounded) {
     const std::string pipe_path = dir_ + "/corepipe";
     ASSERT_EQ(::mkfifo(pipe_path.c_str(), 0644), 0);
 
-    const auto begin  = std::chrono::steady_clock::now();
-    int        error_number = 0;
+    const auto                  begin        = std::chrono::steady_clock::now();
+    int                         error_number = 0;
     const CudacoreTriggerStatus status =
         cudacore_test::triggerUserCoredumpForTest(pipe_path, /*budget_ms=*/200, &error_number);
     const auto elapsed_ms =
@@ -228,7 +417,7 @@ TEST_F(CudacoreIncidentTest, TriggerWritesExactlyOneRequestWithReader) {
     const int reader = ::open(pipe_path.c_str(), O_RDONLY | O_NONBLOCK);
     ASSERT_GE(reader, 0);
 
-    int error_number = 0;
+    int                         error_number = 0;
     const CudacoreTriggerStatus status =
         cudacore_test::triggerUserCoredumpForTest(pipe_path, /*budget_ms=*/200, &error_number);
     EXPECT_EQ(status, CudacoreTriggerStatus::Sent);
@@ -261,7 +450,7 @@ TEST_F(CudacoreIncidentTest, TriggerReportsFullPipe) {
         }
     }
     // The reader never drains the pipe, so the trigger write must hit EAGAIN.
-    int error_number = 0;
+    int                         error_number = 0;
     const CudacoreTriggerStatus status =
         cudacore_test::triggerUserCoredumpForTest(pipe_path, /*budget_ms=*/200, &error_number);
     EXPECT_EQ(status, CudacoreTriggerStatus::PipeFull);
@@ -278,7 +467,7 @@ TEST_F(CudacoreIncidentTest, TriggerPermissionDeniedIsBounded) {
     const std::string pipe_path = dir_ + "/locked.pipe";
     ASSERT_EQ(::mkfifo(pipe_path.c_str(), 0000), 0);
 
-    int error_number = 0;
+    int                         error_number = 0;
     const CudacoreTriggerStatus status =
         cudacore_test::triggerUserCoredumpForTest(pipe_path, /*budget_ms=*/200, &error_number);
     EXPECT_EQ(status, CudacoreTriggerStatus::PermissionDenied);
@@ -300,7 +489,7 @@ TEST_F(CudacoreIncidentTest, BrokenPipeNeverKillsTheProcess) {
     });
 
     for (int attempt = 0; attempt < 20; ++attempt) {
-        int error_number = 0;
+        int                         error_number = 0;
         const CudacoreTriggerStatus status =
             cudacore_test::triggerUserCoredumpForTest(pipe_path, /*budget_ms=*/50, &error_number);
         EXPECT_TRUE(status == CudacoreTriggerStatus::Sent || status == CudacoreTriggerStatus::BrokenPipe
@@ -327,7 +516,7 @@ TEST_F(CudacoreIncidentTest, AutomaticDumpProgressSkipsTheExtraTrigger) {
 
     const auto                      begin   = std::chrono::steady_clock::now();
     const CudacoreCollectionOutcome outcome = waitForCudacoreCollection();
-    const auto elapsed_ms =
+    const auto                      elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
 
     EXPECT_EQ(outcome.trigger, CudacoreTriggerStatus::AlreadyObservedProgress);
@@ -363,7 +552,7 @@ TEST_F(CudacoreIncidentTest, SegmentedDumpKeepsTheWindowOpenUntilTheDeadline) {
 
     const auto                      begin   = std::chrono::steady_clock::now();
     const CudacoreCollectionOutcome outcome = waitForCudacoreCollection();
-    const auto elapsed_ms =
+    const auto                      elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
     writer.join();
 
@@ -431,9 +620,9 @@ TEST_F(CudacoreIncidentTest, NothingToCollectReturnsWithoutWaitingTheFullWindow)
     ASSERT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
 
     cudacore_test::setCollectionWindowMsForTest(5000);
-    const auto begin = std::chrono::steady_clock::now();
+    const auto                      begin   = std::chrono::steady_clock::now();
     const CudacoreCollectionOutcome outcome = waitForCudacoreCollection();
-    const auto elapsed_ms =
+    const auto                      elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
 
     EXPECT_EQ(outcome.terminal, CudacoreTerminalState::NoMechanismAvailable);
@@ -491,9 +680,9 @@ TEST_F(CudacoreIncidentTest, FirstErrorTriggersCollectionWithoutAnyWaiter) {
 
     // No waitForCudacoreCollection() call here: the trigger must come from the
     // collection executor alone, even if the engine thread never returns.
-    char          buffer[8] = {};
-    ssize_t       read      = -1;
-    const auto    read_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    char       buffer[8]     = {};
+    ssize_t    read          = -1;
+    const auto read_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     while (std::chrono::steady_clock::now() < read_deadline) {
         read = ::read(reader, buffer, sizeof(buffer));
         if (read > 0) {
@@ -529,12 +718,11 @@ TEST_F(CudacoreIncidentTest, ThrottledFinalChangeIsPersistedBeforeTheWindowEnds)
 
     // Wait for the first progress snapshot, then change the file within the
     // 500ms throttle. No further writes occur to force another changed tick.
-    bool initial_seen = false;
+    bool       initial_seen   = false;
     const auto first_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
     while (std::chrono::steady_clock::now() < first_deadline) {
         std::string json;
-        if (readFile(findIncidentManifest(dir_), json)
-            && json.find("\"phase\":\"progress\"") != std::string::npos) {
+        if (readFile(findIncidentManifest(dir_), json) && json.find("\"phase\":\"progress\"") != std::string::npos) {
             initial_seen = true;
             break;
         }
@@ -549,12 +737,11 @@ TEST_F(CudacoreIncidentTest, ThrottledFinalChangeIsPersistedBeforeTheWindowEnds)
     }
     EXPECT_NE(file, nullptr);
 
-    bool update_seen = false;
+    bool       update_seen     = false;
     const auto update_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
     while (std::chrono::steady_clock::now() < update_deadline) {
         std::string json;
-        if (readFile(findIncidentManifest(dir_), json)
-            && json.find("\"phase\":\"progress\"") != std::string::npos
+        if (readFile(findIncidentManifest(dir_), json) && json.find("\"phase\":\"progress\"") != std::string::npos
             && json.find("\"bytes\":3") != std::string::npos) {
             update_seen = true;
             break;
@@ -572,9 +759,9 @@ TEST_F(CudacoreIncidentTest, LeaseRecordsTheOriginalDeadlineForTheParent) {
     cudacore_test::setCollectionWindowMsForTest(2000);
     startCudacoreCollector();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    const int64_t before_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::system_clock::now().time_since_epoch())
-                                  .count();
+    const int64_t before_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     ASSERT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
 
     const CudacoreCollectionOutcome outcome = waitForCudacoreCollection();
