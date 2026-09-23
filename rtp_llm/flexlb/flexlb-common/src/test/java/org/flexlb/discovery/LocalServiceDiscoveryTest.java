@@ -1,7 +1,5 @@
 package org.flexlb.discovery;
 
-import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.ServiceDiscoveryConfiguration;
 import org.flexlb.dao.master.WorkerHost;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -30,48 +28,6 @@ class LocalServiceDiscoveryTest {
 
     @TempDir
     Path tempDir;
-
-    @Test
-    void staticHostsResolveEachRoleAndGroupIndependently() {
-        ModelMetaConfig config = new ModelMetaConfig("""
-                {"service_id":"aigc.text-generation.generation.test", "role_endpoints":[
-                  {"group":"a", "prefill_endpoint":{"address":"prefill.a","protocol":"http"},
-                   "decode_endpoint":{"address":"decode.a","protocol":"grpc"},
-                   "vit_endpoint":{"address":"vit.a","protocol":"http"},
-                   "pd_fusion_endpoint":{"address":"fusion.a","protocol":"http"}},
-                  {"group":"b", "prefill_endpoint":{"address":"prefill.b","protocol":"http"}}],
-                 "hosts":{"prefill.a":["127.0.0.1:8000","127.0.0.2:8000"],
-                   "prefill.b":["127.0.0.3:8000"],"decode.a":["127.0.0.4:9001"],
-                   "vit.a":["127.0.0.5:7000"],"fusion.a":["127.0.0.6:8000"]}}
-                """);
-        ServiceDiscovery discovery = ServiceDiscoveryConfiguration.serviceDiscovery(config);
-        for (var endpoint : config.getServiceRoute().getAllEndpoints()) {
-            assertEquals(config.getServiceRoute().getHosts().get(endpoint.getAddress()),
-                    discovery.getHosts(endpoint.getAddress()).stream().map(WorkerHost::getIpPort).toList());
-        }
-        assertEquals(2, config.endpointsWithGroup("test", org.flexlb.dao.route.RoleType.PREFILL).size());
-        assertTrue(discovery.getHosts("missing").isEmpty());
-        assertThrows(UnsupportedOperationException.class, () -> discovery.getHosts("prefill.a").clear());
-        discovery.listen("prefill.a", hosts -> assertEquals(2, hosts.size()));
-        config.getServiceRoute().setDiscoveryFile("discovery.json");
-        assertThrows(IllegalArgumentException.class,
-                () -> ServiceDiscoveryConfiguration.serviceDiscovery(config));
-    }
-
-    @Test
-    void dynamicDiscoveryFileComesFromModelConfig() throws Exception {
-        Path file = tempDir.resolve("configured-discovery.json");
-        writeAtomically(file, "{\"prefill\":[\"127.0.0.1:8000\"]}");
-        ModelMetaConfig config = new ModelMetaConfig("""
-                {"service_id":"aigc.text-generation.generation.test", "role_endpoints":[{
-                  "prefill_endpoint":{"address":"prefill","protocol":"http"}}],
-                 "discovery_file":"%s"}
-                """.formatted(file));
-        ServiceDiscovery discovery = ServiceDiscoveryConfiguration.serviceDiscovery(config);
-        assertEquals("127.0.0.1:8000", discovery.getHosts("prefill").get(0).getIpPort());
-        writeAtomically(file, "{\"prefill\":[\"127.0.0.2:8000\"]}");
-        assertEquals("127.0.0.2:8000", discovery.getHosts("prefill").get(0).getIpPort());
-    }
 
     @Test
     void parsesHostsForKnownDomains() throws Exception {

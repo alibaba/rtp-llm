@@ -63,7 +63,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.BiConsumer;
 import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -102,7 +101,7 @@ class TransientCapacityQueueContractTest {
             assertFalse(high.isDone());
             assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
             assertEquals(1, fixture.decodeEndpoint.routingView().totalLoad());
-            fixture.runtime.scheduler().cancelRequest(990_002L, 0L, CancelReason.CLIENT_CANCELLED);
+        fixture.runtime.scheduler().cancelRequest("990002", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
             awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_001L) != null
                     && fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
@@ -110,7 +109,7 @@ class TransientCapacityQueueContractTest {
             assertTrue(fixture.decodeEndpoint.reservationHandle(990_001L).reservationToken()
                     != oldReservation.reservationToken());
             assertEquals(List.of(), fixture.submission.requestIds(), "neither queued route was sent to the engine");
-            fixture.runtime.scheduler().cancelRequest(990_001L, 0L, CancelReason.CLIENT_CANCELLED);
+        fixture.runtime.scheduler().cancelRequest("990001", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(low.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, fixture.decodeEndpoint.routingView().totalLoad());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
@@ -333,7 +332,7 @@ class TransientCapacityQueueContractTest {
             // yet. Any request that was observed must retain its original
             // context and absolute deadline across exact-capacity retries.
             BalanceContext observed =
-                    fixture.metrics.context(context.getRequestId());
+                    fixture.metrics.context(Long.parseLong(context.getRequestId()));
             if (observed != null) {
                 assertSame(context, observed,
                         "placement retry replaced the BalanceContext");
@@ -341,7 +340,7 @@ class TransientCapacityQueueContractTest {
                         context.schedulingMetadata().expiresAtMs(),
                         "placement retry changed the absolute deadline");
                 assertEquals(absoluteDeadline,
-                        fixture.metrics.deadline(context.getRequestId()),
+                        fixture.metrics.deadline(Long.parseLong(context.getRequestId())),
                         "placement observed a different absolute deadline");
             }
         }
@@ -396,7 +395,7 @@ class TransientCapacityQueueContractTest {
             fixture.releaseCapacity();
 
             assertTrue(waiting.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(101L), fixture.submission.requestIds());
+            assertEquals(List.of("101"), fixture.submission.requestIds());
         }
     }
 
@@ -414,7 +413,7 @@ class TransientCapacityQueueContractTest {
             fixture.releaseCapacity();
 
             assertTrue(waiting.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(201L), fixture.submission.requestIds());
+            assertEquals(List.of("201"), fixture.submission.requestIds());
         }
     }
 
@@ -443,7 +442,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(251L), fixture.submission.requestIds());
+            assertEquals(List.of("251"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -469,7 +468,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(262L), fixture.submission.requestIds());
+            assertEquals(List.of("262"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -488,7 +487,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(271L), fixture.submission.requestIds());
+            assertEquals(List.of("271"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -513,7 +512,7 @@ class TransientCapacityQueueContractTest {
                     1, 2, TimeUnit.SECONDS));
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
-            assertEquals(List.of(281L), fixture.submission.requestIds());
+            assertEquals(List.of("281"), fixture.submission.requestIds());
         }
     }
 
@@ -545,7 +544,7 @@ class TransientCapacityQueueContractTest {
             assertTrue(response.isSuccess());
             assertEquals("127.0.0.1:18081", decodeAddress(response));
             assertEquals(1, fixture.decodeEndpoint.routingView().engineCapacityUsed());
-            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of(301L) : List.of(),
+            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of("301") : List.of(),
                     fixture.submission.requestIds());
         }
     }
@@ -573,7 +572,7 @@ class TransientCapacityQueueContractTest {
             assertTrue(response.isSuccess());
             assertEquals("127.0.0.1:18081", decodeAddress(response));
             assertEquals(1, fixture.decodeEndpoint.routingView().engineCapacityUsed());
-            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of(302L) : List.of(),
+            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of("302") : List.of(),
                     fixture.submission.requestIds());
         }
     }
@@ -1224,7 +1223,7 @@ class TransientCapacityQueueContractTest {
                 new CopyOnWriteArrayList<>();
 
         private long placementStarted(BalanceContext context) {
-            long requestId = context.getRequestId();
+            long requestId = Long.parseLong(context.getRequestId());
             totalAttempts.incrementAndGet();
             placementRequestIds.add(requestId);
             attemptsByRequest.computeIfAbsent(
@@ -1568,7 +1567,7 @@ class TransientCapacityQueueContractTest {
                     });
         }
 
-        private List<Long> requestIds() {
+        private List<String> requestIds() {
             return submittedItems.stream()
                     .flatMap(List::stream)
                     .map(ScheduledRequest::requestId)

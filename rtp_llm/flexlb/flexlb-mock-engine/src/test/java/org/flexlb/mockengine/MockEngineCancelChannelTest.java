@@ -102,7 +102,7 @@ class MockEngineCancelChannelTest {
         // The addressed Prefill is the authoritative typed CANCELED producer.
         EngineRpcService.WorkerStatusPB status = workerStatus(prefill, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId().equals("1")
+                .anyMatch(task -> task.getRequestId() == 1L
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB
@@ -140,13 +140,13 @@ class MockEngineCancelChannelTest {
         assertFalse(prefill.hasDownstreamOwnership(51L));
         assertFalse(decode.hasUpstreamOwnership(51L));
         boolean cancelledReported = workerStatus(decode, 0).getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId().equals("51")
+                .anyMatch(task -> task.getRequestId() == 51L
                         && task.getErrorInfo().getErrorCode()
                         == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
         assertTrue(cancelledReported,
                 "Decode must retain its ordinary CANCELLED terminal");
         boolean typedCanceledReported = workerStatus(prefill, 0).getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId().equals("51")
+                .anyMatch(task -> task.getRequestId() == 51L
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB
@@ -202,7 +202,7 @@ class MockEngineCancelChannelTest {
         assertEquals(CancelAck.ACCEPTED, second,
                 "accepted priority-cancel terminal records are idempotent");
         long terminalCount = workerStatus(prefill, -1).getFinishedTaskListList().stream()
-                .filter(task -> task.getRequestId().equals("21")
+                .filter(task -> task.getRequestId() == 21L
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB

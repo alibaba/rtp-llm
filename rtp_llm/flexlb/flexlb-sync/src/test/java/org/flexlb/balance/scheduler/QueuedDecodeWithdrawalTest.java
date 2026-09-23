@@ -18,13 +18,25 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class QueuedDecodeWithdrawalTest {
     private FlexlbConfig config;
@@ -60,7 +72,7 @@ class QueuedDecodeWithdrawalTest {
         context.setFuture(future);
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserve(pin, id, 16, 16, 30, capacity);
+            reservation = decode.reserve(pin, Long.toString(id), 16, 16, 30, capacity);
         }
         assertNotNull(reservation);
         var prefill = mock(PrefillEndpoint.class);
@@ -76,7 +88,7 @@ class QueuedDecodeWithdrawalTest {
 
     private boolean replace(ScheduledRequest item) {
         return registry.replaceQueuedDecodeReservations(decode, List.of(item.decodeReservation()),
-                100, 16, 16, 80, capacity);
+                "100", 16, 16, 80, capacity);
     }
 
     @Test
@@ -95,12 +107,12 @@ class QueuedDecodeWithdrawalTest {
         verify(queue).requeue(item);
         assertFalse(item.future().isDone());
         try (var pin = decode.tryPinGeneration()) {
-            assertNull(decode.reserve(pin, 1, 16, 16, 30, capacity),
+            assertNull(decode.reserve(pin, "1", 16, 16, 30, capacity),
                     "victim cannot reclaim capacity already assigned to the incoming request");
         }
         decode.release(decode.reservationHandle(100), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         DecodeEndpoint.ReservationHandle second;
-        try (var pin = decode.tryPinGeneration()) { second = decode.reserve(pin, 1, 16, 16, 30, capacity); }
+        try (var pin = decode.tryPinGeneration()) { second = decode.reserve(pin, "1", 16, 16, 30, capacity); }
         var next = new ScheduledRequest(item.ctx(), item.future(), new Response(), item.prefill(), item.decode(),
                 item.prefillEp(), decode, second, item.enqueuedAtMs() + 1000);
         assertEquals(item.enqueuedAtMs(), next.enqueuedAtMs());
@@ -132,7 +144,7 @@ class QueuedDecodeWithdrawalTest {
     void equalPriorityCannotBeWithdrawn() {
         var item = queued(3);
         assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(item.decodeReservation()),
-                100, 16, 16, 30, capacity));
+                "100", 16, 16, 30, capacity));
         assertSame(item, registry.requestSlot(3).activeItem());
         assertNotNull(decode.reservationHandle(3));
         verify(queue, never()).requeue(any());
@@ -160,7 +172,7 @@ class QueuedDecodeWithdrawalTest {
         var item = queued(5);
         var stale = new DecodeEndpoint.ReservationHandle(item.decodeReservation().endpointGenerationId(),
                 5, item.decodeReservation().reservationToken() + 1);
-        assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(stale), 100, 16, 16, 80, capacity));
+        assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(stale), "100", 16, 16, 80, capacity));
         assertSame(item, registry.requestSlot(5).activeItem());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(item.prefillEp(), never()).removeQueued(any(), anyString());
@@ -181,7 +193,7 @@ class QueuedDecodeWithdrawalTest {
         var missing = new DecodeEndpoint.ReservationHandle(
                 item.decodeReservation().endpointGenerationId(), 999, 1);
         assertFalse(registry.replaceQueuedDecodeReservations(decode,
-                List.of(item.decodeReservation(), missing), 100, 16, 16, 80, capacity));
+                List.of(item.decodeReservation(), missing), "100", 16, 16, 80, capacity));
         assertSame(item, registry.requestSlot(7).activeItem());
         assertNotNull(decode.reservationHandle(7));
         assertNull(decode.reservationHandle(100));

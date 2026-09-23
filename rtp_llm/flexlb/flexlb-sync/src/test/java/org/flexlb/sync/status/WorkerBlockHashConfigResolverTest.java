@@ -128,7 +128,12 @@ class WorkerBlockHashConfigResolverTest {
         WorkerStatus worker = worker(RoleType.PDFUSION, 1152, 2);
         CacheStatus cacheStatus = new CacheStatus();
         cacheStatus.setBlockSize(64);
-        worker.publishCacheStatus(cacheStatus);
+        worker.lock.lock();
+        try {
+            worker.publishCacheStatus(cacheStatus);
+        } finally {
+            worker.lock.unlock();
+        }
         statusMap(RoleType.PDFUSION).put("worker", worker);
 
         assertEquals(config(1152, 2), resolver.resolve());

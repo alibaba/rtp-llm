@@ -25,7 +25,7 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 public class PrefillEndpoint extends WorkerEndpoint {
@@ -501,21 +501,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Evict only batches whose member IDs are absent from the scheduler directory. */
     public int evictExpiredBatches(long ttlMs,
-                                   LongPredicate retainForSchedulerCleanup) {
+                                   Predicate<String> retainForSchedulerCleanup) {
         return prefillState.evictExpiredBatches(
                 ttlMs, retainForSchedulerCleanup);
     }
 
     /** Evict stale individual requests whose IDs are absent from the scheduler directory. */
     public int evictExpiredRequests(long ttlMs,
-                                    LongPredicate retainForSchedulerCleanup) {
+                                    Predicate<String> retainForSchedulerCleanup) {
         return prefillState.evictExpiredIndividuals(
                 ttlMs, retainForSchedulerCleanup);
     }
 
     /** Evict endpoint orphans while retaining IDs still registered by the scheduler. */
     public int evictExpiredInflight(long ttlMs,
-                                    LongPredicate retainForSchedulerCleanup) {
+                                    Predicate<String> retainForSchedulerCleanup) {
         return evictExpiredBatches(ttlMs, retainForSchedulerCleanup)
                 + evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
     }

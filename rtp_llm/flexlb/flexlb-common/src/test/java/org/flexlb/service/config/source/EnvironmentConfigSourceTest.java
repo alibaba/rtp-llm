@@ -22,7 +22,7 @@ class EnvironmentConfigSourceTest {
                 "FLEXLB_CONFIG",
                 """
                         {
-                          "schemaVersion":2,
+                          "schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                           "scheduler":{"type":"DIRECT"},
                           "dispatcher":{"type":"NON_BATCH"},
                           "observability":{"logging":{

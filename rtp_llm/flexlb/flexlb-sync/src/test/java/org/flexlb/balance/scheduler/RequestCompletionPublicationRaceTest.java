@@ -10,6 +10,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -69,7 +70,9 @@ class RequestCompletionPublicationRaceTest {
             CompletableFuture<Response> future = registry.register(context);
             RequestSlot slot = registry.requestSlot(501L);
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
-            when(prefill.getIp()).thenReturn("prefill");
+            WorkerStatus prefillStatus = mock(WorkerStatus.class);
+            when(prefillStatus.getMetricIpPort()).thenReturn("prefill");
+            when(prefill.getStatus()).thenReturn(prefillStatus);
             DecodeEndpoint decode = mock(DecodeEndpoint.class);
             var reservation = new DecodeEndpoint.ReservationHandle(1L, 501L, 1L);
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,

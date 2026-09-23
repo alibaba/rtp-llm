@@ -26,7 +26,7 @@ class PvLogDataTest {
         context.setErrorMessage("Schedule RPC deadline exceeded");
         int deadlineCode = org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
         PvLogData data = new PvLogData(context, deadlineCode, null, "LOCAL_MASTER", 0,
-                "REQUEST_STATE_TIMED_OUT", System.currentTimeMillis());
+                "REQUEST_STATE_TIMED_OUT", null, System.currentTimeMillis());
         var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(JsonUtils.toStringOrEmpty(data));
         assertEquals(deadlineCode, json.path("code").asInt());
         assertFalse(json.path("response").has("code"));

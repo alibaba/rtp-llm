@@ -23,8 +23,11 @@ import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -326,8 +329,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected DefaultRouter createRouter() {
         CacheAwareService cache = mock(CacheAwareService.class, withSettings().stubOnly());
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.KVCM));
         CostBasedPrefillStrategy prefillSelector =
                 new CostBasedPrefillStrategy(
                         engineWorkerStatus,
@@ -427,6 +430,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return new EngineHealthReporter(
                 new NoOpFlexMonitor(),
                 constructorOnlyCacheMetricsReporter,
+                mock(CacheMatchConfiguration.class, withSettings().stubOnly()),
                 grpcClient,
                 constructorOnlyLoopResources,
                 engineWorkerStatus);
@@ -919,7 +923,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 long requestId = firstRequestId + index;
                 System.out.printf(
                         "FlexLB Master exceptional request: request_id=%d state=%s%n",
-                        requestId, scheduler.getRequestState(requestId, 0L));
+                        requestId, scheduler.getRequestState(Long.toString(requestId), 0L));
             }
             throw failure;
         }
@@ -1239,7 +1243,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         .build())
                 .build();
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(Long.toString(requestId))
                 .setGenerateInput(ByteString.copyFrom(generateInput.toByteArray()))
                 .addAllBlockCacheKeys(template.blockCacheKeys())
                 .setSeqLen(template.seqLen())
@@ -1714,7 +1718,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             ResponseTiming timing = new ResponseTiming(
                     context.getBatchDispatchedNanos(), context.getAckAtNanos(), responseCompletedNanos);
             super.recordCompletion(context, responseCompletedNanos);
-            if (responseTimings.putIfAbsent(context.getRequestId(), timing) != null) {
+            if (responseTimings.putIfAbsent(
+                    Long.parseLong(context.getRequestId()), timing) != null) {
                 duplicateResponses.incrementAndGet();
             }
         }

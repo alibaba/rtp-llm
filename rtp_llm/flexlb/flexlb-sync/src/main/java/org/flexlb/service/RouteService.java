@@ -31,10 +31,6 @@ public class RouteService {
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
-    public boolean isFallbackEnabled() {
-        return configService.loadBalanceConfig().isEnableFallback();
-    }
-
     /**
      * Route request to appropriate workers based on the deployment-level schedule mode.
      * @param balanceContext Load balancing context
@@ -122,6 +118,10 @@ public class RouteService {
                 : requestScheduler.getRequestState(requestId, expectedBatchId);
     }
 
+    public RequestState getRequestState(long requestId, long expectedBatchId) {
+        return getRequestState(Long.toString(requestId), expectedBatchId);
+    }
+
     /**
      * Cancel one scheduler-owned request generation.
      *
@@ -134,5 +134,10 @@ public class RouteService {
                                                    CancelReason reason) {
         return requestScheduler == null ? null
                 : requestScheduler.cancelRequest(requestId, expectedBatchId, reason);
+    }
+
+    public RequestState cancelRequest(
+            long requestId, long expectedBatchId, CancelReason reason) {
+        return cancelRequest(Long.toString(requestId), expectedBatchId, reason);
     }
 }

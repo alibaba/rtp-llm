@@ -8,7 +8,6 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -17,7 +16,6 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.service.optimizer.OptimizerClient;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -111,7 +109,6 @@ class ScheduleForwardMatrixTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
 
-
         CacheAwareService cacheAwareService = mock(CacheAwareService.class);
         when(cacheAwareService.prepareBlockCacheKeys(any()))
                 .thenReturn(CompletableFuture.completedFuture(null));
@@ -125,8 +122,7 @@ class ScheduleForwardMatrixTest {
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
                 mock(RequestSchedulerReporter.class),
-                cacheAwareService,
-                mock(OptimizerClient.class));
+                cacheAwareService);
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         pvAppender = new ListAppender<>();
@@ -354,7 +350,7 @@ class ScheduleForwardMatrixTest {
         try (RealForwarderFixture fixture = newRealForwarderFixture(LIVE_MASTER)) {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB alreadyForwardedOnce =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId(90_103L)
+                            .setRequestId("90103")
                             .setForwardHop(1)
                             .build();
 
@@ -439,7 +435,7 @@ class ScheduleForwardMatrixTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(Long.toString(requestId))
                 .setSeqLen(1024)
                 .addInputIds(1)
                 .build();

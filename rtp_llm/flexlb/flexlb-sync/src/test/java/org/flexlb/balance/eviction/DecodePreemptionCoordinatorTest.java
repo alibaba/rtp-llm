@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -45,31 +46,31 @@ class DecodePreemptionCoordinatorTest {
         CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(11L, firstTerminal);
         PreemptionRegistration second = claim(12L, secondTerminal);
-        when(requests.tryClaim(anyLong(), anyLong(), anyLong(), any()))
+        when(requests.tryClaim(anyString(), anyLong(), anyLong(), any()))
                 .thenAnswer(invocation -> Optional.of(
-                        invocation.<Long>getArgument(0) == 11L ? first : second));
+                        invocation.<String>getArgument(0).equals("11") ? first : second));
 
         EngineCancelChannel cancelChannel = mock(EngineCancelChannel.class);
-        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
+        when(cancelChannel.cancel(any(), anyString(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelAck.ACCEPTED));
         DecodePreemptionCoordinator coordinator =
                 new DecodePreemptionCoordinator(cancelChannel, requests);
         CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> result =
                 coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
-                        endpoint, 20L, 64L, 64L, 70,
+                        endpoint, "20", 64L, 64L, 70,
                         new DecodeEndpoint.AdmissionCapacity(2L, 100L),
                         List.of(victim(11L, 101L), victim(12L, 102L)),
                         1_000L, 1_000L, () -> true, "test"));
 
         assertFalse(result.isDone());
-        firstTerminal.complete(new VictimTerminal(11L));
+        firstTerminal.complete(new VictimTerminal("11"));
         assertFalse(result.isDone(), "one terminal cannot release two victims");
-        secondTerminal.complete(new VictimTerminal(12L));
+        secondTerminal.complete(new VictimTerminal("12"));
 
         assertTrue(result.get(1, TimeUnit.SECONDS).committed());
-        verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq(11L), anyLong());
-        verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq(12L), anyLong());
+        verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq("11"), anyLong());
+        verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq("12"), anyLong());
         verify(endpoint).finishPreemption(1L, DecodeEndpoint.PreemptionDecision.COMMIT);
         verify(endpoint, never()).finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.ABORT));
     }
@@ -81,16 +82,16 @@ class DecodePreemptionCoordinatorTest {
         Fixture fixture = fixture();
         CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
         PreemptionRegistration victimClaim = claim(11L, terminal);
-        when(fixture.requests().tryClaim(anyLong(), anyLong(), anyLong(), any()))
+        when(fixture.requests().tryClaim(anyString(), anyLong(), anyLong(), any()))
                 .thenReturn(Optional.of(victimClaim));
         EngineCancelChannel channel = mock(EngineCancelChannel.class);
         CompletableFuture<EngineCancelChannel.CancelAck> ack = new CompletableFuture<>();
-        when(channel.cancel(any(), anyLong(), anyLong())).thenReturn(ack);
+        when(channel.cancel(any(), anyString(), anyLong())).thenReturn(ack);
         DecodePreemptionCoordinator coordinator =
                 new DecodePreemptionCoordinator(channel, fixture.requests());
         CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> outcome =
                 coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
-                        fixture.endpoint(), 20L, 64L, 64L, 70,
+                        fixture.endpoint(), "20", 64L, 64L, 70,
                         new DecodeEndpoint.AdmissionCapacity(1L, 100L),
                         List.of(victim(11L, 101L)),
                         50L, 20L, () -> true, "test"));
@@ -107,7 +108,7 @@ class DecodePreemptionCoordinatorTest {
         verify(victimClaim, never()).release();
         assertFalse(terminal.isDone(), "timing out admission must retain the victim terminal observation");
 
-        terminal.complete(new VictimTerminal(11L));
+        terminal.complete(new VictimTerminal("11"));
         assertSame(timedOut, outcome.join());
         verify(fixture.endpoint(), never()).finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.COMMIT));
     }
@@ -121,7 +122,7 @@ class DecodePreemptionCoordinatorTest {
         when(endpoint.beginPreemption(
                 anyLong(),
                 anyList(),
-                anyLong(),
+                anyString(),
                 anyLong(),
                 anyLong(),
                 anyInt(),
@@ -129,7 +130,7 @@ class DecodePreemptionCoordinatorTest {
                 .thenReturn(DecodeEndpoint.PreemptionBeginResult.SUCCESS);
         when(endpoint.updatePreemption(anyLong(), any(DecodeEndpoint.PreemptionUpdate.class))).thenReturn(true);
         when(endpoint.finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.COMMIT))).thenReturn(true);
-        when(requests.findCancelTarget(anyLong(), anyLong())).thenReturn(
+        when(requests.findCancelTarget(anyString(), anyLong())).thenReturn(
                 Optional.of(new CancelTarget("10.0.0.1", 9090)));
         return new Fixture(requests, endpoint);
     }
@@ -140,7 +141,7 @@ class DecodePreemptionCoordinatorTest {
             long requestId,
             CompletableFuture<VictimTerminal> terminal) {
         PreemptionRegistration claim = mock(PreemptionRegistration.class);
-        when(claim.requestId()).thenReturn(requestId);
+        when(claim.requestId()).thenReturn(Long.toString(requestId));
         when(claim.applyPhase(any())).thenReturn(true);
         when(claim.attemptToken()).thenReturn(1L);
         when(claim.terminalObservation()).thenReturn(terminal);

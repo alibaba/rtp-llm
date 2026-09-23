@@ -65,9 +65,10 @@ class DecodeSelectionAdmissionContractTest {
                                 request.capacity());
                         assertNotNull(reservation, "the selected endpoint must pass the same placement gate");
                         try {
-                            assertEquals(requestId, reservation.requestId());
-                            assertTrue(endpoint.resourceSnapshot().isQueued(requestId));
-                            var reserved = endpoint.resourceSnapshot().reserved().get(requestId);
+                            String canonicalRequestId = Long.toString(requestId);
+                            assertEquals(canonicalRequestId, reservation.requestId());
+                            assertTrue(endpoint.resourceSnapshot().isQueued(canonicalRequestId));
+                            var reserved = endpoint.resourceSnapshot().reserved().get(canonicalRequestId);
                             assertEquals(70, reserved.priority());
                             assertEquals(PROMPT_TOKENS, reserved.kvTokens());
                             assertEquals(EXPECTED_TOKENS, reserved.expectedKvTokens());

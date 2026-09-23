@@ -90,7 +90,6 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
-
     /**
      * Returns an independent copy, or null when the source is null.
      * The ViT generation remains part of the copied selection identity.
@@ -106,6 +105,10 @@ public class ServerStatus {
         copy.grpcPort = source.grpcPort;
         copy.preemptRequestIds = List.copyOf(source.preemptRequestIds);
         copy.dpRank = source.dpRank;
+        copy.engineIndex = source.engineIndex;
+        copy.routingEngineIndex = source.routingEngineIndex;
+        copy.routingMultiEngineNum = source.routingMultiEngineNum;
+        copy.workerIdentity = source.workerIdentity;
         copy.prefillTime = source.prefillTime;
         copy.group = source.group;
         copy.workerGeneration = source.workerGeneration;

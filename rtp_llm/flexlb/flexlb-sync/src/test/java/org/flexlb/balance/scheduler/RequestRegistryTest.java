@@ -217,7 +217,7 @@ class RequestRegistryTest {
 
         Response rejection = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
         assertTrue(lifecycle.publishDecisionResponseAsync(
-                302L, future, rejection));
+                "302", future, rejection));
         assertTrue(published.await(5, TimeUnit.SECONDS));
         assertNotEquals(Thread.currentThread().getName(), callbackThread.get());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
@@ -326,7 +326,7 @@ class RequestRegistryTest {
         RequestSlot old = lifecycle.requestSlot(703L);
         DeliveryClaim delivery = RequestLifecycleTestSupport.claimBatchWithoutPrediction(lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
-        PreemptionRegistration preemption = lifecycle.tryClaim(703L, 1L, 19L, "victim").orElseThrow();
+        PreemptionRegistration preemption = lifecycle.tryClaim("703", 1L, 19L, "victim").orElseThrow();
 
         old.expireInactiveRequest(
                 RequestLifecycleTestSupport.<Long>inspect(old, "inactivityExpiresAtMsLocked"));

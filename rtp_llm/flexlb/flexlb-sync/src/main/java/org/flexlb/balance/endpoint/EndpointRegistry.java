@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 @Component
 public class EndpointRegistry {
@@ -978,7 +978,7 @@ public class EndpointRegistry {
      *                                  must not acquire request locks or use a historical snapshot
      */
     public void evictExpiredOrphans(long ttlMs,
-                                    LongPredicate retainForSchedulerCleanup) {
+                                    Predicate<String> retainForSchedulerCleanup) {
         endpoints(RoleType.PREFILL).forEach((endpoint, worker) -> {
             PrefillEndpoint ep = (PrefillEndpoint) worker;
             logEndpointEviction(RoleType.PREFILL, endpoint,

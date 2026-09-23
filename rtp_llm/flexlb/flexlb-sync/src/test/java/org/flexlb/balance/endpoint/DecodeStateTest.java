@@ -15,9 +15,14 @@ import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.Map;
 
-import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.*;
-import static org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult.*;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult.RELEASED;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult.STILL_OWNED;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The resource ledger can run without an Endpoint, scheduler, RPC client or callback. */
 class DecodeStateTest {
@@ -53,7 +58,7 @@ class DecodeStateTest {
         var reservation = state.reserve(2, 100, 200, 50, true, CAPACITY);
         var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         TaskInfo task = new TaskInfo();
-        task.setRequestId(2L);
+        task.setRequestId("2");
         task.setPhase(TaskPhase.KV_ALLOCATED);
         var accepted = calibrate(state, status, Map.of("2", task), Map.of());
         assertEquals(reservation, accepted.facts().getFirst().reservation());
@@ -139,7 +144,7 @@ class DecodeStateTest {
         var victim = state.reserve(10, 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginPreemption(
-                1, java.util.List.of(victim), 11, 100, 200, 80, new AdmissionCapacity(1, 100)));
+                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
         assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelSending()));
         assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelReply(10, reply)));
         for (int i = 0; i < 2; i++) {
@@ -156,7 +161,7 @@ class DecodeStateTest {
         assertTrue(state.finishPreemption(1, DecodeEndpoint.PreemptionDecision.COMMIT));
         assertEquals(1, state.routingView().engineCapacityUsed());
         assertEquals(9_900L, state.routingView().realKvAvailable());
-        assertEquals(RELEASED, state.release(state.reservationHandle(11), ReleaseReason.LOCAL_ROLLBACK));
+        assertEquals(RELEASED, state.release(state.reservationHandle("11"), ReleaseReason.LOCAL_ROLLBACK));
         assertEquals(0, state.routingView().engineCapacityUsed());
     }
 

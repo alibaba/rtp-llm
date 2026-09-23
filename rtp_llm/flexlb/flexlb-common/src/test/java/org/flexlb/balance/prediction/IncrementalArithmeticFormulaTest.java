@@ -1,8 +1,16 @@
 package org.flexlb.balance.prediction;
 
 import org.junit.jupiter.api.Test;
-import java.util.*;
-import static org.junit.jupiter.api.Assertions.*;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class IncrementalArithmeticFormulaTest {
     private final Random random = new Random(20260917);

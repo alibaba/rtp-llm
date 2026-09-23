@@ -197,7 +197,7 @@ public class DecodeSelector {
     private SelectedRole buildSelectedRole(
             DecodeRoutingView selected,
             WorkerEndpoint.GenerationPin selectedPin,
-            long requestId) {
+            String requestId) {
         try {
             if (selectedPin.generationId() != selected.generationId()
                     || !(selectedPin.endpoint() instanceof DecodeEndpoint)) {
@@ -216,6 +216,8 @@ public class DecodeSelector {
             result.setDpRank(status.dpRank());
             result.setGroup(topology.group());
             result.setRequestId(requestId);
+            result.setSelectedEngineIndex(
+                    topology.engineIndex(), topology.multiEngineNum());
 
             // SelectedRole consumes the pin even if its validation rejects.
             WorkerEndpoint.GenerationPin factoryPin = selectedPin;

@@ -222,7 +222,7 @@ class DecodeRequestExpirationTest {
 
     private boolean isConfirmed(long requestId) {
         return endpoint.resourceSnapshot().confirmed().stream()
-                .anyMatch(view -> view.requestId() == requestId);
+                .anyMatch(view -> view.requestId().equals(Long.toString(requestId)));
     }
 
     private int confirmedCount() {

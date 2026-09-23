@@ -11,11 +11,9 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.service.optimizer.OptimizerClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -45,10 +43,6 @@ class FlexlbScheduleEngineIndexTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
 
-        ActiveRequestCounter activeRequestCounter = mock(ActiveRequestCounter.class);
-        when(activeRequestCounter.acquire()).thenReturn(
-                mock(ActiveRequestCounter.RequestToken.class));
-
         CacheAwareService cacheAwareService = mock(CacheAwareService.class);
         when(cacheAwareService.prepareBlockCacheKeys(any(BalanceContext.class)))
                 .thenReturn(CompletableFuture.completedFuture(null));
@@ -57,14 +51,12 @@ class FlexlbScheduleEngineIndexTest {
                 routeService,
                 consistencyService,
                 mock(EngineHealthReporter.class),
-                activeRequestCounter,
-                null,
+                mock(FlexlbGrpcForwarder.class),
                 configService,
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
                 mock(RequestSchedulerReporter.class),
-                cacheAwareService,
-                mock(OptimizerClient.class));
+                cacheAwareService);
     }
 
     @Test

@@ -62,7 +62,8 @@ class DeploymentIdentityTest {
                 .set(SPECTRUM_WORKSPACE_ID, "df4a7748")
                 .set(WHALE_ZONE_NAME, null);
 
-        assertThatThrownBy(() -> environment.execute(DeploymentIdentity::new))
+        assertThatThrownBy(() -> environment.execute(
+                () -> new DeploymentIdentity().getDeploymentId()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(SPECTRUM_WORKSPACE_ID + "=df4a7748")
                 .hasMessageContaining(SPECTRUM_APPLICATION_NAME + "=null")
@@ -84,7 +85,8 @@ class DeploymentIdentityTest {
     void rejectsIncompleteRuntimeIdentity(String field, String value) {
         EnvironmentVariables environment = runtimeEnvironment().set(field, value);
 
-        assertThatThrownBy(() -> environment.execute(DeploymentIdentity::new))
+        assertThatThrownBy(() -> environment.execute(
+                () -> new DeploymentIdentity().getDeploymentId()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(field);
     }
@@ -96,7 +98,8 @@ class DeploymentIdentityTest {
                 .remove(WHALE_DEPLOYMENT_NAME)
                 .remove(WHALE_ZONE_NAME);
 
-        assertThatThrownBy(() -> environment.execute(DeploymentIdentity::new))
+        assertThatThrownBy(() -> environment.execute(
+                () -> new DeploymentIdentity().getDeploymentId()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(WHALE_BIZ_NAME)
                 .hasMessageContaining(WHALE_DEPLOYMENT_NAME)

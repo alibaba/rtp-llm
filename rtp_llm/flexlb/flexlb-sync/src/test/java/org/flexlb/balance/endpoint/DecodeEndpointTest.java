@@ -329,6 +329,15 @@ class DecodeEndpointTest {
         }
     }
 
+    private static DecodeEndpoint.ReservationHandle reserve(
+            DecodeEndpoint target, long requestId, long hardKv, long expectedKv) {
+        try (WorkerEndpoint.GenerationPin pin = target.tryPinGeneration()) {
+            assertNotNull(pin);
+            return target.reserveUnqueued(
+                    pin, requestId, hardKv, expectedKv, 0);
+        }
+    }
+
     private void release(long requestId) {
         DecodeEndpoint.ReservationHandle reservation =
                 reservations.get(requestId);
@@ -346,7 +355,7 @@ class DecodeEndpointTest {
 
     private TaskInfo task(long requestId) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         return task;
     }
 

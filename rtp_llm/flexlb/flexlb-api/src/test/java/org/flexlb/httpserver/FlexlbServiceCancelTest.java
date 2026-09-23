@@ -59,13 +59,13 @@ class FlexlbServiceCancelTest {
         RequestState pending = snapshot(
                 101L, RequestState.Phase.CANCEL_REQUESTED, 301L);
         when(routeService.cancelRequest(
-                101L, 301L, CancelReason.DEADLINE_EXCEEDED))
+                "101", 301L, CancelReason.DEADLINE_EXCEEDED))
                 .thenReturn(pending);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
         service.cancel(cancelRequest(
-                101L,
+                "101",
                 301L,
                 FlexlbScheduleProtocol.CancelReasonPB
                         .CANCEL_REASON_DEADLINE_EXCEEDED), observer);
@@ -89,13 +89,13 @@ class FlexlbServiceCancelTest {
         RequestState completed = snapshot(
                 102L, RequestState.Phase.COMPLETED, 0);
         when(routeService.cancelRequest(
-                102L, 0, CancelReason.CLIENT_CANCELLED))
+                "102", 0, CancelReason.CLIENT_CANCELLED))
                 .thenReturn(completed);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
         service.cancel(cancelRequest(
-                102L,
+                "102",
                 0,
                 FlexlbScheduleProtocol.CancelReasonPB
                         .CANCEL_REASON_CLIENT_CANCELLED), observer);
@@ -113,13 +113,13 @@ class FlexlbServiceCancelTest {
     @Test
     void unknownRequestIsTheOnlyLocalNotFoundResponse() {
         when(routeService.cancelRequest(
-                103L, 0, CancelReason.CLIENT_CANCELLED))
+                "103", 0, CancelReason.CLIENT_CANCELLED))
                 .thenReturn(null);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(103L)
+                .setRequestId("103")
                 .build(), observer);
 
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
@@ -142,7 +142,7 @@ class FlexlbServiceCancelTest {
                 mock(StreamObserver.class);
         FlexlbScheduleProtocol.FlexlbCancelRequestPB request =
                 cancelRequest(
-                        104L,
+                        "104",
                         0,
                         FlexlbScheduleProtocol.CancelReasonPB
                                 .CANCEL_REASON_CLIENT_CANCELLED);
@@ -163,7 +163,7 @@ class FlexlbServiceCancelTest {
         verify(observer, times(1)).onNext(masterResponse);
         verify(observer, times(1)).onCompleted();
         verify(routeService).cancelRequest(
-                104L, 0L, CancelReason.CLIENT_CANCELLED);
+                "104", 0L, CancelReason.CLIENT_CANCELLED);
     }
 
     @Test
@@ -178,7 +178,7 @@ class FlexlbServiceCancelTest {
                 mock(StreamObserver.class);
 
         service.cancel(cancelRequest(
-                105L,
+                "105",
                 0,
                 FlexlbScheduleProtocol.CancelReasonPB
                         .CANCEL_REASON_CLIENT_CANCELLED), observer);
@@ -190,7 +190,7 @@ class FlexlbServiceCancelTest {
                 Status.fromThrowable(error.getValue()).getCode());
         verify(observer, never()).onNext(any());
         verify(routeService, times(1)).cancelRequest(
-                105L, 0L, CancelReason.CLIENT_CANCELLED);
+                "105", 0L, CancelReason.CLIENT_CANCELLED);
     }
 
     @Test
@@ -204,13 +204,13 @@ class FlexlbServiceCancelTest {
                 mock(StreamObserver.class);
 
         service.cancel(cancelRequest(
-                106L,
+                "106",
                 0,
                 FlexlbScheduleProtocol.CancelReasonPB
                         .CANCEL_REASON_CLIENT_CANCELLED), observer);
 
         verify(routeService, times(1)).cancelRequest(
-                106L, 0, CancelReason.CLIENT_CANCELLED);
+                "106", 0, CancelReason.CLIENT_CANCELLED);
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
                 org.mockito.ArgumentCaptor.forClass(
                         FlexlbScheduleProtocol.FlexlbCancelResponsePB.class);
@@ -231,7 +231,7 @@ class FlexlbServiceCancelTest {
                 FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
                         .setFound(true)
                         .setLifecycle(FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
-                                .setRequestId(107L)
+                                .setRequestId("107")
                                 .setState(FlexlbScheduleProtocol.RequestStatePB
                                         .REQUEST_STATE_CANCEL_REQUESTED))
                         .build();
@@ -249,7 +249,7 @@ class FlexlbServiceCancelTest {
                 mock(StreamObserver.class);
 
         service.cancel(cancelRequest(
-                107L,
+                "107",
                 0,
                 FlexlbScheduleProtocol.CancelReasonPB
                         .CANCEL_REASON_CLIENT_CANCELLED), observer);
@@ -260,7 +260,7 @@ class FlexlbServiceCancelTest {
     }
 
     private static FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest(
-            long requestId,
+            String requestId,
             long batchId,
             FlexlbScheduleProtocol.CancelReasonPB reason) {
         return FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()

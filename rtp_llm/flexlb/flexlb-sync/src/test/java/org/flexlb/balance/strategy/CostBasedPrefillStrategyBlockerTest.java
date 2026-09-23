@@ -2,7 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -46,7 +46,7 @@ class CostBasedPrefillStrategyBlockerTest {
                             new EndpointRegistry.PrefillRoutingEntry("second", secondEndpoint)));
                     var context = new BalanceContext(new FlexlbConfig());
                     var request = new Request();
-                    request.setRequestId(1L);
+                    request.setRequestId("1");
                     request.setSeqLen(100L);
                     context.setRequest(request);
                     context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));

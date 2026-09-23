@@ -244,7 +244,7 @@ class PrefillEndpointTest {
                     .captureRouteProjectionInputs().work();
             assertEquals(1, invalidPredictorEndpoint.observedRequestCount(),
                     "membership settlement must not depend on prediction");
-            assertEquals(List.of(1L), snapshot.batches().getFirst().requestIds());
+            assertEquals(List.of("1"), snapshot.batches().getFirst().requestIds());
             assertEquals(360L, snapshot.batches().getFirst().remainingWorkMs().orElseThrow());
             assertFalse(snapshot.hasUnknownWork());
             assertEquals(360L, invalidPredictorEndpoint.getLoadMetric().orElseThrow());
@@ -302,7 +302,7 @@ class PrefillEndpointTest {
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo successTask = new TaskInfo();
-        successTask.setRequestId(1L);
+        successTask.setRequestId("1");
         successTask.setBatchId(1L);
         successTask.setErrorCode(0);
         finished.put("1", successTask);
@@ -317,15 +317,15 @@ class PrefillEndpointTest {
         registerBatch(endpoint, 9L, 100, List.of(createScheduledRequest(9L, 500, 200)));
         doThrow(new IllegalStateException("metrics unavailable"))
                 .when(endpointReporter)
-                .reportBatchPredictedTimeMs("PREFILL", "127.0.0.1", 100);
+                .reportBatchPredictedTimeMs("PREFILL", "127.0.0.1:8080", 100);
 
         TaskInfo finished = taskInfo(9L, 9L, null, 0, 125);
         assertDoesNotThrow(() -> calibrate(Map.of("9", finished), Map.of()));
 
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.observedRequestCount());
-        verify(endpointReporter).reportBatchActualTimeMs("PREFILL", "127.0.0.1", 125);
-        verify(endpointReporter).reportBatchPredictGapMs("PREFILL", "127.0.0.1", 25);
+        verify(endpointReporter).reportBatchActualTimeMs("PREFILL", "127.0.0.1:8080", 125);
+        verify(endpointReporter).reportBatchPredictGapMs("PREFILL", "127.0.0.1:8080", 25);
     }
 
     @Test
@@ -336,7 +336,7 @@ class PrefillEndpointTest {
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo failedTask = new TaskInfo();
-        failedTask.setRequestId(2L);
+        failedTask.setRequestId("2");
         failedTask.setBatchId(1L);
         failedTask.setErrorCode(500);
         failedTask.setErrorMessage("engine error");
@@ -551,7 +551,7 @@ class PrefillEndpointTest {
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo badTask = new TaskInfo();
-        badTask.setRequestId(999L); // non-colliding: won't match batchId=1
+        badTask.setRequestId("999"); // non-colliding: won't match batchId=1
         badTask.setBatchId(-1);
         badTask.setErrorCode(0);
         finished.put("1", badTask);
@@ -578,7 +578,7 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getIndividuallyTrackedRequestCount());
 
         TaskInfo finished = new TaskInfo();
-        finished.setRequestId(101L);
+        finished.setRequestId("101");
         finished.setBatchId(-1L);
         finished.setErrorCode(0);
         calibrate(Map.of("101", finished), Map.of());
@@ -619,7 +619,7 @@ class PrefillEndpointTest {
                 "a terminal without a valid batch id retires no batch member");
 
         TaskInfo survivingSuccess = new TaskInfo();
-        survivingSuccess.setRequestId(102L);
+        survivingSuccess.setRequestId("102");
         survivingSuccess.setBatchId(700L);
         survivingSuccess.setErrorCode(0);
         calibrate(Map.of("102", survivingSuccess), Map.of());
@@ -650,7 +650,7 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.observedRequestCount());
 
         TaskInfo foreignBatchMemberSuccess = new TaskInfo();
-        foreignBatchMemberSuccess.setRequestId(201L);
+        foreignBatchMemberSuccess.setRequestId("201");
         foreignBatchMemberSuccess.setBatchId(101L);
         foreignBatchMemberSuccess.setErrorCode(0);
         calibrate(Map.of("201", foreignBatchMemberSuccess), Map.of());
@@ -845,7 +845,7 @@ class PrefillEndpointTest {
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo foreignTask = new TaskInfo();
         foreignTask.setBatchId(1L);
-        foreignTask.setRequestId(999L);
+        foreignTask.setRequestId("999");
         foreignTask.setErrorCode(0);
         finished.put("999", foreignTask);
 
@@ -862,7 +862,7 @@ class PrefillEndpointTest {
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo task = new TaskInfo();
         task.setBatchId(1L);
-        task.setRequestId(100L);
+        task.setRequestId("100");
         task.setErrorCode(0);
         finished.put("100", task);
 
@@ -878,7 +878,7 @@ class PrefillEndpointTest {
 
         TaskInfo siblingSuccess = new TaskInfo();
         siblingSuccess.setBatchId(7L);
-        siblingSuccess.setRequestId(102L);
+        siblingSuccess.setRequestId("102");
         siblingSuccess.setErrorCode(0);
         calibrate(Map.of("102", siblingSuccess), Map.of());
 
@@ -888,7 +888,7 @@ class PrefillEndpointTest {
 
         TaskInfo ambiguousMemberSuccess = new TaskInfo();
         ambiguousMemberSuccess.setBatchId(7L);
-        ambiguousMemberSuccess.setRequestId(101L);
+        ambiguousMemberSuccess.setRequestId("101");
         ambiguousMemberSuccess.setErrorCode(0);
         calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
         assertEquals(0, endpoint.getInflightBatchCount(),
@@ -951,7 +951,7 @@ class PrefillEndpointTest {
         // Mark the batch as running so elapsed time counts
         Map<String, TaskInfo> running = new HashMap<>();
         TaskInfo runningTask = new TaskInfo();
-        runningTask.setRequestId(1L);
+        runningTask.setRequestId("1");
         runningTask.setBatchId(1L);
         runningTask.setPhase(TaskPhase.RUNNING);
         running.put("1", runningTask);
@@ -1094,7 +1094,7 @@ class PrefillEndpointTest {
             org.flexlb.balance.projection.RouteProjection.Inputs snapshot =
                     handoffEndpoint.captureRouteProjectionInputs();
             assertEquals(1, snapshot.queue().activeItems().size());
-            assertEquals(111L,
+            assertEquals("111",
                     snapshot.queue().activeItems().getFirst().requestId());
         } finally {
             handoffEndpoint.close();
@@ -1283,7 +1283,7 @@ class PrefillEndpointTest {
             DecodeEndpoint decode = mock(DecodeEndpoint.class);
             DecodeEndpoint.ReservationHandle decodeReservation =
                     mock(DecodeEndpoint.ReservationHandle.class);
-            org.mockito.Mockito.when(decodeReservation.requestId()).thenReturn(8_201L);
+            org.mockito.Mockito.when(decodeReservation.requestId()).thenReturn("8201");
             DecodeEndpoint.EngineDispatchPermit permit =
                     mock(DecodeEndpoint.EngineDispatchPermit.class);
             org.mockito.Mockito.when(decode.acquireDispatchPermit(
@@ -1465,7 +1465,7 @@ class PrefillEndpointTest {
                 requestRuntime.prefillRetirements().stream()
                         .findFirst()
                         .orElseThrow();
-        assertEquals(List.of(100L, 200L), retirement.ownedItems().stream()
+        assertEquals(List.of("100", "200"), retirement.ownedItems().stream()
                 .map(ScheduledRequest::requestId).sorted().toList(),
                 "both immediate and queued routes retain their canonical retirement owner");
         assertTrue(retirement.ownedItems().contains(route));

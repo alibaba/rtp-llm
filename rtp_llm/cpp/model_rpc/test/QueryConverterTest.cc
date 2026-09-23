@@ -194,7 +194,6 @@ TEST_F(QueryConverterTest, testTransOutput) {
         data[i] = i;
     }
     GenerateOutputs outputs;
-    outputs.request_id = 123;
     GenerateOutput  res;
     res.custom_output                                 = torch::tensor({{2147483647, -16777217}}, torch::kInt32);
     res.output_ids                                    = output_token_ids;
@@ -216,7 +215,6 @@ TEST_F(QueryConverterTest, testTransOutput) {
 
     GenerateOutputsPB outputs_pb;
     QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
-    EXPECT_EQ(outputs_pb.request_id(), 123);
 
     auto& output_pb   = outputs_pb.flatten_output();
     auto  aux_info_pb = output_pb.aux_info(0);

@@ -335,10 +335,18 @@ public abstract class FlexLBMockTestBase {
         return scheduler.submit(createBalanceContext(requestId));
     }
 
+    protected CompletableFuture<Response> submitRequest(String requestId) {
+        return scheduler.submit(createBalanceContext(requestId));
+    }
+
     /**
      * Submit a request with the given ID and seq_len.
      */
     protected CompletableFuture<Response> submitRequest(long requestId, long seqLen) {
+        return scheduler.submit(createBalanceContext(requestId, seqLen));
+    }
+
+    protected CompletableFuture<Response> submitRequest(String requestId, long seqLen) {
         return scheduler.submit(createBalanceContext(requestId, seqLen));
     }
 
@@ -505,7 +513,15 @@ public abstract class FlexLBMockTestBase {
         return createBalanceContext(requestId, 128);
     }
 
+    protected BalanceContext createBalanceContext(String requestId) {
+        return createBalanceContext(requestId, 128);
+    }
+
     protected BalanceContext createBalanceContext(long requestId, long seqLen) {
+        return createBalanceContext(Long.toString(requestId), seqLen);
+    }
+
+    protected BalanceContext createBalanceContext(String requestId, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -515,7 +531,8 @@ public abstract class FlexLBMockTestBase {
 
         BalanceContext ctx = new BalanceContext(config);
         ctx.setRequest(request);
-        ctx.setGenerateInputPb(ByteString.copyFrom(generateInputBytes(requestId)));
+        ctx.setGenerateInputPb(ByteString.copyFrom(
+                generateInputBytes(Long.parseLong(requestId))));
         return ctx;
     }
 
@@ -604,7 +621,7 @@ public abstract class FlexLBMockTestBase {
         return response;
     }
 
-    private Response successRoute(long requestId) {
+    private Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -614,7 +631,7 @@ public abstract class FlexLBMockTestBase {
         return response;
     }
 
-    private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

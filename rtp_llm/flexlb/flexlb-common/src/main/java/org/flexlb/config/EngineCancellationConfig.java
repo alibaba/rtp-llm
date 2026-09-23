@@ -14,6 +14,4 @@ public final class EngineCancellationConfig {
     }
 
     private Mode mode = Mode.RPC;
-    private long ackTimeoutMs = 50;
-    private long completionTimeoutMs = 1000;
 }

@@ -128,6 +128,15 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         return waitDiagnostics;
     }
 
+    int blockedSize() {
+        lock.lock();
+        try {
+            return waitingRequests.size();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /** Enqueue without selecting an endpoint on the ingress thread. */
     boolean offer(
             BalanceContext context,

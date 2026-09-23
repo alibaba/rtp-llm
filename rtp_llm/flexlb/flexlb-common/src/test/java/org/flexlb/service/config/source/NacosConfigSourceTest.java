@@ -42,7 +42,7 @@ class NacosConfigSourceTest {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         when(client.getConfig("flexlb-test", DEFAULT_NACOS_GROUP, 3000L))
-                .thenReturn("{\"schemaVersion\":2,\"fallbackBatchTokenCapacity\":1048585}");
+                .thenReturn("{\"schemaVersion\":3,\"fallbackBatchTokenCapacity\":1048585}");
         new EnvironmentVariables(
                 "FLEXLB_UNICONF_ENABLE", "false",
                 "UNICONF_ENABLE", "true",
@@ -211,11 +211,11 @@ class NacosConfigSourceTest {
                             listenerCaptor.capture());
 
                     listenerCaptor.getValue().receiveConfigInfo("""
-                            {"schemaVersion":2,"scheduler":{"type":"QUEUE"},"dispatcher":{"type":"BATCH"}}
+                            {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"scheduler":{"type":"QUEUE"},"dispatcher":{"type":"BATCH"}}
                             """);
 
                     assertThat(source.name()).isEqualTo("Nacos");
-                    assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(2);
+                    assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(3);
                     ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
                     configService.close();
                 });
@@ -230,7 +230,7 @@ class NacosConfigSourceTest {
                 org.mockito.ArgumentMatchers.eq("flexlb-test"),
                 org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
                 org.mockito.ArgumentMatchers.eq(3000L)))
-                .thenReturn("{\"schemaVersion\":2,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+                .thenReturn("{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
         NacosConfigSource source = createSource(client, "test-namespace");
 
         source.initialize();
@@ -243,7 +243,7 @@ class NacosConfigSourceTest {
         assertThat(configService.loadBalanceConfig().getObservability()
                 .getLogging().getLevel()).isEqualTo(LogLevel.WARN);
         listenerCaptor.getValue().receiveConfigInfo(
-                "{\"schemaVersion\":2,\"observability\":{\"logging\":{\"level\":\"error\"}}}");
+                "{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"error\"}}}");
         configService.close();
 
         assertThat(configService.loadBalanceConfig().getObservability()
@@ -263,7 +263,7 @@ class NacosConfigSourceTest {
                 org.mockito.ArgumentMatchers.eq("flexlb-test"),
                 org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
                 org.mockito.ArgumentMatchers.eq(3000L)))
-                .thenReturn("{\"schemaVersion\":2,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
+                .thenReturn("{\"schemaVersion\":3,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
         NacosConfigSource source = createSource(client, "");
         source.initialize();
         ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));

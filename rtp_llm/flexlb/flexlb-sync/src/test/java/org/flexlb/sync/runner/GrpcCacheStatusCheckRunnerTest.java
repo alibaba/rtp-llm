@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -54,7 +54,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         new GrpcCacheStatusCheckRunner(
-                "test-model", status.getIpPort(), "test-site", RoleType.DECODE,
+                "test-model", status.getLogicalIpPort(), "test-site", RoleType.DECODE,
                 status, status.tryBeginCachePoll(), directory(status),
                 engineHealthReporter, engineGrpcService, localKvCacheAwareManager, cacheIntervalService,
                 20, new LongAdder(), 50L, true, Runnable::run).run();
@@ -81,7 +81,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 .setBlockSize(128)
                 .build();
         when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(), eq(RoleType.PREFILL))).thenReturn(CompletableFuture.completedFuture(cacheStatusPB));
-        when(localKvCacheAwareManager.updateEngineBlockCache(workerStatus))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(workerStatus))
                 .thenReturn(WorkerCacheUpdateResult.builder()
                         .success(true)
                         .cacheVersion(1)
@@ -111,8 +111,8 @@ class GrpcCacheStatusCheckRunnerTest {
 
     @Test
     void failedCacheIndexUpdateRetriesTheSameWorkerVersion() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus workerStatus = workerStatus();
+        String ipPort = workerStatus.getLogicalIpPort();
         WorkerDirectory directory = directory(workerStatus);
         EngineRpcService.CacheStatusPB firstResponse =
                 EngineRpcService.CacheStatusPB.newBuilder()
@@ -131,7 +131,7 @@ class GrpcCacheStatusCheckRunnerTest {
                         CompletableFuture.completedFuture(firstResponse),
                         CompletableFuture.completedFuture(secondResponse),
                         CompletableFuture.completedFuture(secondResponse));
-        when(localKvCacheAwareManager.updateEngineBlockCache(workerStatus))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(workerStatus))
                 .thenReturn(
                         WorkerCacheUpdateResult.builder()
                                 .success(true)
@@ -192,7 +192,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 .build());
 
         verify(localKvCacheAwareManager, never())
-                .updateEngineBlockCache(oldStatus);
+                .updateFromWorkerStatus(oldStatus);
     }
 
     private void runCachePoll(
