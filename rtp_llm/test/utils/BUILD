@@ -68,3 +68,10 @@ py_test(
         ":torch",
     ],
 )
+
+py_test(
+    name = "device_resource_test",
+    srcs = ["device_resource_test.py"],
+    deps = [":device_resource"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
