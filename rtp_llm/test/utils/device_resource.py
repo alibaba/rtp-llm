@@ -147,6 +147,36 @@ class DeviceResource:
 
         Returns True if GPUs are clean, False if zombie contexts detected.
         """
+        # Shared-host opt-in: admission and release must never signal unknown
+        # nvidia-smi PIDs (which may also be in a different PID namespace).
+        if os.environ.get("RTP_LLM_GPU_LOCK_NO_KILL") == "1":
+            for gpu_id in self.gpu_ids:
+                try:
+                    result = subprocess.run(
+                        [
+                            "nvidia-smi",
+                            "--query-compute-apps=pid",
+                            "--format=csv,noheader",
+                            f"--id={gpu_id}",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                except Exception:
+                    logging.exception("[GPU_LOCK_NO_KILL] GPU query failed")
+                    return False
+                if result.returncode != 0 or result.stdout.strip():
+                    logging.error(
+                        "[GPU_LOCK_NO_KILL] GPU %s not verified idle: rc=%s pids=%s",
+                        gpu_id,
+                        result.returncode,
+                        result.stdout.strip(),
+                    )
+                    return False
+            logging.info("[GPU_LOCK_NO_KILL] leased GPUs verified idle; no signals")
+            return True
+
         my_pid = os.getpid()
         sigterm_sent: Set[int] = set()
         sigkill_sent: Set[int] = set()
@@ -204,7 +234,9 @@ class DeviceResource:
                 with ExitStack() as group_stack:
                     for id in group:
                         if self._has_zombie_gpu_contexts(str(id)):
-                            logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
+                            logging.info(
+                                f"skip GPU {id}: zombie CUDA contexts detected"
+                            )
                             break
                         lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
                         try:
@@ -288,18 +320,30 @@ class DeviceResource:
                         )
                         self.gpu_ids = []
                         self.gpu_locks.close()
+                        if os.environ.get("RTP_LLM_GPU_LOCK_NO_KILL") == "1":
+                            raise RuntimeError(
+                                "GPU admission failed; read-only mode sent no signals"
+                            )
                 except Exception as e:
+                    if os.environ.get("RTP_LLM_GPU_LOCK_NO_KILL") == "1":
+                        self.gpu_ids = []
+                        self.gpu_locks.close()
+                        raise
                     logging.warn(f"{traceback.format_exc()}")
             time.sleep(1)
         return self
 
     def __exit__(self, *args: Any):
-        self._ensure_gpus_released()
+        clean = self._ensure_gpus_released()
         with FileLock(self.global_lock_file):
             logging.info(f"release gpu:{self.gpu_ids}")
             self.gpu_ids = []
             self.gpu_locks.close()
             logging.info("release done")
+        if os.environ.get("RTP_LLM_GPU_LOCK_NO_KILL") == "1" and not clean:
+            raise RuntimeError(
+                "GPU release failed idle check; read-only mode sent no signals"
+            )
 
 
 if __name__ == "__main__":
