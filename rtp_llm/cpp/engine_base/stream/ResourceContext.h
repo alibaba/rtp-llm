@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <torch/types.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -27,6 +28,9 @@ struct ResourceContext {
     bool    enable_tiered_memory_cache{false};
     int64_t device_cache_min_free_blocks{0};
     int     load_cache_retry_times{1};
+
+    // Shared by request processors; built from this engine's validated, immutable codebook configuration.
+    torch::Tensor codebook_masks;
 
     void initCacheConfig(const KVCacheConfig&       kv_cache_config,
                          const FIFOSchedulerConfig& scheduler_config,
