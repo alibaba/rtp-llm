@@ -113,9 +113,23 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     RTP_LLM_PROFILE_FUNCTION();
     // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
     // 如果流有错误，应该停止消费输出
+    // A stream can go the whole generation without producing an output -- a non-streaming PD decode
+    // only emits once it finishes -- so cancellation has to be evaluated INSIDE the output wait, not
+    // only after an output arrives. Handing the wait this predicate is what lets an abandoned request
+    // stop holding its stream, its KV blocks and its per-rank admission slot, instead of waiting for
+    // the generation to complete on its own.
+    const auto is_cancelled = [context]() { return context != nullptr && context->IsCancelled(); };
     while (stream->isActive() || stream->hasOutput()) {
-        const auto result = stream->nextOutput();
+        const auto result = stream->nextOutput(is_cancelled);
         if (!result.ok()) {
+            if (result.status().code() == ErrorCode::CANCELLED) {
+                // The wait saw the cancellation before any output could. Terminal handling matches
+                // the post-output check below: mark the stream so the context teardown that follows
+                // dequeues it from the scheduler and lets it release its resources.
+                stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+                RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
+                return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+            }
             if (result.status().code() != ErrorCode::FINISHED) {
                 return serializeErrorMsg(request_key, stream->generateInput()->request_info, result.status());
             } else {
