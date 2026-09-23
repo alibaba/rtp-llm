@@ -3,13 +3,22 @@
 import torch
 
 from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearKDAPrefill
-from rtp_llm.models_py.modules.kimi_k3.native_kda import flash_kda_paged_prefill
+from rtp_llm.models_py.modules.kimi_k3.native_kda import (
+    flash_kda_paged_prefill,
+    vllm_kda_paged_prefill,
+)
 
 
-class KimiK3FlashKDAPrefill(KimiLinearKDAPrefill):
-    def __init__(self, config, parallelism, weights):
+class KimiK3NativeKDAPrefill(KimiLinearKDAPrefill):
+    core = staticmethod(flash_kda_paged_prefill)
+
+    def __init__(self, config, parallelism, weights, backend="flashkda"):
         super().__init__(config, parallelism, weights)
-        # FlashKDA consumes the gate parameters in FP32, independently of the
+        if backend == "vllm_triton":
+            self.core = vllm_kda_paged_prefill
+        elif backend != "flashkda":
+            raise ValueError(f"Unsupported native KDA prefill backend: {backend}")
+        # Native KDA consumes the gate parameters in FP32, independently of the
         # ordinary projection precision. Conversion happens once, at creation.
         self.alog = self.alog.float().contiguous()
         self.dt_bias = self.dt_bias.float().contiguous()
@@ -26,10 +35,10 @@ class KimiK3FlashKDAPrefill(KimiLinearKDAPrefill):
         cu = attn_inputs.cu_seqlens
         prefixes = attn_inputs.prefix_lengths
         if cu.device.type != "cpu" or prefixes.device.type != "cpu":
-            raise ValueError("K3 FlashKDA prefill requires RTP host metadata mirrors")
+            raise ValueError("K3 native KDA prefill requires RTP host metadata mirrors")
         cu, prefixes = cu.tolist(), prefixes.tolist()
         if len(prefixes) != len(cu) - 1:
-            raise ValueError("K3 FlashKDA prefix metadata does not match the batch")
+            raise ValueError("K3 native KDA prefix metadata does not match the batch")
         shape = (-1, self.local_num_v_heads, self.head_k_dim)
         q, k, v = (x.reshape(shape) for x in mixed_qkv.chunk(3, dim=-1))
         if kv_cache_tensor is None:
@@ -47,10 +56,10 @@ class KimiK3FlashKDAPrefill(KimiLinearKDAPrefill):
         else:
             table = attn_inputs.kv_cache_kernel_block_id
             if table.device.type != "cpu":
-                raise ValueError("K3 FlashKDA block planning requires host block IDs")
+                raise ValueError("K3 native KDA block planning requires host block IDs")
             block_table = table.tolist()
             states = self._get_ssm_states(kv_cache_tensor)
-        return flash_kda_paged_prefill(
+        return self.core(
             q,
             k,
             v,
@@ -65,3 +74,6 @@ class KimiK3FlashKDAPrefill(KimiLinearKDAPrefill):
             block_table,
             seq_size_per_block,
         ).reshape(mixed_qkv.shape[0], -1)
+
+
+KimiK3FlashKDAPrefill = KimiK3NativeKDAPrefill

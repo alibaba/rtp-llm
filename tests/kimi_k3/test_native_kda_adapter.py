@@ -5,6 +5,7 @@ import torch
 
 from rtp_llm.models_py.modules.kimi_k3.native_kda import (
     flash_kda_paged_prefill,
+    vllm_kda_paged_prefill,
     plan_state_sequences,
 )
 
@@ -51,11 +52,12 @@ def test_state_sequence_plans():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("backend", ["flashkda", "vllm_triton"])
 @pytest.mark.parametrize("checkpoint_mode", ["full", "final", "none"])
 @pytest.mark.parametrize("heads", [1, 2])
 @pytest.mark.parametrize("tail_length", [1, 193])
-def test_flashkda_paged_state_layout(checkpoint_mode, heads, tail_length):
-    flash_kda = pytest.importorskip("flash_kda")
+def test_native_kda_paged_state_layout(backend, checkpoint_mode, heads, tail_length):
+    flash_kda = pytest.importorskip("flash_kda") if backend == "flashkda" else None
     torch.manual_seed(922)
     lengths = [4167, tail_length, 32]
     cu = [0, 4167, 4167 + tail_length, 4199 + tail_length]
@@ -78,7 +80,9 @@ def test_flashkda_paged_state_layout(checkpoint_mode, heads, tail_length):
         tables[0][0] = -1
     if checkpoint_mode == "none":
         tables[0][1] = tables[1][1] = -1
-    out = flash_kda_paged_prefill(
+    input_before = [x.clone() for x in [*xs, beta]]
+    paged = flash_kda_paged_prefill if backend == "flashkda" else vllm_kda_paged_prefill
+    out = paged(
         *xs, beta, alog, bias, -5.0, cache, cu, [0, 4096, 0], tables, 4096
     )
 
@@ -96,6 +100,18 @@ def test_flashkda_paged_state_layout(checkpoint_mode, heads, tail_length):
             .unsqueeze(0)
             .contiguous()
         )
+        if backend == "vllm_triton":
+            from rtp_llm.models_py.modules.kimi_k3.vllm_kda.kda.chunk import chunk_kda_with_fused_gate
+
+            output, final = chunk_kda_with_fused_gate(
+                q, k, v.clone(), g,
+                raw_beta=beta[start:end].unsqueeze(0).contiguous(),
+                A_log=alog, g_bias=bias.flatten(), initial_state=initial,
+                output_final_state=True, lower_bound=-5.0,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=torch.tensor([0, n], device="cuda", dtype=torch.int32),
+            )
+            return output[0], final[0].transpose(-1, -2)
         final = torch.empty_like(initial)
         output = torch.empty_like(v)
         workspace = torch.empty(
@@ -117,6 +133,9 @@ def test_flashkda_paged_state_layout(checkpoint_mode, heads, tail_length):
             final,
         )
         return output[0], final[0].transpose(-1, -2)
+
+    for actual, original in zip([*xs, beta], input_before):
+        torch.testing.assert_close(actual, original, rtol=0, atol=0)
 
     for request in (0, 1):
         expected, state = native(request, lengths[request])

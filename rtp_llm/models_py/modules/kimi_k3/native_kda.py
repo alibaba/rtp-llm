@@ -1,12 +1,13 @@
-"""FlashKDA prefill with RTP's ordinary per-block recurrent checkpoints.
+"""Native KDA prefill with RTP's ordinary per-block recurrent checkpoints.
 
-FlashKDA stores [value, key]; RTP stores [key, value]. This adapter converts
+Native backends store [value, key]; RTP stores [key, value]. This adapter converts
 at the cache boundary and keeps every intermediate recurrent state in FP32.
 Splitting an operator call at cache boundaries does not reschedule the model
 or enable scheduler chunked prefill.
 """
 
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 
@@ -66,7 +67,7 @@ def plan_state_sequences(cu_seqlens, prefix_lengths, block_table, block_size):
     return tuple(result)
 
 
-def flash_kda_paged_prefill(
+def native_kda_paged_prefill(
     q,
     k,
     v,
@@ -80,6 +81,8 @@ def flash_kda_paged_prefill(
     prefix_lengths,
     block_table,
     block_size,
+    *,
+    backend="flashkda",
 ):
     """Run BF16 projections and publish only real request states to RTP cache.
 
@@ -87,21 +90,24 @@ def flash_kda_paged_prefill(
     cache_states: FP32 [blocks, heads, key, value], possibly row-strided.
     Metadata arguments are CPU lists prepared outside CUDA Graph capture.
     """
-    try:
-        import flash_kda
-    except ImportError as exc:
-        raise RuntimeError(
-            "K3 native prefill requires the pinned FlashKDA backend"
-        ) from exc
-    capability = getattr(torch.ops.flash_kda, "supports_fp32_recurrence", None)
-    if capability is None or not capability():
-        raise RuntimeError(
-            "K3 native KDA requires a backend with FP32 recurrent accumulation"
-        )
+    if backend == "flashkda":
+        try:
+            import flash_kda
+        except ImportError as exc:
+            raise RuntimeError(
+                "K3 native prefill requires the pinned FlashKDA backend"
+            ) from exc
+        capability = getattr(torch.ops.flash_kda, "supports_fp32_recurrence", None)
+        if capability is None or not capability():
+            raise RuntimeError("K3 native KDA requires FP32 recurrent accumulation")
+    elif backend == "vllm_triton":
+        from .vllm_kda.kda.chunk import chunk_kda_with_fused_gate
+    else:
+        raise ValueError(f"Unsupported native KDA prefill backend: {backend}")
     if q.dtype != torch.bfloat16 or any(x.dtype != q.dtype for x in (k, v, g, beta)):
-        raise ValueError("FlashKDA requires BF16 Q/K/V/G and raw beta logits")
+        raise ValueError("Native KDA requires BF16 Q/K/V/G and raw beta logits")
     if q.ndim != 3 or q.shape[-1] != 128 or any(x.shape != q.shape for x in (k, v, g)):
-        raise ValueError("FlashKDA requires matching [tokens, heads, 128] projections")
+        raise ValueError("Native KDA requires matching [tokens, heads, 128] projections")
     if beta.shape != q.shape[:2] or cache_states.dtype != torch.float32:
         raise ValueError("Invalid KDA beta or recurrent state precision")
     if cache_states.shape[1:] != (q.shape[1], 128, 128):
@@ -111,7 +117,7 @@ def flash_kda_paged_prefill(
     if not q.is_cuda or any(
         x.device != q.device for x in (k, v, g, beta, a_log, dt_bias, cache_states)
     ):
-        raise ValueError("FlashKDA tensors must share one CUDA device")
+        raise ValueError("Native KDA tensors must share one CUDA device")
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError(
             "Paged KDA prefill planning must run outside CUDA Graph capture"
@@ -133,11 +139,13 @@ def flash_kda_paged_prefill(
     )
     if not max_tokens:
         return out
-    workspace = torch.empty(
-        flash_kda.get_workspace_size(max_tokens, q.shape[1], 1),
-        dtype=torch.uint8,
-        device=q.device,
-    )
+    workspace = None
+    if backend == "flashkda":
+        workspace = torch.empty(
+            flash_kda.get_workspace_size(max_tokens, q.shape[1], 1),
+            dtype=torch.uint8,
+            device=q.device,
+        )
     a_log, dt_bias = a_log.contiguous(), dt_bias.reshape(q.shape[1], 128).contiguous()
     for seq in sequences:
         if not seq.segments:
@@ -159,22 +167,46 @@ def flash_kda_paged_prefill(
             segment_beta = beta[start:end].unsqueeze(0).contiguous()
             if segment_beta.data_ptr() % 16:
                 segment_beta = segment_beta.clone()
-            final = torch.empty_like(state)
-            torch.ops.flash_kda.fwd(
-                *xs,
-                segment_beta,
-                128**-0.5,
-                out[start:end].unsqueeze(0),
-                workspace,
-                a_log,
-                dt_bias,
-                float(lower_bound),
-                state,
-                final
-            )
+            if backend == "vllm_triton":
+                # Upstream overwrites V with its intra-chunk residual. Preserve
+                # the caller's projection storage, including contiguous views.
+                xs[2] = xs[2].clone()
+                _, final = chunk_kda_with_fused_gate(
+                    *xs,
+                    raw_beta=segment_beta,
+                    A_log=a_log,
+                    g_bias=dt_bias.flatten(),
+                    initial_state=state,
+                    output_final_state=True,
+                    lower_bound=float(lower_bound),
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=torch.tensor(
+                        [0, end - start], dtype=torch.int32, device=q.device
+                    ),
+                    out=out[start:end].unsqueeze(0),
+                )
+            else:
+                final = torch.empty_like(state)
+                torch.ops.flash_kda.fwd(
+                    *xs,
+                    segment_beta,
+                    128**-0.5,
+                    out[start:end].unsqueeze(0),
+                    workspace,
+                    a_log,
+                    dt_bias,
+                    float(lower_bound),
+                    state,
+                    final,
+                )
             # RTP uses -1 for unretained linear-cache checkpoints (for example
             # reuse_cache=False). Still compute and carry the recurrent state.
             if segment.cache_block > 0:
                 cache_states[segment.cache_block].copy_(final[0].transpose(-1, -2))
             state = final
     return out
+
+
+# Keep existing callers and backend selection compatible.
+flash_kda_paged_prefill = partial(native_kda_paged_prefill, backend="flashkda")
+vllm_kda_paged_prefill = partial(native_kda_paged_prefill, backend="vllm_triton")

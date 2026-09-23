@@ -50,12 +50,12 @@ class KimiK3KDA(nn.Module):
             activation="sigmoid",
         )
         backend = getattr(runtime, "kda_prefill_backend", "rtp")
-        if backend == "flashkda":
+        if backend in {"flashkda", "vllm_triton"}:
             from rtp_llm.models_py.modules.kimi_k3.native_kda_prefill import (
-                KimiK3FlashKDAPrefill,
+                KimiK3NativeKDAPrefill,
             )
 
-            self.prefill = KimiK3FlashKDAPrefill(cfg, parallelism, weights)
+            self.prefill = KimiK3NativeKDAPrefill(cfg, parallelism, weights, backend)
         elif backend == "rtp":
             self.prefill = KimiLinearKDAPrefill(cfg, parallelism, weights)
         else:

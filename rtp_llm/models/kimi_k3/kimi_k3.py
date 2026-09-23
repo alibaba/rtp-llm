@@ -404,7 +404,7 @@ class KimiK3(BaseModel):
         if linear_beta is not None and float(linear_beta) <= 0:
             raise ValueError("SiTU linear beta must be positive or null")
         kda_backend = os.environ.get("KIMI_K3_KDA_PREFILL_BACKEND", "rtp")
-        if kda_backend not in {"rtp", "flashkda"}:
+        if kda_backend not in {"rtp", "flashkda", "vllm_triton"}:
             raise ValueError(f"Unsupported K3 KDA prefill backend: {kda_backend}")
         if kda_backend == "flashkda":
             try:
@@ -422,6 +422,11 @@ class KimiK3(BaseModel):
                 )
             logging.info(
                 "K3 KDA prefill backend=flashkda module=%s", flash_kda.__file__
+            )
+        if kda_backend == "vllm_triton":
+            logging.info(
+                "K3 KDA prefill backend=vllm_triton "
+                "upstream=c3b48446349569512749db7f6e2164aa8a33437d recurrent=fp32"
             )
         config.k3_runtime_config = KimiK3RuntimeConfig(
             kda_prefill_backend=kda_backend,
