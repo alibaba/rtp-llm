@@ -241,6 +241,10 @@ def local_rank_start(
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
         setup_cuda_device_and_accl_env(local_rank)
+        # Verify rank membership and artifacts after rank assignment, before model loading.
+        from rtp_llm.config.release_profile import enforce_release_profile
+
+        enforce_release_profile(py_env_configs, join_group=True)
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
