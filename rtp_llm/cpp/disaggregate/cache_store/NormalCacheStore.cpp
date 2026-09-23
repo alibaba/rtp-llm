@@ -15,7 +15,7 @@ namespace {
 
 constexpr size_t kMaxDevicePinFailuresBeforeDrain = 3;
 constexpr int    kDevicePinRetryBackoffMs         = 1000;
-const bool kPdDebugEnabled = []() {
+const bool       kPdDebugEnabled                  = []() {
     const char* env = std::getenv("RTP_LLM_PD_DEBUG");
     return env != nullptr && std::string(env) == "1";
 }();
@@ -409,7 +409,7 @@ NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuff
 
     auto load_context = std::make_shared<LoadContext>(shared_from_this(), memory_util_->isRdmaMode());
     load_context->load(
-        request_block_buffers, ip, port, rdma_port, timeout_ms, check_cancel_func, partition_count, partition_id);
+        *load_buffers, ip, port, rdma_port, timeout_ms, check_cancel_func, partition_count, partition_id);
     return load_context;
 }
 
