@@ -18,7 +18,7 @@ from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import FtRuntimeException
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import MM_TRANSPORT_MODE_RDMA, PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
@@ -358,6 +358,22 @@ class VitEndpointServer:
 
         if self.mm_process_engine is None:
             return
+
+        if py_env_configs.vit_config.output_transport.mode == MM_TRANSPORT_MODE_RDMA:
+            from rtp_llm import ops
+
+            # The standalone ViT worker does not initialize the LLM engine/logger.
+            # Initialize logging before constructing the RDMA provider so its
+            # allocation, connection and lease-GC failures reach engine.log.
+            ops.ensure_rdma_ops_loaded()
+            alog_conf_path = (
+                py_env_configs.profiling_debug_logging_config.ft_alog_conf_path
+            )
+            if not ops.MMRdmaExporter.init_logger(alog_conf_path):
+                raise RuntimeError(
+                    f"Failed to initialize RDMA logger: {alog_conf_path}"
+                )
+            logging.info("[VIT] RDMA C++ logger initialized: %s", alog_conf_path)
 
         self.mm_rpc_server = MultimodalRpcServer(
             self.mm_process_engine,

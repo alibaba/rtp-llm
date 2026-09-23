@@ -27,7 +27,7 @@ inline constexpr const char* kReasonReleaseClientStop  = "release_client_stoppin
 inline constexpr size_t      kMaxPendingReleaseHandles = 1024;
 
 std::vector<std::string> uniqueReleaseHandles(const std::vector<std::string>& handles) {
-    std::vector<std::string>       unique;
+    std::vector<std::string>        unique;
     std::unordered_set<std::string> seen;
     unique.reserve(handles.size());
     for (const auto& handle : handles) {
@@ -93,6 +93,12 @@ public:
         metrics_->reportRpcMetrics(endpoint, cost_us, request_bytes, receipt.ByteSizeLong());
 
         if (!status.ok()) {
+            RTP_LLM_LOG_WARNING("[MM-RPC] request_id=%ld endpoint=%s grpc_code=%d elapsed_us=%ld error=%s",
+                                request_pb.request_id(),
+                                endpoint.c_str(),
+                                static_cast<int>(status.error_code()),
+                                cost_us,
+                                status.error_message().c_str());
             metrics_->reportRpcClientError(
                 endpoint, kReasonGrpcError, std::to_string(static_cast<int>(status.error_code())));
             if (auto error_info = parseMultimodalErrorMessage(status.error_message())) {
@@ -110,11 +116,10 @@ public:
         return receipt;
     }
 
-    void release(const std::string&              endpoint,
-                 const std::vector<std::string>& handles,
-                 DeadlineBudget&                 budget) override {
-        const int64_t remaining = budget.remainingMs();
-        const auto unique_handles = uniqueReleaseHandles(handles);
+    void
+    release(const std::string& endpoint, const std::vector<std::string>& handles, DeadlineBudget& budget) override {
+        const int64_t remaining      = budget.remainingMs();
+        const auto    unique_handles = uniqueReleaseHandles(handles);
         if (unique_handles.empty() || remaining <= 0) {
             return;
         }
@@ -154,9 +159,11 @@ public:
         }
         if (drop_reason != nullptr) {
             metrics_->reportRpcClientError(endpoint, drop_reason);
-            RTP_LLM_LOG_WARNING("multimodal async release dropped %zu handle(s), reason=%s; "
-                                "encoder slot GC will reclaim them",
+            RTP_LLM_LOG_WARNING("[MM-RDMA-RELEASE] async release dropped leases=%zu endpoint=%s first_lease=%s "
+                                "reason=%s; encoder slot GC will reclaim them",
                                 handles.size(),
+                                endpoint.c_str(),
+                                handles.front().c_str(),
                                 drop_reason);
             return;
         }
@@ -175,6 +182,11 @@ private:
         }
         auto connection_status = pool_.getConnection(endpoint);
         if (!connection_status.ok()) {
+            RTP_LLM_LOG_WARNING("[MM-RDMA-RELEASE] connection failed endpoint=%s leases=%zu first_lease=%s error=%s",
+                                endpoint.c_str(),
+                                handles.size(),
+                                handles.front().c_str(),
+                                connection_status.status().ToString().c_str());
             return;
         }
         auto&               stub = connection_status.value().stub;
@@ -184,12 +196,20 @@ private:
         for (const auto& handle : handles) {
             rel.add_lease_id(handle);
         }
-        EmptyPB empty;
-        auto    rel_status = stub->ReleaseRdmaLease(&rel_ctx, rel, &empty);
+        EmptyPB    empty;
+        const auto start      = std::chrono::steady_clock::now();
+        auto       rel_status = stub->ReleaseRdmaLease(&rel_ctx, rel, &empty);
         if (!rel_status.ok()) {
-            RTP_LLM_LOG_WARNING("ReleaseRdmaLease(%zu leases) failed: %s",
-                                handles.size(),
-                                rel_status.error_message().c_str());
+            RTP_LLM_LOG_WARNING(
+                "[MM-RDMA-RELEASE] RPC failed endpoint=%s leases=%zu first_lease=%s "
+                "timeout_ms=%ld elapsed_ms=%.3f grpc_code=%d error=%s",
+                endpoint.c_str(),
+                handles.size(),
+                handles.front().c_str(),
+                timeout_ms,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
+                static_cast<int>(rel_status.error_code()),
+                rel_status.error_message().c_str());
         }
     }
 
@@ -227,15 +247,15 @@ private:
         }
     }
 
-    MultimodalRpcPool       pool_;
-    MMTransportMetricsPtr   metrics_;
-    int64_t                 release_timeout_ms_;
-    std::mutex              release_mutex_;
-    std::condition_variable release_cv_;
-    std::deque<ReleaseTask>  release_queue_;
+    MultimodalRpcPool               pool_;
+    MMTransportMetricsPtr           metrics_;
+    int64_t                         release_timeout_ms_;
+    std::mutex                      release_mutex_;
+    std::condition_variable         release_cv_;
+    std::deque<ReleaseTask>         release_queue_;
     std::unordered_set<std::string> pending_release_keys_;
-    bool                     stopping_ = false;
-    std::thread              release_thread_;
+    bool                            stopping_ = false;
+    std::thread                     release_thread_;
 };
 
 class GrpcInlineReceiptReader: public MMTerminalReceiptReader {
@@ -252,8 +272,7 @@ public:
 
 }  // namespace
 
-std::unique_ptr<MMControlClient> createGrpcMMControlClient(MMTransportMetricsPtr metrics,
-                                                           int64_t release_timeout_ms) {
+std::unique_ptr<MMControlClient> createGrpcMMControlClient(MMTransportMetricsPtr metrics, int64_t release_timeout_ms) {
     return std::make_unique<GrpcMMControlClient>(std::move(metrics), release_timeout_ms);
 }
 

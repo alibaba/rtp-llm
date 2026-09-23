@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 from typing import TYPE_CHECKING, Dict, List
 
 import torch
@@ -67,14 +69,32 @@ class RdmaOutputBackend(MMTransportBackend):
         if res.extra_input is not None and len(res.extra_input) > 0:
             extras = [e.to(device=emb.device).contiguous() for e in res.extra_input]
         receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
-        desc_bytes_list = self._exporter.export_embedding(emb, pos, extras)
-
-        if not desc_bytes_list:
-            raise RuntimeError(
-                "RDMA output export returned no descriptors "
-                f"(embedding_bytes={emb.numel() * emb.element_size()}, "
-                f"pos={pos is not None}, extra_count={len(extras)})"
+        embedding_bytes = emb.numel() * emb.element_size()
+        pos_bytes = pos.numel() * pos.element_size() if pos is not None else 0
+        extra_bytes = sum(e.numel() * e.element_size() for e in extras)
+        export_start = time.monotonic()
+        try:
+            desc_bytes_list = self._exporter.export_embedding(emb, pos, extras)
+            if not desc_bytes_list:
+                raise RuntimeError(
+                    "RDMA output export returned no descriptors "
+                    f"(request_id={request.request_id}, embedding_bytes={embedding_bytes}, "
+                    f"pos_bytes={pos_bytes}, extra_bytes={extra_bytes})"
+                )
+        except Exception:
+            # native_thread_id matches the C++ log TID emitted by this call.
+            logging.exception(
+                "[MM-RDMA-EXPORT] failed request_id=%s native_thread_id=%s "
+                "device=%s embedding_bytes=%s pos_bytes=%s extra_bytes=%s elapsed_ms=%.3f",
+                request.request_id,
+                threading.get_native_id(),
+                emb.device,
+                embedding_bytes,
+                pos_bytes,
+                extra_bytes,
+                (time.monotonic() - export_start) * 1000,
             )
+            raise
 
         slots: List[MMRdmaSlotPB] = []
         parse_error = None
@@ -94,6 +114,15 @@ class RdmaOutputBackend(MMTransportBackend):
                     parse_error = error
 
         if parse_error is not None:
+            logging.error(
+                "[MM-RDMA-EXPORT] invalid descriptor request_id=%s native_thread_id=%s "
+                "descriptors=%s parsed_slots=%s error=%s",
+                request.request_id,
+                threading.get_native_id(),
+                len(desc_bytes_list),
+                len(slots),
+                parse_error,
+            )
             self._roll_back(slots)
             raise RuntimeError(
                 f"invalid RDMA descriptor: {parse_error}"
@@ -104,6 +133,18 @@ class RdmaOutputBackend(MMTransportBackend):
             receipt.output_rdma_slots.add().CopyFrom(slot)
             for role, tensor in zip(slot.roles, slot.rdma_descriptor.tensors):
                 role_bytes[role] = role_bytes.get(role, 0) + tensor.nbytes
+        logging.info(
+            "[MM-RDMA-EXPORT] ready request_id=%s native_thread_id=%s slots=%s "
+            "lease_ids=%s embedding_bytes=%s pos_bytes=%s extra_bytes=%s elapsed_ms=%.3f",
+            request.request_id,
+            threading.get_native_id(),
+            len(slots),
+            [slot.rdma_descriptor.lease_id for slot in slots[:8]],
+            embedding_bytes,
+            pos_bytes,
+            extra_bytes,
+            (time.monotonic() - export_start) * 1000,
+        )
         return MMOutputResult(
             receipt=receipt,
             transport=TRANSPORT_RDMA,
@@ -124,11 +165,20 @@ class RdmaOutputBackend(MMTransportBackend):
             self._exporter.release(handles)
         except Exception:  # noqa: BLE001 - exporter GC is the final backstop
             logging.exception(
-                "[VIT] failed to roll back RDMA slots after descriptor parse failure"
+                "[VIT] failed to roll back RDMA slots after descriptor parse failure: "
+                "leases=%s lease_ids=%s",
+                len(handles),
+                handles[:8],
             )
 
     def release(self, handles: List[str]) -> None:
         try:
             self._exporter.release(handles)
         except Exception as e:  # noqa: BLE001 - slot GC is the backstop
-            logging.warning("[VIT] RDMA release failed: %s", e)
+            logging.exception(
+                "[MM-RDMA-RELEASE] failed leases=%s lease_ids=%s native_thread_id=%s: %s",
+                len(handles),
+                handles[:8],
+                threading.get_native_id(),
+                e,
+            )

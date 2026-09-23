@@ -6,15 +6,13 @@
 
 namespace rtp_llm {
 
-int64_t resolveRpcTimeoutMs(const MultimodalInputsPB& request,
-                            int64_t                   default_rpc_timeout_ms,
-                            int64_t                   rpc_timeout_margin_ms) {
+int64_t
+resolveRpcTimeoutMs(const MultimodalInputsPB& request, int64_t default_rpc_timeout_ms, int64_t rpc_timeout_margin_ms) {
     int64_t max_timeout_ms = 0;
     for (const auto& mm_input : request.multimodal_inputs()) {
         const int64_t configured_timeout_ms = mm_input.mm_preprocess_config().mm_timeout_ms();
-        const int64_t resolved_timeout_ms = configured_timeout_ms > 0
-                                                ? configured_timeout_ms + rpc_timeout_margin_ms
-                                                : default_rpc_timeout_ms;
+        const int64_t resolved_timeout_ms =
+            configured_timeout_ms > 0 ? configured_timeout_ms + rpc_timeout_margin_ms : default_rpc_timeout_ms;
         max_timeout_ms = std::max(max_timeout_ms, resolved_timeout_ms);
     }
     return max_timeout_ms > 0 ? max_timeout_ms : default_rpc_timeout_ms;
@@ -57,8 +55,8 @@ void MMTransportMetrics::reportRpcMetrics(const std::string& endpoint,
 
 ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string&  endpoint,
                                                              MultimodalInputsPB& request_pb) {
-    DeadlineBudget budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_));
-    DeliveryContext context{endpoint, budget, *control_};
+    DeadlineBudget  budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_));
+    DeliveryContext context{endpoint, budget, *control_, request_pb.request_id()};
 
     std::vector<MMReceiptReader*> advertised;
     for (auto& reader : readers_) {
@@ -73,8 +71,7 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
     }
 
     auto* matched = matchReader(receipt.value());
-    if (matched != nullptr
-        && std::find(advertised.begin(), advertised.end(), matched) == advertised.end()) {
+    if (matched != nullptr && std::find(advertised.begin(), advertised.end(), matched) == advertised.end()) {
         // Reject an unadvertised data plane and release its remote resources.
         matched->discard(receipt.value(), context);
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,

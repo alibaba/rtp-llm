@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/multimodal_processor/transport/rdma/MMRdmaExporter.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <utility>
 
@@ -24,8 +25,7 @@ uint64_t slotFootprint(const torch::Tensor& tensor) {
 
 }  // namespace
 
-MMRdmaExporter::MMRdmaExporter(const py::object& rdma_config):
-    MMRdmaExporter(extractRdmaConfig(rdma_config), -1) {}
+MMRdmaExporter::MMRdmaExporter(const py::object& rdma_config): MMRdmaExporter(extractRdmaConfig(rdma_config), -1) {}
 
 MMRdmaExporter::MMRdmaExporter(const py::object& rdma_config, int device_id):
     MMRdmaExporter(extractRdmaConfig(rdma_config), device_id) {}
@@ -40,19 +40,21 @@ MMRdmaExporter::MMRdmaExporter(const RdmaConfig& rdma_config, int device_id) {
     max_slot_bytes_ = rdma_config.max_slot_bytes;
 }
 
-bool MMRdmaExporter::exportSlots(const torch::Tensor&                  embedding,
-                                 const std::optional<torch::Tensor>&   pos_id,
-                                 const std::vector<torch::Tensor>&     extra_inputs,
-                                 std::vector<MMRdmaSlotPB>*            slots) {
+bool MMRdmaExporter::exportSlots(const torch::Tensor&                embedding,
+                                 const std::optional<torch::Tensor>& pos_id,
+                                 const std::vector<torch::Tensor>&   extra_inputs,
+                                 std::vector<MMRdmaSlotPB>*          slots) {
     if (exporter_ == nullptr) {
+        RTP_LLM_LOG_WARNING("[MM-RDMA-EXPORT] provider is disabled");
         return false;
     }
+    const auto                  wait_start = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> provider_lock(provider_mutex_);
+    const auto                  export_start = std::chrono::steady_clock::now();
 
-    const uint64_t max_slot = max_slot_bytes_ > 0 ? static_cast<uint64_t>(max_slot_bytes_)
-                                                   : std::numeric_limits<uint64_t>::max();
-    const uint64_t max_slot_aligned =
-        max_slot / rdma_transport::kRdmaSlotAlign * rdma_transport::kRdmaSlotAlign;
+    const uint64_t max_slot =
+        max_slot_bytes_ > 0 ? static_cast<uint64_t>(max_slot_bytes_) : std::numeric_limits<uint64_t>::max();
+    const uint64_t max_slot_aligned = max_slot / rdma_transport::kRdmaSlotAlign * rdma_transport::kRdmaSlotAlign;
 
     std::vector<torch::Tensor>      tensors;
     std::vector<MMRdmaSlotPB::Role> roles;
@@ -68,13 +70,11 @@ bool MMRdmaExporter::exportSlots(const torch::Tensor&                  embedding
         }
         const uint64_t row_bytes = tensorBytes(embedding) / static_cast<uint64_t>(rows);
         if (row_bytes == 0 || alignUp(row_bytes, rdma_transport::kRdmaSlotAlign) > max_slot) {
-            RTP_LLM_LOG_WARNING("mm rdma chunk: single embedding row (%lu B) exceeds max_slot (%lu)",
-                                row_bytes,
-                                max_slot);
+            RTP_LLM_LOG_WARNING(
+                "mm rdma chunk: single embedding row (%lu B) exceeds max_slot (%lu)", row_bytes, max_slot);
             return false;
         }
-        int64_t rows_per_chunk =
-            static_cast<int64_t>(max_slot_aligned / std::max<uint64_t>(row_bytes, 1));
+        int64_t rows_per_chunk = static_cast<int64_t>(max_slot_aligned / std::max<uint64_t>(row_bytes, 1));
         rows_per_chunk         = std::max<int64_t>(rows_per_chunk, 1);
         for (int64_t start = 0; start < rows; start += rows_per_chunk) {
             const int64_t len = std::min<int64_t>(rows_per_chunk, rows - start);
@@ -85,9 +85,7 @@ bool MMRdmaExporter::exportSlots(const torch::Tensor&                  embedding
 
     if (pos_id.has_value()) {
         if (slotFootprint(*pos_id) > max_slot) {
-            RTP_LLM_LOG_WARNING("mm rdma chunk: pos_id (%lu B) exceeds max_slot (%lu)",
-                                tensorBytes(*pos_id),
-                                max_slot);
+            RTP_LLM_LOG_WARNING("mm rdma chunk: pos_id (%lu B) exceeds max_slot (%lu)", tensorBytes(*pos_id), max_slot);
             return false;
         }
         tensors.push_back(*pos_id);
@@ -95,9 +93,8 @@ bool MMRdmaExporter::exportSlots(const torch::Tensor&                  embedding
     }
     for (const auto& extra : extra_inputs) {
         if (slotFootprint(extra) > max_slot) {
-            RTP_LLM_LOG_WARNING("mm rdma chunk: extra_input (%lu B) exceeds max_slot (%lu)",
-                                tensorBytes(extra),
-                                max_slot);
+            RTP_LLM_LOG_WARNING(
+                "mm rdma chunk: extra_input (%lu B) exceeds max_slot (%lu)", tensorBytes(extra), max_slot);
             return false;
         }
         tensors.push_back(extra);
@@ -127,6 +124,15 @@ bool MMRdmaExporter::exportSlots(const torch::Tensor&                  embedding
 
     const auto descriptors = exporter_->createBatch(groups);
     if (descriptors.size() != groups.size()) {
+        const auto now = std::chrono::steady_clock::now();
+        RTP_LLM_LOG_WARNING("[MM-RDMA-EXPORT] create_batch failed: groups=%zu descriptors=%zu "
+                            "embedding_bytes=%lu max_slot_bytes=%ld lock_wait_ms=%.3f export_ms=%.3f",
+                            groups.size(),
+                            descriptors.size(),
+                            tensorBytes(embedding),
+                            max_slot_bytes_,
+                            std::chrono::duration<double, std::milli>(export_start - wait_start).count(),
+                            std::chrono::duration<double, std::milli>(now - export_start).count());
         return false;
     }
     for (size_t group = 0; group < descriptors.size(); ++group) {
@@ -140,9 +146,9 @@ bool MMRdmaExporter::exportSlots(const torch::Tensor&                  embedding
     return !slots->empty();
 }
 
-std::vector<py::bytes> MMRdmaExporter::exportEmbedding(torch::Tensor                  embedding,
-                                                        std::optional<torch::Tensor>   pos_id,
-                                                        std::vector<torch::Tensor>     extra_inputs) {
+std::vector<py::bytes> MMRdmaExporter::exportEmbedding(torch::Tensor                embedding,
+                                                       std::optional<torch::Tensor> pos_id,
+                                                       std::vector<torch::Tensor>   extra_inputs) {
     std::vector<MMRdmaSlotPB> slots;
     bool                      exported = false;
     {
@@ -165,7 +171,7 @@ void MMRdmaExporter::release(const std::vector<std::string>& handles) {
     if (exporter_ == nullptr) {
         return;
     }
-    py::gil_scoped_release release;
+    py::gil_scoped_release      release;
     std::lock_guard<std::mutex> provider_lock(provider_mutex_);
     exporter_->release(handles);
 }
@@ -175,6 +181,7 @@ void registerMMRdmaExporter(py::module& module) {
         .def(py::init<const py::object&>(), py::arg("rdma_config"))
         .def(py::init<const py::object&, int>(), py::arg("rdma_config"), py::arg("device_id"))
         .def_static("available", &rdma_transport::hasRdmaImplementation)
+        .def_static("init_logger", &initLogger, py::arg("alog_conf_path"))
         .def("enabled", &MMRdmaExporter::enabled)
         .def("export_embedding",
              &MMRdmaExporter::exportEmbedding,
