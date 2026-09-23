@@ -229,6 +229,21 @@ private:
 
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>                   tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+
+    // Optional counters correlate each sender with its peer's receive log.
+    int64_t send_seq_           = 0;
+    int64_t recv_seq_           = 0;
+    int64_t step_count_         = 0;
+    bool    pp_step_log_        = false;
+    bool    obj_log_active_     = false;
+    bool    last_step_skip_run_ = true;
+    // Whether each round ends with a device-wide host barrier. Resolved once
+    // from RTP_LLM_PP_ROUND_DEVICE_SYNC so the per-round path never calls
+    // getenv. Default keeps the barrier the fastgen port added.
+    bool round_device_sync_ = true;
+    // Whether each round blocks the host on a main-stream event before posting
+    // the activation send. Resolved from RTP_LLM_PP_ROUND_FWD_EVENT_SYNC.
+    bool round_fwd_event_sync_ = true;
 };
 
 }  // namespace rtp_llm

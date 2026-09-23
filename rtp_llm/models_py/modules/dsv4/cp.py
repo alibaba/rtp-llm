@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -287,9 +289,22 @@ class CudaAsyncCPGatherImpl:
                 f"CudaAsyncCPGatherImpl.wait expected CPCudaAsyncGatherHandle, got {type(handle)!r}"
             )
         current_stream = torch.cuda.current_stream(handle.gathered.device)
-        with record_function_range(f"{handle.profile_name}.wait_host"):
-            current_stream.wait_event(handle.completion_event)
-            handle.work.wait()
+        if _CP_GATHER_STATS:
+            # GPU events include the exposed gather stall; host timers cannot measure
+            # Work.wait(), which only enqueues a stream dependency.
+            _cp_gather_stats_drain()
+            ev0 = torch.cuda.Event(enable_timing=True)
+            ev1 = torch.cuda.Event(enable_timing=True)
+            ev2 = torch.cuda.Event(enable_timing=True)
+            ev0.record(current_stream)
+            with record_function_range(f"{handle.profile_name}.wait_host"):
+                current_stream.wait_event(handle.completion_event)
+                handle.work.wait()
+            ev1.record(current_stream)
+        else:
+            with record_function_range(f"{handle.profile_name}.wait_host"):
+                current_stream.wait_event(handle.completion_event)
+                handle.work.wait()
         # Restore destination: the per-forward workspace restore scratch
         # (non-prefix path) instead of a fresh per-layer ``index_select``
         # output. The prefix fast-path returns a view of ``gathered`` and
@@ -307,6 +322,16 @@ class CudaAsyncCPGatherImpl:
         with record_function_range(f"{handle.profile_name}.restore"):
             full = _cp_restore_gathered_full_2d(
                 handle.gathered, handle.cp_ctx, out=out_buf
+            )
+        if _CP_GATHER_STATS:
+            ev2.record(current_stream)
+            nbytes = handle.gathered.numel() * handle.gathered.element_size()
+            _cp_gather_record(
+                _cp_gather_kind(f"{handle.profile_name}.async_wait"),
+                ev0,
+                ev1,
+                ev2,
+                nbytes,
             )
         # Compressor gather/restore buffers come from the per-forward
         # ``PrefillWorkspace`` union — they are reused across layers (never
@@ -678,6 +703,21 @@ def cp_all_gather_full(
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.sync"
     local_2d = _cp_gather_2d(local_2d, cp_ctx)
+    if _CP_GATHER_STATS:
+        _cp_gather_stats_drain()
+        kind = _cp_gather_kind(profile_name)
+        nbytes = local_2d.numel() * local_2d.element_size() * cp_ctx.cp_size
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record()
+        with record_function_range(f"{profile_name}.launch"):
+            gathered = all_gather(local_2d, group=Group.TP)
+        # gathered: [cp_size * chunk_length, H]
+        with record_function_range(f"{profile_name}.restore"):
+            full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
+        ev2.record()
+        _cp_gather_record(kind, ev0, None, ev2, nbytes)
+        return full
     with record_function_range(f"{profile_name}.launch"):
         gathered = all_gather(local_2d, group=Group.TP)
     # gathered: [cp_size * chunk_length, H]
@@ -745,6 +785,14 @@ def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tenso
     return gathered
 
 
+from ._cp_diagnostics import (
+    _CP_GATHER_STATS,
+    _cp_gather_kind,
+    _cp_gather_record,
+    _cp_gather_stats_drain,
+)
+
+
 def cp_all_gather_full_varlen(
     local_flat: torch.Tensor,
     cp_ctx: CPContext,
@@ -772,11 +820,236 @@ def cp_all_gather_full_varlen(
     ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
+    if _CP_GATHER_STATS:
+        _cp_gather_stats_drain()
+        kind = _cp_gather_kind(profile_name)
+        nbytes = local_2d.numel() * local_2d.element_size() * cp_ctx.cp_size
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record()
+        with record_function_range(f"{profile_name}.launch"):
+            gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
+        ev1.record()
+        with record_function_range(f"{profile_name}.restore"):
+            full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
+        ev2.record()
+        _cp_gather_record(kind, ev0, ev1, ev2, nbytes)
+        return full.view((cp_ctx.seq_len_full,) + trailing)
     with record_function_range(f"{profile_name}.launch"):
         gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
         full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((cp_ctx.seq_len_full,) + trailing)
+
+
+@dataclass
+class CPVarlenGatherHandle:
+    """In-flight varlen CP all-gather from :func:`cp_all_gather_full_varlen_async`."""
+
+    cp_ctx: CPContext
+    gathered: torch.Tensor
+    work: Any
+    stream: Any
+    completion_event: Any
+    local_2d: torch.Tensor
+    trailing: tuple
+    profile_name: str
+
+
+def cp_all_gather_full_varlen_async(
+    local_flat: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    stream: Optional[Any] = None,
+    profile_name: Optional[str] = None,
+) -> CPVarlenGatherHandle:
+    """Start the gather on stream; consumers must drain cp_wait_gather_full_varlen.
+
+    The fresh result must not alias the workspace used for Q materialization."""
+    profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen_async"
+    assert local_flat.dim() >= 1
+    assert (
+        local_flat.size(0) == cp_ctx.chunk_length
+    ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
+    trailing = local_flat.shape[1:]
+    local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
+    if not local_2d.is_cuda:
+        raise RuntimeError("cp_all_gather_full_varlen_async requires a CUDA tensor")
+    if not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "cp_all_gather_full_varlen_async requires initialized torch.distributed"
+        )
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != cp_ctx.cp_size:
+        raise RuntimeError(
+            f"CP varlen gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
+        )
+
+    current_stream = torch.cuda.current_stream(local_2d.device)
+    gather_stream = stream if stream is not None else current_stream
+    if stream is not None:
+        gather_stream.wait_stream(current_stream)
+    # Both tensors are allocated on ``current_stream`` but written by the NCCL
+    # kernel on ``gather_stream``: the ``wait_stream`` edge above orders the
+    # access, ``record_stream`` is what stops the caching allocator recycling
+    # either storage before NCCL finishes.
+    local_2d.record_stream(gather_stream)
+    gathered = torch.empty(
+        [world_size * local_2d.size(0)] + list(local_2d.shape[1:]),
+        device=local_2d.device,
+        dtype=local_2d.dtype,
+    )
+    gathered.record_stream(gather_stream)
+    with torch.cuda.stream(gather_stream):
+        with record_function_range(f"{profile_name}.launch"):
+            work = torch.distributed.all_gather_into_tensor(
+                gathered,
+                local_2d,
+                group=process_group,
+                async_op=True,
+            )
+            completion_event = torch.cuda.Event()
+            completion_event.record(gather_stream)
+    return CPVarlenGatherHandle(
+        cp_ctx=cp_ctx,
+        gathered=gathered,
+        work=work,
+        stream=gather_stream,
+        completion_event=completion_event,
+        local_2d=local_2d,
+        trailing=trailing,
+        profile_name=profile_name,
+    )
+
+
+def cp_wait_gather_full_varlen(handle: CPVarlenGatherHandle) -> torch.Tensor:
+    """Drain :func:`cp_all_gather_full_varlen_async` -> ``[seq_len_full, *F]``."""
+    if not isinstance(handle, CPVarlenGatherHandle):
+        raise TypeError(
+            f"cp_wait_gather_full_varlen expected CPVarlenGatherHandle, got {type(handle)!r}"
+        )
+    cp_ctx = handle.cp_ctx
+    current_stream = torch.cuda.current_stream(handle.gathered.device)
+    if _CP_GATHER_STATS:
+        # Events on the CURRENT stream bracket wait + restore, which is exactly
+        # the stall this gather exposes to compute (Work.wait() only enqueues a
+        # stream dependency, so host timers cannot see it).
+        _cp_gather_stats_drain()
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record(current_stream)
+        with record_function_range(f"{handle.profile_name}.wait_host"):
+            current_stream.wait_event(handle.completion_event)
+            handle.work.wait()
+        ev1.record(current_stream)
+    else:
+        with record_function_range(f"{handle.profile_name}.wait_host"):
+            current_stream.wait_event(handle.completion_event)
+            handle.work.wait()
+    with record_function_range(f"{handle.profile_name}.restore"):
+        full = _cp_restore_gathered_full_2d(handle.gathered, cp_ctx)
+    if _CP_GATHER_STATS:
+        ev2.record(current_stream)
+        nbytes = handle.gathered.numel() * handle.gathered.element_size()
+        _cp_gather_record(
+            _cp_gather_kind(f"{handle.profile_name}.async_wait"), ev0, ev1, ev2, nbytes
+        )
+    return full.view((cp_ctx.seq_len_full,) + handle.trailing)
+
+
+# Optional E4M3 row transport with FP32 scales; dequantize into fresh workspace.
+# Persistent KV writes remain rank-local and precede the exchange.
+_FP8_GATHER_BLOCK: tl.constexpr = (
+    1024  # noqa: E501 (module-level block size for both kernels)
+)
+
+
+def _fp8_gather_enabled(kind: str) -> bool:
+    """Master switch + per-site subswitches (review: 拆 costs a reboot, not a
+    rebuild). kind is 'q' or 'kv'."""
+    import os
+
+    if os.environ.get("DSV4_FP8_GATHER", "0") != "1":
+        return False
+    return os.environ.get(f"DSV4_FP8_GATHER_{kind.upper()}", "1") != "0"
+
+
+@triton.jit
+def _fp8_row_quant_kernel(x_ptr, q_ptr, s_ptr, F, BLOCK: tl.constexpr):
+    # One program per row: two passes (amax, then quantize). Rows are up to
+    # ~8K elements — L2-cached second pass, cheaper than register staging.
+    row = tl.program_id(0).to(tl.int64)
+    base = row * F
+    amax = 0.0
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        v = tl.load(x_ptr + base + offs, mask=offs < F, other=0.0).to(tl.float32)
+        amax = tl.maximum(amax, tl.max(tl.abs(v)))
+    scale = amax / 448.0  # e4m3 finite max
+    scale = tl.where(scale == 0.0, 1.0, scale)
+    tl.store(s_ptr + row, scale)
+    inv = 1.0 / scale
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        m = offs < F
+        v = tl.load(x_ptr + base + offs, mask=m, other=0.0).to(tl.float32)
+        tl.store(q_ptr + base + offs, (v * inv).to(tl.float8e4nv), mask=m)
+
+
+@triton.jit
+def _fp8_row_dequant_kernel(q_ptr, s_ptr, y_ptr, F, BLOCK: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64)
+    base = row * F
+    scale = tl.load(s_ptr + row)
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        m = offs < F
+        q = tl.load(q_ptr + base + offs, mask=m, other=0.0).to(tl.float32)
+        tl.store(y_ptr + base + offs, (q * scale).to(tl.bfloat16), mask=m)
+
+
+def cp_all_gather_full_varlen_fp8(
+    local_flat: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    kind: str,
+    profile_name: Optional[str] = None,
+) -> torch.Tensor:
+    """Use FP8 transport when enabled and eligible; otherwise retain the BF16 gather."""
+    if (
+        not _fp8_gather_enabled(kind)
+        or local_flat.dtype != torch.bfloat16
+        or local_flat.size(0) == 0
+    ):
+        return cp_all_gather_full_varlen(local_flat, cp_ctx, profile_name=profile_name)
+    tag = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.fp8.{kind}.varlen"
+    trailing = local_flat.shape[1:]
+    R = cp_ctx.chunk_length
+    x2d = local_flat.reshape(R, -1).contiguous()
+    F = x2d.size(1)
+    q = torch.empty((R, F), dtype=torch.float8_e4m3fn, device=x2d.device)
+    scale = torch.empty((R,), dtype=torch.float32, device=x2d.device)
+    with record_function_range(f"{tag}.quant"):
+        _fp8_row_quant_kernel[(R,)](x2d, q, scale, F, BLOCK=1024)
+    # Payload: F bytes of fp8 + 4 bytes of fp32 scale per row (-49.97% vs bf16).
+    payload = torch.cat(
+        (q.view(torch.uint8), scale.view(torch.uint8).reshape(R, 4)), dim=1
+    )
+    del q, scale, x2d
+    gathered = cp_all_gather_full_varlen(payload, cp_ctx, profile_name=tag)
+    # gathered: [seq_len_full, F+4] uint8 (row stride may exceed F+4 on the
+    # prefix-restore view path — force contiguous slices before dtype views).
+    full_rows = gathered.size(0)
+    qf = gathered[:, :F].contiguous().view(torch.float8_e4m3fn)
+    sf = gathered[:, F:].contiguous().view(torch.float32).reshape(full_rows)
+    del gathered
+    y = torch.empty((full_rows, F), dtype=torch.bfloat16, device=qf.device)
+    with record_function_range(f"{tag}.dequant"):
+        _fp8_row_dequant_kernel[(full_rows,)](qf, sf, y, F, BLOCK=1024)
+    return y.view((cp_ctx.seq_len_full,) + trailing)
 
 
 def cp_gather_last_by_request(

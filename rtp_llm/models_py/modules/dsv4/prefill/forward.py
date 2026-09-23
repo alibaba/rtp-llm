@@ -95,6 +95,7 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -147,6 +148,20 @@ _PrefillFastLayerCall = Callable[..., torch.Tensor]
 
 def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in _TRUE_ENV_VALUES
+
+
+from ._diagnostics import (
+    _FWD_GPU,
+    _FWD_PROFILE,
+    _FWD_PROFILE_CT,
+    _FWD_PROFILE_IDX,
+    _FWD_STATS,
+    _fwd_profile_dump,
+    _fwd_profile_rank_ok,
+    _fwd_profile_start,
+    _fwd_stats_report_row,
+    _fwd_stats_snap,
+)
 
 
 def _prefill_fast_path_layer_calls(
@@ -305,6 +320,21 @@ def forward_layers(
     """Run stage-local layers over flat tokens with per-request cu_seqlens.
 
     Non-last stages return [T, hc, dim]; the last stage reduces to [T, dim]."""
+    _fs_marks: Optional[Dict[str, float]] = None
+    _fs_mem0 = None
+    _fs_ev0 = None
+    if _FWD_STATS:
+        _fs_marks = {"entry": time.perf_counter()}
+        _fs_mem0 = _fwd_stats_snap()
+    if _FWD_GPU:
+        _fs_ev0 = torch.cuda.Event(enable_timing=True)
+        _fs_ev0.record()
+    _fs_prof = None
+    if _FWD_PROFILE and _fwd_profile_rank_ok() and int(input_ids.size(0)) >= 1024:
+        _FWD_PROFILE_CT[0] += 1
+        if _FWD_PROFILE_CT[0] == _FWD_PROFILE_IDX:
+            _fs_prof = _fwd_profile_start()
+
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
@@ -325,6 +355,36 @@ def forward_layers(
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)
+    if _fs_marks is not None:
+        _fs_marks["cpctx"] = time.perf_counter()
+    if os.environ.get("DSV4_CP_PROBE"):
+        # Probe distinct large chunks; tiny startup requests legitimately bypass CP.
+        _seen = getattr(forward_layers, "_cp_probe_seen", None)
+        if _seen is None:
+            _seen = forward_layers._cp_probe_seen = set()
+        _T = int(input_ids.size(0))
+        if _T >= 1024 and len(_seen) < 4 and _T not in _seen:
+            _seen.add(_T)
+            import sys as _sys
+
+            _il = getattr(attn_inputs, "input_lengths", None)
+            _pl = getattr(attn_inputs, "prefix_lengths", None)
+            print(
+                "[CPPROBE] T={T} cp_info={ci} cp_size={cs} cp_rank={cr} cp_ctx={cc} "
+                "chunk_len={cl} seq_len_full={sf} input_lengths={il} prefix_lengths={pl}".format(
+                    T=_T,
+                    ci=cp_info is not None,
+                    cs=cp_size,
+                    cr=cp_rank,
+                    cc="None(CP CLEARED)" if cp_ctx is None else "set",
+                    cl=getattr(cp_ctx, "chunk_length", None),
+                    sf=getattr(cp_ctx, "seq_len_full", None),
+                    il=_il.flatten()[:4].tolist() if _il is not None else None,
+                    pl=_pl.flatten()[:4].tolist() if _pl is not None else None,
+                ),
+                file=_sys.stderr,
+                flush=True,
+            )
     if cp_ctx is not None:
         # The framework's fallback position_ids are rank-local contiguous
         # after ZigZagProcessor rewrites input_lengths to CP chunk lengths.
@@ -336,6 +396,8 @@ def forward_layers(
     positions = positions.reshape(-1).contiguous()
     if cu_seqlens is not None:
         cu_seqlens = cu_seqlens.reshape(-1).contiguous()
+    if _fs_marks is not None:
+        _fs_marks["pos"] = time.perf_counter()
 
     # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
     # smoke / production prefill path produces the same per-layer dump
@@ -366,6 +428,8 @@ def forward_layers(
 
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     capture_aux = bool(capture_ids)
+    if _fs_marks is not None:
+        _fs_marks["embed"] = time.perf_counter()
 
     prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
     use_prefill_fast_path = _prefill_fast_path_enabled(
@@ -490,6 +554,9 @@ def forward_layers(
                 workspace=ws,
             )
 
+    if _fs_marks is not None:
+        _fs_marks["meta"] = time.perf_counter()
+
     try:
         with (
             record_range_ctx(),
@@ -568,6 +635,15 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+        if _fs_prof is not None:
+            # __exit__ synchronises, so every kernel the loop launched is
+            # captured even though the launches themselves are async.
+            _fs_prof.__exit__(None, None, None)
+            _fwd_profile_dump(_fs_prof, _FWD_PROFILE_CT[0])
+            _fs_prof = None
+
+    if _fs_marks is not None:
+        _fs_marks["loop"] = time.perf_counter()
 
     if v4._mtp_hidden_buffer is not None:
         if capture_aux:
@@ -584,6 +660,16 @@ def forward_layers(
     # Only the last PP stage owns head reduction and norm.
     # Forward unreduced hyper-connection lanes to downstream stages.
     if v4.norm is None:
+        if _fs_marks is not None:
+            _fs_marks["tail"] = time.perf_counter()
+            _fwd_stats_report_row(
+                n_tokens=int(input_ids.size(0)),
+                cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+                marks=_fs_marks,
+                mem_before=_fs_mem0,
+                mem_after=_fwd_stats_snap(),
+                ev0=_fs_ev0,
+            )
         return h  # [T, hc, dim]
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
@@ -670,6 +756,16 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if _fs_marks is not None:
+        _fs_marks["tail"] = time.perf_counter()
+        _fwd_stats_report_row(
+            n_tokens=int(input_ids.size(0)),
+            cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+            marks=_fs_marks,
+            mem_before=_fs_mem0,
+            mem_after=_fwd_stats_snap(),
+            ev0=_fs_ev0,
+        )
     return h  # [T, dim]
 
 
