@@ -102,12 +102,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.placementAvailability = java.util.Objects.requireNonNull(
                 placementAvailability, "placementAvailability");
         this.predictor = createPredictor(config);
-        // fe736c60 equivalent: prefill endpoints are always available for
-        // routing regardless of inflight request count. The old
-        // PrefillResourceMeasure.isAvailable() was removed by the scheduler
-        // rewrite; setting the limit to 0 disables the capacity gate in both
-        // canAcceptRequest() and reserveUnqueuedRoute().
-        this.inflightRequestLimit = 0L;
+        this.inflightRequestLimit = config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
+                ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
         this.runtime = new WorkerBatcher(
                 status.getIpPort(), this, config,
                 deliveryStrategy, endpointEvents);
