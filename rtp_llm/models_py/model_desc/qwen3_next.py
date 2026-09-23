@@ -17,7 +17,7 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_attention_inputs_for_layer,
     select_fmha_impl_for_layer,
 )
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GraphPaddingMask
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -33,6 +33,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
     causal_conv1d_update,
+    prepare_causal_conv1d_graph_metadata,
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
@@ -65,6 +66,10 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.triton_kernels.fla.index import (
+    FLAChunkMetadata,
+    prepare_chunk_graph_metadata,
+)
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -124,6 +129,7 @@ class Qwen3NextMetadata(object):
         aiter_gdn_prefill_metadata: (
             dict[int, tuple[torch.Tensor, object]] | None
         ) = None,
+        fla_chunk_metadata: Optional[FLAChunkMetadata] = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
@@ -141,6 +147,7 @@ class Qwen3NextMetadata(object):
             tuple[object, ...], _AiterFlydslGdnDecodeCacheEntry
         ] = {}
         self.aiter_flydsl_gdn_decode_unsupported: set[tuple[object, ...]] = set()
+        self.fla_chunk_metadata = fla_chunk_metadata
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -531,6 +538,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         attn_meta: Qwen3NextMetadata,
+        chunk_metadata: Optional[FLAChunkMetadata] = None,
     ) -> torch.Tensor:
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
@@ -590,16 +598,20 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         prefill_metadata = attn_meta.get_aiter_gdn_prefill_metadata(
             cu_seqlens_without_padding
         )
-        use_aiter_flydsl_gdn = _should_use_aiter_flydsl_gdn_prefill(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            prefill_metadata,
+        use_aiter_flydsl_gdn = (
+            chunk_metadata is None
+            and _should_use_aiter_flydsl_gdn_prefill(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                prefill_metadata,
+            )
         )
         use_flydsl_chunk_gdn = (
             not use_aiter_flydsl_gdn
+            and chunk_metadata is None
             and is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
@@ -662,6 +674,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
                 use_qk_l2norm_in_kernel=True,
+                chunk_metadata=chunk_metadata,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
@@ -673,6 +686,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
+                chunk_indices=(
+                    chunk_metadata.chunk_indices if chunk_metadata is not None else None
+                ),
             )
         return attn_out.squeeze_(0)
 
@@ -707,6 +723,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block,
             attn_inputs,
             attn_meta,
+            chunk_metadata=attn_meta.fla_chunk_metadata,
         )
         cache_store_inputs = attn_inputs.cache_store_inputs
         cache_store_writer = attn_inputs.cache_store_writer
@@ -1426,7 +1443,8 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hw_kernel_config=hw_kernel_config,
             )
 
-        if config.moe_style in (1, 2):
+        self.is_moe_layer = config.moe_style in (1, 2)
+        if self.is_moe_layer:
             self.mlp = GenericMoeLayer(
                 config,
                 parallelism_config,
@@ -1460,6 +1478,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -1473,7 +1492,10 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        if self.is_moe_layer:
+            hidden_states = self.mlp(hidden_states, padding_mask)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 
@@ -1526,6 +1548,9 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self.graph_padding_mask = GraphPaddingMask()
+        self.graph_prefill_conv1d_metadata: Dict[int, CausalConv1dMetadata] = {}
+        self.graph_prefill_fla_metadata: Dict[int, FLAChunkMetadata] = {}
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
@@ -1663,7 +1688,11 @@ class Qwen3NextModel(GptModelBase):
                     "Qwen3Next LINEAR layer must map to exactly one attention-input tag"
                 )
             attention_inputs = linear_attention_inputs
+        padding_mask = self.graph_padding_mask.get(
+            attention_inputs, inputs.input_ids.shape[0], hidden_states.device
+        )
         prefill_conv1d_meta = None
+        fla_chunk_metadata = None
         is_target_verify = attention_inputs.is_target_verify
         if (
             torch.version.hip is not None
@@ -1695,15 +1724,35 @@ class Qwen3NextModel(GptModelBase):
                 )
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
-                prefill_conv1d_meta = prepare_causal_conv1d_metadata(
-                    query_start_loc=cu_seqlen_without_padding,
-                    device=hidden_states.device,
-                )
+                if attention_inputs.is_cuda_graph:
+                    token_capacity = hidden_states.shape[0]
+                    prefill_conv1d_meta = prepare_causal_conv1d_graph_metadata(
+                        query_start_loc=cu_seqlen_without_padding,
+                        device=hidden_states.device,
+                        token_capacity=token_capacity,
+                        metadata=self.graph_prefill_conv1d_metadata.get(token_capacity),
+                    )
+                    self.graph_prefill_conv1d_metadata[token_capacity] = (
+                        prefill_conv1d_meta
+                    )
+                    fla_chunk_metadata = prepare_chunk_graph_metadata(
+                        cu_seqlen_without_padding,
+                        token_capacity=token_capacity,
+                        chunk_size=64,
+                        metadata=self.graph_prefill_fla_metadata.get(token_capacity),
+                    )
+                    self.graph_prefill_fla_metadata[token_capacity] = fla_chunk_metadata
+                else:
+                    prefill_conv1d_meta = prepare_causal_conv1d_metadata(
+                        query_start_loc=cu_seqlen_without_padding,
+                        device=hidden_states.device,
+                    )
 
         if (
             attention_inputs.is_prefill
             and not is_target_verify
             and not is_cp
+            and not is_cuda_graph
             and _is_aiter_flydsl_gdn_prefill_enabled()
         ):
             for layer_idx, layer in enumerate(self.layers):
@@ -1744,6 +1793,7 @@ class Qwen3NextModel(GptModelBase):
             cp_local_valid_mask=cp_local_valid_mask,
             is_cuda_graph=is_cuda_graph,
             aiter_gdn_prefill_metadata=aiter_gdn_prefill_metadata,
+            fla_chunk_metadata=fla_chunk_metadata,
         )
 
         if fmha_impl is None:
@@ -1763,13 +1813,15 @@ class Qwen3NextModel(GptModelBase):
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
                 else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             )
+            layer_cache = self.kv_cache.get_layer_cache(i) if self.kv_cache else None
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_cache,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
+                padding_mask=padding_mask,
             )
             if i in self._mtp_aux_capture_layer_id_set:
                 self.capture_aux_hidden(i, hidden_states, residual)

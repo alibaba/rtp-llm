@@ -140,6 +140,10 @@ def _install_rtp_llm_stubs_for_moriep_wrapper() -> None:
         "rtp_llm.utils.util",
         to_torch_dtype=_to_torch_dtype_stub,
     )
+    _register_stub_module(
+        "rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter",
+        MoEConfigAdapter=type("MoEConfigAdapter", (), {}),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +467,10 @@ def worker_function(
             _moriep_log(rank, f"iter {it + 1}/5: router.prepare (mori dispatch)")
             payload = router.prepare(a1, None, None, topk_weights, topk_ids)
             combine_x = payload.expert_x
-            combine_payload = CombineForwardPayload(fused_expert_output=combine_x)
+            combine_payload = CombineForwardPayload(
+                fused_expert_output=combine_x,
+                combine_indices=payload.combine_indices,
+            )
             _moriep_log(rank, f"iter {it + 1}/5: router.finalize (mori combine)")
             a2 = router.finalize(
                 combine_payload,
@@ -575,6 +582,15 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
         if max_gpu_count < 2:
             self.skipTest(f"Need at least 2 GPUs, got {max_gpu_count}")
 
+    def test_finalize_rejects_missing_combine_indices(self):
+        _ensure_moriep_symbols_loaded()
+        router = MoriEpIntranodeRouter.__new__(MoriEpIntranodeRouter)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "combine_indices missing for Mori finalize"
+        ):
+            router._finalize_single(torch.empty(0), None, None)
+
     def test_world_size_2(self):
         self._check_skip()
         max_gpu_count, _ = _gpu_count_without_parent_cuda_init()
@@ -592,6 +608,16 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
             self.skipTest("Need at least 4 GPUs")
         mp.set_start_method("spawn", force=True)
         test_single(world_size=4, dist_port=_get_free_port())
+
+    def test_world_size_8(self):
+        if _MAX_GPUS > 0 and _MAX_GPUS < 8:
+            self.skipTest(f"MORIEP_TEST_MAX_GPUS={_MAX_GPUS}, skipping 8-GPU test")
+        self._check_skip()
+        max_gpu_count, _ = _gpu_count_without_parent_cuda_init()
+        if max_gpu_count < 8:
+            self.skipTest("Need at least 8 GPUs")
+        mp.set_start_method("spawn", force=True)
+        test_single(world_size=8, dist_port=_get_free_port())
 
 
 if __name__ == "__main__":
