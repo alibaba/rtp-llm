@@ -85,7 +85,7 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
-    void initGroups(std::shared_ptr<const CacheTopology> topology);
+    void initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views = true);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id) const;
@@ -116,7 +116,7 @@ public:
     const GroupBlockIds& groupBlocks() const;
 
     LayerBlockIds            layerBlocks() const;
-    const LayerAttnBlockIds& layerGroupBlocks() const;
+    LayerAttnBlockIds         layerGroupBlocks() const;
     int                      groupId(int layer_id, int group_id) const;
 
     CacheKeysType&       cacheKeys();
@@ -174,6 +174,9 @@ private:
     int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
     bool hasOneGroupPerLayer() const;
 
+    // Compact beam resources share immutable membership. The default owning
+    // projection preserves the existing topology-independent lifetime contract.
+    std::shared_ptr<const CacheTopology> topology_;
     std::unordered_map<std::string, int>  tag_to_group_id_;
     std::vector<std::vector<std::string>> layer_group_tags_;
     // layer_id -> group_id -> block_indices

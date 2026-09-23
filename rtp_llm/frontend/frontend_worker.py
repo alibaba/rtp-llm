@@ -27,7 +27,11 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactor
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
-from rtp_llm.utils.base_model_datatypes import CustomOutput, GenerateResponse
+from rtp_llm.utils.base_model_datatypes import (
+    BatchedTerminalOutputs,
+    CustomOutput,
+    GenerateResponse,
+)
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -340,7 +344,9 @@ class FrontendWorker:
         if generate_config.num_return_sequences > 0:
             outputs = gen_responses.generate_outputs.generate_outputs
             custom_outputs = None
-            if any(seq.custom_output is not None for seq in outputs):
+            if not isinstance(outputs, BatchedTerminalOutputs) and any(
+                seq.custom_output is not None for seq in outputs
+            ):
                 custom_outputs = [
                     (
                         seq.custom_output.tolist()
@@ -357,7 +363,11 @@ class FrontendWorker:
                     aux_info.append(info)
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
-                finished=all(
+                finished=isinstance(
+                    gen_responses.generate_outputs.generate_outputs,
+                    BatchedTerminalOutputs,
+                )
+                or all(
                     [
                         seq.finished
                         for seq in gen_responses.generate_outputs.generate_outputs

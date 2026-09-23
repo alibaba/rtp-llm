@@ -41,6 +41,39 @@ protected:
     std::shared_ptr<TestAllocator> allocator_;
 };
 
+TEST_F(SingleTypeKVCacheAllocatorUpdateTest, BatchFreePreservesOtherRequestAndTransferHolds) {
+    auto config = createSingleTypeTestConfig(2, 5, 4);
+    allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+    auto pool = allocator_->getDeviceBlockPool();
+    const auto blocks = allocateRequestBlocks(pool, 3);
+    ASSERT_EQ(blocks.size(), 3u);
+    auto resource = createBatchKVCacheResource(2000, config);
+    resource->setBatchBlocks(0, 0, blocks);
+    for (int beam = 1; beam < 2000; ++beam) {
+        pool->incRef({blocks[0], blocks[1]});
+        resource->setBatchBlocks(beam, 0, {blocks[0], blocks[1], NULL_BLOCK_IDX});
+    }
+    pool->incRef(blocks[0]);  // another request
+    pool->incTreeRef(blocks[1], BlockTreeRefType::STORE);
+    int notifications = 0;
+    pool->setCapacityChangeCallback([&] {
+        ++notifications;
+        EXPECT_EQ(pool->freeBlocksNum(), 2u); // callback can reacquire the pool lock
+        EXPECT_EQ(pool->referencedBlocksNum(), 1u);
+    });
+    allocator_->free(FreeInfo{resource, nullptr});
+    EXPECT_EQ(resource->curBlocksNum(), 0);
+    EXPECT_EQ(pool->refCount(blocks[0]), 1u);
+    EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 1u);
+    EXPECT_EQ(notifications, 1);
+    pool->setCapacityChangeCallback({});
+    pool->decRef(blocks[0]);
+    pool->decTreeRef(blocks[1], BlockTreeRefType::STORE);
+    EXPECT_EQ(pool->freeBlocksNum(), 4u);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorUpdateTest, InvalidExchangeLeavesEarlierReferencesUnchanged) {
     auto config = createSingleTypeTestConfig(1, 4, 4);
     allocator_  = std::make_shared<TestAllocator>(config, AllocationType::HOST);

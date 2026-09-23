@@ -2,6 +2,17 @@ load("//:def.bzl", "copts", "cuda_copts", "rocm_copts", "any_cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
+cc_library(
+    name = "block_id_copy",
+    srcs = ["block_id_copy.cu"],
+    hdrs = ["block_id_copy.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+)
+
 any_cuda_deps = select({
     "@//:using_cuda": [
         "//rtp_llm/models_py/bindings/cuda/kernels:cuda_utils_common",

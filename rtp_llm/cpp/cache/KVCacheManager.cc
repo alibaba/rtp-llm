@@ -545,6 +545,10 @@ void KVCacheManager::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& c
     return allocator_->blockBatchCopyByTag(copy_mapping);
 }
 
+void KVCacheManager::blockBatchCopyForForward(const torch::Tensor& copy_mapping) {
+    allocator_->blockBatchCopyForForward(copy_mapping);
+}
+
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                    const std::vector<int>&         block_src_batch,
                                    bool                            copy_last_block,

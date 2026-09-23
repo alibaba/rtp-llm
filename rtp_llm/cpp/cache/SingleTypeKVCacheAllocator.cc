@@ -67,8 +67,38 @@ bool SingleTypeKVCacheAllocator::doInit() {
         return false;
     }
 
+#if USING_CUDA
+    if (allocation_type_ == AllocationType::DEVICE) {
+        const auto kv_tensors = full_kv_cache_group_->allLayerCacheBase();
+        const auto scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
+        std::vector<GpuBlockCopyPlane> planes;
+        for (int layer_id : cache_group.layer_ids) {
+            planes.push_back({kv_tensors.at(layer_id), cache_group.kv_block_stride_bytes});
+            if (cache_group.kv_scale_stride_bytes > 0) {
+                planes.push_back({scale_tensors.at(layer_id), cache_group.kv_scale_stride_bytes});
+            }
+        }
+        const bool supported = !planes.empty() && std::all_of(planes.begin(), planes.end(), [](const auto& plane) {
+            return plane.blocks.defined() && plane.blocks.is_cuda() && plane.blocks.dim() > 0
+                   && plane.blocks.size(0) > 0 && plane.blocks.stride(0) > 0 && plane.copy_bytes > 0
+                   && plane.copy_bytes <= plane.blocks.stride(0) * plane.blocks.element_size();
+        });
+        if (supported) {
+            gpu_block_copy_ = GpuBlockCopy::create(std::move(planes));
+            RTP_LLM_LOG_INFO("GPU block ID copy enabled for single-group KV forward updates");
+        }
+    }
+#endif
     RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initialized successfully");
     return true;
+}
+
+void SingleTypeKVCacheAllocator::blockBatchCopyForForward(const torch::Tensor& copy_mapping) {
+    if (gpu_block_copy_ && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3) {
+        gpu_block_copy_->copy(copy_mapping);
+    } else {
+        KVCacheAllocator::blockBatchCopyForForward(copy_mapping);
+    }
 }
 
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
@@ -352,10 +382,31 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     if (kv_cache_resource->curBlocksNum() == 0) {
         return;
     }
-    auto all_blocks = kv_cache_resource->getAllBatchBlocks(0);
-    for (const auto& blocks : all_blocks) {
-        full_kv_cache_group_->unreference(blocks);
+    // Aggregate request ownership before taking the pool lock. Tree/transfer
+    // holds and references from other requests are preserved by the same
+    // transaction used for beam forks in updateKVBlock().
+    std::vector<DeviceBlockPool::RequestReferenceUpdate> updates;
+    {
+        std::unordered_map<BlockIdxType, int> counts;
+        counts.reserve(kv_cache_resource->curBlocksNum() + kv_cache_resource->batchSize());
+        for (int batch = 0; batch < kv_cache_resource->batchSize(); ++batch) {
+            for (const auto block : kv_cache_resource->blocks(batch, 0)) {
+                if (!isNullBlockIdx(block)) {
+                    auto& count = counts[block];
+                    RTP_LLM_CHECK(count < std::numeric_limits<int>::max());
+                    ++count;
+                }
+            }
+        }
+        updates.reserve(counts.size());
+        for (const auto& [block, count] : counts) {
+            updates.push_back({block, count, 0});
+        }
     }
+    BlockIndicesType replacements;
+    int required_free_blocks = 0;
+    const bool released = block_pool_->tryReplaceRequestReferences(updates, 0, replacements, required_free_blocks);
+    RTP_LLM_CHECK_WITH_INFO(released, "releasing request references must not require free capacity");
     kv_cache_resource->clearBlocks();
 }
 
@@ -591,7 +642,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
             retained_slots.emplace_back(i, old_idx);
         } else {
             auto& fork = staged_resource.cacheResource(i);
-            fork.initGroups(config_.topologyPtr());
+            fork.initGroups(config_.topologyPtr(), /*materialize_layer_views=*/false);
             fork.setCacheKeys(old_resource.cacheKeys());
             auto& block_ids = fork.mutableBlockIds(0);
             block_ids.assign(old_resource.blocks(0));
