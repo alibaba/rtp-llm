@@ -3133,6 +3133,51 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         await return_output_ids_test_suite.test_no_stream()
 
+    async def test_custom_output_preserves_prefill_extra_outputs(self):
+        _, renderer = self._create_adaptive_qwen_renderer()
+        hidden = [[1.0, 2.0]]
+        score = [[-0.25]]
+        for with_score in (False, True):
+            with self.subTest(with_score=with_score):
+                config = GenerateConfig(return_all_hidden_states=True)
+
+                async def responses():
+                    for is_prefill in (True, False):
+                        output = GenerateOutput(
+                            all_hidden_states=(
+                                torch.tensor(hidden) if is_prefill else None
+                            ),
+                            custom_output=(torch.tensor(score) if with_score else None),
+                        )
+                        yield custom_renderer.StreamResponseObject(
+                            choices=[],
+                            extra_outputs=await renderer._generate_extra_outputs(
+                                output, config
+                            ),
+                        )
+
+                result = await OpenaiEndpoint._collect_complete_response(
+                    responses(), None
+                )
+                self.assertEqual(result.extra_outputs.all_hidden_states, hidden)
+                self.assertEqual(
+                    result.extra_outputs.custom_output, score if with_score else None
+                )
+
+    def test_native_chat_final_preserves_custom_output(self):
+        _, renderer = self._create_adaptive_qwen_renderer()
+        values = [[-0.25, 1.75]]
+        status = [custom_renderer.StreamStatusSync(ChatCompletionRequest(messages=[]))]
+        args = (status, [3], [2], [0], torch.tensor(values))
+        final = renderer.render_stream_response_final_blocking(*args)
+        for response in (
+            renderer.render_stream_response_final(*args),
+            renderer.collect_complete_response([final]),
+        ):
+            self.assertEqual(
+                json.loads(response)["extra_outputs"]["custom_output"], values
+            )
+
     async def test_debug_info_with_output_ids_and_raw_output(self):
         """Test that debug_info includes output_ids and raw_output when debug_info=True (non-streaming)"""
         tokenizer = QwenTestTokenizer(
