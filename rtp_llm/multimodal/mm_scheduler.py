@@ -52,9 +52,7 @@ class MMSchedulerExecutionError(MMSchedulerError):
         self.source_type = source_type
         self.source_message = source_message
         self.is_oom = is_oom
-        super().__init__(
-            f"batch embedding failed: {source_type}: {source_message}"
-        )
+        super().__init__(f"batch embedding failed: {source_type}: {source_message}")
 
 
 class MMSchedulerOverloadError(MMSchedulerError):
@@ -254,6 +252,7 @@ class MMScheduler:
         self._batch_wait_ms = batch_wait_ms
         self._max_batch_size = max_batch_size
         self._max_batch_images = max_batch_images
+        self._max_queue_size = max_queue_size
         # Device the forward must run on. The executor is a fresh thread, which
         # defaults to cuda:0; without pinning, a non-zero local rank would run the
         # forward on the wrong device. None (tests / CPU) skips pinning.
@@ -264,11 +263,12 @@ class MMScheduler:
         # -> no profiling. Attribution is per forward/batch.
         self._forward_profiler = forward_profiler
 
-        # Bounded so a stalled forward can't let cancelled/waiting requests (and
-        # the preprocessed tensors they pin) grow without limit; over capacity,
-        # submit fails fast with MMSchedulerOverloadError.
+        # New submissions are limited to max_queue_size below. Reserve one
+        # continuation per in-flight chunk so the sole consumer never blocks
+        # requeueing a split request after producers fill the admission queue.
+        # These slots hold already-admitted requests, not additional callers.
         self._waiting: queue.Queue[_EmbeddingChunk] = queue.Queue(
-            maxsize=max_queue_size
+            maxsize=max_queue_size + max_batch_size
         )
         # A chunk that would have overflowed the batch's image/work budget,
         # carried to the next round so it is neither lost nor re-ordered behind
@@ -323,7 +323,7 @@ class MMScheduler:
             GaugeMetrics.VIT_EMBEDDING_QUEUE_SIZE_METRIC, self._queue_depth()
         )
 
-    def _enqueue_chunk(self, chunk: _EmbeddingChunk, *, block: bool = True) -> None:
+    def _enqueue_chunk(self, chunk: _EmbeddingChunk, *, block: bool = False) -> None:
         """Put a chunk into the waiting queue and stamp its queue-entry time."""
         chunk.enqueued_at = time.monotonic()
         chunk.queue_wait_reported = False
@@ -532,6 +532,10 @@ class MMScheduler:
             # requests) fail fast with an overload signal instead of blocking the
             # caller and letting the backlog grow unbounded.
             try:
+                # Producers share _lock; only the executor can remove entries
+                # between this check and put. Keep its reserved slots private.
+                if self._waiting.qsize() >= self._max_queue_size:
+                    raise queue.Full
                 # Only the first chunk is queued; _complete_chunk appends the
                 # next one at the tail so a split request cannot monopolize the
                 # scheduler.
@@ -539,7 +543,7 @@ class MMScheduler:
             except queue.Full:
                 kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
                 raise MMSchedulerOverloadError(
-                    f"MMScheduler queue full (max_queue_size={self._waiting.maxsize}), "
+                    f"MMScheduler queue full (max_queue_size={self._max_queue_size}), "
                     f"request rejected"
                 ) from None
 
@@ -704,9 +708,7 @@ class MMScheduler:
                             # TOCTOU where a caller cancels a still-PENDING request.
                             if not req.future.done():
                                 try:
-                                    self._fail(
-                                        req, source_type, source_message, is_oom
-                                    )
+                                    self._fail(req, source_type, source_message, is_oom)
                                 except InvalidStateError:
                                     pass
         finally:
@@ -797,9 +799,7 @@ class MMScheduler:
             # arrival still wakes get() immediately; on the poll timeout we loop to
             # re-check _stopped and the deadline rather than ending the window.
             try:
-                chunk = self._waiting.get(
-                    timeout=min(remaining, _STOP_POLL_INTERVAL_S)
-                )
+                chunk = self._waiting.get(timeout=min(remaining, _STOP_POLL_INTERVAL_S))
             except queue.Empty:
                 continue
             self._report_queue_depth()

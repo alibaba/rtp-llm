@@ -15,16 +15,16 @@ import torch
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
-from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
-from rtp_llm.multimodal.multimodal_util import (
-    build_multimodal_output_pb,
-    maybe_tensor_to_list,
-)
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
     MMSchedulerExecutionError,
     MMSchedulerOverloadError,
     OutputCountMismatchError,
+)
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
+from rtp_llm.multimodal.multimodal_util import (
+    build_multimodal_output_pb,
+    maybe_tensor_to_list,
 )
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
@@ -444,6 +444,57 @@ class MMSchedulerTest(TestCase):
         self.assertEqual(large_error, [])
         self.assertEqual(fake.call_values, [[1.0], [3.0], [2.0]])
 
+    def test_split_request_continues_when_admission_queue_is_full(self):
+        release = threading.Event()
+        fake = _FakeMMPart(
+            block_until=release, work_budget=MMWorkEstimate(input_patches=10)
+        )
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1, max_queue_size=1)
+        errors, threads = [], []
+
+        def submit(values):
+            try:
+                sched.submit_and_wait(
+                    [
+                        _FakeWorkItem(
+                            preprocess_result=torch.tensor([float(value)]),
+                            input_patches=6,
+                        )
+                        for value in values
+                    ]
+                )
+            except Exception as error:
+                errors.append(error)
+
+        try:
+            for values in ([1, 3], [2]):
+                thread = threading.Thread(target=submit, args=(values,), daemon=True)
+                threads.append(thread)
+                thread.start()
+                self.assertTrue(fake.forward_entered.wait(1.0))
+            deadline = time.monotonic() + 1.0
+            while sched._waiting.qsize() < 1 and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertEqual(sched._waiting.qsize(), 1)
+            with self.assertRaises(MMSchedulerOverloadError):
+                sched.submit_and_wait([_FakeWorkItem(input_patches=1)])
+            release.set()
+            for thread in threads:
+                thread.join(2.0)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(fake.call_values, [[1.0], [2.0], [3.0]])
+        finally:
+            release.set()
+            # Also let the old blocking-put bug exit if this regression fails.
+            sched._stopped.set()
+            for chunk in sched._drain(sched._waiting):
+                chunk.request.future.cancel()
+            sched._executor.join(2.0)
+            for thread in threads:
+                thread.join(2.0)
+        self.assertFalse(sched._executor.is_alive())
+
     def test_cost_aware_model_requires_work_estimate(self):
         """Opting into cost admission requires every preprocessed item to estimate."""
         fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
@@ -516,10 +567,7 @@ class MMSchedulerTest(TestCase):
             all(isinstance(e, MMSchedulerExecutionError) for e in errors), errors
         )
         self.assertTrue(
-            all(
-                e.source_type == torch.cuda.OutOfMemoryError.__name__
-                for e in errors
-            ),
+            all(e.source_type == torch.cuda.OutOfMemoryError.__name__ for e in errors),
             errors,
         )
         self.assertTrue(all(e.is_oom for e in errors), errors)
