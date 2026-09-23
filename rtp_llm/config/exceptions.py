@@ -157,6 +157,8 @@ class ExceptionType(IntEnum):
     MM_EMPTY_ENGINE_ERROR = 904
     MM_NOT_SUPPORTED_ERROR = 905, ExceptionCategory.UNSUPPORTED
     MM_DOWNLOAD_FAILED = 906
+    MM_RESOURCE_EXHAUSTED = 907, ExceptionCategory.CAPACITY
+    MM_DOWNLOAD_TEMPORARY = 908, ExceptionCategory.CAPACITY
 
     @classmethod
     def from_value(cls, value):

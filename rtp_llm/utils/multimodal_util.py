@@ -17,13 +17,13 @@ logger = logging.getLogger(__name__)
 REQUEST_GET = None
 
 
-def _default_request_get(url, headers):
+def _default_request_get(url, headers, timeout=10):
     import requests
 
-    return requests.get(url, stream=True, headers=headers, timeout=10)
+    return requests.get(url, stream=True, headers=headers, timeout=timeout)
 
 
-def request_get(url, headers):
+def request_get(url, headers, timeout=None):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
@@ -32,7 +32,9 @@ def request_get(url, headers):
             REQUEST_GET = safe_request_get
         except ImportError:
             REQUEST_GET = _default_request_get
-    return REQUEST_GET(url, headers)
+    if timeout is None:
+        return REQUEST_GET(url, headers)
+    return REQUEST_GET(url, headers, timeout=timeout)
 
 
 def _get_http_heads(download_headers: str = ""):
@@ -102,7 +104,6 @@ class MultimodalInput:
 
 
 class IgraphItemKeyCountMismatchError(Exception):
-
     def __init__(self, requested_count: int, received_count: int, message: str = None):
         self.requested_count = requested_count
         self.received_count = received_count

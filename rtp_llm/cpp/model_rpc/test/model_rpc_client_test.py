@@ -48,6 +48,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateInputPB,
     GenerateOutputsPB,
+    RoleAddrPB,
     TensorPB,
 )
 from rtp_llm.utils.base_model_datatypes import (
@@ -58,7 +59,6 @@ from rtp_llm.utils.base_model_datatypes import (
 
 
 class FakeStub:
-
     async def GenerateStreamCall(self, input: GenerateInputPB, timeout=None):
         # 1. 第一个响应：包含第一个生成的 token
         outputs_pb1 = GenerateOutputsPB()
@@ -101,7 +101,6 @@ class FakeStub:
 
 
 class FakeModelRpcClient(ModelRpcClient):
-
     def __init__(self):
         # Call parent __init__ with minimal required parameters
         super().__init__(
@@ -180,7 +179,6 @@ def _decode_role_addr(ip="decode", grpc_port=9001):
 
 
 class ModelRpcClientTest(TestCase):
-
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         # self.client = FakeModelRpcClient()
@@ -411,6 +409,11 @@ class ModelRpcClientTest(TestCase):
         with patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
             return_value=stub,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            side_effect=AssertionError(
+                "FetchResponse must not serialize the image payload"
+            ),
         ):
             responses = asyncio.run(self._run(client, input_py))
 

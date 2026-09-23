@@ -141,7 +141,8 @@ int64_t batchErrorCode(const grpc::Status& status) {
     // the status into EnqueueBatchErrorPB.
     ErrorDetailsPB details;
     if (!status.error_details().empty() && details.ParseFromString(status.error_details())
-        && details.error_code() == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED)) {
+        && (details.error_code() == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED)
+            || details.error_code() == static_cast<int64_t>(ErrorCode::MM_RESOURCE_EXHAUSTED))) {
         return details.error_code();
     }
     return status.error_code();
@@ -252,6 +253,7 @@ grpc::Status DeferredPrefillContextMap::store(int64_t                           
     if (!contexts_.emplace(request_id, deferred).second) {
         return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "request already exists in deferred context map");
     }
+    fetch_expired_requests_.erase(request_id);
     return grpc::Status::OK;
 }
 
@@ -272,6 +274,7 @@ grpc::Status DeferredPrefillContextMap::armTtl(int64_t                          
                                 "request context is missing from deferred context map");
         }
         deferred->ttl_alarm = alarm;
+        RTP_LLM_LOG_INFO("FetchResponse publish request_id=%ld attach_ttl_ms=%ld", request_id, ttl.count());
         // Arm before returning success. cancelAll() cannot remove this context
         // until Set() has completed, so Cancel() never races an unset Alarm.
         alarm->experimental().Set(std::chrono::system_clock::now() + ttl,
@@ -290,6 +293,10 @@ grpc::Status DeferredPrefillContextMap::take(int64_t request_id, std::shared_ptr
     deferred.reset();
     {
         std::lock_guard<std::mutex> lock(mu_);
+        sweepFetchExpired(autil::TimeUtility::currentTimeInMilliSeconds());
+        if (fetch_expired_requests_.find(request_id) != fetch_expired_requests_.end()) {
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "FetchResponse attachment deadline exceeded");
+        }
         sweepPriorityPreemptionTombstones(autil::TimeUtility::currentTimeInMilliSeconds());
         if (priority_preemption_tombstones_.find(request_id) != priority_preemption_tombstones_.end()) {
             return statusFromErrorInfo(
@@ -309,6 +316,7 @@ grpc::Status DeferredPrefillContextMap::take(int64_t request_id, std::shared_ptr
         }
         deferred = std::move(it->second);
         contexts_.erase(it);
+        RTP_LLM_LOG_INFO("FetchResponse attached request_id=%ld", request_id);
     }
     if (deferred->ttl_alarm) {
         deferred->ttl_alarm->Cancel();
@@ -487,6 +495,18 @@ void DeferredPrefillContextMap::finish(int64_t request_id, const DeferredPrefill
     }
 }
 
+void DeferredPrefillContextMap::sweepFetchExpired(int64_t now_ms) {
+    while (!fetch_expired_order_.empty()
+           && (fetch_expired_order_.front().first <= now_ms || fetch_expired_order_.size() > 10000)) {
+        const auto [expires_at, id] = fetch_expired_order_.front();
+        fetch_expired_order_.pop_front();
+        auto it = fetch_expired_requests_.find(id);
+        if (it != fetch_expired_requests_.end() && it->second == expires_at) {
+            fetch_expired_requests_.erase(it);
+        }
+    }
+}
+
 void DeferredPrefillContextMap::expire(int64_t request_id, const DeferredPrefillContext* expected) {
     std::shared_ptr<DeferredPrefillContext> deferred;
     {
@@ -497,6 +517,11 @@ void DeferredPrefillContextMap::expire(int64_t request_id, const DeferredPrefill
         }
         deferred = std::move(it->second);
         contexts_.erase(it);
+        const int64_t now_ms                = autil::TimeUtility::currentTimeInMilliSeconds();
+        fetch_expired_requests_[request_id] = now_ms + 60000;
+        fetch_expired_order_.emplace_back(now_ms + 60000, request_id);
+        sweepFetchExpired(now_ms);
+        RTP_LLM_LOG_WARNING("FetchResponse expired before attachment request_id=%ld", request_id);
         if (deferred->context) {
             deferred->context->tryMarkOtherTerminal();
         }

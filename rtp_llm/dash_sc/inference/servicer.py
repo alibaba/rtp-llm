@@ -18,10 +18,14 @@ import asyncio
 import inspect
 import logging
 import struct
+import time
 from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Callable, Optional, Sequence
+from urllib.parse import urlsplit
 
+import requests
 import torch
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -95,6 +99,7 @@ _DEFAULT_TERMINATE_TOKEN_ID = 1
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 _V41_INLINE_PAYLOAD_MAX_BYTES = 64 * 1024
+_V41_DOWNLOAD_TIMEOUT_SECONDS = 60
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -524,6 +529,30 @@ def _make_generate_input(
     )
 
 
+def _image_download_chunks(response, deadline):
+    raw = getattr(response, "raw", None)
+    read1 = getattr(raw, "read1", None)
+    if callable(read1):
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise requests.Timeout("image download deadline exceeded")
+            connection = getattr(raw, "connection", None)
+            sock = getattr(connection, "sock", None)
+            if sock is not None:
+                sock.settimeout(min(20, remaining))
+            # read1 returns currently available data; read/iter_content can
+            # wait for a whole chunk indefinitely on a slow-drip response.
+            chunk = read1(64 * 1024, decode_content=True)
+            if not chunk:
+                break
+            yield chunk
+    else:
+        # Older urllib3 does not have read1. A byte-sized read still permits
+        # deadline checks between arrivals instead of waiting for 64 KiB.
+        yield from response.iter_content(chunk_size=1)
+
+
 def _prepare_v41_image_request(request, input_ids, processor_config, images=None):
     from rtp_llm.models.multimodal.deepseek_v41_processor import (
         prepare_vl_inputs_from_token_ids,
@@ -532,18 +561,91 @@ def _prepare_v41_image_request(request, input_ids, processor_config, images=None
 
     # Cache bytes only for this request; a URL may change between requests.
     downloaded = {}
+    download_deadline = time.monotonic() + _V41_DOWNLOAD_TIMEOUT_SECONDS
 
     def load_url(url):
         if not url.startswith(("http://", "https://")):
             raise ValueError("unsupported V4.1 image URL scheme")
         if url not in downloaded:
-            try:
-                with request_get(url, _get_http_heads()) as response:
-                    if response.status_code != 200:
-                        raise ValueError("image download failed")
-                    downloaded[url] = response.content
-            except Exception as error:
-                raise ValueError("Failed to download multimodal content") from error
+            for attempt in range(3):
+                remaining = download_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise FtRuntimeException(
+                        ExceptionType.CONNECT_TIMEOUT,
+                        "Multimodal download deadline exceeded",
+                    )
+                started = time.monotonic()
+                status = None
+                try:
+                    with request_get(
+                        url,
+                        _get_http_heads(),
+                        timeout=(min(5, remaining), min(20, remaining)),
+                    ) as response:
+                        status = response.status_code
+                        if status in (408, 429, 500, 502, 503, 504):
+                            raise requests.ConnectionError(
+                                "temporary image download failure"
+                            )
+                        if status != 200:
+                            raise ValueError("image download failed")
+                        chunks = []
+                        size = 0
+                        for chunk in _image_download_chunks(
+                            response, download_deadline
+                        ):
+                            if time.monotonic() >= download_deadline:
+                                raise requests.Timeout(
+                                    "image download deadline exceeded"
+                                )
+                            size += len(chunk)
+                            if size > 10 * 1024 * 1024:
+                                raise ValueError("Multimodal file size is too large")
+                            chunks.append(chunk)
+                        downloaded[url] = b"".join(chunks)
+                    break
+                except Exception as error:
+                    # Exception strings and URL query parameters can contain credentials.
+                    logging.warning(
+                        "V4.1 image download request_id=%s host=%s attempt=%d status=%s "
+                        "error_type=%s elapsed_ms=%.1f",
+                        request.id,
+                        urlsplit(url).hostname,
+                        attempt + 1,
+                        status,
+                        type(error).__name__,
+                        (time.monotonic() - started) * 1000,
+                    )
+                    transient = isinstance(
+                        error,
+                        (
+                            requests.Timeout,
+                            requests.ConnectionError,
+                            requests.exceptions.ChunkedEncodingError,
+                            ReadTimeoutError,
+                            ProtocolError,
+                        ),
+                    )
+                    if (
+                        isinstance(error, ValueError)
+                        and str(error) == "Multimodal file size is too large"
+                    ):
+                        raise
+                    if not transient:
+                        raise ValueError(
+                            "Failed to download multimodal content"
+                        ) from error
+                    remaining = download_deadline - time.monotonic()
+                    if attempt == 2 or remaining <= 0:
+                        code = (
+                            ExceptionType.CONNECT_TIMEOUT
+                            if isinstance(error, (requests.Timeout, ReadTimeoutError))
+                            else ExceptionType.MM_DOWNLOAD_TEMPORARY
+                        )
+                        raise FtRuntimeException(
+                            code, "Temporary multimodal download failure"
+                        ) from error
+                    time.sleep(min(0.2 * 2**attempt, remaining))
         return downloaded[url]
 
     try:

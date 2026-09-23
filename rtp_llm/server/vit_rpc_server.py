@@ -120,6 +120,8 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
         self._status_lock = threading.Lock()
         self._active = 0
+        self._active_bytes = 0
+        self._v41_execution = threading.Lock()
         self._status_version = 0
         self.rdma_encoder = rdma_encoder
         config = getattr(mm_process_engine, "vit_config", None)
@@ -128,9 +130,18 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             getattr(config, "vit_token_cache_time_window_ms", 30 * 60 * 1000),
         )
         self.require_rdma = getattr(config, "mm_transport_mode", "grpc") == "rdma"
+        self._v41 = (
+            getattr(mm_process_engine.model.model_config, "model_type", None)
+            == "deepseek_v41"
+        )
+        self.max_request_bytes = int(
+            os.environ.get("VIT_MAX_INFLIGHT_REQUEST_BYTES", str(2 << 30))
+        )
+        if self.max_request_bytes <= 0:
+            raise ValueError("VIT_MAX_INFLIGHT_REQUEST_BYTES must be positive")
         self.max_requests = (
             getattr(config, "vit_max_concurrent_requests", 32)
-            if getattr(mm_process_engine, "_scheduler", None) is not None
+            if self._v41 or getattr(mm_process_engine, "_scheduler", None) is not None
             else 1
         )
         if (
@@ -334,14 +345,32 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "Strict ViT RDMA requires support_rdma",
             )
+        request_bytes = multimodal_inputs.ByteSize()
         with self._status_lock:
-            if self._active >= self.max_requests:
+            if (
+                self._active >= self.max_requests
+                or self._active_bytes + request_bytes > self.max_request_bytes
+            ):
                 context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "ViT worker is busy")
             self._active += 1
+            self._active_bytes += request_bytes
         output = None
+        res = None
+        execution_acquired = False
         returned = False
         try:
             is_v41 = multimodal_inputs.HasField("v41_inputs")
+            if is_v41:
+                # Retain only bounded CPU requests while waiting. Serialize the
+                # complete forward/export so concurrent requests cannot retain
+                # multiple sets of GPU image embeddings before RDMA export.
+                queue_deadline = time.monotonic() + 60
+                if deadline is not None:
+                    queue_deadline = min(queue_deadline, deadline)
+                while not self._v41_execution.acquire(timeout=0.05):
+                    self.engine._check_request(queue_deadline, cancelled)
+                execution_acquired = True
+                self.engine._check_request(queue_deadline, cancelled)
             urls, types, tensors, configs = trans_input(multimodal_inputs)
             token_cache_hits = token_cache_misses = 0
             if multimodal_inputs.metadata_only and not is_v41:
@@ -404,15 +433,22 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             # Before returning the response no consumer can have issued a READ.
             # After return, lost responses remain bounded in the pool until restart.
             if output is not None and not returned and self.rdma_encoder is not None:
-                self.rdma_encoder.release(
-                    [
-                        item.output_rdma.handle
-                        for item in output.multimodal_outputs
-                        if item.HasField("output_rdma")
-                    ]
-                )
+                try:
+                    self.rdma_encoder.release(
+                        [
+                            item.output_rdma.handle
+                            for item in output.multimodal_outputs
+                            if item.HasField("output_rdma")
+                        ]
+                    )
+                except Exception:
+                    logging.exception("Failed to release cancelled ViT outputs")
+            res = None
+            if execution_acquired:
+                self._v41_execution.release()
             with self._status_lock:
                 self._active -= 1
+                self._active_bytes -= request_bytes
 
 
 def _create_rpc_server(service, concurrency):
@@ -425,7 +461,10 @@ def _create_rpc_server(service, concurrency):
         maximum_concurrent_rpcs=rpc_concurrency,
         options=[
             ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+            (
+                "grpc.max_receive_message_length",
+                int(os.environ.get("VIT_MAX_REQUEST_BYTES", str(512 << 20))),
+            ),
         ],
     )
     add_MultimodalRpcServiceServicer_to_server(service, server)
@@ -583,6 +622,7 @@ def vit_start_server(py_env_configs=None):
     concurrency = (
         model.vit_config.vit_max_concurrent_requests
         if engine._scheduler is not None
+        or model.model_config.model_type == "deepseek_v41"
         else 1
     )
     if concurrency <= 0:

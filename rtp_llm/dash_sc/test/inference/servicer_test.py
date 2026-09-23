@@ -3817,9 +3817,9 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
         tokenizer = _dsv4_tokenizer()
         env = _GenerateEnvCfg()
         req = self._request([])
-        req.parameters[
-            "payload"
-        ].string_param = '{"input":{"messages":[]},"parameters":{}}'
+        req.parameters["payload"].string_param = (
+            '{"input":{"messages":[]},"parameters":{}}'
+        )
         req.parameters["ds_header_attributes"].string_param = json.dumps(
             {"x-ds-llm-thinking": True}
         )
@@ -3952,7 +3952,9 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
         url = "https://example.test/image.png"
         response = MagicMock()
         response.__enter__.return_value = SimpleNamespace(
-            status_code=200, content=self.data
+            status_code=200,
+            content=self.data,
+            iter_content=lambda **kwargs: iter([self.data]),
         )
         with patch("rtp_llm.utils.multimodal_util.REQUEST_GET", None), patch.object(
             ssrf_check, "check_ssrf", return_value=True
@@ -3964,7 +3966,7 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
             visitor, _ = await self._run(self._request([url]))
             self.assertEqual(visitor.enqueue_called, 1)
             check.assert_called_once_with(url)
-            self.assertEqual(get.call_args.kwargs["timeout"], 10)
+            self.assertEqual(get.call_args.kwargs["timeout"], (5, 20))
             self.assertTrue(get.call_args.kwargs["stream"])
             check.return_value = False
             rejected, chunks = await self._run(self._request([url]))
@@ -4012,9 +4014,9 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
         ids = _parsed_input_ids([0, 129260, 1])
         ids = ParsedInputIds(values=NoScanList(ids.values), tensor=ids.tensor)
         req = self._request([])
-        req.parameters[
-            "payload"
-        ].string_param = '{"input":{"messages":[]},"parameters":{}}'
+        req.parameters["payload"].string_param = (
+            '{"input":{"messages":[]},"parameters":{}}'
+        )
         with patch(
             "rtp_llm.dash_sc.inference.servicer.asyncio.to_thread",
             side_effect=AssertionError,
@@ -4100,7 +4102,9 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
             hashes = []
             for data in (self.data, self._png((0, 0, 255))):
                 response.__enter__.return_value = SimpleNamespace(
-                    status_code=200, content=data
+                    status_code=200,
+                    content=data,
+                    iter_content=lambda **kwargs: iter([data]),
                 )
                 visitor, _ = await self._run(self._request([url, url]), ids)
                 images = visitor.last_generate_input.v41_inputs.images
@@ -4127,6 +4131,7 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
                     response.__enter__.return_value = SimpleNamespace(
                         status_code=200,
                         content=data,
+                        iter_content=lambda **kwargs: iter([data]),
                         headers=(
                             {"Content-Length": "1"}
                             if source == "http_understated_length"
@@ -4167,7 +4172,9 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
     async def test_image_size_limit_is_per_file_with_duplicate_urls(self):
         data = self.data.ljust(10 * 1024 * 1024, b"\0")
         response = MagicMock()
-        response.__enter__.return_value = SimpleNamespace(status_code=200, content=data)
+        response.__enter__.return_value = SimpleNamespace(
+            status_code=200, content=data, iter_content=lambda **kwargs: iter([data])
+        )
         url = "https://example.test/image.png"
         with patch(
             "rtp_llm.utils.multimodal_util.request_get", return_value=response
@@ -4182,6 +4189,111 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(images), 2)
         self.assertLess(images[0].start, images[1].start)
         self.assertEqual(images[0].content_sha256, images[1].content_sha256)
+
+    async def test_download_retries_transient_failure_without_leaking_url(self):
+        import requests
+
+        response = MagicMock()
+        response.__enter__.return_value = SimpleNamespace(
+            status_code=200, iter_content=lambda **kwargs: iter([self.data])
+        )
+        with patch(
+            "rtp_llm.utils.multimodal_util.request_get",
+            side_effect=[requests.ReadTimeout("secret signed URL"), response],
+        ) as get, patch(
+            "rtp_llm.dash_sc.inference.servicer.time.sleep"
+        ), self.assertLogs(
+            level="WARNING"
+        ) as logs:
+            visitor, _ = await self._run(
+                self._request(["https://example.test/image?secret=key"])
+            )
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(get.call_count, 2)
+        self.assertNotIn("secret", "\n".join(logs.output))
+        self.assertIn("ReadTimeout", "\n".join(logs.output))
+
+    async def test_download_retry_exhaustion_is_not_engine_abort(self):
+        import requests
+
+        with patch(
+            "rtp_llm.utils.multimodal_util.request_get",
+            side_effect=requests.ConnectionError("secret"),
+        ) as get, patch("rtp_llm.dash_sc.inference.servicer.time.sleep"):
+            visitor, chunks = await self._run(
+                self._request(["https://example.test/image"])
+            )
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(get.call_count, 3)
+        payload = _dash_error_payload(chunks[0])[1]
+        self.assertEqual(payload["status_code"], 503)
+        self.assertNotIn("secret", payload["status_message"])
+
+    async def test_download_recovers_from_mid_stream_disconnect(self):
+        import requests
+
+        def broken(**kwargs):
+            yield self.data[:8]
+            raise requests.exceptions.ChunkedEncodingError("connection lost")
+
+        responses = [MagicMock(), MagicMock()]
+        responses[0].__enter__.return_value = SimpleNamespace(
+            status_code=200, iter_content=broken
+        )
+        responses[1].__enter__.return_value = SimpleNamespace(
+            status_code=200, iter_content=lambda **kwargs: iter([self.data])
+        )
+        with patch(
+            "rtp_llm.utils.multimodal_util.request_get", side_effect=responses
+        ), patch("rtp_llm.dash_sc.inference.servicer.time.sleep"):
+            visitor, _ = await self._run(self._request(["https://example.test/image"]))
+        self.assertEqual(visitor.enqueue_called, 1)
+        for response in responses:
+            response.__exit__.assert_called_once()
+
+    async def test_download_deadline_interrupts_slow_drip_body(self):
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        import requests
+        from urllib3.exceptions import ReadTimeoutError
+
+        from rtp_llm.dash_sc.inference.servicer import _image_download_chunks
+
+        stop = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "100000")
+                self.end_headers()
+                while not stop.wait(0.01):
+                    try:
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                    except OSError:
+                        break
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with requests.get(
+                f"http://127.0.0.1:{server.server_port}", stream=True, timeout=1
+            ) as response:
+                started = time.monotonic()
+                with self.assertRaises((requests.Timeout, ReadTimeoutError)):
+                    list(_image_download_chunks(response, started + 0.1))
+                self.assertLess(time.monotonic() - started, 1)
+        finally:
+            stop.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     async def test_download_failure_is_sanitized_400(self):
         with patch(
@@ -4236,10 +4348,12 @@ class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
         visitor = self._visitor()
         response = MagicMock()
         response.__enter__.return_value = SimpleNamespace(
-            status_code=200, content=self.data
+            status_code=200,
+            content=self.data,
+            iter_content=lambda **kwargs: iter([self.data]),
         )
 
-        def download(url, headers):
+        def download(url, headers, timeout=None):
             loop.call_soon_threadsafe(entered.set)
             if not release.wait(5):
                 raise RuntimeError("test download was not released")

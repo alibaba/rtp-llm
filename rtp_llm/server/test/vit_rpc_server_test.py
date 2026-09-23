@@ -29,8 +29,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.ops import get_multimodal_feature_hash
 from rtp_llm.server.vit_rpc_server import (
     MultimodalRpcServer,
-    _create_rpc_server,
     _create_health_server,
+    _create_rpc_server,
     _serve_rpc_server,
     trans_output,
 )
@@ -313,6 +313,75 @@ class VitRpcServerTest(unittest.TestCase):
         )
         return server
 
+    def test_v41_admission_uses_configured_concurrency_without_batch_scheduler(self):
+        engine = self.v41_server().engine
+        engine.model.model_config.model_type = "deepseek_v41"
+        engine._scheduler = None
+        engine.vit_config = SimpleNamespace(vit_max_concurrent_requests=32)
+        service = MultimodalRpcServer(engine)
+        self.assertEqual(service.max_requests, 32)
+
+    def test_v41_waits_without_overlapping_gpu_execution(self):
+        service = self.v41_server()
+        service.max_requests = 2
+        entered, release = threading.Event(), threading.Event()
+        original = service.engine.submit_v41.side_effect
+        running = 0
+        peak = 0
+        mutex = threading.Lock()
+
+        def forward(images):
+            nonlocal running, peak
+            with mutex:
+                running += 1
+                peak = max(peak, running)
+            entered.set()
+            self.assertTrue(release.wait(3))
+            try:
+                return original(images)
+            finally:
+                with mutex:
+                    running -= 1
+
+        service.engine.submit_v41.side_effect = forward
+        with futures.ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(
+                service.RemoteMultimodalEmbedding, self.v41_request(), Context()
+            )
+            self.assertTrue(entered.wait(2))
+            second = pool.submit(
+                service.RemoteMultimodalEmbedding, self.v41_request(), Context()
+            )
+            try:
+                for _ in range(100):
+                    if service._active == 2:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(service._active, 2)
+                self.assertFalse(second.done())
+            finally:
+                release.set()
+            first.result(timeout=3)
+            second.result(timeout=3)
+        self.assertEqual(peak, 1)
+        self.assertEqual(service._active, 0)
+        self.assertEqual(service._active_bytes, 0)
+
+    def test_v41_expired_wait_releases_admission(self):
+        service = self.v41_server()
+        context = Context()
+        context.time_remaining = lambda: 0.001
+        service._v41_execution.acquire()
+        try:
+            with self.assertRaises(Aborted):
+                service.RemoteMultimodalEmbedding(self.v41_request(), context)
+        finally:
+            service._v41_execution.release()
+        self.assertEqual(context.code, grpc.StatusCode.DEADLINE_EXCEEDED)
+        service.engine.submit_v41.assert_not_called()
+        self.assertEqual(service._active, 0)
+        self.assertEqual(service._active_bytes, 0)
+
     def test_v41_roundtrip_preserves_all_images_and_typed_payload(self):
         service = self.v41_server()
         request = self.v41_request()
@@ -409,9 +478,11 @@ class VitRpcServerTest(unittest.TestCase):
                 service.RemoteMultimodalEmbedding(self.v41_request(), context)
             self.assertEqual(
                 context.code,
-                grpc.StatusCode.DEADLINE_EXCEEDED
-                if expired
-                else grpc.StatusCode.CANCELLED,
+                (
+                    grpc.StatusCode.DEADLINE_EXCEEDED
+                    if expired
+                    else grpc.StatusCode.CANCELLED
+                ),
             )
             self.assertEqual(service.engine.submit_v41.call_count, 0 if expired else 1)
             self.assertEqual(service._active, 0)

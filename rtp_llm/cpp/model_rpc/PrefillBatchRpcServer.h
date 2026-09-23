@@ -101,6 +101,9 @@ private:
     // report TOMBSTONED to the master.
     std::unordered_map<int64_t, int64_t>                                 recently_seen_requests_;
     std::deque<std::pair<int64_t, int64_t>>                              recently_seen_request_expiries_;
+    std::unordered_map<int64_t, int64_t>                                 fetch_expired_requests_;
+    std::deque<std::pair<int64_t, int64_t>>                              fetch_expired_order_;
+    void                                                                 sweepFetchExpired(int64_t now_ms);
     bool                                                                 stopping_{false};
 };
 

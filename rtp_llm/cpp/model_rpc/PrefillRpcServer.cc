@@ -283,7 +283,13 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
             vit_context->TryCancel();
         }
         auto result = mm_processor_->updateMultimodalFeatures(input, vit_context.get());
-        CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
+        if (!result.ok()) {
+            prefill_context.error_info = result;
+            prefill_context.error_status =
+                serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, result);
+            logPrefillFailureTrace("multimodal_process_error", prefill_context);
+            return;
+        }
     }
     auto prepared_request = std::make_unique<GenerateInputPB>(*prefill_context.rpc_context.request);
     // Decode consumes the expanded IDs and transferred KV, not image inputs.

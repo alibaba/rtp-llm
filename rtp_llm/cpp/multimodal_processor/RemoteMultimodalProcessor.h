@@ -92,9 +92,10 @@ private:
         request.set_support_rdma(rdma_transport_ != nullptr);
         auto status = stub->RemoteMultimodalEmbedding(context, request, &output_pb);
         if (!status.ok()) {
-            auto code = status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED ? ErrorCode::GENERATE_TIMEOUT :
-                        status.error_code() == grpc::StatusCode::CANCELLED         ? ErrorCode::CANCELLED :
-                                                                                     ErrorCode::MM_PROCESS_ERROR;
+            auto code = status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED  ? ErrorCode::GENERATE_TIMEOUT :
+                        status.error_code() == grpc::StatusCode::CANCELLED          ? ErrorCode::CANCELLED :
+                        status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED ? ErrorCode::MM_RESOURCE_EXHAUSTED :
+                                                                                      ErrorCode::MM_PROCESS_ERROR;
             return ErrorInfo(code, status.error_message());
         }
         std::vector<std::string> releasable;

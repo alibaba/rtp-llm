@@ -446,7 +446,6 @@ def trans_output(
 
 
 class ModelRpcClient(object):
-
     def __init__(
         self,
         addresses: list[str],
@@ -491,10 +490,11 @@ class ModelRpcClient(object):
             if request_timeout_ms is not None and request_timeout_ms > 0
             else self._max_rpc_timeout_ms
         )
-        input_pb = trans_input(input_py)
+        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
+        input_pb = None if use_fetch_response else trans_input(input_py)
+        request_id = input_py.request_id
         response_iterator = None
         stream_state = StreamState()
-        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
 
         if use_fetch_response:
             address_list = [
@@ -517,14 +517,12 @@ class ModelRpcClient(object):
                         break
 
         if not address_list:
-            raise ValueError(f"No address found for request: {input_pb.request_id}")
+            raise ValueError(f"No address found for request: {request_id}")
         # Select target address before entering the try block so it is always
         # available to the error handlers below (surfaced in logs only)
         # details to identify which backend peer dropped the connection).
         target_address = address_list[input_py.request_id % len(address_list)]
-        logging.debug(
-            f"request: [{input_pb.request_id}] send to address: {target_address}"
-        )
+        logging.debug(f"request: [{request_id}] send to address: {target_address}")
         stub = None
         stream_done = False
         terminal_seen = False
@@ -541,11 +539,11 @@ class ModelRpcClient(object):
                 ):
                     logging.info(
                         "FLEXLB_EXPECT_FETCH_RESPONSE request_id=%s target=%s",
-                        input_pb.request_id,
+                        request_id,
                         target_address,
                     )
                 response_iterator = stub.FetchResponse(
-                    FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
+                    FetchRequestPB(request_id=request_id), **grpc_kwargs
                 )
             else:
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
@@ -566,7 +564,7 @@ class ModelRpcClient(object):
                 metadata["grpc-status-details-bin"]
             ):
                 logging.error(
-                    f"request: [{input_pb.request_id}] RPC to [{target_address}] failed: "
+                    f"request: [{request_id}] RPC to [{target_address}] failed: "
                     f"{e.code()}, {e.details()}, detail error code is "
                     f"{ExceptionType.from_value(error_details.error_code)}"
                 )
@@ -575,7 +573,7 @@ class ModelRpcClient(object):
                 )
             else:
                 logging.error(
-                    f"request: [{input_pb.request_id}] RPC to [{target_address}] failed: "
+                    f"request: [{request_id}] RPC to [{target_address}] failed: "
                     f"error code is {e.code()}, detail is {e.details()}"
                 )
                 # NOTE: keep the backend peer (target_address) in the log line above
@@ -603,7 +601,7 @@ class ModelRpcClient(object):
                     raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, details)
         except Exception as e:
             logging.error(
-                f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
+                f"request: [{request_id}] rpc to [{target_address}] unknown error: {str(e)}"
             )
             raise e
         finally:

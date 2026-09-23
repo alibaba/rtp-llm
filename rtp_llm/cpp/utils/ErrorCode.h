@@ -23,6 +23,8 @@ enum class ErrorCode {
     MM_EMPTY_ENGINE_ERROR  = 904,
     MM_NOT_SUPPORTED_ERROR = 905,
     MM_DOWNLOAD_FAILED     = 906,
+    MM_RESOURCE_EXHAUSTED  = 907,
+    MM_DOWNLOAD_TEMPORARY  = 908,
 
     // Error codes starting from 8000 can be retried
     CANCELLED             = 8100,
@@ -213,6 +215,10 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "MM_WRONG_FORMAT_ERROR";
         case ErrorCode::MM_PROCESS_ERROR:
             return "MM_PROCESS_ERROR";
+        case ErrorCode::MM_RESOURCE_EXHAUSTED:
+            return "MM_RESOURCE_EXHAUSTED";
+        case ErrorCode::MM_DOWNLOAD_TEMPORARY:
+            return "MM_DOWNLOAD_TEMPORARY";
         case ErrorCode::MM_EMPTY_ENGINE_ERROR:
             return "MM_EMPTY_ENGINE_ERROR";
         case ErrorCode::MM_NOT_SUPPORTED_ERROR:

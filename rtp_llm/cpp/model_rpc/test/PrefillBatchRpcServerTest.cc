@@ -1063,6 +1063,9 @@ TEST(PrefillBatchRpcServerTest, DeferredContextMapExpiresAndCancelsUnfetchedCont
     EXPECT_EQ(contexts->size(), 0);
     EXPECT_TRUE(deferred->context->cancel_state->load());
     EXPECT_EQ(deferred->context->error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    std::shared_ptr<DeferredPrefillContext> claimed;
+    EXPECT_EQ(contexts->take(3003, claimed).error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(contexts->take(99999, claimed).error_code(), grpc::StatusCode::NOT_FOUND);
 }
 
 TEST(PrefillBatchRpcServerTest, TakingContextCancelsItsTtlWithoutCancellingRequest) {
