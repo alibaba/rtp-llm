@@ -1,3 +1,6 @@
+#include <cstdlib>
+#include <optional>
+#include <string>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -88,6 +91,66 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     ASSERT_TRUE(model_input.ok());
     EXPECT_FALSE(model_input->kv_cache_block_id.defined());
     EXPECT_FALSE(model_input->kv_cache_kernel_block_id.defined());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceInputModeIsStableAfterStartup) {
+    // Check real gathered tensor placement and values after environment mutation,
+    // including a new processor picking up its own startup configuration.
+    struct RestoreDeviceInputEnv {
+        std::optional<std::string> previous;
+        RestoreDeviceInputEnv() {
+            if (const char* value = std::getenv("RTP_LLM_DEVICE_INPUT")) {
+                previous = value;
+            }
+        }
+        ~RestoreDeviceInputEnv() {
+            if (previous) {
+                setenv("RTP_LLM_DEVICE_INPUT", previous->c_str(), 1);
+            } else {
+                unsetenv("RTP_LLM_DEVICE_INPUT");
+            }
+        }
+    } restore;
+
+    ResourceContext resource_context;
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size = 2048;
+    model_config.input_vocab_size = 2048;
+    model_config.num_layers = 1;
+    PDSepConfig pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    CacheConfig cache_config;
+    RuntimeConfig runtime_config;
+    auto query = std::make_shared<GenerateInput>();
+    query->input_ids = hostIntBuffer({1, 2, 3});
+    query->generate_config = std::make_shared<GenerateConfig>();
+    auto stream = std::make_shared<NormalGenerateStream>(
+        query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    StreamGroups groups({stream});
+
+    for (const char* startup_value : {"0", "1", "true"}) {
+        SCOPED_TRACE(startup_value);
+        const bool initially_device = std::string(startup_value) == "1";
+        ASSERT_EQ(setenv("RTP_LLM_DEVICE_INPUT", startup_value, 1), 0);
+        NormalBatchStreamProcessor existing(model_config, pd_sep_config, logging_config, cache_config, true);
+        ASSERT_EQ(setenv("RTP_LLM_DEVICE_INPUT", initially_device ? "0" : "1", 1), 0);
+        NormalBatchStreamProcessor fresh(model_config, pd_sep_config, logging_config, cache_config, true);
+        for (auto* processor : {&existing, &fresh}) {
+            TensorHolder holder;
+            auto inputs = processor->gatherModelInput(groups, holder);
+            ASSERT_TRUE(inputs.ok()) << inputs.status();
+            const bool expect_device = processor == &existing ? initially_device : !initially_device;
+            EXPECT_EQ(inputs->combo_tokens.is_cuda(), expect_device);
+            EXPECT_EQ(inputs->input_lengths.is_cuda(), expect_device);
+            EXPECT_EQ(inputs->prefix_lengths.is_cuda(), expect_device);
+            EXPECT_EQ(inputs->lm_output_indexes.is_cuda(), expect_device);
+            EXPECT_EQ(toVec<int32_t>(inputs->combo_tokens), (std::vector<int32_t>{1, 2, 3}));
+            EXPECT_EQ(toVec<int32_t>(inputs->input_lengths), (std::vector<int32_t>{3}));
+            EXPECT_EQ(toVec<int32_t>(inputs->lm_output_indexes), (std::vector<int32_t>{2}));
+        }
+    }
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {

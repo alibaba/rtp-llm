@@ -43,6 +43,9 @@ void syncPinnedCpuCopies(bool need_sync) {
 
 }  // namespace
 
+NormalOutputDispatcher::NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids):
+    output_vocab_ids_(std::move(output_vocab_ids)), async_debug_enabled_(asyncDebugEnabled()) {}
+
 std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
                                                    const torch::Tensor& success_cpu,
                                                    int                  batch_idx_in,
@@ -380,7 +383,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
-    if (asyncDebugEnabled() && success_cpu.defined()) {
+    if (async_debug_enabled_ && success_cpu.defined()) {
         for (int i = 0; i < cur_batch_size; ++i) {
             if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
                 const auto& state = stream->getNormalAsyncDeviceState();

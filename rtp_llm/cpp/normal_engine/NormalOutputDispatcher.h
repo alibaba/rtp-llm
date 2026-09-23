@@ -18,8 +18,7 @@ std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_
 
 class NormalOutputDispatcher {
 public:
-    explicit NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids = {}):
-        output_vocab_ids_(std::move(output_vocab_ids)) {}
+    explicit NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids = {});
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
@@ -41,6 +40,7 @@ private:
 
 private:
     std::vector<int64_t> output_vocab_ids_;
+    const bool async_debug_enabled_;
 };
 
 }  // namespace rtp_llm

@@ -61,6 +61,9 @@ private:
                                          TensorHolder&       host_holder) const;
 
     NormalModelInputGathererConfig config_;
+    // Snapshot startup flags before the engine worker can race with setenv.
+    const bool device_input_enabled_;
+    const bool async_debug_enabled_;
 };
 
 }  // namespace rtp_llm
