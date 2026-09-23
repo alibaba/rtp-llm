@@ -152,6 +152,7 @@ class PyMiscellaneousConfig:
     def __init__(self):
         self.misc_config = MiscellaneousConfig()
         # Additional Python-only fields
+        self.disable_access_log: bool = False
         self.oss_endpoint: str = ""
         self.openai_api_key: str = "EMPTY"
         self.dashscope_api_key: str = "EMPTY"
@@ -161,6 +162,7 @@ class PyMiscellaneousConfig:
     def to_string(self):
         return (
             self.misc_config.to_string() + "\n"
+            f"disable_access_log: {self.disable_access_log}\n"
             f"oss_endpoint: {self.oss_endpoint}\n"
             f"openai_api_key: {self.openai_api_key}\n"
             f"dashscope_api_key: {self.dashscope_api_key}\n"

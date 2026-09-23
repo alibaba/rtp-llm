@@ -52,6 +52,7 @@ class FrontendServer(object):
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
             rank_id,
             server_id,
+            disable_access_log=py_env_configs.misc_config.disable_access_log,
         )
         self._frontend_worker = None
         self._openai_endpoint = None
