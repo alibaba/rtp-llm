@@ -58,6 +58,23 @@ class LanguageCppEngine(BaseEngine):
     def _start(self) -> None:
         start_time = time.time()
         self.rtp_llm_op_.start(defer_service_start=self.defer_service_start)
+        if self.defer_service_start:
+            from rtp_llm.utils.scr_template_lifecycle import (
+                CallbackHook,
+                get_template_lifecycle,
+            )
+
+            # The native engine loop and cache connectors are still deferred.
+            # Register independently of Epsilon's optional GPU-cache hints:
+            # host release/restore failures must prevent service startup.
+            get_template_lifecycle().register(
+                f"mla-host-kv:{id(self)}",
+                CallbackHook(
+                    prepare=lambda _: self.rtp_llm_op_.release_mla_host_cache_for_checkpoint(),
+                    fixup=lambda _: self.rtp_llm_op_.restore_mla_host_cache_after_checkpoint(),
+                    abort=lambda _: self.rtp_llm_op_.restore_mla_host_cache_after_checkpoint(),
+                ),
+            )
         consume_s = time.time() - start_time
         logging.info(f"start rtp_llm_op_ took {consume_s:.2f}s")
 

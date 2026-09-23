@@ -49,6 +49,12 @@ class RtpLLMOp:
         """Return all owning GPU KV allocations, including speculative caches."""
         return self.ft_op.gpu_cache_tensors()
 
+    def release_mla_host_cache_for_checkpoint(self):
+        self.ft_op.release_mla_host_cache_for_checkpoint()
+
+    def restore_mla_host_cache_after_checkpoint(self):
+        self.ft_op.restore_mla_host_cache_after_checkpoint()
+
     def start_service(self):
         """Start serving sockets after a control-plane pre-service barrier."""
         self.ft_op.start_rpc_server()  # type: ignore

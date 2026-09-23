@@ -5,6 +5,9 @@
 #include <torch/torch.h>
 #include <numeric>
 #include <optional>
+#include <cstring>
+#include <sys/mman.h>
+#include <unistd.h>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
@@ -19,6 +22,7 @@
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 #if USING_CUDA
+#include <cuda.h>
 #include <cuda_runtime.h>
 #endif
 
@@ -339,6 +343,111 @@ TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
     EXPECT_EQ(evicted.evicted_keys, (CacheKeysType{10, 11}));
     EXPECT_EQ(pool.freeBlocksNum(), 2u);
     EXPECT_TRUE(tree_cache.empty());
+}
+
+TEST_F(BlockPoolTest, PinnedMlaCheckpointKeepsGraphAddressAndDiscardsPages) {
+#if USING_CUDA
+    autil::EnvGuard numa("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY", "none");
+    autil::EnvGuard prefault("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS", "2");
+    auto model = makeTestModelConfig(2);
+    model.model_type = "glm_5";
+    model.attn_config.use_mla = true;
+    model.attn_config.is_sparse = true;
+    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank = 512;
+    model.attn_config.rope_head_dim = 64;
+    model.attn_config.indexer_head_dim = 128;
+    auto config = SingleConfigCreator::createSingleConfig(model, ParallelismConfig{}, false);
+    config.block_num = 256;
+    config.dsa_mla_resident_tokens = config.seq_size_per_block;
+    config.dsa_mla_hbm_blocks = 3;
+    BlockPool pool(BlockPoolConfigHelper::createConfig(config), AllocationType::DEVICE, false, true);
+    ASSERT_TRUE(pool.init());
+    const auto host_view = pool.allLayerCacheBase()[0];
+    void* const ptr = pool.getBaseAddress();
+    const size_t bytes = pool.getTotalSizeBytes();
+    const auto gpu_buffers = pool.gpuCacheTensors();
+
+    auto blocks = pool.malloc(1);
+    EXPECT_ANY_THROW(pool.releaseMlaHostCacheForCheckpoint());
+    EXPECT_TRUE(host_view.is_pinned());
+    pool.requestFree(blocks);
+    auto generations = pool.blockGenerations().clone();
+
+    auto output = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    cudaStream_t stream;
+    cudaGraph_t graph;
+    cudaGraphExec_t executable;
+    // MLA kernels dereference mapped host KV directly. A graph memcpy node
+    // instead retains registration-specific state and is not this pool's path.
+    const char* ptx = R"ptx(
+.version 7.0
+.target sm_70
+.address_size 64
+.visible .entry read_host(.param .u64 source, .param .u64 dest) {
+    .reg .b64 src, dst;
+    .reg .b32 value;
+    ld.param.u64 src, [source];
+    ld.param.u64 dst, [dest];
+    ld.global.u32 value, [src];
+    st.global.u32 [dst], value;
+    ret;
+}
+)ptx";
+    CUmodule module;
+    CUfunction read_host;
+    ASSERT_EQ(cuModuleLoadData(&module, ptx), CUDA_SUCCESS);
+    ASSERT_EQ(cuModuleGetFunction(&read_host, module, "read_host"), CUDA_SUCCESS);
+    void* source = ptr;
+    void* dest = output.data_ptr();
+    void* args[] = {&source, &dest};
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+    ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), cudaSuccess);
+    ASSERT_EQ(cuLaunchKernel(read_host, 1, 1, 1, 1, 1, 1, 0, stream, args, nullptr), CUDA_SUCCESS);
+    ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+    ASSERT_EQ(cudaGraphInstantiateWithFlags(&executable, graph, 0), cudaSuccess);
+    for (int iteration = 0; iteration < 2; ++iteration) {
+        std::memset(ptr, 0x5a, bytes);
+        pool.releaseMlaHostCacheForCheckpoint();
+        pool.releaseMlaHostCacheForCheckpoint();
+        EXPECT_EQ(pool.getBaseAddress(), ptr);
+        const size_t page_size = sysconf(_SC_PAGESIZE);
+        std::vector<unsigned char> resident((bytes + page_size - 1) / page_size);
+        ASSERT_EQ(mincore(ptr, bytes, resident.data()), 0);
+        EXPECT_TRUE(std::all_of(resident.begin(), resident.end(), [](auto flags) { return !(flags & 1); }));
+        pool.restoreMlaHostCacheAfterCheckpoint();
+        pool.restoreMlaHostCacheAfterCheckpoint();
+        EXPECT_TRUE(host_view.is_pinned());
+        EXPECT_EQ(host_view.data_ptr(), pool.allLayerCacheBase()[0].data_ptr());
+        EXPECT_TRUE(torch::all(host_view.view(torch::kUInt8) == 0).item<bool>());
+        generations.add_(1);
+        EXPECT_TRUE(torch::equal(pool.blockGenerations(), generations));
+        for (size_t i = 0; i < gpu_buffers.size(); ++i) {
+            EXPECT_EQ(gpu_buffers[i].data_ptr(), pool.gpuCacheTensors()[i].data_ptr());
+        }
+        *static_cast<int32_t*>(ptr) = 73 + iteration;
+        ASSERT_EQ(cudaGraphLaunch(executable, stream), cudaSuccess);
+        ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+        EXPECT_EQ(output.cpu().item<int32_t>(), 73 + iteration);
+    }
+    EXPECT_EQ(cudaGraphExecDestroy(executable), cudaSuccess);
+    EXPECT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+    EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+    EXPECT_EQ(cuModuleUnload(module), CUDA_SUCCESS);
+#else
+    GTEST_SKIP() << "CUDA host registration required";
+#endif
+}
+
+TEST_F(BlockPoolTest, CheckpointDoesNotReleaseOrdinaryHostPool) {
+    auto config = BlockPoolConfigHelper::createConfig(makeMtpCacheConfigByCreateSpConfig(1, 0, 4));
+    BlockPool pool(config, AllocationType::HOST);
+    ASSERT_TRUE(pool.init());
+    auto view = pool.allLayerCacheBase()[0].view(torch::kUInt8);
+    view.fill_(42);
+    pool.releaseMlaHostCacheForCheckpoint();
+    pool.restoreMlaHostCacheAfterCheckpoint();
+    EXPECT_TRUE(torch::all(view == 42).item<bool>());
 }
 
 // Scale the 48 x 16K + 16 x 192K workload to one/twelve blocks per query.
