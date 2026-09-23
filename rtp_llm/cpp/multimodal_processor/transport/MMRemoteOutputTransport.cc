@@ -1,20 +1,19 @@
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransport.h"
 
+#include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
 #include <algorithm>
 #include <memory>
 #include <utility>
 
 namespace rtp_llm {
 
-int64_t resolveRpcTimeoutMs(const MultimodalInputsPB& request,
-                            int64_t                   default_rpc_timeout_ms,
-                            int64_t                   rpc_timeout_margin_ms) {
+int64_t
+resolveRpcTimeoutMs(const MultimodalInputsPB& request, int64_t default_rpc_timeout_ms, int64_t rpc_timeout_margin_ms) {
     int64_t max_timeout_ms = 0;
     for (const auto& mm_input : request.multimodal_inputs()) {
         const int64_t configured_timeout_ms = mm_input.mm_preprocess_config().mm_timeout_ms();
-        const int64_t resolved_timeout_ms = configured_timeout_ms > 0
-                                                ? configured_timeout_ms + rpc_timeout_margin_ms
-                                                : default_rpc_timeout_ms;
+        const int64_t resolved_timeout_ms =
+            configured_timeout_ms > 0 ? configured_timeout_ms + rpc_timeout_margin_ms : default_rpc_timeout_ms;
         max_timeout_ms = std::max(max_timeout_ms, resolved_timeout_ms);
     }
     return max_timeout_ms > 0 ? max_timeout_ms : default_rpc_timeout_ms;
@@ -55,9 +54,11 @@ void MMTransportMetrics::reportRpcMetrics(const std::string& endpoint,
 
 // ---- MMRemoteOutputTransport ----
 
-ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string&  endpoint,
-                                                             MultimodalInputsPB& request_pb) {
-    DeadlineBudget budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_));
+ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string&   endpoint,
+                                                             MultimodalInputsPB&  request_pb,
+                                                             grpc::ServerContext* server_context) {
+    DeadlineBudget  budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_),
+                          server_context);
     DeliveryContext context{endpoint, budget, *control_};
 
     std::vector<MMReceiptReader*> advertised;
@@ -73,8 +74,7 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
     }
 
     auto* matched = matchReader(receipt.value());
-    if (matched != nullptr
-        && std::find(advertised.begin(), advertised.end(), matched) == advertised.end()) {
+    if (matched != nullptr && std::find(advertised.begin(), advertised.end(), matched) == advertised.end()) {
         // Reject an unadvertised data plane and release its remote resources.
         matched->discard(receipt.value(), context);
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
@@ -85,6 +85,10 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
     if (matched != nullptr) {
         auto result = matched->consume(receipt.value(), context);
         if (result.succeeded()) {
+            auto hash_status = MultimodalPbConverter::featureHashesFromPb(receipt.value(), result.output());
+            if (!hash_status.ok()) {
+                return hash_status;
+            }
             return std::move(result.output());
         }
         return result.error();
@@ -93,7 +97,15 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
                          "vit returned an inline receipt while RDMA transport was required");
     }
-    return terminal_->consumeTerminal(receipt.value(), context);
+    auto result = terminal_->consumeTerminal(receipt.value(), context);
+    if (!result.ok()) {
+        return result.status();
+    }
+    auto hash_status = MultimodalPbConverter::featureHashesFromPb(receipt.value(), result.value());
+    if (!hash_status.ok()) {
+        return hash_status;
+    }
+    return std::move(result.value());
 }
 
 MMReceiptReader* MMRemoteOutputTransport::matchReader(const MultimodalOutputPB& receipt) const {

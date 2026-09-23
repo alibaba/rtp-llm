@@ -12,6 +12,7 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
@@ -21,10 +22,15 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
+    MultimodalInputsPB,
     RoleAddrPB,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+    RpcServiceStub,
+)
 from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
 )
@@ -438,7 +444,14 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
-    input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    expansion = input_py.mm_token_expansion
+    if expansion is not None:
+        input_pb.token_ids.extend(expansion.token_ids)
+        input_pb.multimodal_token_layout.SetInParent()
+        for offset, length in expansion.spans:
+            input_pb.multimodal_token_layout.spans.add(offset=offset, length=length)
+    else:
+        input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
@@ -630,7 +643,15 @@ def trans_input(input_py: GenerateInput):
     return input_pb
 
 
-def get_multimodal_preprocess_value(value: Optional[int], default: int):
+def _make_multimodal_inputs_pb(input_pb: GenerateInputPB) -> MultimodalInputsPB:
+    mm_inputs_pb = MultimodalInputsPB(request_id=input_pb.request_id)
+    mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+    return mm_inputs_pb
+
+
+def get_multimodal_preprocess_value(
+    value: Optional[Union[int, float]], default: Union[int, float]
+) -> Union[int, float]:
     if value is not None and value != -1:
         return value
     else:
@@ -640,6 +661,11 @@ def get_multimodal_preprocess_value(value: Optional[int], default: int):
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
+    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+
+
+def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateConfig):
+    """Resolve preprocessing identically for inference and routing, one input at a time."""
     resized_shape = [-1, -1]
     if generate_config.resized_shape:
         if len(generate_config.resized_shape) != 2:
@@ -665,9 +691,10 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
             generate_config.max_pixels, mm_input.mm_preprocess_config.max_pixels
         )
-        mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
+        fps = get_multimodal_preprocess_value(
             generate_config.fps, mm_input.mm_preprocess_config.fps
         )
+        mm_preprocess_config_pb.fps = int(fps)
         mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
             generate_config.min_frames, mm_input.mm_preprocess_config.min_frames
         )
@@ -682,7 +709,36 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
             generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
         )
-        input_pb.multimodal_inputs.append(mm_input_pb)
+        mm_preprocess_config_pb.max_long_side_pixel = int(
+            get_multimodal_preprocess_value(
+                generate_config.max_long_side_pixel,
+                getattr(mm_input.mm_preprocess_config, "max_long_side_pixel", -1),
+            )
+        )
+        yield mm_input_pb
+
+
+def multimodal_cache_keys(input_py: GenerateInput) -> list[str]:
+    from rtp_llm.multimodal.multimodal_util import trans_config
+    from rtp_llm.ops import MultimodalInput
+
+    keys = []
+    for original, item in zip(
+        input_py.mm_inputs, iter_multimodal_inputs(input_py, input_py.generate_config)
+    ):
+        if not item.multimodal_url or (
+            original.tensor is not None and original.tensor.numel() > 0
+        ):
+            return []
+        # Use the worker's protobuf conversion so sentinel values produce
+        # identical cache keys on the frontend and ViT worker.
+        resolved = trans_config(item.mm_preprocess_config)
+        keys.append(
+            MultimodalInput(
+                item.multimodal_url, item.multimodal_type, original.tensor, resolved
+            ).cache_key()
+        )
+    return keys
 
 
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
@@ -1062,6 +1118,13 @@ class ModelRpcClient(object):
             client_span.set_attribute(trace_attrs.REQUEST_ID, str(input_py.request_id))
         last_output = None
 
+        if input_pb.multimodal_inputs:
+            # GreenNet content-safety gate: block before prefill until the VIT
+            # encoder's inspection verdict lands. A violation raises
+            # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
+            # request before any LLM compute.
+            await self._wait_greennet_verdict(input_py, input_pb)
+
         try:
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
@@ -1070,6 +1133,8 @@ class ModelRpcClient(object):
             grpc_kwargs = {}
             if effective_ms > 0:
                 grpc_kwargs["timeout"] = effective_ms / 1000.0
+            identity_metadata = dashscope_greennet_metadata(input_py.headers)
+            trace_metadata = tuple(trace_metadata or ()) + tuple(identity_metadata)
             if trace_metadata:
                 # One injection point covers both channels: W3C traceparent
                 # rides gRPC metadata for FetchResponse and GenerateStreamCall.
@@ -1305,3 +1370,82 @@ class ModelRpcClient(object):
         except Exception as e:
             logging.error(f"batch rpc unknown error: {str(e)}")
             raise e
+
+    async def _wait_greennet_verdict(
+        self, input_py: GenerateInput, input_pb: GenerateInputPB
+    ) -> None:
+        """Block until the VIT encoder's greennet inspection verdict lands.
+
+        Raises FtRuntimeException(UNSAFE_INPUT_CONTENT) on a violation — the
+        server signals it via an ErrorDetailsPB in the grpc-status-details-bin
+        trailer (same scheme as GenerateStreamCall). When no VIT role is routed
+        (in-process embedding), this is a no-op: the LOCAL path enforces greennet
+        inline inside mm_process_engine and surfaces the same exception through
+        the normal generate stream.
+
+        Successful hash metadata includes an approval for the exact ViT/media
+        pair, so that path returns without another RPC. Keep the verdict RPC
+        for requests that did not acquire approved metadata.
+
+        When greennet is disabled (open-source build or ENABLE_SAFETY_INSPECTION
+        off), this returns immediately WITHOUT any RPC — so the disabled path is
+        byte-identical to the pre-greennet behavior (no extra round-trip).
+        """
+        from rtp_llm.multimodal.greennet_hook import greennet_enabled
+
+        if not greennet_enabled():
+            return
+        for role_addr in input_py.generate_config.role_addrs:
+            if role_addr.role != RoleType.VIT:
+                continue
+            if (
+                input_py.greennet_verified_vit is not None
+                and input_py.greennet_verified_vit
+                == (
+                    role_addr.ip,
+                    role_addr.grpc_port,
+                    tuple(dict.fromkeys(multimodal_cache_keys(input_py))),
+                )
+            ):
+                # Hash acquisition already waited for inspection (or reused an
+                # approved hash). No separate ViT RPC is needed on this route.
+                continue
+            vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
+            mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
+            channel = await self._channel_pool.get(vit_addr)
+            stub = MultimodalRpcServiceStub(channel)
+            try:
+                await stub.WaitGreenNetVerdict(
+                    mm_inputs_pb,
+                    timeout=VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0,
+                    metadata=dashscope_greennet_metadata(input_py.headers),
+                )
+            except grpc.RpcError as e:
+                error_details = ErrorDetailsPB()
+                metadata = e.trailing_metadata()
+                if (
+                    "grpc-status-details-bin" in metadata
+                    and error_details.ParseFromString(
+                        metadata["grpc-status-details-bin"]
+                    )
+                ):
+                    logging.warning(
+                        f"request: [{input_py.request_id}] greennet rejected: "
+                        f"{ExceptionType.from_value(error_details.error_code)}, "
+                        f"{error_details.error_message}"
+                    )
+                    raise FtRuntimeException(
+                        ExceptionType(error_details.error_code),
+                        error_details.error_message,
+                    )
+                # No structured detail: greennet infra error (timeout / VIT down).
+                # Fail closed — never let an uninspected request through.
+                logging.error(
+                    f"request: [{input_py.request_id}] greennet verdict rpc to "
+                    f"{vit_addr} failed: {e.code()}, {e.details()}"
+                )
+                raise FtRuntimeException(
+                    ExceptionType.UNSAFE_INPUT_CONTENT,
+                    f"greennet verdict unavailable: {e.details()}",
+                )
+            break

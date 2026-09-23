@@ -405,3 +405,93 @@ def init_vit_group_args(parser, vit_config):
         default=1024,
         help="mm embedding调度器等待队列容量上限；超出时提交快速失败并返回过载错误，防止forward卡住时内存无界增长",
     )
+
+    vit_group.add_argument(
+        "--mm_video_max_frames",
+        env_name="MM_VIDEO_MAX_FRAMES",
+        bind_to=(vit_config, "mm_video_max_frames"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES,
+        help="多模态视频最大采样帧数",
+    )
+
+    vit_group.add_argument(
+        "--mm_cache_gpu_max_bytes",
+        env_name="MM_CACHE_GPU_MAX_BYTES",
+        bind_to=(vit_config, "mm_cache_gpu_max_bytes"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_CACHE_GPU_MAX_BYTES,
+        help="每个ViT进程的GPU embedding缓存容量，单位bytes，默认2GiB，0关闭GPU驻留；淘汰时下放CPU",
+    )
+
+    vit_group.add_argument(
+        "--mm_cache_cpu_max_bytes",
+        env_name="MM_CACHE_CPU_MAX_BYTES",
+        bind_to=(vit_config, "mm_cache_cpu_max_bytes"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_CACHE_CPU_MAX_BYTES,
+        help="每个ViT进程的CPU embedding缓存容量，单位bytes，默认2GiB，0关闭CPU驻留；命中时恢复原设备",
+    )
+
+    vit_group.add_argument(
+        "--mm_hash_key_cache_max_bytes",
+        env_name="MM_HASH_KEY_CACHE_MAX_BYTES",
+        bind_to=(vit_config, "mm_hash_key_cache_max_bytes"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES,
+        help="每个ViT进程的CPU hash缓存容量，单位bytes，包含hash张量和key元数据，0关闭",
+    )
+
+    vit_group.add_argument(
+        "--vit_concurrency",
+        env_name="VIT_CONCURRENCY",
+        bind_to=(vit_config, "vit_concurrency"),
+        type=int,
+        default=64,
+        help="ViT 异步计算的最大并发数",
+    )
+
+    vit_group.add_argument(
+        "--vit_max_queue_size",
+        env_name="VIT_MAX_QUEUE_SIZE",
+        bind_to=(vit_config, "vit_max_queue_size"),
+        type=int,
+        default=64,
+        help="ViT 异步计算等待队列的最大任务数",
+    )
+
+    for name, parser, default, description in (
+        (
+            "mm_remote_cache_enable",
+            str2bool,
+            False,
+            "启用共享KVCM多模态完整结果缓存，默认关闭",
+        ),
+        (
+            "mm_remote_cache_max_object_bytes",
+            int,
+            256 * 1024**2,
+            "远端缓存单对象最大bytes",
+        ),
+        (
+            "mm_remote_cache_max_inflight_bytes",
+            int,
+            1024**3,
+            "远端缓存读写暂存内存预算bytes",
+        ),
+        ("mm_remote_cache_max_pending", int, 8, "远端缓存最大未完成任务数"),
+        (
+            "mm_remote_cache_read_timeout_ms",
+            int,
+            200,
+            "远端缓存读取等待预算ms，超时回退计算",
+        ),
+    ):
+        vit_group.add_argument(
+            "--" + name,
+            env_name=name.upper(),
+            bind_to=(vit_config, name),
+            type=parser,
+            default=default,
+            help=description,
+        )

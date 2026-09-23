@@ -675,6 +675,28 @@ class DashScGrpcRequestTest(TestCase):
                 self.assertEqual(sp.max_new_tokens, value)
                 self.assertTrue(sp.max_new_tokens_from_completion_alias)
 
+    def test_default_thinking_budget_follows_max_new_tokens(self) -> None:
+        generate_config = SamplingParams(max_new_tokens=123).to_generate_config(
+            request_controls=DashScRequestControls(enable_thinking=True)
+        )
+
+        self.assertEqual(generate_config.max_new_tokens, 123)
+        self.assertEqual(generate_config.max_thinking_tokens, 123)
+
+    def test_default_thinking_budget_follows_resolved_completion_alias(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+            max_total_tokens=80,
+        )
+
+        generate_config = sampling.to_generate_config(
+            request_controls=DashScRequestControls(enable_thinking=True)
+        )
+
+        self.assertEqual(generate_config.max_new_tokens, 80)
+        self.assertEqual(generate_config.max_thinking_tokens, 80)
+
     def test_completion_alias_thinking_budget_keeps_backend_limit(
         self,
     ) -> None:
@@ -900,7 +922,6 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(parsed.values, [7, 8, 9])
         self.assertEqual(parse_input_ids_from_request(req), [7, 8, 9])
 
-
     def test_inference_input_ids_from_int64_converts_to_engine_dtype(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "input_ids", "INT64", [2], struct.pack("<2q", 10, 11))
@@ -911,7 +932,6 @@ class DashScGrpcRequestTest(TestCase):
         assert parsed is not None
         self.assertEqual(parsed.tensor.dtype, torch.int32)
         self.assertEqual(parsed.tensor.tolist(), [10, 11])
-
 
     def test_inference_input_ids_from_int64_accepts_int32_boundaries(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -929,7 +949,6 @@ class DashScGrpcRequestTest(TestCase):
         assert parsed is not None
         self.assertEqual(parsed.tensor.tolist(), [-(2**31), 2**31 - 1])
 
-
     def test_inference_input_ids_from_int64_rejects_int32_overflow(self) -> None:
         for value in (-(2**40), 2**40):
             with self.subTest(value=value):
@@ -939,7 +958,6 @@ class DashScGrpcRequestTest(TestCase):
                     DashScInputIdsError, "outside the INT32 range"
                 ):
                     parse_dash_sc_grpc_request(req)
-
 
     def test_inference_input_ids_rejects_misaligned_wire_buffer(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()

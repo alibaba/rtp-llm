@@ -833,6 +833,20 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         Request request = new Request();
         request.setRequestId(pb.getRequestId());
         request.setBlockCacheKeys(pb.getBlockCacheKeysList());
+        request.setMediaKeys(pb.getMediaKeysList());
+        request.setVitRouteOnly(pb.getVitRouteOnly());
+        if (pb.hasSelectedVit()) {
+            var selected = pb.getSelectedVit();
+            ServerStatus vit = new ServerStatus();
+            vit.setRole(RoleType.VIT.getCode().equals(selected.getRole()) ? RoleType.VIT : null);
+            vit.setServerIp(selected.getServerIp());
+            vit.setHttpPort(selected.getHttpPort());
+            vit.setGrpcPort(selected.getGrpcPort());
+            vit.setGroup(selected.getGroup().isEmpty() ? null : selected.getGroup());
+            vit.setWorkerInstance(selected.getWorkerInstance().isEmpty() ? null : selected.getWorkerInstance());
+            vit.setWorkerGeneration(selected.getWorkerGeneration());
+            request.setSelectedVit(vit);
+        }
         request.setSeqLen(pb.getSeqLen());
         // Keep the wire values for transport compatibility and request
         // observability. FlexLB scheduling expiration is owned by the QUEUE
@@ -914,6 +928,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         .setServerIp(ss.getServerIp() != null ? ss.getServerIp() : "")
                         .setHttpPort(ss.getHttpPort())
                         .setGrpcPort(ss.getGrpcPort())
+                        .setGroup(ss.getGroup() != null ? ss.getGroup() : "")
+                        .setWorkerInstance(ss.getWorkerInstance() != null ? ss.getWorkerInstance() : "")
+                        .setWorkerGeneration(ss.getWorkerGeneration())
                         .build());
             }
         }

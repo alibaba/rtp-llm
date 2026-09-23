@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import grpc
 import grpc.aio
@@ -25,14 +25,31 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
     FlexlbServiceStub,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    ErrorDetailsPB,
+    GenerateInputPB,
+    MultimodalHashRequestPB,
+    MultimodalInputsPB,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+)
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
+from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
+from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
+    normalize_request_headers,
+)
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_client_span
 from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
+
+DEFAULT_REQUEST_TIMEOUT_SEC = 0.5
+VIT_ROUTE_STALE_CODE = 8408
 
 route_logger = logging.getLogger("route_logger")
 
@@ -69,6 +86,7 @@ class FlexlbResponse:
     error_message: Optional[str] = None
     admission_reject_reason: AdmissionRejectReason = AdmissionRejectReason.UNSPECIFIED
     enqueued_by_master: bool = False
+    result: Optional[Dict[str, Any]] = None
 
     @property
     def is_ok(self) -> bool:
@@ -147,6 +165,12 @@ class MasterClient:
         )
         self.host_service: Optional[HostService] = host_service
         self._channels: Dict[str, grpc.aio.Channel] = {}
+        self._vit_channels = GrpcHostChannelPool(
+            options=[
+                ("grpc.max_receive_message_length", MAX_METADATA_BYTES),
+                ("grpc.max_send_message_length", MAX_METADATA_BYTES),
+            ]
+        )
         self.latest_queue_length: int = 0
 
     def _get_grpc_target(self, addr: str) -> str:
@@ -183,6 +207,7 @@ class MasterClient:
         for channel in self._channels.values():
             await channel.close()
         self._channels.clear()
+        await self._vit_channels.close()
 
     def get_latest_queue_length(self) -> int:
         return self.latest_queue_length
@@ -262,9 +287,13 @@ class MasterClient:
                 elapsed,
             )
             if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                await self._best_effort_cancel(
-                    stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED, trace_metadata
-                )
+                if not request_pb.vit_route_only:
+                    await self._best_effort_cancel(
+                        stub,
+                        request_id,
+                        CANCEL_REASON_DEADLINE_EXCEEDED,
+                        trace_metadata,
+                    )
                 await self._close_channel(target)
                 raise FtRuntimeException(
                     exception_type=ExceptionType.DEADLINE_EXCEEDED,
@@ -273,7 +302,7 @@ class MasterClient:
             await self._close_channel(target)
             return None
         except asyncio.CancelledError:
-            if "stub" in locals():
+            if "stub" in locals() and not request_pb.vit_route_only:
                 await self._best_effort_cancel(
                     stub, request_id, CANCEL_REASON_CLIENT_CANCELLED, trace_metadata
                 )
@@ -315,6 +344,11 @@ class MasterClient:
         input: GenerateInput,
         request_id: int,
         input_pb: Optional["GenerateInputPB"] = None,
+        *,
+        media_keys: Optional[List[str]] = None,
+        selected_vit: Optional[Dict[str, Any]] = None,
+        seq_len: Optional[int] = None,
+        vit_only: bool = False,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -343,7 +377,7 @@ class MasterClient:
         request_pb = FlexlbScheduleRequestPB(
             request_id=request_id,
             block_cache_keys=block_cache_keys,
-            seq_len=input.prompt_length,
+            seq_len=input.prompt_length if seq_len is None else seq_len,
             generate_timeout=ttft_timeout_ms,
             request_time_ms=int(time.time() * 1000),
             max_new_tokens=gc.max_new_tokens,
@@ -354,7 +388,24 @@ class MasterClient:
             cache_key_block_size=cache_key_block_size,
             priority=priority,
         )
-        if input_pb is not None:
+        request_pb.media_keys.extend(media_keys or [])
+        request_pb.vit_route_only = vit_only
+        if selected_vit is not None:
+            for name in (
+                "role",
+                "server_ip",
+                "http_port",
+                "grpc_port",
+                "group",
+                "worker_instance",
+                "worker_generation",
+            ):
+                value = selected_vit.get(name)
+                if value is not None:
+                    setattr(request_pb.selected_vit, name, value)
+        if vit_only:
+            timeout_s = min(timeout_s, 0.5) if timeout_s is not None else 0.5
+        if input_pb is not None and not vit_only:
             request_pb.generate_input = input_pb.SerializeToString()
 
         response = await self._send_schedule_request(
@@ -377,6 +428,15 @@ class MasterClient:
         self.latest_queue_length = response.queue_length
 
         if response.code != SUCCESS_CODE:
+            # Only an unadmitted stale selection can be retried with the same request id.
+            if (
+                selected_vit is not None
+                and response.code == VIT_ROUTE_STALE_CODE
+                and not response.HasField("lifecycle")
+            ):
+                return FlexlbResponse.error_response(
+                    response.code, response.error_message
+                )
             admission_reject_reason = _admission_reject_reason_from_response(response)
             try:
                 exception_type = ExceptionType(response.code)
@@ -411,10 +471,24 @@ class MasterClient:
             )
             for s in response.server_status
         ]
-        return FlexlbResponse.ok(
-            role_addrs,
-            enqueued_by_master=response.enqueued_by_master,
+        result = FlexlbResponse.ok(
+            role_addrs, enqueued_by_master=response.enqueued_by_master
         )
+        result.result = {
+            "server_status": [
+                {
+                    "role": s.role,
+                    "server_ip": s.server_ip,
+                    "http_port": s.http_port,
+                    "grpc_port": s.grpc_port,
+                    "group": s.group or None,
+                    "worker_instance": s.worker_instance or None,
+                    "worker_generation": s.worker_generation,
+                }
+                for s in response.server_status
+            ]
+        }
+        return result
 
     @staticmethod
     def _extract_api_key(input: GenerateInput) -> str:
@@ -453,3 +527,169 @@ class MasterClient:
             if qos_priority is not None and qos_priority > 0:
                 return qos_priority
         return 50
+
+    async def get_vit_cache_metadata(
+        self, address: RoleAddr, keys: List[str], input: Optional[GenerateInput] = None
+    ):
+        """Probe hashes, then submit only missing media when routing requires them."""
+        started = time.monotonic()
+        unique_keys = list(dict.fromkeys(keys))
+        if input is not None:
+            input.greennet_verified_vit = None
+        metadata = await self._get_vit_metadata(
+            address,
+            MultimodalHashRequestPB(keys=unique_keys),
+            DEFAULT_REQUEST_TIMEOUT_SEC,
+            headers=input.headers if input is not None else None,
+        )
+        if input is None:
+            return metadata
+        entries = {
+            e["key"]: e
+            for e in (metadata or {}).get("entries", [])
+            if isinstance(e, dict) and isinstance(e.get("key"), str)
+        }
+        missing = {
+            key
+            for key in unique_keys
+            if not entries.get(key, {}).get(
+                "hash_hit", entries.get(key, {}).get("hit", False)
+            )
+        }
+        if not missing:
+            self._record_greennet_approval(input, address, unique_keys, entries)
+            return metadata
+
+        from rtp_llm.cpp.model_rpc.model_rpc_client import iter_multimodal_inputs
+
+        # The cache-hit probe carries no URLs. On a miss serialize each distinct
+        # missing input once, without copying image/video data into embeddings.
+        inputs = MultimodalInputsPB(request_id=input.request_id)
+        submitted = set()
+        for key, item in zip(
+            keys, iter_multimodal_inputs(input, input.generate_config)
+        ):
+            if key in missing and key not in submitted:
+                inputs.multimodal_inputs.add().CopyFrom(item)
+                submitted.add(key)
+        if submitted != missing:
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
+            )
+        configured_timeout = input.generate_config.mm_timeout_ms
+        if not configured_timeout or configured_timeout <= 0:
+            configured_timeout = max(
+                (
+                    i.mm_preprocess_config.mm_timeout_ms
+                    for i in input.mm_inputs
+                    if i.mm_preprocess_config.mm_timeout_ms > 0
+                ),
+                default=120000,
+            )
+        limits = [configured_timeout]
+        for name in ("ttft_timeout_ms", "timeout_ms"):
+            limit = getattr(input.generate_config, name, None)
+            if limit and limit > 0:
+                limits.append(limit)
+        remaining = min(limits) / 1000.0 - (time.monotonic() - started)
+        if remaining <= 0:
+            raise FtRuntimeException(
+                ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
+            )
+        filled = await self._get_vit_metadata(
+            address,
+            MultimodalHashRequestPB(
+                keys=[key for key in unique_keys if key in missing],
+                inputs=inputs,
+                timeout_ms=max(1, int(remaining * 1000)),
+            ),
+            remaining,
+            required=True,
+            headers=input.headers,
+        )
+        if metadata and filled.get("worker_instance") != metadata.get(
+            "worker_instance"
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR, "ViT restarted during hash acquisition"
+            )
+        entries.update({e["key"]: e for e in filled.get("entries", [])})
+        if any(
+            not entries.get(key, {}).get(
+                "hash_hit", entries.get(key, {}).get("hit", False)
+            )
+            for key in unique_keys
+        ):
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "ViT returned incomplete feature hashes"
+            )
+        filled["entries"] = [entries[key] for key in unique_keys]
+        self._record_greennet_approval(input, address, unique_keys, entries)
+        return filled
+
+    @staticmethod
+    def _record_greennet_approval(
+        input: GenerateInput,
+        address: RoleAddr,
+        keys: List[str],
+        entries: Dict[str, Any],
+    ) -> None:
+        if keys and all(entries[key].get("greennet_passed") is True for key in keys):
+            input.greennet_verified_vit = (address.ip, address.grpc_port, tuple(keys))
+
+    async def _get_vit_metadata(
+        self,
+        address,
+        request,
+        timeout_sec,
+        required=False,
+        headers=None,
+    ):
+        started = time.monotonic()
+        try:
+            channel = await self._vit_channels.get(f"{address.ip}:{address.grpc_port}")
+            response = await MultimodalRpcServiceStub(channel).GetMultimodalHashes(
+                request,
+                timeout=timeout_sec,
+                metadata=dashscope_greennet_metadata(headers),
+            )
+            return metadata_from_proto(response)
+        except grpc.RpcError as error:
+            if required:
+                code = (
+                    ExceptionType.GENERATE_TIMEOUT
+                    if error.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+                    else ExceptionType.MM_PROCESS_ERROR
+                )
+                message = error.details() or "ViT hash acquisition failed"
+                for key, value in error.trailing_metadata() or ():
+                    if key == "grpc-status-details-bin":
+                        details = ErrorDetailsPB.FromString(value)
+                        code = ExceptionType(details.error_code)
+                        message = details.error_message
+                        break
+                raise FtRuntimeException(code, message) from error
+            route_logger.warning(
+                "ViT hash probe unavailable, address=%s:%s, status=%s",
+                address.ip,
+                address.grpc_port,
+                error.code(),
+            )
+            return None
+        except (TimeoutError, OSError, ValueError) as error:
+            if required:
+                code = (
+                    ExceptionType.GENERATE_TIMEOUT
+                    if isinstance(error, TimeoutError)
+                    else ExceptionType.MM_PROCESS_ERROR
+                )
+                raise FtRuntimeException(
+                    code, f"ViT hash acquisition failed: {type(error).__name__}"
+                ) from error
+            route_logger.warning("ViT hash probe failed: %s", error)
+            return None
+        finally:
+            route_logger.debug(
+                "ViT hash RPC elapsed_ms=%.3f",
+                (time.monotonic() - started) * 1000,
+            )

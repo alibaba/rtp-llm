@@ -32,6 +32,14 @@ def init_generate_group_args(parser, generate_env_config):
         help="深度思考模式: disabled/adaptive/enabled（兼容 0/1）",
     )
     generate_group.add_argument(
+        "--max_thinking_tokens",
+        env_name="MAX_THINKING_TOKENS",
+        bind_to=(generate_env_config, "max_thinking_tokens"),
+        type=int,
+        default=None,
+        help="Default thinking token budget when the request does not specify one",
+    )
+    generate_group.add_argument(
         "--force_stop_words",
         env_name="FORCE_STOP_WORDS",
         bind_to=(generate_env_config, "force_stop_words"),

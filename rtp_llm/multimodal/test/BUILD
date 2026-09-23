@@ -115,3 +115,45 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "mm_embedding_cache_test",
+    srcs = ["mm_embedding_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_remote_embedding_cache_test",
+    srcs = ["mm_remote_embedding_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_client_test",
+    srcs = ["mm_kvcm_emb_client_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_config_test",
+    srcs = ["mm_kvcm_emb_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_tensor_object_test",
+    srcs = ["mm_kvcm_tensor_object_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_cancellation_test",
+    srcs = ["mm_cancellation_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "cuda_graph_gate_test",
+    srcs = ["cuda_graph_gate_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
