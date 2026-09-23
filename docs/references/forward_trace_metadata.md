@@ -1,8 +1,11 @@
 # Per-forward timeline metadata
 
 The RTP `TorchProfile` export path automatically includes `rtp_forward_metadata`
-(schema version 1). Each `RTP::model_forward(id=N)` event also exposes its record
-under `args.rtp_forward`. No model-input logging flag is required.
+(schema version 1). Exported events include phase, request count, sequence count
+and total Q in their name, for example
+`RTP::model_forward(id=1,phase=prefill_target,requests=2,sequences=2,tokens=8320)`.
+Each event exposes the full record under `args.rtp_forward`. No model-input
+logging flag is required. Names are expanded in the save worker.
 
 `q_lens[i]` is the number of new tokens executed for sequence row `i`;
 `prefix_lens[i]` is the initialized prefix before that execution; `kv_lens[i]`
@@ -41,7 +44,9 @@ If the fixed arena or 65,536-record limit is exhausted, records are marked
 incomplete; the collector never grows device storage or blocks inference to
 recover missing values. Unsupported dtype/layout is also explicit. The exporter
 checks recorded scopes against records and sets `complete=false` for dropped,
-invalid, failed or unmatched records. An export failure leaves a `.partial` file;
+invalid, failed or unmatched records. It also checks that existing CPU forward
+and K3 target-chunk scopes have enclosing metadata scopes; omissions increment
+`unannotated_forward_events`. An export failure leaves a `.partial` file;
 only an enriched trace is renamed to the final filename.
 
 The exporter currently parses the trace JSON in the save worker. Large traces

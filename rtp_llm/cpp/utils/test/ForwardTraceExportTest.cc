@@ -16,7 +16,7 @@ JsonMap exportFixture(const std::string& path, rtp_llm::ForwardTraceSession& ses
     std::ofstream output(path);
     output << R"({"traceEvents":[)";
     if (include_event) {
-        output << R"({"name":"RTP::model_forward(id=1)","ph":"X","cat":"cpu_op","pid":1,"tid":1,"ts":0,"dur":3,"args":{}},)";
+        output << R"json({"name":"RTP::model_forward(id=1)","ph":"X","cat":"cpu_op","pid":1,"tid":1,"ts":0,"dur":3,"args":{}},)json";
     }
     output << R"({"name":"py_model.forward","ph":"X","cat":"cpu_op","pid":1,"tid":1,"ts":1,"dur":1}]})";
     output.close();
