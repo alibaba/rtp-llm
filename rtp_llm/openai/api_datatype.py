@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
 from rtp_llm.config.response_format import ResponseFormat, parse_response_format
-from rtp_llm.utils.base_model_datatypes import AuxInfo
+from rtp_llm.utils.base_model_datatypes import AuxInfo, CustomOutput
 
 
 class ModelCard(BaseModel):
@@ -421,6 +421,7 @@ class ChatCompletionExtraOutputs(BaseModel):
     logits: Optional[Union[List[float], List[List[float]]]] = None
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
+    custom_output: Optional[CustomOutput] = None
 
 
 class ChatCompletionResponse(BaseModel):

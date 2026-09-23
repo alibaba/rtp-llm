@@ -110,6 +110,10 @@ private:
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1);
+    // Compact context rows prepared once by input gathering.
+    torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
+    void                            initializeCustomOutput();
+    torch::Tensor                   runCustomOutput(const torch::Tensor& rows);
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
@@ -170,6 +174,7 @@ private:
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
+    bool                                       custom_output_enabled_ = false;
 
     // Accumulated H2D copies from tensorHoldHostAndToCuda(); flushed as one kernel per forward.
     FusedD2DCopyParams d2d_copies_;
@@ -360,6 +365,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
+    }
+    // Registration enables the handler; only batches with selected prefill rows invoke it.
+    if (py::hasattr(py_model_, "custom_output_handler")) {
+        initializeCustomOutput();
     }
     const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :

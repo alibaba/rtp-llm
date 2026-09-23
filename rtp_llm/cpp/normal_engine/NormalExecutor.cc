@@ -174,8 +174,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                   cache_manager->cacheConfig()) :
                                    CacheConfig();
 
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
-        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
+    const int async_worker_count =
+        tp_rank_ > 0 || warm_up_ || is_propose_ ? 0 : params.runtime_config.output_dispatcher_worker_count;
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.model_config_,
+                                                                 params.pd_sep_config,
+                                                                 params.profiling_debug_logging_config,
+                                                                 cache_config,
+                                                                 warm_up_,
+                                                                 async_worker_count));
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
                                  params.sp_config.tree_decode_config,
@@ -485,6 +491,7 @@ void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const 
     to_cuda(model_input.prefix_lengths, "prefix_lengths");
     to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
+    to_cuda(model_input.custom_output_indexes, "custom_output_indexes");
     checkModelInputsOnCuda(model_input, tag);
 }
 
@@ -509,6 +516,7 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
     check(model_input.prefix_lengths, "prefix_lengths");
     check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     check(model_input.lm_output_indexes, "lm_output_indexes");
+    check(model_input.custom_output_indexes, "custom_output_indexes");
 }
 
 bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) const {

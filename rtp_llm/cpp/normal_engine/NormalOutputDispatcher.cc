@@ -3,7 +3,10 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <ATen/ThreadLocalState.h>
+#include <c10/core/InferenceMode.h>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #if USING_CUDA
@@ -43,8 +46,31 @@ void syncPinnedCpuCopies(bool need_sync) {
 
 }  // namespace
 
-NormalOutputDispatcher::NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids):
-    output_vocab_ids_(std::move(output_vocab_ids)), async_debug_enabled_(asyncDebugEnabled()) {}
+NormalOutputDispatcher::NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids, int async_worker_count):
+    output_vocab_ids_(std::move(output_vocab_ids)), async_debug_enabled_(asyncDebugEnabled()) {
+    if (async_worker_count < 0) {
+        throw std::invalid_argument("output_dispatcher_worker_count must be non-negative");
+    }
+    if (async_worker_count > 0) {
+        thread_pool_ = std::make_unique<autil::LockFreeThreadPool>(
+            async_worker_count, 2 * async_worker_count, nullptr, "OutputDispatcher");
+        if (!thread_pool_->start()) {
+            RTP_LLM_LOG_WARNING("failed to start output dispatcher thread pool; falling back to serial dispatch");
+            thread_pool_.reset();
+        } else {
+            RTP_LLM_LOG_INFO("created output dispatcher thread pool with %d workers", async_worker_count);
+        }
+    } else {
+        RTP_LLM_LOG_INFO("output dispatcher worker count is 0; using serial dispatch");
+    }
+}
+
+NormalOutputDispatcher::~NormalOutputDispatcher() {
+    if (thread_pool_) {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+    }
+}
 
 std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
                                                    const torch::Tensor& success_cpu,
@@ -144,6 +170,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool                need_d2h_sync = false;
     const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    const torch::Tensor custom_output_cpu =
+        copyToPinnedCpuAsync(merge_outputs.model_output.custom_output, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     int  batch_idx_in     = 0;
@@ -152,24 +180,79 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
     auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_) {
+        futures.reserve(stream_groups.size());
+    }
+    const auto                          dispatch_stream  = cuda_graph::graphGetCurrentStream();
+    const bool                          record_functions = at::isRecordFunctionEnabled();
+    std::optional<at::ThreadLocalState> profiling_state;
+    if (thread_pool_ && record_functions && at::hasCallbacks()) {
+        // Synchronous dispatch drains every worker before returning, so the
+        // caller's profiling session outlives these callbacks. AsyncRunner
+        // disables recording: never copy its profiler state into the pool.
+        profiling_state.emplace();
+    }
+
+    int custom_output_offset = 0;
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
+        // Assign compact rows in gather order before handing streams to workers.
+        const bool has_custom_output =
+            stream->isContextStream()
+            && stream->generateInput()->custom_output_token_position >= stream->prefixLength();
 
-        dispatchSingleStream(stream,
-                             merge_outputs,
-                             batch_idx_in,
-                             batch_idx_out,
-                             token_offset,
-                             return_all_probs,
-                             new_tokens_all,
-                             token_ids_cpu,
-                             success_cpu);
+        auto task = [&,
+                     stream,
+                     batch_idx_in,
+                     batch_idx_out,
+                     token_offset,
+                     dispatch_stream,
+                     custom_output_batch_idx = has_custom_output ? custom_output_offset : -1]() {
+            std::optional<at::ThreadLocalStateGuard> profiling_guard;
+            if (profiling_state) {
+                profiling_guard.emplace(*profiling_state);
+            }
+            // Also preserve AsyncRunner's disable guard for global callbacks.
+            at::RecordFunctionGuard      record_function_guard(record_functions);
+            c10::InferenceMode           inference_guard(true);
+            cuda_graph::GraphStreamGuard stream_guard(dispatch_stream);
+            dispatchSingleStream(stream,
+                                 merge_outputs,
+                                 batch_idx_in,
+                                 batch_idx_out,
+                                 token_offset,
+                                 return_all_probs,
+                                 new_tokens_all,
+                                 token_ids_cpu,
+                                 success_cpu,
+                                 custom_output_cpu,
+                                 custom_output_batch_idx);
+        };
 
+        if (thread_pool_) {
+            futures.emplace_back(thread_pool_->async(std::move(task)));
+        } else {
+            task();
+        }
+
+        if (has_custom_output) {
+            custom_output_offset += cur_batch_size;
+        }
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    // Tasks reference local tensors and merge_outputs. Drain every task before
+    // get() can propagate a worker exception and unwind this stack frame.
+    for (auto& future : futures) {
+        future.wait();
+    }
+    for (auto& future : futures) {
+        future.get();
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");
@@ -184,7 +267,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& token_ids_cpu,
-                                                  const torch::Tensor& success_cpu) const {
+                                                  const torch::Tensor& success_cpu,
+                                                  const torch::Tensor& custom_output_cpu,
+                                                  int                  custom_output_batch_idx) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -195,6 +280,15 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     auto next_batch_size = stream->nextBatchSize();
     auto token_size      = stream->currentExecuteTokenSize();
 
+    // Only uncached selected tokens occupy rows in the custom output batch.
+    torch::Tensor batch_custom_output;
+    if (custom_output_cpu.defined() && custom_output_batch_idx >= 0) {
+        if (custom_output_batch_idx + cur_batch_size > custom_output_cpu.size(0)) {
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "custom output row count mismatch");
+            return;
+        }
+        batch_custom_output = custom_output_cpu.narrow(0, custom_output_batch_idx, cur_batch_size);
+    }
     auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
 
     bool has_beam_search = stream->usesBeamSearchTokenLayoutForCurrentStep();
@@ -369,11 +463,12 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
-        auto batch_softmax_input = raw_logits.to(torch::kFloat32).contiguous();
 #if USING_CUDA
+        // The in-place kernel must not overwrite model logits or the views returned to streams.
+        auto batch_softmax_input = raw_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true).contiguous();
         cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
 #else
-        batch_softmax_input = torch::softmax(batch_softmax_input, -1);
+        auto batch_softmax_input = torch::softmax(raw_logits.to(torch::kFloat32).contiguous(), -1);
 #endif
         auto batch_softmax_tensor = batch_softmax_input.cpu();
         current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
@@ -383,6 +478,10 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
+    if (custom_output_batch_idx >= 0 && !model_output.custom_output_error.empty() && !error_info.has_value()) {
+        error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                               "custom output processor failed: " + model_output.custom_output_error);
+    }
     if (async_debug_enabled_ && success_cpu.defined()) {
         for (int i = 0; i < cur_batch_size; ++i) {
             if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
@@ -422,7 +521,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  std::move(prompt_logits_output),
                                  std::move(error_info),
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
-                                                             GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+                                                             GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
+                                 batch_custom_output};
     stream->update(update_info);
 }
 

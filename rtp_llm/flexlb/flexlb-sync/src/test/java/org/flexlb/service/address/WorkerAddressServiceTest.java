@@ -2,7 +2,6 @@ package org.flexlb.service.address;
 
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
@@ -43,7 +42,7 @@ class WorkerAddressServiceTest {
 
     @BeforeEach
     void setUp() {
-        Mockito.lenient().when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.lenient().when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         workerAddressService = new WorkerAddressService(engineHealthReporter, modelMetaConfig,
                 serviceDiscovery, configService);
     }

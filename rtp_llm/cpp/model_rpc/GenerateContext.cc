@@ -5,6 +5,15 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
+    if (!rpc_handling_completed_) {
+        RTP_LLM_LOG_ERROR("request [%s] GenerateContext destroyed before RPC handling completed, grpc code [%d], "
+                          "grpc message [%s], finished [%d], has stream [%d]",
+                          request_key.c_str(),
+                          static_cast<int>(error_status.error_code()),
+                          error_status.error_message().c_str(),
+                          finished,
+                          static_cast<bool>(stream_));
+    }
     stopStream();
     reportTime();
 }
@@ -138,40 +147,53 @@ void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
 }
 
 void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
+    if (stream_ && stream_ != stream) {
+        stopStreamForRetry();
+    }
     stream_ = stream;
     if (stream) {
         meta->enqueue(request_id, stream_);
     }
 }
 
-void GenerateContext::stopStream() {
-    if (stream_) {
-        if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
-            if (error_info.hasError()) {
-                RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=context_error, code=%d, err=%s",
-                                    request_key.c_str(),
-                                    static_cast<int>(error_info.code()),
-                                    error_info.ToString().c_str());
-                stream_->reportError(error_info.code(), error_info.ToString());
-            } else if (cancelled() || isRequestCancelled()) {
-                RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=client_cancel",
-                                    request_key.c_str());
-                stream_->reportError(ErrorCode::CANCELLED, "request cancelled by client");
-            } else {
-                RTP_LLM_LOG_WARNING("request [%s] stopping unfinished stream with terminal source=context_cleanup",
-                                    request_key.c_str());
-                stream_->reportError(ErrorCode::CANCELLED, "context cleanup before stream finished");
-            }
-        }
-        if (!stream_->finishOrCancel(kStopStreamWaitTimeoutMs, "cancel stream")) {
-            RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
-                                kStopStreamWaitTimeoutMs,
-                                stream_->generateInput()->request_id);
-        }
-        // RuntimeMeta snapshots the stream's terminal status during dequeue.
-        // Capture only after reportError/finishOrCancel have committed it so
-        // FlexLB observes the real cancellation or context error code.
+void GenerateContext::markRpcHandlingCompleted() {
+    rpc_handling_completed_ = true;
+}
+
+void GenerateContext::cancelStreamOnTeardown() noexcept {
+    if (!stream_ || stream_->getStatus() == StreamState::FINISHED || stream_->hasError()) {
+        return;
+    }
+    if (rpc_handling_completed_ && !hasError() && !error_info.hasError() && !isRequestCancelled()) {
+        return;
+    }
+    // Preserve the terminal cause before RuntimeMeta snapshots the stream.
+    if (error_info.hasError()) {
+        stream_->reportError(error_info.code(), error_info.ToString());
+    } else {
+        stream_->reportError(ErrorCode::CANCELLED, "RPC handling failed, was cancelled, or exited unexpectedly");
+    }
+}
+
+void GenerateContext::stopStreamForRetry() {
+    if (!stream_) {
+        return;
+    }
+    if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
+        stream_->reportError(ErrorCode::CANCELLED, "cancel abandoned retry attempt");
+    }
+    if (meta) {
         meta->dequeue(request_id, stream_);
+    }
+    stream_.reset();
+}
+
+void GenerateContext::stopStream() {
+    cancelStreamOnTeardown();
+    if (stream_) {
+        if (meta) {
+            meta->dequeue(request_id, stream_);
+        }
         stream_.reset();
     }
 }

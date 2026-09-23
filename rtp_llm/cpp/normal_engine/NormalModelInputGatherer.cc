@@ -323,6 +323,10 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     const bool   has_multimodal_input     = config_.is_multimodal && stream_groups.has_multimodal_input();
     const bool   need_cal_position_id =
         (config_.mm_position_ids_style != PositionIdsStyle::DEFAULT) || config_.has_positional_encoding;
+    const bool needs_custom_output_indexes =
+        std::any_of(stream_groups.contextStreams().begin(),
+                    stream_groups.contextStreams().end(),
+                    [](const auto& stream) { return stream->generateInput()->custom_output_token_position >= 0; });
 
     static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
     static const auto pinned_i64  = torch::TensorOptions(torch::kInt64).pinned_memory(true);
@@ -333,6 +337,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    if (needs_custom_output_indexes) {
+        model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
+    }
     model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
 
@@ -512,6 +519,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
+    int custom_output_count = 0;
 
     for (const auto& stream : stream_groups.contextStreams()) {
         model_input.need_all_logits =
@@ -532,6 +540,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             model_input.trace_ids.push_back(stream->traceId());
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
+            const int position     = stream->generateInput()->custom_output_token_position;
+            // Return sequences occupy separate context rows; preserve one selected
+            // index per sequence in the same order consumed by output dispatch.
+            if (model_input.custom_output_indexes.defined() && position >= stream->prefixLength()) {
+                model_input.custom_output_indexes.data_ptr<int64_t>()[custom_output_count++] =
+                    ctx.token_idx + position - stream->prefixLength();
+            }
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
 
             for (int index = 0; index < (int)input_tokens.size(); ++index) {
@@ -599,6 +614,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     }
     model_input.prefix_lengths =
         device_input_enabled_ ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
+    if (model_input.custom_output_indexes.defined()) {
+        model_input.custom_output_indexes = model_input.custom_output_indexes.narrow(0, 0, custom_output_count);
+    }
     return absl::OkStatus();
 }
 

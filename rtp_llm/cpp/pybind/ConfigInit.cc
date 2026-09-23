@@ -1560,6 +1560,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
         .def_readwrite("model_warm_up", &RuntimeConfig::model_warm_up)
+        .def_readwrite("output_dispatcher_worker_count", &RuntimeConfig::output_dispatcher_worker_count)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
@@ -1590,10 +1591,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_grpc_addrs,
                                       self.worker_addrs,
                                       self.specify_gpu_arch,
-                                      self.model_warm_up);
+                                      self.model_warm_up,
+                                      self.output_dispatcher_worker_count);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1611,6 +1613,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.specify_gpu_arch              = t[11].cast<std::string>();
                     if (t.size() >= 13) {
                         c.model_warm_up = t[12].cast<bool>();
+                    }
+                    if (t.size() >= 14) {
+                        c.output_dispatcher_worker_count = t[13].cast<int>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());

@@ -48,6 +48,8 @@ struct StreamUpdateInfo {
     std::optional<ErrorInfo>          error_info;
     GenerationPrefillCudaGraphStatus  generation_prefill_cuda_graph_status{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+    // Appended to preserve existing aggregate initializers. CPU context rows.
+    const torch::Tensor custom_output{};
 };
 
 struct StreamSpecUpdateInfo {
@@ -936,6 +938,7 @@ protected:
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
+    torch::Tensor                            custom_output_;
     int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> consumer_cv_;

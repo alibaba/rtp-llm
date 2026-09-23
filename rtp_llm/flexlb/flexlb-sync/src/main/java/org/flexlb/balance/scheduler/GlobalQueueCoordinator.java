@@ -3,9 +3,9 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -13,8 +13,13 @@ import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,28 +33,24 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * The single QUEUE admission owner for one FlexLB model.
  *
- * <p>This queue is the model's ordered placement boundary. A request is
+ * <p>This queue orders the start of placement attempts for the model. A request is
  * selected from the complete live candidate fleet before the endpoint runtime
- * receives it. A bounded planning frontier controls how many
+ * receives it. A bounded set of in-flight requests controls how many
  * independent routes can be prepared together; request collection and grouping
  * remain exclusively endpoint-runtime concerns. The queue lock protects only
  * index operations; route projection and RPCs are never performed while it is
  * held.</p>
  *
- * <p>Plans are committed in queue order unless the exact endpoint selected by
- * one request is locally full. In that case the request is parked against that
- * endpoint and a later plan may commit only when it does not use the parked
- * endpoint. Selector misses block overlapping routing domains; explicit,
- * disjoint groups can progress independently. Planning concurrency is bounded
- * by the planner pool, while {@link WorkerBatcher} remains the sole SINGLE or
- * FIXED_WINDOW group owner. This keeps cache/KV
- * projections adjacent to each exact reservation while retaining planner
- * parallelism where the policy permits it.</p>
+ * <p>Ready requests receive planning slots in FIFO/priority order. A request
+ * that cannot be admitted waits for a relevant capacity event; it does not fence
+ * later requests from trying the same worker with different resource demands.
+ * Planning is bounded and parallel; completed plans are published without waiting
+ * for earlier planners. Arrivals and wakeups do not invalidate in-flight work.
+ * WorkerBatcher owns SINGLE/FIXED_WINDOW grouping.</p>
  */
 final class GlobalQueueCoordinator implements AutoCloseable {
 
     private static final int MIN_PLANNER_THREADS = 1;
-    private static final int MIN_PLANNING_FRONTIER_SIZE = 1;
 
     private final DefaultRouter router;
     private final BatchSchedulerReporter reporter;
@@ -58,11 +59,21 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final PlacementAvailability availability;
     private final boolean priorityOrdering;
     private final int plannerCount;
+    private final double scanBudgetMultiplier;
     private final ConfigService configService;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
-    private final BlockedRequestIndex blockedRequests;
+    private final PlacementWaitQueue waitingRequests;
+    /** Retained until response completion so withdrawal reuses the original FIFO identity. */
+    private final Map<CompletableFuture<Response>, GlobalQueueEntry> registered = new IdentityHashMap<>();
+    // Protected by lock. A slot stays occupied until its result has been handled,
+    // including when the request is cancelled while planning.
+    private final Set<GlobalQueueEntry> inFlight =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+    private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
+    /** Published by the decision thread; timeout readers never acquire the queue lock. */
+    private volatile Map<String, Object> waitDiagnostics = Map.of("cause", "waiting for placement");
     private final ExecutorService planners;
     private final Thread decisionThread;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -87,7 +98,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.availability = Objects.requireNonNull(availability, "availability");
         this.priorityOrdering = resolvePriorityOrdering(checkedConfig);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
-        this.blockedRequests = new BlockedRequestIndex(priorityOrdering);
+        this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
+        this.scanBudgetMultiplier = checkedConfig.loadBalanceConfig().queueScheduler().getScanBudgetMultiplier();
 
         AtomicInteger plannerId = new AtomicInteger();
         ThreadFactory plannerFactory = task -> {
@@ -108,7 +120,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             close();
         });
         availability.addListener(availabilityListener);
+        lifecycle.attachGlobalQueue(this);
         decisionThread.start();
+    }
+
+    Map<String, Object> waitDiagnostics() {
+        return waitDiagnostics;
     }
 
     /** Enqueue without selecting an endpoint on the ingress thread. */
@@ -126,10 +143,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 return false;
             }
             orderedQueue.add(entry);
-            // Completion unlinks this exact intrusive node in O(1), so
-            // cancellation never scans the queue or leaves historical nodes
-            // behind a blocked head.
-            future.whenComplete((ignored, failure) -> markCompleted(entry));
+            registered.put(future, entry);
+            // Completion removes this exact request from the ordering and wait
+            // indexes without scanning the backlog.
+            future.whenComplete((ignored, failure) -> completeRequest(entry));
             changed.signal();
             return true;
         } finally {
@@ -146,113 +163,152 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
+    /** A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline. */
+    boolean requeue(ScheduledRequest previous) {
+        lock.lock();
+        try {
+            if (previous.future().isDone()) { return true; }
+            GlobalQueueEntry entry = registered.get(previous.future());
+            if (closed.get() || entry == null) { return false; }
+            if (!entry.removed) { throw new IllegalStateException("withdrawn route still has a global queue entry"); }
+            entry.context.setPlanType("");
+            entry.context.setPlanCost(0L);
+            entry.context.setVictimCount(0);
+            orderedQueue.restore(entry);
+            changed.signal();
+            return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void completeRequest(GlobalQueueEntry entry) {
+        lock.lock();
+        try {
+            registered.remove(entry.future, entry);
+            removeRequestUnderLock(entry);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private void runDecisionLoop() {
         try {
             while (!closed.get()) {
-                List<GlobalQueueEntry> frontier;
-                try {
-                    frontier = nextPlanningFrontier();
-                } catch (Throwable failure) {
-                    Logger.error(
-                            "Global queue planning-frontier capture failed",
-                            failure);
-                    continue;
+                Plan completed = pollCompletedPlan();
+                if (completed != null) {
+                    processCompletedPlan(completed);
                 }
-                if (frontier.isEmpty()) {
-                    continue;
-                }
-                PlanningPipeline plans = new PlanningPipeline(
-                        frontier, plannerCount);
-                boolean restartFrontier = false;
-                for (int planIndex = 0; planIndex < plans.size(); planIndex++) {
-                    Plan plan = plans.awaitNext();
-                    if (closed.get()) {
-                        closePlan(plan);
-                        plans.closeSubmitted();
-                        break;
-                    }
-                    if (!isQueued(plan.entry)) {
-                        closePlan(plan);
-                        continue;
-                    }
-                    if (hasHigherPriorityEntry(plan.entry)) {
-                        // A priority arrival may race a captured planner
-                        // frontier. Ordering must not depend on CPU count or
-                        // how many low-priority plans happened to be in flight.
-                        closePlan(plan);
-                        plans.closeSubmitted();
-                        restartFrontier = true;
-                        break;
-                    }
-                    if (parkIfConflicting(plan)) {
-                        closePlan(plan);
-                        continue;
-                    }
-                    Outcome outcome;
-                    try {
-                        outcome = commit(plan);
-                    } catch (Throwable failure) {
-                        closePlan(plan);
-                        remove(plan.entry);
-                        completeDecisionResponse(plan.entry, error(
-                                StrategyErrorType.BATCH_DISPATCH_FAILED,
-                                "Placement failed: " + failure.getMessage()));
-                        Logger.error("Global queue commit failed: request_id={}",
-                                plan.entry.context.getRequestId(), failure);
-                        continue;
-                    }
-                    if (outcome == Outcome.REPLAN) {
-                        // The winner became stale at endpoint-local commit.
-                        // Replan this ordered frontier before consuming its
-                        // suffix. Otherwise a later request which selected the
-                        // same endpoint could overtake the older request before
-                        // its exact blocker has been published.
-                        plans.closeSubmitted();
-                        restartFrontier = true;
-                        break;
-                    }
-                    if (outcome == Outcome.BLOCKED) {
-                        PlacementKey blocker = plan.blocker();
-                        if (blocker == null) {
-                            throw new IllegalStateException(
-                                    "blocked placement has no capacity domain");
-                        }
-                        WorkerEndpoint blockedEndpoint = plan.blockedEndpoint();
-                        if (!parkIfCapacityUnchanged(
-                                plan, blocker, blockedEndpoint)) {
-                            // The capacity edge may have been published after
-                            // this planner captured its snapshot but before
-                            // the atomic park. Retry against the newer state.
-                            closePlan(plan);
-                            plans.closeSubmitted();
-                            restartFrontier = true;
-                            break;
-                        }
-                        closePlan(plan);
-                        // The next plan can use another engine immediately. Plans
-                        // on this same engine are parked as well by the conflict
-                        // check above, so no repeated failed reservation occurs.
-                        continue;
-                    }
-                }
-                if (restartFrontier) {
-                    signal();
-                }
+                // Reuse released slots even when other completed plans are buffered.
+                claimPlanningSlots().forEach(this::submitPlan);
+                awaitIfNoWork();
             }
         } finally {
+            closed.set(true);
+            availability.removeListener(availabilityListener);
+            planners.shutdown();
             drainOnClose();
         }
     }
 
-    private Plan awaitPlan(
-            CompletableFuture<Plan> future,
-            GlobalQueueEntry entry) {
+    private Plan pollCompletedPlan() {
+        lock.lock();
         try {
-            return future.join();
+            return completedPlans.pollFirst();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private List<GlobalQueueEntry> claimPlanningSlots() {
+        lock.lock();
+        try {
+            int slots = plannerCount - inFlight.size();
+            if (closed.get() || slots == 0) {
+                return List.of();
+            }
+            List<GlobalQueueEntry> candidates = planningCandidates(slots);
+            inFlight.addAll(candidates);
+            return candidates;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void awaitIfNoWork() {
+        lock.lock();
+        try {
+            // Check under the same lock as arrivals and result publication: a signal
+            // between processing and this check must not leave completed work asleep.
+            while (!closed.get() && completedPlans.isEmpty()
+                    && (inFlight.size() == plannerCount
+                        || (!orderedQueue.hasUnscannedRequests()
+                            && !waitingRequests.hasReadyRequests()))) {
+                awaitChanged();
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void submitPlan(GlobalQueueEntry entry) {
+        try {
+            planners.execute(() -> {
+                Plan result;
+                try {
+                    result = plan(entry);
+                } catch (Throwable failure) {
+                    result = Plan.failure(entry, failure, availability.sequence());
+                }
+                publishPlan(result);
+            });
         } catch (Throwable failure) {
-            Logger.error("Global queue planner failed: request_id={}",
-                    entry.context.getRequestId(), failure);
-            return Plan.failure(entry, failure, availability.sequence());
+            publishPlan(Plan.failure(entry, failure, availability.sequence()));
+        }
+    }
+
+    private void publishPlan(Plan plan) {
+        lock.lock();
+        try {
+            if (!closed.get()) {
+                completedPlans.addLast(plan);
+                changed.signal();
+                return;
+            }
+        } finally {
+            lock.unlock();
+        }
+        // Shutdown may finish before a slow planner. The producer then owns cleanup.
+        closePlan(plan);
+    }
+
+    private void processCompletedPlan(Plan plan) {
+        boolean retry = false;
+        try {
+            if (!closed.get()) {
+                Outcome outcome = commit(plan);
+                retry = outcome == Outcome.REPLAN
+                        || (outcome == Outcome.BLOCKED && !park(plan));
+            }
+        } catch (Throwable failure) {
+            removeRequest(plan.entry);
+            completeDecisionResponse(plan.entry, error(
+                    StrategyErrorType.DISPATCH_FAILED,
+                    "Placement failed: " + failure.getMessage()));
+            Logger.error("Global queue commit failed: request_id={}",
+                    plan.entry.context.getRequestId(), failure);
+        } finally {
+            // Release ownership before making this request eligible again.
+            closePlan(plan);
+            lock.lock();
+            try {
+                inFlight.remove(plan.entry);
+                if (retry && isQueued(plan.entry)) {
+                    orderedQueue.markRequestReadyForRetry(plan.entry);
+                }
+            } finally {
+                lock.unlock();
+            }
         }
     }
 
@@ -264,37 +320,20 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
-    private List<GlobalQueueEntry> nextPlanningFrontier() {
-        while (!closed.get()) {
-            int frontierSize = planningFrontierSize();
-            lock.lock();
-            try {
-                orderedQueue.pruneCompletedHeads();
-                List<GlobalQueueEntry> frontier = orderedQueue.snapshotPrefix(
-                        frontierSize, this::isEligible);
-                if (!frontier.isEmpty()) {
-                    return frontier;
-                }
-                // Only queue mutations and relevant capacity events make a
-                // parked request eligible again. There is no timed retry.
-                awaitChanged();
-            } finally {
-                lock.unlock();
-            }
-        }
-        return List.of();
+    /** Caller holds lock; every examined entry counts against the scan budget. */
+    private List<GlobalQueueEntry> planningCandidates(int slots) {
+        waitingRequests.resumeReady(slots, orderedQueue::markRequestReadyForRetry);
+        return orderedQueue.scanForPlanningCandidates(
+                slots, calculateScanBudget(slots), entry -> {
+                    if (entry.future.isDone()) {
+                        removeRequestUnderLock(entry);
+                        return false;
+                    }
+                    return !entry.removed && !inFlight.contains(entry)
+                            && !waitingRequests.isWaiting(entry);
+                });
     }
 
-    private boolean isEligible(GlobalQueueEntry entry) {
-        return !entry.removed && !entry.future.isDone()
-                && !blockedRequests.isBlocked(entry);
-    }
-
-    /**
-     * Bounds speculative work to the planner pool. A suffix is submitted only
-     * as earlier plans are consumed, so a blocked head can abandon at most the
-     * in-flight planner set rather than the complete planning frontier.
-     */
     private Plan plan(GlobalQueueEntry entry) {
         long availabilitySequence = availability.sequence();
         if (entry.removed || entry.future.isDone()) {
@@ -310,22 +349,25 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     CancelReason.DEADLINE_EXCEEDED);
             return Plan.done(entry, availabilitySequence);
         }
-        AdmissionMutation mutation = lifecycle.claimAdmissionMutation(
+        AdmissionHandle handle = lifecycle.claimAdmissionHandle(
                 entry.context.getRequestId(), entry.future);
-        if (mutation == null) {
+        if (handle == null) {
             return Plan.done(entry, availabilitySequence);
         }
         try {
-            PlacementResult<QueueRouteAdmission, PlacementKey> result =
-                    router.routeForQueue(entry.context, entry.routingGroup);
+            // A wakeup grants a fresh fleet-wide decision, not an obligation
+            // to return to the endpoint which published the capacity event.
+            PlacementResult<RouteAdmission, PlacementKey> result =
+                    router.select(entry.context, entry.routingGroup);
+            handle.recordDiagnostics(result.diagnostics());
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(
-                        entry, mutation, result.value(), availabilitySequence);
+                        entry, handle, result, availabilitySequence);
             }
-            mutation.close();
+            handle.close();
             return Plan.result(entry, result, availabilitySequence);
         } catch (Throwable failure) {
-            mutation.close();
+            handle.close();
             return Plan.failure(entry, failure, availabilitySequence);
         }
     }
@@ -334,78 +376,62 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         GlobalQueueEntry entry = plan.entry;
         if (entry.removed || entry.future.isDone()) {
             plan.close();
-            remove(entry);
+            removeRequest(entry);
             return Outcome.DONE;
         }
         if (plan.failure != null) {
-            remove(entry);
+            removeRequest(entry);
             completeDecisionResponse(entry, error(
-                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    StrategyErrorType.DISPATCH_FAILED,
                     "Placement failed: " + plan.failure.getMessage()));
             return Outcome.DONE;
         }
-        PlacementResult<QueueRouteAdmission, PlacementKey> result = plan.result;
+        PlacementResult<RouteAdmission, PlacementKey> result = plan.result;
         if (result.status() == PlacementResult.Status.REJECTED) {
-            remove(entry);
-            completeDecisionResponse(entry, result.rejection());
+            removeRequest(entry);
+            completeDecisionResponse(entry, result.failure());
             return Outcome.DONE;
         }
         if (result.status() == PlacementResult.Status.BLOCKED) {
-            entry.blockedKey = result.blocker();
             return Outcome.BLOCKED;
         }
         if (result.status() == PlacementResult.Status.CLOSED) {
-            remove(entry);
+            removeRequest(entry);
             return Outcome.DONE;
         }
-        if (result.status() == PlacementResult.Status.LIMIT_REACHED) {
-            remove(entry);
-            completeAcceptanceLimit(entry);
-            return Outcome.DONE;
-        }
-        QueueRouteAdmission admission = plan.admission;
+        RouteAdmission admission = plan.admission();
         try {
             PlacementResult<ScheduledRequest, PlacementKey> publication =
-                    admission.tryPublish(entry.context, entry.future, lifecycle);
+                    admission.tryEnqueue(entry.context, entry.future, lifecycle);
             if (publication.status() == PlacementResult.Status.SUCCESS) {
-                removeCommitted(entry, admission);
+                removeRequest(entry);
                 reportRouteSubmitted(entry.context, publication.value());
-                return Outcome.DONE;
-            }
-            if (publication.status() == PlacementResult.Status.LIMIT_REACHED) {
-                remove(entry);
-                completeAcceptanceLimit(entry);
                 return Outcome.DONE;
             }
             if (publication.status() == PlacementResult.Status.REJECTED
                     || publication.status() == PlacementResult.Status.CLOSED) {
-                remove(entry);
+                removeRequest(entry);
                 return Outcome.DONE;
             }
-            entry.blockedKey = publication.blocker();
-            plan.rememberBlockedEndpoint(admission.blockedEndpoint());
-            boolean staleSelection = admission.blockedSelectionBecameStale();
-            if (staleSelection) {
-                return Outcome.REPLAN;
-            }
-            if (tryPriorityRescue(plan)) {
-                remove(entry);
+            plan.blockedOn(publication.blocker());
+            boolean staleSelection = admission.blockedEndpointChanged();
+            if (!staleSelection && tryPriorityRescue(plan, admission.blockedEndpoint())) {
+                removeRequest(entry);
                 return Outcome.DONE;
             }
-            return Outcome.BLOCKED;
+            return staleSelection ? Outcome.REPLAN : Outcome.BLOCKED;
         } finally {
             plan.close();
         }
     }
 
-    private boolean tryPriorityRescue(Plan plan) {
+    private boolean tryPriorityRescue(Plan plan, WorkerEndpoint blockedEndpoint) {
         GlobalQueueEntry entry = plan.entry;
         if (!priorityOrdering || entry.future.isDone()) {
             return false;
         }
-        WorkerEndpoint blockedEndpoint = plan.blockedEndpoint();
-        plan.closeMutation();
-        QueueRouteAdmission admission = plan.admission();
+        plan.closeAdmissionHandle();
+        RouteAdmission admission = plan.admission();
         if (admission == null || !evictionManager.tryAdmit(
                 entry.context, entry.future, admission, blockedEndpoint)) {
             return false;
@@ -420,147 +446,68 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         return !entry.removed && !entry.future.isDone();
     }
 
-    /** Revalidate PRIORITY at the commit linearization point. */
-    private boolean hasHigherPriorityEntry(GlobalQueueEntry entry) {
+    private boolean park(Plan plan) {
+        int depth;
+        int[] counts;
+        boolean parked;
         lock.lock();
         try {
-            return orderedQueue.hasHigherPriorityEntry(
-                    entry, this::isEligible);
+            if (!isQueued(plan.entry)) { return true; }
+            parked = waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence);
+            depth = orderedQueue.size();
+            counts = orderedQueue.priorityCounts();
         } finally {
             lock.unlock();
         }
+        Map<Integer, Integer> priorityCounts = new LinkedHashMap<>();
+        for (int priority = 0; priority < counts.length; priority++) {
+            if (counts[priority] > 0) { priorityCounts.put(priority, counts[priority]); }
+        }
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("cause", plan.waitKey().role().name() + " placement unavailable");
+        details.put("role", plan.waitKey().role().name());
+        if (plan.waitKey().group() != null) { details.put("group", plan.waitKey().group()); }
+        if (plan.waitKey().endpoint() != null) { details.put("endpoint", plan.waitKey().endpoint()); }
+        details.put("capturedAtMs", System.currentTimeMillis());
+        details.put("queueDepth", depth);
+        details.put("priorityCounts", Collections.unmodifiableMap(priorityCounts));
+        if (plan.result != null && plan.result.diagnostics() != null) {
+            details.put("decision", plan.result.diagnostics());
+        }
+        waitDiagnostics = Collections.unmodifiableMap(details);
+        return parked;
     }
 
-    /**
-     * Preserve queue order per endpoint while allowing independent endpoints
-     * to progress. Conflict discovery and park publication share the ordering
-     * lock, so an endpoint release cannot linearize between those operations.
-     */
-    private boolean parkIfConflicting(Plan plan) {
-        QueueRouteAdmission admission = plan.admission;
-        if (admission == null) {
-            return false;
-        }
-        lock.lock();
-        try {
-            if (blockedRequests.isSelectorBlocked(plan.entry)) {
-                return true;
-            }
-            BlockedRequestIndex.Conflict conflict =
-                    blockedRequests.conflict(plan.entry, admission);
-            if (conflict == null) {
-                return false;
-            }
-            parkEndpointUnderLock(
-                    plan.entry,
-                    conflict.blocker(),
-                    conflict.endpoint());
-            return true;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /**
-     * Atomically close the plan-snapshot/availability-edge race and publish
-     * either an exact endpoint blocker or a selector resource domain.
-     *
-     * @return false when a newer capacity edge requires immediate replanning
-     */
-    private boolean parkIfCapacityUnchanged(
-            Plan plan,
-            PlacementKey blocker,
-            WorkerEndpoint endpoint) {
-        lock.lock();
-        try {
-            if (!isQueued(plan.entry)) {
-                return true;
-            }
-            if (availability.lastChangedSequence(blocker)
-                    > plan.availabilitySequence) {
-                return false;
-            }
-            if (endpoint == null) {
-                blockedRequests.parkSelector(plan.entry, blocker);
-                changed.signal();
-            } else {
-                parkEndpointUnderLock(plan.entry, blocker, endpoint);
-            }
-            return true;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /** Caller holds {@link #lock}. */
-    private void parkEndpointUnderLock(
-            GlobalQueueEntry entry,
-            PlacementKey blocker,
-            WorkerEndpoint endpoint) {
-        if (!isQueued(entry)) {
-            return;
-        }
-        blockedRequests.parkExact(entry, blocker, endpoint);
-        changed.signal();
-    }
-
-    private void remove(GlobalQueueEntry entry) {
-        lock.lock();
-        try {
-            if (!orderedQueue.remove(entry)) {
-                return;
-            }
-            blockedRequests.clearEntry(entry);
-            changed.signal();
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private void removeCommitted(
-            GlobalQueueEntry entry,
-            QueueRouteAdmission admission) {
-        lock.lock();
-        try {
-            if (!orderedQueue.remove(entry)) {
-                return;
-            }
-            blockedRequests.routeCommitted(entry, admission);
-            changed.signal();
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /** Unlink a completed request from its ordering bucket in O(1). */
-    private void markCompleted(GlobalQueueEntry entry) {
+    private void removeRequest(GlobalQueueEntry entry) {
         if (entry.removed) {
             return;
         }
         lock.lock();
         try {
-            if (!orderedQueue.remove(entry)) {
-                return;
-            }
-            blockedRequests.clearEntry(entry);
-            changed.signal();
+            removeRequestUnderLock(entry);
         } finally {
             lock.unlock();
         }
     }
 
-    private static boolean resolvePriorityOrdering(ConfigService configService) {
-        return configService.loadBalanceConfig().isPriorityOrdering();
+    /**
+     * Remove from both indexes atomically. Publication and completion callbacks
+     * share this boundary and return any active retry opportunity to its domain.
+     * Caller holds {@link #lock}.
+     */
+    private void removeRequestUnderLock(GlobalQueueEntry entry) {
+        if (orderedQueue.remove(entry)) {
+            waitingRequests.remove(entry);
+            changed.signal();
+        }
     }
 
-    /** Bound each ordered pass by admitted work; the pipeline bounds CPU concurrency. */
-    private int planningFrontierSize() {
-        // Planning owns CPU slots, not endpoint capacity. In particular, zero
-        // free credits must still allow exact-route priority rescue. Publication
-        // and replacement share the endpoint's authoritative capacity check.
-        return Math.max(MIN_PLANNING_FRONTIER_SIZE,
-                configService.loadBalanceConfig().queueScheduler().getCapacity()
-                        .getMaxOutstandingRequestsGlobal());
+    private int calculateScanBudget(int candidates) {
+        return (int) Math.min(Integer.MAX_VALUE, Math.ceil(candidates * scanBudgetMultiplier));
+    }
+
+    private static boolean resolvePriorityOrdering(ConfigService configService) {
+        return configService.loadBalanceConfig().isPriorityOrdering();
     }
 
     private void awaitChanged() {
@@ -585,37 +532,18 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private void onAvailabilityChanged(PlacementAvailability.Event event) {
         lock.lock();
         try {
-            if (event.kind() == PlacementAvailability.ChangeKind.TOPOLOGY) {
-                blockedRequests.topologyChanged(event.key());
-            } else {
-                blockedRequests.capacityChanged(event.key());
-            }
-            // Aggregate planning credits can become available even when no
-            // parked entry matches this exact edge.
+            waitingRequests.capacityChanged(event.key());
+            // Other planning work may progress even when no parked entry
+            // matches this exact edge.
             changed.signal();
         } finally {
             lock.unlock();
         }
     }
 
-    private void completeAcceptanceLimit(GlobalQueueEntry entry) {
-        BalanceContext context = entry.context;
-        int limit = context.getConfig().queueScheduler().getLifecycle()
-                .getMaxDeliveredNotAcceptedRequestsGlobal();
-        String detail = "admission capacity is temporarily exhausted"
-                + "; active_admissions=" + lifecycle.decodeAcceptanceCount()
-                + " limit=" + limit;
-        Response failure = Response.error(
-                StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED);
-        failure.setErrorMessage(
-                StrategyErrorType.RESOURCE_EXHAUSTED.buildErrorMessage(detail));
-        completeDecisionResponse(entry, failure);
-    }
-
     private void completeDecisionResponse(GlobalQueueEntry entry, Response response) {
         try {
-            lifecycle.publishQueueDecisionResponseAsync(
+            lifecycle.publishDecisionResponseAsync(
                     entry.context.getRequestId(), entry.future, response);
         } catch (Throwable failure) {
             Logger.error(
@@ -639,18 +567,22 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     private void drainOnClose() {
         List<GlobalQueueEntry> abandoned;
+        List<Plan> completed;
         lock.lock();
         try {
             abandoned = orderedQueue.drain();
-            blockedRequests.clear();
+            waitingRequests.clear();
+            registered.clear();
+            completed = List.copyOf(completedPlans);
+            completedPlans.clear();
+            inFlight.clear();
         } finally {
             lock.unlock();
         }
+        completed.forEach(GlobalQueueCoordinator::closePlan);
         for (GlobalQueueEntry entry : abandoned) {
-            entry.blockedKey = null;
-            entry.blockedEndpoint = null;
             completeDecisionResponse(entry, error(
-                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    StrategyErrorType.DISPATCH_FAILED,
                     "request scheduler is shutting down"));
         }
     }
@@ -661,7 +593,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private static Response error(StrategyErrorType type, String detail) {
-        return RequestRegistry.buildErrorResponse(type, detail);
+        return Response.buildErrorResponse(type, detail);
     }
 
     @Override
@@ -671,8 +603,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         availability.removeListener(availabilityListener);
         signal();
-        // Do not discard queued CompletableFuture tasks: the decision thread
-        // may be joining one while it drains the current planning pipeline.
+        // Every submitted task must run: late results release their own route ownership.
         planners.shutdown();
         if (Thread.currentThread() != decisionThread) {
             try {
@@ -680,9 +611,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             } catch (InterruptedException interruption) {
                 Thread.currentThread().interrupt();
             }
-        }
-        if (!decisionThread.isAlive()) {
-            planners.shutdownNow();
         }
         awaitPlannerTermination();
     }
@@ -708,154 +636,78 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         REPLAN
     }
 
-    /** Ordered, bounded submission view over one captured planning frontier. */
-    private final class PlanningPipeline {
-        private final List<GlobalQueueEntry> entries;
-        private final ArrayDeque<SubmittedPlan> submitted;
-        private final int maxInFlight;
-        private int nextToSubmit;
-
-        private PlanningPipeline(
-                List<GlobalQueueEntry> entries,
-                int maxInFlight) {
-            this.entries = List.copyOf(entries);
-            this.maxInFlight = Math.max(MIN_PLANNER_THREADS, maxInFlight);
-            this.submitted = new ArrayDeque<>(Math.min(
-                    this.maxInFlight, entries.size()));
-        }
-
-        private int size() {
-            return entries.size();
-        }
-
-        private Plan awaitNext() {
-            fill();
-            SubmittedPlan next = submitted.removeFirst();
-            return awaitPlan(next.future(), next.entry());
-        }
-
-        private void fill() {
-            while (submitted.size() < maxInFlight
-                    && nextToSubmit < entries.size()) {
-                GlobalQueueEntry entry = entries.get(nextToSubmit++);
-                submitted.addLast(new SubmittedPlan(entry, submit(entry)));
-            }
-        }
-
-        private void closeSubmitted() {
-            // A submitted plan owns its entry's sole AdmissionMutation.
-            // Re-entering the queue before it closes can misread temporary
-            // ownership as terminal state. Abandonment is rare and bounded by
-            // plannerCount, so retire the submitted suffix synchronously.
-            while (!submitted.isEmpty()) {
-                SubmittedPlan pending = submitted.removeFirst();
-                closePlan(awaitPlan(pending.future(), pending.entry()));
-            }
-        }
-
-        private CompletableFuture<Plan> submit(GlobalQueueEntry entry) {
-            try {
-                return CompletableFuture.supplyAsync(
-                        () -> plan(entry), planners);
-            } catch (Throwable failure) {
-                Logger.error("Global queue planner submission failed", failure);
-                return CompletableFuture.completedFuture(
-                        Plan.failure(entry, failure, availability.sequence()));
-            }
-        }
-
-        private record SubmittedPlan(
-                GlobalQueueEntry entry,
-                CompletableFuture<Plan> future) {}
-    }
-
     private static final class Plan implements AutoCloseable {
         private final GlobalQueueEntry entry;
-        private AdmissionMutation mutation;
-        private QueueRouteAdmission admission;
-        private final PlacementResult<QueueRouteAdmission, PlacementKey> result;
+        private AdmissionHandle handle;
+        // A successful result owns its admission until transfer or close.
+        private PlacementResult<RouteAdmission, PlacementKey> result;
         private final Throwable failure;
         private final long availabilitySequence;
-        private WorkerEndpoint blockedEndpoint;
+        // Retained after admission closes so the request can be parked.
+        private PlacementKey waitKey;
 
         private Plan(
                 GlobalQueueEntry entry,
-                AdmissionMutation mutation,
-                QueueRouteAdmission admission,
-                PlacementResult<QueueRouteAdmission, PlacementKey> result,
+                AdmissionHandle handle,
+                PlacementResult<RouteAdmission, PlacementKey> result,
                 Throwable failure,
                 long availabilitySequence) {
             this.entry = entry;
-            this.mutation = mutation;
-            this.admission = admission;
+            this.handle = handle;
             this.result = result;
             this.failure = failure;
             this.availabilitySequence = availabilitySequence;
+            if (result != null && result.status() == PlacementResult.Status.BLOCKED) {
+                waitKey = result.blocker();
+            }
         }
 
-        static Plan success(GlobalQueueEntry entry, AdmissionMutation mutation,
-                            QueueRouteAdmission admission,
+        static Plan success(GlobalQueueEntry entry, AdmissionHandle handle,
+                            PlacementResult<RouteAdmission, PlacementKey> result,
                             long availabilitySequence) {
-            return new Plan(entry, mutation, admission,
-                    PlacementResult.success(admission), null,
+            return new Plan(entry, handle, result, null,
                     availabilitySequence);
         }
 
         static Plan result(GlobalQueueEntry entry,
-                           PlacementResult<QueueRouteAdmission, PlacementKey> result,
+                           PlacementResult<RouteAdmission, PlacementKey> result,
                            long availabilitySequence) {
-            return new Plan(entry, null, null, result, null,
+            return new Plan(entry, null, result, null,
                     availabilitySequence);
         }
 
         static Plan done(GlobalQueueEntry entry, long availabilitySequence) {
-            return new Plan(entry, null, null,
+            return new Plan(entry, null,
                     PlacementResult.closed(), null, availabilitySequence);
         }
 
         static Plan failure(GlobalQueueEntry entry, Throwable failure,
                             long availabilitySequence) {
-            return new Plan(entry, null, null, null, failure,
+            return new Plan(entry, null, null, failure,
                     availabilitySequence);
         }
 
-        PlacementKey blocker() {
-            if (result != null && result.status() == PlacementResult.Status.BLOCKED) {
-                return result.blocker();
-            }
-            return entry.blockedKey;
+        PlacementKey waitKey() {
+            return waitKey;
         }
 
-        WorkerEndpoint blockedEndpoint() {
-            if (blockedEndpoint != null) {
-                return blockedEndpoint;
-            }
-            if (admission != null) {
-                WorkerEndpoint endpoint = admission.blockedEndpoint();
-                if (endpoint != null) {
-                    return endpoint;
-                }
-            }
-            return entry.blockedEndpoint;
+        void blockedOn(PlacementKey key) {
+            waitKey = Objects.requireNonNull(key, "waitKey");
         }
 
-        void rememberBlockedEndpoint(WorkerEndpoint endpoint) {
-            blockedEndpoint = endpoint;
-        }
-
-        QueueRouteAdmission takeAdmission() {
-            QueueRouteAdmission owned = admission;
-            admission = null;
+        RouteAdmission takeAdmission() {
+            RouteAdmission owned = admission();
+            result = null;
             return owned;
         }
 
-        QueueRouteAdmission admission() {
-            return admission;
+        RouteAdmission admission() {
+            return result == null ? null : result.value();
         }
 
-        void closeMutation() {
-            AdmissionMutation owned = mutation;
-            mutation = null;
+        void closeAdmissionHandle() {
+            AdmissionHandle owned = handle;
+            handle = null;
             if (owned != null) {
                 owned.close();
             }
@@ -863,8 +715,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
         @Override
         public void close() {
-            QueueRouteAdmission ownedAdmission = admission;
-            admission = null;
+            RouteAdmission ownedAdmission = takeAdmission();
             if (ownedAdmission != null) {
                 try {
                     ownedAdmission.close();
@@ -872,7 +723,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     Logger.warn("Failed to close abandoned route plan", failure);
                 }
             }
-            closeMutation();
+            closeAdmissionHandle();
         }
     }
 }

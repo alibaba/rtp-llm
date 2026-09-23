@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <type_traits>
 #include <unordered_map>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -536,68 +537,102 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
     const int        new_batch_size = static_cast<int>(block_src_batch.size());
     std::vector<int> batch_fork_count(old_batch_size, 0);
     for (const int old_batch_idx : block_src_batch) {
-        RTP_LLM_CHECK_WITH_INFO(old_batch_idx < old_batch_size,
+        RTP_LLM_CHECK_WITH_INFO(old_batch_idx >= 0 && old_batch_idx < old_batch_size,
                                 "try to reuse an old batch %d that out of range %d",
                                 old_batch_idx,
                                 old_batch_size);
         ++batch_fork_count[old_batch_idx];
     }
 
-    uint32_t new_blocks_num = 0;
-    for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-        const int fork_count = batch_fork_count[old_batch_idx];
-        if (fork_count == 0) {
-            full_kv_cache_group_->unreference(kv_cache_resource->blocks(old_batch_idx, 0));
-        } else if (fork_count > 1 && copy_last_block) {
-            new_blocks_num += static_cast<uint32_t>(fork_count - 1);
+    // Count once per input beam, weighted by its descendants. References that
+    // stay unchanged are omitted; their pool counts still prevent reclamation.
+    std::vector<DeviceBlockPool::RequestReferenceUpdate> reference_updates;
+    for (int i = 0; i < old_batch_size; ++i) {
+        const auto& blocks = kv_cache_resource->blocks(i, 0);
+        if (batch_fork_count[i] == 0 && !blocks.empty()) {
+            reference_updates.push_back({blocks.back(), 1, 0});
+        }
+    }
+    size_t replacement_count = 0;
+    for (int i = 0; i < old_batch_size; ++i) {
+        const auto& blocks = kv_cache_resource->blocks(i, 0);
+        const int   forks  = batch_fork_count[i];
+        if (forks == 1 || blocks.empty()) {
+            continue;
+        }
+        const size_t prefix_size = blocks.size() - 1;
+        for (size_t j = 0; j < prefix_size; ++j) {
+            reference_updates.push_back({blocks[j], 1, forks});
+        }
+        if (forks > 1) {
+            if (copy_last_block) {
+                replacement_count += forks - 1;
+            } else {
+                reference_updates.push_back({blocks.back(), 1, forks});
+            }
         }
     }
 
-    // Free disused blocks before requesting replacement capacity from the tree cache.
-
-    // ensure there are enough free blocks for last-block copies
-    if (new_blocks_num > 0) {
-        if (!full_kv_cache_group_->ensureFreeBlocks(static_cast<int>(new_blocks_num))) {
-            RTP_LLM_LOG_WARNING("ensure free blocks failed for kv cache update, need %u", new_blocks_num);
-            return false;
-        }
-    }
-
-    // rebuild batch_kv_cache_resource and generate mapping
-    std::vector<KVCacheResource> old_resources;
-    kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
-
-    // init for all batch
-    kv_cache_resource->initGroups(config_.topologyPtr());
-
-    for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
-        const int old_batch_idx = block_src_batch[new_batch_idx];
-        auto&     fork_count    = batch_fork_count[old_batch_idx];
-        RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
-
+    BatchKVCacheResource staged_resource;
+    staged_resource.resetBatchSize(new_batch_size);
+    std::vector<TaggedBlockIdPair>            staged_mapping;
+    std::vector<std::pair<BlockIds*, size_t>> replacement_slots;
+    std::vector<std::pair<int, int>>          retained_slots;
+    staged_mapping.reserve(replacement_count);
+    replacement_slots.reserve(replacement_count);
+    retained_slots.reserve(old_batch_size);
+    for (int i = 0; i < new_batch_size; ++i) {
+        const int   old_idx      = block_src_batch[i];
+        auto&       fork_count   = batch_fork_count[old_idx];
+        const auto& old_resource = kv_cache_resource->cacheResource(old_idx);
         if (fork_count == 1) {
-            kv_cache_resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
+            // Move retained metadata only after the pool commits. Preparing a
+            // duplicate here would rebuild identical group/layer block views.
+            retained_slots.emplace_back(i, old_idx);
         } else {
-            auto& block_ids = kv_cache_resource->mutableBlockIds(new_batch_idx, 0);
-            kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
-            full_kv_cache_group_->reference(block_ids, old_resources[old_batch_idx].blocks(0));
-
+            auto& fork = staged_resource.cacheResource(i);
+            fork.initGroups(config_.topologyPtr());
+            fork.setCacheKeys(old_resource.cacheKeys());
+            auto& block_ids = fork.mutableBlockIds(0);
+            block_ids.assign(old_resource.blocks(0));
             if (copy_last_block && !block_ids.blocks().empty()) {
-                const int old_block = block_ids.popBack();
-                full_kv_cache_group_->unreference({old_block});
-
-                // allocate exactly one new block via kvCacheGroup
-                int seq_len_target =
-                    (static_cast<int>(block_ids.blocks().size()) + 1) * full_kv_cache_group_->seqSizePerBlock();
-                bool ok = full_kv_cache_group_->malloc(block_ids, seq_len_target);
-                RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during kv cache update");
-                const int new_block = block_ids.blocks().back();
-                block_update_mapping.push_back(
-                    TaggedBlockIdPair{config_.topology().soleGroupForLayer(0).tag, old_block, new_block});
+                const auto& blocks = block_ids.blocks();
+                staged_mapping.push_back({config_.topology().soleGroupForLayer(0).tag, blocks.back(), NULL_BLOCK_IDX});
+                replacement_slots.emplace_back(&block_ids, blocks.size() - 1);
+                block_ids.setAt(blocks.size() - 1, NULL_BLOCK_IDX);
             }
         }
         --fork_count;
     }
+
+    BlockIndicesType replacements;
+    int              required_free_blocks = 0;
+    if (!block_pool_->tryReplaceRequestReferences(
+            reference_updates, static_cast<int>(replacement_count), replacements, required_free_blocks)) {
+        // BlockTreeCache takes its own lock before calling pool methods, so
+        // eviction must stay outside the pool transaction. Retry with fresh
+        // counts even if eviction failed: other requests may have freed blocks.
+        full_kv_cache_group_->ensureFreeBlocks(required_free_blocks);
+        if (!block_pool_->tryReplaceRequestReferences(
+                reference_updates, static_cast<int>(replacement_count), replacements, required_free_blocks)) {
+            RTP_LLM_LOG_WARNING("atomic kv cache update failed, need %zu replacement blocks", replacement_count);
+            return false;
+        }
+    }
+
+    // No allocations or ownership operations remain after the exchange. Both
+    // physical and kernel block slots are already sized, and publication swaps
+    // storage while the caller still holds its per-request lock.
+    for (size_t i = 0; i < replacements.size(); ++i) {
+        replacement_slots[i].first->setAt(replacement_slots[i].second, replacements[i]);
+        staged_mapping[i].dst = replacements[i];
+    }
+    static_assert(std::is_nothrow_move_assignable_v<KVCacheResource>);
+    for (const auto& [new_idx, old_idx] : retained_slots) {
+        staged_resource.moveBatchResource(new_idx, std::move(kv_cache_resource->cacheResource(old_idx)));
+    }
+    kv_cache_resource->swap(staged_resource);
+    block_update_mapping.swap(staged_mapping);
     return true;
 }
 

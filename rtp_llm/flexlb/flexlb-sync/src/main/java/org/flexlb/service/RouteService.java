@@ -2,10 +2,8 @@ package org.flexlb.service;
 
 import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -20,17 +18,11 @@ import java.util.concurrent.CompletableFuture;
 @Component
 public class RouteService {
 
-    private final ConfigService configService;
-    private final DefaultRouter router;
     private final RequestScheduler requestScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
-    public RouteService(ConfigService configService,
-                        DefaultRouter defaultScheduler,
-                        RequestScheduler requestScheduler,
+    public RouteService(RequestScheduler requestScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
-        this.configService = configService;
-        this.router = defaultScheduler;
         this.requestScheduler = requestScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
@@ -41,19 +33,13 @@ public class RouteService {
      * @return Routing result
      */
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
-        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
-        balanceContext.setConfig(flexlbConfig);
+        FlexlbConfig flexlbConfig = balanceContext.getConfig();
         FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(),
                 FlexlbTrace.SCHEDULE_MODE, flexlbConfig.isDirect() ? "DIRECT"
                         : flexlbConfig.getDispatcher().getType() == DispatcherConfig.Type.BATCH
                                 ? "BATCH" : "QUEUE");
 
-        CompletableFuture<Response> resultFuture;
-        if (flexlbConfig.isDirect()) {
-            resultFuture = routeDirect(balanceContext);
-        } else {
-            resultFuture = routeScheduled(balanceContext);
-        }
+        CompletableFuture<Response> resultFuture = routeScheduled(balanceContext);
 
         // Observe the scheduler-owned future without replacing it with a
         // dependent stage. Returning the exact source preserves external
@@ -86,7 +72,8 @@ public class RouteService {
                     balanceContext.getConfig().getDispatcher().typeName(),
                     balanceContext.getRequestId());
             return CompletableFuture.completedFuture(
-                    Response.error(StrategyErrorType.BATCH_BUILD_FAILED));
+                    Response.buildErrorResponse(StrategyErrorType.INVALID_REQUEST,
+                            "missing serialized generate_input for batch dispatch"));
         }
         return submitScheduled(balanceContext);
     }
@@ -104,19 +91,6 @@ public class RouteService {
         CompletableFuture<Response> resultFuture = requestScheduler.submit(balanceContext);
         balanceContext.setFuture(resultFuture);
         return resultFuture;
-    }
-
-    private CompletableFuture<Response> routeDirect(BalanceContext balanceContext) {
-        try {
-            if (balanceContext.requestExpired(System.currentTimeMillis())) {
-                return CompletableFuture.completedFuture(
-                        Response.error(StrategyErrorType.BATCH_SLO_EXPIRED));
-            }
-            return CompletableFuture.completedFuture(
-                    router.routeDirect(balanceContext));
-        } catch (Exception e) {
-            return CompletableFuture.failedFuture(e);
-        }
     }
 
     private boolean hasValidGenerateInput(BalanceContext ctx) {

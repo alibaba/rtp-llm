@@ -130,10 +130,9 @@ final class RouteProjectionTestSupport {
             long requestId,
             int priority,
             long sequenceLength,
-            long hitCache,
-            RouteProjection.Demand demand) {
+            long hitCache) {
         return probe(requestId, priority, NOW_MS, Long.MAX_VALUE,
-                sequenceLength, hitCache, demand);
+                sequenceLength, hitCache);
     }
 
     static RouteProjection.Probe probe(
@@ -142,8 +141,7 @@ final class RouteProjectionTestSupport {
             long enqueuedAtMs,
             long expiresAtMs,
             long sequenceLength,
-            long hitCache,
-            RouteProjection.Demand demand) {
+            long hitCache) {
         return new RouteProjection.Probe(
                 requestId,
                 priority,
@@ -151,8 +149,7 @@ final class RouteProjectionTestSupport {
                 expiresAtMs,
                 sequenceLength,
                 hitCache,
-                hitCache,
-                demand);
+                hitCache);
     }
 
     static WorkSnapshot noCommittedWork() {
@@ -173,20 +170,9 @@ final class RouteProjectionTestSupport {
             PrefillTimePredictor.Evaluator evaluator,
             RouteProjection.Probe probe,
             RouteProjection.DeliveryProjection deliveryProjection) {
-        return candidate(
-                queue, work, evaluator, probe, deliveryProjection, 0L);
-    }
-
-    static RouteProjection.Candidate candidate(
-            QueueSnapshot queue,
-            WorkSnapshot work,
-            PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.Probe probe,
-            RouteProjection.DeliveryProjection deliveryProjection,
-            long pendingRequestCount) {
         return RouteProjection.project(
                 new RouteProjection.Inputs(
-                        queue, work, pendingRequestCount),
+                        queue, work),
                 probe,
                 evaluator,
                 deliveryProjection);

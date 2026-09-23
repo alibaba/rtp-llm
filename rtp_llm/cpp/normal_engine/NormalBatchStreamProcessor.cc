@@ -7,7 +7,8 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const PDSepConfig&                 pd_sep_config,
     const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
     const CacheConfig&                 cache_config,
-    bool                               warm_up) {
+    bool                               warm_up,
+    int                                async_worker_count) {
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
     model_input_gatherer_config_.vocab_size              = model_config.vocab_size;
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;
@@ -36,7 +37,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
 
     model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
     sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();
-    output_dispatcher_      = std::make_unique<NormalOutputDispatcher>(model_config.output_vocab_ids);
+    output_dispatcher_ = std::make_unique<NormalOutputDispatcher>(model_config.output_vocab_ids, async_worker_count);
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,

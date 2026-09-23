@@ -1,7 +1,10 @@
 package org.flexlb.config;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
+import org.flexlb.balance.prediction.DecodeCostFormula;
 
 @Getter
 @Setter
@@ -25,8 +28,6 @@ public final class RoutingConfig {
     public static final class PrefillConfig {
         private ExecutionTimeEstimatorConfig executionTimeEstimator =
                 new ExecutionTimeEstimatorConfig();
-        private CandidateChoiceConfig candidateChoice =
-                new CandidateChoiceConfig();
         private CacheAffinityConfig cacheAffinity;
     }
 
@@ -45,45 +46,6 @@ public final class RoutingConfig {
 
     @Getter
     @Setter
-    public static final class CandidateChoiceConfig {
-        private CandidateChoiceType type =
-                CandidateChoiceType.RANDOM_WITHIN_TOLERANCE;
-        private double relativeTolerance = 0.1;
-        private long minimumToleranceMs = 20;
-        private OutlierRejectionConfig outlierRejection =
-                new OutlierRejectionConfig();
-        private CandidatePoolConfig pool = new CandidatePoolConfig();
-    }
-
-    public enum CandidateChoiceType {
-        BEST_ONLY,
-        RANDOM_WITHIN_TOLERANCE,
-        LEAST_RECENTLY_USED_IN_POOL
-    }
-
-    @Getter
-    @Setter
-    public static final class OutlierRejectionConfig {
-        private double maxPendingVsAverageMultiplier = 3.0;
-        private double maxProjectedDrainVsAverageMultiplier = 3.0;
-    }
-
-    @Getter
-    @Setter
-    public static final class CandidatePoolConfig {
-        private CandidatePoolType type = CandidatePoolType.RATIO;
-        private double ratio = 0.3;
-        private int minimumWorkers = 1;
-        private int workers = 1;
-    }
-
-    public enum CandidatePoolType {
-        RATIO,
-        FIXED
-    }
-
-    @Getter
-    @Setter
     public static final class CacheAffinityConfig {
         /** Maximum TTFT penalty accepted for choosing a cache leader. */
         private long maxExtraTtftMs;
@@ -95,35 +57,48 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class DecodeConfig {
+        private DecodeCostEstimatorConfig costEstimator = new DecodeCostEstimatorConfig();
         private DecodeAvailabilityConfig availability =
                 new DecodeAvailabilityConfig();
-        private KvReservationConfig kvReservation = new KvReservationConfig();
-        private double decayPerToken = 0.001;
-        private double loadDecayPerRequest = 1.0;
-        private DecodeOutlierRejectionConfig outlierRejection =
-                new DecodeOutlierRejectionConfig();
+    }
+
+    @Getter
+    @Setter
+    public static final class DecodeCostEstimatorConfig {
+        private volatile String expression = "kvcache_used_ratio";
+
+        @JsonIgnore
+        @Getter(AccessLevel.NONE)
+        @Setter(AccessLevel.NONE)
+        private volatile DecodeCostFormula compiledCost;
+
+        @JsonIgnore
+        public DecodeCostFormula compiledFormula() {
+            String currentExpression = expression;
+            DecodeCostFormula cached = compiledCost;
+            if (cached != null && cached.expression().equals(currentExpression)) {
+                return cached;
+            }
+            synchronized (this) {
+                currentExpression = expression;
+                cached = compiledCost;
+                if (cached == null || !cached.expression().equals(currentExpression)) {
+                    cached = DecodeCostFormula.parse(currentExpression);
+                    compiledCost = cached;
+                }
+                return cached;
+            }
+        }
     }
 
     @Getter
     @Setter
     public static final class DecodeAvailabilityConfig {
+        /** Maximum Decode KV usage percentage, in [1, 100]. */
         private long maxKvUsagePercent = 90;
 
         /** Master-side cap for all Engine-facing Decode ownership. */
         private Long maxEngineRequests;
-    }
-
-    @Getter
-    @Setter
-    public static final class KvReservationConfig {
-        private Long maxOutputTokensForEstimate = 1000L;
-    }
-
-    @Getter
-    @Setter
-    public static final class DecodeOutlierRejectionConfig {
-        private double maxEngineLoadVsAverageMultiplier = 3.0;
-        private double maxKvUsedVsAverageMultiplier = 3.0;
     }
 
 }

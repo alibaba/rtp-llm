@@ -5,7 +5,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -183,7 +182,7 @@ class EngineSyncRunnerTest {
     @Test
     void should_remove_status_and_endpoint_when_service_discovery_is_empty() {
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         String ipPort = "127.0.0.1:8080";
@@ -223,7 +222,7 @@ class EngineSyncRunnerTest {
         // resolves the load-balance config in this scenario. Keep the stub
         // lenient so strict stubbing does not flag it as unnecessary.
         Mockito.lenient().when(configService.loadBalanceConfig())
-                .thenReturn(new FlexlbConfig());
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         EngineSyncRunner runner = new EngineSyncRunner(
@@ -345,7 +344,7 @@ class EngineSyncRunnerTest {
             String oldGroup, String newGroup) {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig())
-                .thenReturn(new FlexlbConfig());
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry);
         String ipPort = "127.0.0.1:61000";

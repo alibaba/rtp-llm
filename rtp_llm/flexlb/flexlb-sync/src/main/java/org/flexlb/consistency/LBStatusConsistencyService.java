@@ -1,7 +1,6 @@
 package org.flexlb.consistency;
 
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.flexlb.domain.consistency.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
@@ -10,6 +9,7 @@ import org.flexlb.util.JsonUtils;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.LinkedHashMap;
@@ -49,17 +49,8 @@ public class LBStatusConsistencyService implements MasterElectService {
             serverPort = System.getProperty("server.port", "7001");
         }
         log.info("hostIp:{}, serverPort:{}.", localHostIp, serverPort);
+        lbConsistencyConfig = zookeeperMasterElectService.getLbConsistencyConfig();
         roleId = System.getenv("HIPPO_ROLE");
-        if (StringUtils.isBlank(roleId)) {
-            throw new RuntimeException("HIPPO_ROLE env is blank");
-        }
-        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
-        log.info("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
-        if (configStr == null) {
-            lbConsistencyConfig = new LBConsistencyConfig();
-        } else {
-            lbConsistencyConfig = JsonUtils.toObject(configStr, LBConsistencyConfig.class);
-        }
         if (!isNeedConsistency()) {
             log.warn("LBStatusConsistencyService is not need.");
             return;
@@ -68,7 +59,6 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     }
 
-    @Override
     public void start() {
         if (!isNeedConsistency()) {
             log.warn("start: lbConsistencyConfig is closed.");
@@ -77,7 +67,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         this.zookeeperMasterElectService.start();
     }
 
-    @Override
     public void offline() {
         if (!isNeedConsistency()) {
             log.warn("offline: lbConsistencyConfig is closed.");
@@ -86,7 +75,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         this.zookeeperMasterElectService.offline();
     }
 
-    @Override
+    @PreDestroy
     public void destroy() {
         if (!isNeedConsistency()) {
             log.warn("destroy: lbConsistencyConfig is closed.");
@@ -108,7 +97,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         return zookeeperMasterElectService.isMaster();
     }
 
-    @Override
     public void refreshMasterHost(boolean forceSync) {
         if (isNeedConsistency() && forceSync) {
             zookeeperMasterElectService.updateLatestMaster();
@@ -138,7 +126,7 @@ public class LBStatusConsistencyService implements MasterElectService {
      */
     public MasterChangeNotifyResp handleMasterChange(MasterChangeNotifyReq req) {
         log.warn("recv MasterChangeNotifyReq:{}.", req);
-        if (!roleId.equals(req.getRoleId())) {
+        if (!isNeedConsistency() || !roleId.equals(req.getRoleId())) {
             MasterChangeNotifyResp resp = new MasterChangeNotifyResp();
             resp.setSuccess(false);
             resp.setMsg("roleId not match this:" + roleId);

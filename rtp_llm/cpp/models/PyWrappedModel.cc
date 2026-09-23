@@ -591,6 +591,46 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              skip_final_layernorm);
 }
 
+torch::Tensor PyWrappedModel::customOutputIndexes(const GptModelInputs& inputs) {
+    const auto  decode_batch_size  = inputs.sequence_lengths.size(0);
+    const auto  context_batch_size = inputs.input_lengths.size(0) - decode_batch_size;
+    const auto& indexes            = inputs.custom_output_indexes;
+    TORCH_CHECK(indexes.defined() && indexes.dim() == 1 && indexes.size(0) <= context_batch_size,
+                "custom output indexes must contain at most one row per context sequence");
+    // Device-input staging is optional. Retain CPU indexes for async H2D;
+    // already-staged CUDA indexes require no host retention or additional copy.
+    buffer_holder_.hold_host(indexes);
+    return indexes.to(torch::kCUDA, /*non_blocking=*/true);
+}
+
+void PyWrappedModel::initializeCustomOutput() {
+    const auto handler = py_model_.attr("custom_output_handler");
+    TORCH_CHECK(py::cast<std::vector<std::string>>(handler.attr("extend_forward_args")())
+                    == std::vector<std::string>{"selected_hidden_states"},
+                "custom output handler must request selected_hidden_states");
+    TORCH_CHECK(weights_.lm_head, "custom output requires a model with lm_head");
+    // CP does not retain arbitrary token rows for postprocessing.
+    TORCH_CHECK(!device_props_.enable_prefill_cp, "custom output does not support context parallel yet");
+    custom_output_enabled_ = true;
+    RTP_LLM_LOG_INFO("custom output initialized");
+}
+
+torch::Tensor PyWrappedModel::runCustomOutput(const torch::Tensor& rows) {
+    py::gil_scoped_acquire gil;
+    auto                   output = py_model_.attr("custom_output_handler")
+                      .attr("extend_forward")(py::arg("selected_hidden_states") = rows)
+                      .cast<torch::Tensor>();
+    TORCH_CHECK(output.defined() && (output.dim() == 1 || output.dim() == 2) && output.numel() > 0,
+                "custom output must be a nonempty [batch] or [batch, width] tensor");
+    TORCH_CHECK(output.size(0) == rows.size(0), "custom output must return one row per selected context sequence");
+    TORCH_CHECK(output.device() == rows.device(), "custom output must remain on the input CUDA device");
+    const auto dtype = output.scalar_type();
+    TORCH_CHECK(dtype == torch::kFloat32 || dtype == torch::kFloat16 || dtype == torch::kBFloat16
+                    || dtype == torch::kInt32,
+                "custom output dtype must be float32, float16, bfloat16 or int32 for RPC serialization");
+    return output;
+}
+
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
     if (inputs.warmup) {
@@ -1242,6 +1282,21 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
             }
         }
+
+        GptModelOutputs outputs;
+        // Internal warmup/system-prefix requests have no selected token and do not score.
+        if (custom_output_enabled_ && has_context_request && inputs.custom_output_indexes.defined()
+            && inputs.custom_output_indexes.numel() > 0) {
+            try {
+                auto context_rows = torch::index_select(hidden, 0, customOutputIndexes(inputs));
+                // C++ RMSNorm may promote hidden to FP32; heads use the model
+                // activation dtype. Cast only selected rows, leaving LM logits unchanged.
+                outputs.custom_output = runCustomOutput(context_rows.to(dataTypeToTorchType(description_.data_type)));
+            } catch (const std::exception& error) {
+                outputs.custom_output_error = error.what();
+                RTP_LLM_LOG_ERROR("custom output processor failed: %s", outputs.custom_output_error.c_str());
+            }
+        }
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
@@ -1259,17 +1314,17 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
         }
-        torch::Tensor softmax_result_t;
+        outputs.logits            = logits;
+        outputs.hidden_states     = last_hidden;
+        outputs.all_hidden_states = hidden;
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");
-            auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
-            return {last_logits, last_hidden, hidden, logits, softmax_result_t};
+            outputs.all_logits = logits;
+            outputs.logits     = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
+        } else if (merged_eagle3_hidden.defined()) {
+            outputs.all_hidden_states = merged_eagle3_hidden;
         }
-
-        if (merged_eagle3_hidden.defined()) {
-            hidden = merged_eagle3_hidden;
-        }
-        return {logits, last_hidden, hidden, torch::Tensor(), softmax_result_t};
+        return outputs;
     } else {
         return {torch::Tensor(), torch::Tensor(), hidden};
     }

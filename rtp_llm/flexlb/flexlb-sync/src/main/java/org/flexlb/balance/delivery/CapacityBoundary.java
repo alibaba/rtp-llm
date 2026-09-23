@@ -4,7 +4,11 @@ import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Objects;
 
-/** Materialized result of crossing one delivery-admission boundary. */
+/**
+ * Materialized result of crossing one delivery-admission boundary.
+ * A delivery wait may carry additional route-publication restrictions;
+ * absent projection semantics leave routing forecasts unchanged.
+ */
 public record CapacityBoundary(
         Status status,
         Availability availability,
@@ -18,7 +22,7 @@ public record CapacityBoundary(
         Objects.requireNonNull(status, "status");
         boolean unavailable = status == Status.UNAVAILABLE;
         boolean failed = status == Status.FAILED;
-        if (unavailable != (availability != null && projectionSemantics != null)
+        if (unavailable != (availability != null)
                 || failed != (cause != null)
                 || (!unavailable
                         && (availability != null || projectionSemantics != null))) {
@@ -35,6 +39,13 @@ public record CapacityBoundary(
                 Objects.requireNonNull(projectionSemantics,
                         "projectionSemantics"),
                 null);
+    }
+
+    /** Park delivery without restricting publication into the worker queue. */
+    public static CapacityBoundary deliveryUnavailable(Availability availability) {
+        return new CapacityBoundary(Status.UNAVAILABLE,
+                Objects.requireNonNull(availability, "availability"),
+                null, null);
     }
 
     public static CapacityBoundary failed(Throwable cause) {

@@ -277,18 +277,8 @@ public class DefaultBatchDispatcher {
                 new AtomicReference<>(PermitPhase.PREPARED);
 
         @Override
-        public void submitBatch(
-                List<ScheduledRequest> exactItems,
-                long batchId,
-                long predictedMs,
-                String decisionReason,
-                BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-            DispatchTask submittedTask = dispatchTask(
-                    exactItems,
-                    batchId,
-                    predictedMs,
-                    decisionReason,
-                    observer);
+        public void submit(BatchDeliveryStrategy.Delivery delivery) {
+            Objects.requireNonNull(delivery, "delivery");
             if (!phase.compareAndSet(
                     PermitPhase.PREPARED, PermitPhase.SUBMITTED)) {
                 throw new IllegalStateException(
@@ -298,7 +288,12 @@ public class DefaultBatchDispatcher {
             try {
                 dispatchExecutor.execute(() -> {
                     try {
-                        doDispatch(submittedTask);
+                        delivery.run((items, batchId, predictedMs, reason, observer) ->
+                                doDispatch(dispatchTask(items, batchId, predictedMs, reason, observer)));
+                    } catch (Throwable deliveryFailure) {
+                        // Delivery owns admission cleanup; do not infer a
+                        // second per-request outcome from task failure.
+                        Logger.error("Batch delivery task failed", deliveryFailure);
                     } finally {
                         finishSubmitted();
                     }
@@ -413,7 +408,7 @@ public class DefaultBatchDispatcher {
         // Resolve every potentially fallible argument before entering the RPC
         // invocation block. A failure here is definitely pre-send and is
         // handled by doDispatch's outer guard.
-        long deadlineMs = activeBatchConfig().getEnqueueRpcTimeoutMs();
+        requireBatchDispatcher();
         String prefillIp = prefillEp.getIp();
         int prefillGrpcPort = prefillEp.getGrpcPort();
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
@@ -429,7 +424,7 @@ public class DefaultBatchDispatcher {
             }
             attempt.rpcInvocationStarted = true;
             rpcFuture = grpcClient.batchEnqueueAsync(
-                    prefillIp, prefillGrpcPort, request, deadlineMs);
+                    prefillIp, prefillGrpcPort, request);
         } catch (Throwable invocationFailure) {
             // Once client invocation starts, a synchronous exception does not
             // prove that no bytes were written. Treat it as ambiguous.
@@ -496,11 +491,11 @@ public class DefaultBatchDispatcher {
                 ? failure.getCause() : failure;
     }
 
-    private DispatcherConfig activeBatchConfig() {
+    private void requireBatchDispatcher() {
         DispatcherConfig dispatcher =
                 configService.loadBalanceConfig().getDispatcher();
         if (dispatcher.getType() == DispatcherConfig.Type.BATCH) {
-            return dispatcher;
+            return;
         }
         throw new IllegalStateException(
                 "batch submission requires BATCH dispatcher configuration");
@@ -535,7 +530,7 @@ public class DefaultBatchDispatcher {
         for (ScheduledRequest item : items) {
             try {
                 observer.accept(
-                        item, DeliveryResult.failed(error));
+                        item, DeliveryResult.notSent(error));
             } catch (Throwable callbackFailure) {
                 Logger.error("Dispatch-failure callback failed request_id={} batch_id={}",
                         item.requestId(), batchId, callbackFailure);
@@ -633,7 +628,7 @@ public class DefaultBatchDispatcher {
                             : "missing error_info";
                     observer.accept(
                             item,
-                            DeliveryResult.failed(
+                            DeliveryResult.prefillRejected(
                                     new RuntimeException(
                                             "EnqueueBatch rejected request "
                                                     + item.requestId()
@@ -662,7 +657,10 @@ public class DefaultBatchDispatcher {
     private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(long batchId, List<ScheduledRequest> items)
             throws InvalidProtocolBufferException {
         EngineRpcService.EnqueueBatchRequestPB.Builder builder =
-                EngineRpcService.EnqueueBatchRequestPB.newBuilder().setBatchId(batchId);
+                EngineRpcService.EnqueueBatchRequestPB.newBuilder()
+                        .setBatchId(batchId)
+                        .setFetchAttachTimeoutMs(configService.loadBalanceConfig()
+                                .getDispatcher().getFetchAttachTimeoutMs());
         BatchRoleAddressCache roleAddresses = new BatchRoleAddressCache();
         if (!items.isEmpty()) {
             long dpRank = items.get(0).prefill().getDpRank();

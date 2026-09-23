@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
+#include <algorithm>
 #include <cassert>
+#include <limits>
+#include <unordered_map>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -90,6 +93,113 @@ void DeviceBlockPool::decRef(const BlockIdList& blocks) {
             updateActiveBlocksNumNoLock(block, was_active);
             updateAvailableBlocksNumNoLock(block, was_available);
         });
+}
+
+bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestReferenceUpdate>& reference_updates,
+                                                  int                                        replacement_count,
+                                                  BlockIndicesType&                          replacements,
+                                                  int&                                       required_free_blocks) {
+    replacements.clear();
+    required_free_blocks = 0;
+    RTP_LLM_CHECK(replacement_count >= 0);
+
+    std::vector<RequestReferenceUpdate>      changes;
+    std::unordered_map<BlockIdxType, size_t> positions;
+    changes.reserve(reference_updates.size());
+    positions.reserve(reference_updates.size());
+    for (const auto& update : reference_updates) {
+        RTP_LLM_CHECK(update.old_count > 0 && update.new_count >= 0);
+        const auto [it, inserted] = positions.emplace(update.block, changes.size());
+        if (inserted) {
+            changes.push_back(update);
+        } else {
+            auto& change = changes[it->second];
+            RTP_LLM_CHECK(change.old_count <= std::numeric_limits<int>::max() - update.old_count);
+            RTP_LLM_CHECK(change.new_count <= std::numeric_limits<int>::max() - update.new_count);
+            change.old_count += update.old_count;
+            change.new_count += update.new_count;
+        }
+    }
+
+    std::vector<size_t> reclaimable;
+    reclaimable.reserve(changes.size());
+    replacements.reserve(replacement_count);
+    std::function<void()> notify;
+    bool                  capacity_increased = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        checkInitializedNoLock();
+        for (size_t i = 0; i < changes.size(); ++i) {
+            const auto& change = changes[i];
+            checkAllocatedNoLock(change.block);
+            const uint32_t tree_hold    = treeRefCountNoLock(change.block) > 0 ? 1 : 0;
+            const uint32_t request_refs = refcounts_[change.block] - tree_hold;
+            RTP_LLM_CHECK_WITH_INFO(request_refs >= static_cast<uint32_t>(change.old_count),
+                                    "replacing more request references than owned for block %d",
+                                    change.block);
+            RTP_LLM_CHECK(static_cast<uint64_t>(refcounts_[change.block]) - change.old_count + change.new_count
+                          <= std::numeric_limits<uint32_t>::max());
+            // CACHE, LOAD, EVICTION and STORE holds all prevent donor reuse.
+            if (request_refs == static_cast<uint32_t>(change.old_count) && change.new_count == 0 && tree_hold == 0) {
+                reclaimable.push_back(i);
+            }
+        }
+
+        const size_t transfer_count = std::min(reclaimable.size(), static_cast<size_t>(replacement_count));
+        required_free_blocks        = replacement_count - static_cast<int>(transfer_count);
+        const size_t free_before    = availableFreeBlocksNoLock();
+        if (free_before < static_cast<size_t>(required_free_blocks)) {
+            return false;
+        }
+
+        // Prepare all potentially allocating work before committing ownership.
+        notify = capacityChangeCallbackNoLock();
+        reserveReleasedBlocksNoLock(reclaimable.size() - transfer_count);
+        auto fresh_blocks = mallocNoLock(required_free_blocks);
+        RTP_LLM_CHECK(fresh_blocks.has_value());
+        for (size_t i = 0; i < transfer_count; ++i) {
+            auto& change     = changes[reclaimable[i]];
+            change.new_count = 1;
+            replacements.push_back(change.block);
+        }
+        replacements.insert(replacements.end(), fresh_blocks->begin(), fresh_blocks->end());
+
+        for (const auto& change : changes) {
+            const auto block          = change.block;
+            const bool was_active     = isActiveNoLock(block);
+            const bool was_available  = isAvailableNoLock(block);
+            const bool was_referenced = hasRequestRefNoLock(block);
+            refcounts_[block]         = refcounts_[block] - change.old_count + change.new_count;
+            if (was_referenced && !hasRequestRefNoLock(block)) {
+                --request_referenced_blocks_num_;
+            }
+            if (refcounts_[block] == 0) {
+                freeAllocatedBlockNoLock(block);
+            }
+            updateActiveBlocksNumNoLock(block, was_active);
+            updateAvailableBlocksNumNoLock(block, was_available);
+            capacity_increased |= !was_available && isAvailableNoLock(block);
+        }
+        for (const auto block : *fresh_blocks) {
+            const bool was_active = isActiveNoLock(block);
+            refcounts_[block]     = 1;
+            ++request_referenced_blocks_num_;
+            updateActiveBlocksNumNoLock(block, was_active);
+        }
+        capacity_increased |= availableFreeBlocksNoLock() > free_before;
+    }
+    // Tree callbacks acquire their own locks and must run outside the pool lock.
+    if (capacity_increased && notify) {
+        notify();
+    }
+    return true;
+}
+
+bool DeviceBlockPool::isExclusiveRequestBlock(BlockIdxType block) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    return refcounts_[block] == 1 && treeRefCountNoLock(block) == 0;
 }
 
 uint32_t DeviceBlockPool::refCount(BlockIdxType block) const {
