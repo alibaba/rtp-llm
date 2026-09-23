@@ -6,7 +6,9 @@ This launcher does not select hosts or certify runtime precision/Graph/RDMA.
 """
 
 import argparse
+import csv
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -174,6 +176,42 @@ def rdma_hca_environment(run, value):
     return {"ACCL_USE_NICS": selected}
 
 
+def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250):
+    """Record a final TP8 capacity snapshot; shared runs prove correctness only.
+
+    Host-side fleet selection must also record owners: container PID namespaces
+    can hide the owners of nvidia-smi's host PIDs.
+    """
+    if not math.isfinite(min_free_gib) or min_free_gib <= 0:
+        raise ValueError("GPU free-memory requirement must be finite and positive")
+    def query(fields):
+        return subprocess.check_output(
+            ["nvidia-smi", fields, "--format=csv,noheader,nounits"],
+            text=True, timeout=30,
+        )
+    gpu_text = query("--query-gpu=index,uuid,memory.free")
+    process_text = query("--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory")
+    evidence = {
+        "allow_shared_accuracy": allow_shared_accuracy,
+        "performance_validated": False,
+        "min_free_gib": min_free_gib,
+        "gpus": gpu_text,
+        "compute_processes": process_text,
+        "owner_evidence": "See host-side fleet selection and process monitor; host PIDs may be hidden here.",
+    }
+    (Path(run) / "gpu-preflight.json").write_text(json.dumps(evidence, indent=2) + "\n")
+    rows = list(csv.reader(gpu_text.splitlines(), skipinitialspace=True))
+    selected = {int(row[0]): float(row[2]) for row in rows if len(row) == 3}
+    if any(i not in selected or not math.isfinite(selected[i]) or
+           selected[i] < min_free_gib * 1024 for i in range(8)):
+        raise RuntimeError("Insufficient free GPU memory for the complete TP8 profile; reselect hosts")
+    selected_uuids = {row[1].strip() for row in rows if int(row[0]) in range(8)}
+    occupied = [row for row in csv.reader(process_text.splitlines(), skipinitialspace=True)
+                if row and row[0].strip() in selected_uuids]
+    if occupied and not allow_shared_accuracy:
+        raise RuntimeError("GPUs occupied; reselect hosts or explicitly allow shared accuracy validation")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
@@ -189,6 +227,10 @@ def main():
         "--run-dir", required=True, help="New directory on a local data disk"
     )
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument("--allow-shared-accuracy", action="store_true",
+                        help="Allow correctness-only coexistence after host-side isolation checks; never for performance")
+    parser.add_argument("--min-free-gib", type=float, default=250,
+                        help="Required free memory on each of GPUs 0-7 (default: 250 GiB)")
     args = parser.parse_args()
     environment, command = launch_config(args)
     if args.print_config:
@@ -244,11 +286,7 @@ def main():
                 check=True,
             )
     # This is an additional final check, not a replacement for fleet selection.
-    processes = subprocess.check_output(
-        ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"], text=True
-    ).strip()
-    if processes:
-        raise RuntimeError(f"GPUs occupied; reselect hosts. Compute PIDs: {processes}")
+    require_gpu_capacity(run, args.allow_shared_accuracy, args.min_free_gib)
     ports = []
     try:
         for port in range(args.start_port, args.start_port + 8 * 9):
@@ -265,6 +303,8 @@ def main():
                 "environment": environment,
                 "command": command,
                 "pid": os.getpid(),
+                "allow_shared_accuracy": args.allow_shared_accuracy,
+                "performance_validated": False,
             },
             indent=2,
         )
