@@ -910,7 +910,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDynamicBeamDispatchReordersAndPlacesT
     // Per-output-beam rows; the new token sits at column seqLength()==2 while the
     // trailing column holds a different token, so a wrong token_position (last column)
     // would be observable instead of silently passing.
-    merge_outputs.sampler_output.token_ids  = torch::tensor({5, 1, 2, 1, 5, 2, 3, 1}, torch::kInt32).reshape({2, 4});
+    merge_outputs.sampler_output.token_ids  = torch::tensor({5, 2, 2, 1, 5, 1, 3, 1}, torch::kInt32).reshape({2, 4});
     merge_outputs.sampler_output.beam_index = torch::tensor({1, 0}, torch::kInt32);
     merge_outputs.sampler_output.success    = torch::tensor({true, true}, torch::kBool);
     // Distinct per-row values so parent reordering is observable.
@@ -924,9 +924,9 @@ TEST_F(NormalBatchStreamProcessorTest, testDynamicBeamDispatchReordersAndPlacesT
                                      << " msg=" << stream->statusInfo().ToString();
 
     // (1) New tokens land in the seqLength column (index 2), not the last column,
-    // and each beam keeps its own parent history.
-    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{5, 1, 2}));
-    EXPECT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{5, 2, 3}));
+    // and host history follows beam_index: row 0 <- parent 1, row 1 <- parent 0.
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{5, 2, 2}));
+    EXPECT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{5, 1, 3}));
 
     // (2) Hidden states and logits follow beam_index: output row 0 <- parent row 1,
     // output row 1 <- parent row 0.

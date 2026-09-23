@@ -352,8 +352,20 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
 
+    auto          error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
     torch::Tensor current_softmax_result;
-    if (stream->calculateSoftmaxProbs()) {
+    if (!error_info.has_value() && stream->calculateSoftmaxProbs()) {
+        // Validate compact IDs before using them as probability indices. A bad
+        // sampler result must fail only this stream, without throwing during dispatch.
+        const auto* token_ids = new_tokens.data_ptr<int32_t>();
+        for (int i = 0; i < next_batch_size; ++i) {
+            if (token_ids[i] < 0 || token_ids[i] >= raw_logits.size(1)) {
+                stream->reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                                    "output token id " + std::to_string(token_ids[i])
+                                        + " is outside the probability vocabulary");
+                return;
+            }
+        }
         auto batch_softmax_input = raw_logits.to(torch::kFloat32).contiguous();
 #if USING_CUDA
         cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
@@ -367,7 +379,6 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
     }
 
-    auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
     if (asyncDebugEnabled() && success_cpu.defined()) {
         for (int i = 0; i < cur_batch_size; ++i) {
             if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {

@@ -209,7 +209,8 @@ TEST_F(NormalEngineTest, testParallelDispatchMultipleRequests) {
         return query;
     };
 
-    auto streams = engine->batchEnqueue({make_query(1), make_query(2)});
+    auto [accepted, streams] = engine->enqueueMultiple({make_query(1), make_query(2)});
+    ASSERT_EQ(accepted, std::vector<bool>({true, true}));
     ASSERT_EQ(streams.size(), 2u);
     for (auto& stream : streams) {
         ASSERT_NE(stream, nullptr);
