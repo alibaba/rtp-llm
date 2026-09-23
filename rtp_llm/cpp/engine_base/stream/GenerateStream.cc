@@ -235,7 +235,7 @@ void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
 absl::Status GenerateStream::incrKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    return stream_cache_resource_->incrKVBlock();
+    return stream_cache_resource_->incrKVBlock(useChunkWindow() ? reuseLength() + currentChunkLen() : -1);
 }
 
 void GenerateStream::releaseResource() {
@@ -844,6 +844,24 @@ bool GenerateStream::reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>
     return true;
 }
 
+bool GenerateStream::prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info) {
+    if (reportUpdateErrorWithoutLock(error_info)) {
+        return false;
+    }
+
+    const bool middle_chunk = isMiddleChunk();
+    // Forced terminal updates may publish output, but must not advance a chunk.
+    if ((hasErrorWithoutLock() || isFinished()) && (!force_update_info || middle_chunk)) {
+        return false;
+    }
+    if (middle_chunk) {
+        advanceChunk();
+        return false;
+    }
+    is_context_stream_->store(false, std::memory_order_release);
+    return true;
+}
+
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return hasEventWithoutLock(event);
@@ -1164,25 +1182,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
-    if (reportUpdateErrorWithoutLock(update_info.error_info)) {
+    if (!prepareUpdateWithoutLock(update_info.error_info, update_info.force_update_info)) {
         return;
     }
-
-    const bool middle_chunk = isMiddleChunk();
-    const bool terminal     = hasErrorWithoutLock() || isFinished();
-    // force_update_info may publish a final update for a terminal stream, but it must never
-    // advance the chunk window of a request that has already failed or finished.
-    if (terminal && (!update_info.force_update_info || middle_chunk)) {
-        return;
-    }
-
-    // Middle chunk: target/draft forward succeeded and wrote KV. Discard sampled/proposed
-    // tokens, advance the window, and keep context mode; the final chunk falls through.
-    if (middle_chunk) {
-        advanceChunk();
-        return;
-    }
-    is_context_stream_->store(false, std::memory_order_release);
 
     const auto& new_tokens = update_info.new_tokens;
 
@@ -1303,25 +1305,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
-    if (reportUpdateErrorWithoutLock(update_info.error_info)) {
+    if (!prepareUpdateWithoutLock(update_info.error_info, update_info.force_update_info)) {
         return;
     }
-
-    const bool middle_chunk = isMiddleChunk();
-    const bool terminal     = hasErrorWithoutLock() || isFinished();
-    // force_update_info may publish a final update for a terminal stream, but it must never
-    // advance the chunk window of a request that has already failed or finished.
-    if (terminal && (!update_info.force_update_info || middle_chunk)) {
-        return;
-    }
-
-    // Middle chunk: the forward pass succeeded and wrote KV. Drop its sampled token,
-    // advance the window, and stay in context; the final chunk falls through.
-    if (middle_chunk) {
-        advanceChunk();
-        return;
-    }
-    is_context_stream_->store(false, std::memory_order_release);
 
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
