@@ -115,9 +115,10 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
     # --- auto-pick matrix --------------------------------------------------
 
     def test_ep1_with_grouped_kernel_picks_grouped(self):
-        with mock.patch.object(
-            GroupedFP4Strategy, "can_handle", return_value=True
-        ), mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
+        with (
+            mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=True),
+            mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False),
+        ):
             self.assertIs(select_strategy(_cfg(ep_size=1)), GroupedFP4Strategy)
 
     def test_grouped_selection_is_gated_by_ep_size(self):
@@ -144,39 +145,49 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
             m_grouped_fp8_fp4_gemm_nt_contiguous=object(),
             get_mk_alignment_for_contiguous_layout=lambda: (128, 128),
         )
-        with mock.patch.dict(
-            sys.modules,
-            {
-                "flashinfer": fake_flashinfer,
-                "flashinfer.gemm": fake_gemm,
-                "flashinfer.fused_moe": fake_fused_moe,
-                "flashinfer.fused_moe.core": fake_fused_moe_core,
-            },
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-            "torch.cuda.is_available",
-            return_value=True,
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-            "torch.cuda.get_device_capability",
-            return_value=(12, 0),
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
-            return_value=True,
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "flashinfer": fake_flashinfer,
+                    "flashinfer.gemm": fake_gemm,
+                    "flashinfer.fused_moe": fake_fused_moe,
+                    "flashinfer.fused_moe.core": fake_fused_moe_core,
+                },
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                "torch.cuda.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                "torch.cuda.get_device_capability",
+                return_value=(12, 0),
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+                return_value=True,
+            ),
         ):
             self.assertTrue(_has_fp8_fp4_grouped_kernel())
 
-        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-            "torch.cuda.is_available",
-            return_value=True,
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-            "torch.cuda.get_device_capability",
-            return_value=(10, 0),
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
-            return_value=False,
+        with (
+            mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                "torch.cuda.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                "torch.cuda.get_device_capability",
+                return_value=(10, 0),
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+                return_value=False,
+            ),
         ):
             self.assertTrue(_has_fp8_fp4_grouped_kernel())
 
@@ -192,31 +203,33 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
         fake_fused_moe.cutlass_fused_moe_workspace_size = lambda *args, **kwargs: 1
         fake_core = types.ModuleType("flashinfer.fused_moe.core")
         fake_core.ActivationType = types.SimpleNamespace(Swiglu=object())
-        with mock.patch.dict(
-            sys.modules,
-            {
-                "flashinfer": fake_flashinfer,
-                "flashinfer.gemm": fake_gemm,
-                "flashinfer.fused_moe": fake_fused_moe,
-                "flashinfer.fused_moe.core": fake_core,
-            },
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-            "torch.cuda.is_available",
-            return_value=True,
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
-            return_value=True,
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "flashinfer": fake_flashinfer,
+                    "flashinfer.gemm": fake_gemm,
+                    "flashinfer.fused_moe": fake_fused_moe,
+                    "flashinfer.fused_moe.core": fake_core,
+                },
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                "torch.cuda.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+                return_value=True,
+            ),
         ):
             self.assertFalse(_has_fp8_fp4_grouped_kernel())
 
     def test_ep1_no_grouped_falls_to_local(self):
-        with mock.patch.object(
-            GroupedFP4Strategy, "can_handle", return_value=False
-        ), mock.patch.object(
-            MegaMoEStrategy, "can_handle", return_value=False
-        ), mock.patch.object(
-            DeepEPStrategy, "can_handle", return_value=False
+        with (
+            mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False),
+            mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False),
+            mock.patch.object(DeepEPStrategy, "can_handle", return_value=False),
         ):
             self.assertIs(select_strategy(_cfg(ep_size=1)), LocalLoopStrategy)
 
@@ -250,17 +263,21 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
                 super().__init__()
                 self.expert_weights = expert_weights
 
-        with mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop."
-            "_uses_sm120_local_loop",
-            return_value=True,
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop."
-            "prepare_fp4_weight_scale_for_deepgemm",
-            side_effect=AssertionError("DeepGEMM packer must not run on SM120"),
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop.Expert",
-            _FakeExpert,
+        with (
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop."
+                "_uses_sm120_local_loop",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop."
+                "prepare_fp4_weight_scale_for_deepgemm",
+                side_effect=AssertionError("DeepGEMM packer must not run on SM120"),
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop.Expert",
+                _FakeExpert,
+            ),
         ):
             strategy.setup_weights(weights)
 
@@ -344,17 +361,20 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
         x = torch.zeros(2, 8, dtype=torch.bfloat16)
         weights = torch.tensor([[1.0, 0.0], [0.5, 0.0]])
         indices = torch.tensor([[3, 17], [4, 99]], dtype=torch.int64)
-        with mock.patch.dict(
-            sys.modules,
-            {
-                "flashinfer": fake_flashinfer,
-                "flashinfer.fused_moe": fake_fused_moe,
-                "flashinfer.fused_moe.core": fake_core,
-            },
-        ), mock.patch.object(
-            strategy,
-            "_get_sm120_fused_moe_workspace",
-            return_value=torch.zeros(1, dtype=torch.uint8),
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "flashinfer": fake_flashinfer,
+                    "flashinfer.fused_moe": fake_fused_moe,
+                    "flashinfer.fused_moe.core": fake_core,
+                },
+            ),
+            mock.patch.object(
+                strategy,
+                "_get_sm120_fused_moe_workspace",
+                return_value=torch.zeros(1, dtype=torch.uint8),
+            ),
         ):
             strategy._forward_capture_sm120(x, weights, indices)
 
@@ -368,22 +388,27 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
     def test_ep_gt1_default_stays_mega_when_se_is_capable(self):
-        with mock.patch.object(
-            MegaMoEStrategy, "can_handle", return_value=True
-        ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
+        with (
+            mock.patch.object(MegaMoEStrategy, "can_handle", return_value=True),
+            mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True),
+        ):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
     def test_mega_child_strategies_share_exact_architecture_gate(self):
-        with mock.patch.object(
-            MegaMoEStrategy, "_architecture_supported", return_value=False
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.mega_se."
-            "_mega_moe_se_enabled",
-            return_value=True,
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.mega_fused."
-            "_mega_moe_fused_enabled",
-            return_value=True,
+        with (
+            mock.patch.object(
+                MegaMoEStrategy, "_architecture_supported", return_value=False
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.mega_se."
+                "_mega_moe_se_enabled",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.mega_fused."
+                "_mega_moe_fused_enabled",
+                return_value=True,
+            ),
         ):
             self.assertFalse(MegaMoEStrategySE.can_handle(_cfg(ep_size=4)))
             self.assertFalse(MegaMoEFusedStrategy.can_handle(_cfg(ep_size=4)))
@@ -397,9 +422,13 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
             (DeviceType.Cpu, False, False),
         )
         for device_type, sm12x, expected in cases:
-            with self.subTest(device_type=device_type, sm12x=sm12x), mock.patch.object(
-                deepep_wrapper, "get_device_type", return_value=device_type
-            ), mock.patch.object(deepep_wrapper, "is_sm12x", return_value=sm12x):
+            with (
+                self.subTest(device_type=device_type, sm12x=sm12x),
+                mock.patch.object(
+                    deepep_wrapper, "get_device_type", return_value=device_type
+                ),
+                mock.patch.object(deepep_wrapper, "is_sm12x", return_value=sm12x),
+            ):
                 self.assertEqual(deepep_wrapper.use_accl_ep(), expected)
 
     def test_explicit_unsupported_deepep_request_fails_closed(self):
@@ -410,30 +439,31 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
                 deepep_wrapper.init_deepep_wrapper(None, None)
 
     def test_ep_gt1_no_mega_fails_instead_of_silently_using_deepep(self):
-        with mock.patch.object(
-            MegaMoEStrategy, "can_handle", return_value=False
-        ), mock.patch.object(
-            Sm120FusedMoeStrategy, "can_handle", return_value=False
-        ), mock.patch.object(
-            DeepEPStrategy, "can_handle", return_value=True
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.mega_buf."
-            "_mega_moe_disabled_or_unavailable_reason",
-            return_value="Mega unavailable in test",
+        with (
+            mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False),
+            mock.patch.object(Sm120FusedMoeStrategy, "can_handle", return_value=False),
+            mock.patch.object(DeepEPStrategy, "can_handle", return_value=True),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.mega_buf."
+                "_mega_moe_disabled_or_unavailable_reason",
+                return_value="Mega unavailable in test",
+            ),
         ):
             with self.assertRaisesRegex(RuntimeError, "Mega unavailable in test"):
                 select_strategy(_cfg(ep_size=4))
 
     def test_sm120_ep_gt1_uses_explicit_fused_moe_strategy(self):
-        with mock.patch.object(
-            MegaMoEStrategy, "can_handle", return_value=False
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe.is_sm120",
-            return_value=True,
-        ), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-            "torch.cuda.get_device_capability",
-            return_value=(12, 0),
+        with (
+            mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe.is_sm120",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+                "torch.cuda.get_device_capability",
+                return_value=(12, 0),
+            ),
         ):
             self.assertIs(
                 select_strategy(_cfg(ep_size=4)),
@@ -530,8 +560,9 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
         self.assertIn("Conflicting", str(cm.exception))
 
     def test_mega_moe_se_opt_in_selects_se(self):
-        with _env(DSV4_USE_MEGA_MOE_SE="1"), mock.patch.object(
-            MegaMoEStrategySE, "can_handle", return_value=True
+        with (
+            _env(DSV4_USE_MEGA_MOE_SE="1"),
+            mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True),
         ):
             forced, strict = _resolve_forced(None)
             self.assertIs(
@@ -540,8 +571,9 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
             )
 
     def test_mega_moe_se_unavailable_fails_loudly(self):
-        with _env(DSV4_USE_MEGA_MOE_SE="1"), mock.patch.object(
-            MegaMoEStrategySE, "can_handle", return_value=False
+        with (
+            _env(DSV4_USE_MEGA_MOE_SE="1"),
+            mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=False),
         ):
             forced, strict = _resolve_forced(None)
             with self.assertRaises(RuntimeError) as cm:
@@ -578,9 +610,11 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
             self.assertEqual(_resolve_forced(None), (None, False))
 
     def test_legacy_negation_ep_gt1_fails_closed(self):
-        with _env(DSV4_USE_MEGA_MOE="0"), mock.patch.object(
-            Sm120FusedMoeStrategy, "can_handle", return_value=False
-        ), mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+        with (
+            _env(DSV4_USE_MEGA_MOE="0"),
+            mock.patch.object(Sm120FusedMoeStrategy, "can_handle", return_value=False),
+            mock.patch.object(DeepEPStrategy, "can_handle", return_value=True),
+        ):
             with self.assertRaisesRegex(RuntimeError, "DSV4_USE_MEGA_MOE=0"):
                 select_strategy(_cfg(ep_size=4))
 
@@ -589,13 +623,81 @@ import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
         # because ep_size=1; should silently fall through to LocalLoop
         # (NOT raise — that's the strict-mode behaviour). Mirrors the
         # 64k_cp4_ep1 smoke that has ep_size=1 + DSV4_USE_MEGA_MOE=1.
-        with mock.patch.object(
-            MegaMoEStrategy, "can_handle", return_value=False
-        ), mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False):
+        with (
+            mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False),
+            mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False),
+        ):
             self.assertIs(
                 select_strategy(_cfg(ep_size=1), forced="mega", strict=False),
                 LocalLoopStrategy,
             )
+
+
+class NativeGraphWarmupFlagTest(unittest.TestCase):
+    def setUp(self):
+        from rtp_llm.models_py.modules.dsv4.moe import warmup_sync
+
+        self.module = warmup_sync
+        self.name = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
+        self.old_native = warmup_sync._native_getenv(self.name.encode())
+        self.old_python = os.environ.pop(self.name, None)
+        os.unsetenv(self.name)
+
+    def tearDown(self):
+        if self.old_python is not None:
+            os.environ[self.name] = self.old_python
+        else:
+            os.environ.pop(self.name, None)
+        if self.old_native is None:
+            os.unsetenv(self.name)
+        else:
+            os.putenv(self.name, self.old_native.decode())
+
+    def test_native_scope_visible_without_python_mapping_mutation(self):
+        self.assertFalse(self.module.cuda_graph_warmup_forward_enabled())
+        # os.putenv calls native setenv, exactly like the C++ scoped writer;
+        # intentionally does not update os.environ.
+        os.putenv(self.name, "1")
+        self.assertNotIn(self.name, os.environ)
+        self.assertTrue(self.module.cuda_graph_warmup_forward_enabled())
+        os.unsetenv(self.name)
+        self.assertFalse(self.module.cuda_graph_warmup_forward_enabled())
+
+    def test_only_exact_one_enables(self):
+        for value in ("", "0", "True", "11"):
+            os.putenv(self.name, value)
+            self.assertFalse(self.module.cuda_graph_warmup_forward_enabled())
+        os.environ[self.name] = "1"
+        self.assertTrue(self.module.cuda_graph_warmup_forward_enabled())
+        # Native restoration must win even if Python retained a stale one.
+        os.putenv(self.name, "0")
+        self.assertFalse(self.module.cuda_graph_warmup_forward_enabled())
+
+    def test_native_warmup_uses_capture_backend_then_restores_eager(self):
+        strategy = GroupedFP4Strategy(_cfg(ep_size=1))
+        x = torch.zeros(2, 8, dtype=torch.bfloat16)
+        weights = torch.ones(2, 1)
+        indices = torch.zeros(2, 1, dtype=torch.int64)
+        capture_result, eager_result = object(), object()
+        with (
+            mock.patch.object(grouped_fp4_module, "is_sm120", return_value=True),
+            mock.patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=False
+            ),
+            mock.patch.object(
+                strategy, "_forward_capture_sm120", return_value=capture_result
+            ) as cap,
+            mock.patch.object(
+                strategy, "forward_sm120_eager", return_value=eager_result
+            ) as eager,
+        ):
+            os.putenv(self.name, "1")
+            self.assertIs(strategy(x, weights, indices), capture_result)
+            cap.assert_called_once_with(x, weights, indices)
+            eager.assert_not_called()
+            os.unsetenv(self.name)
+            self.assertIs(strategy(x, weights, indices), eager_result)
+            eager.assert_called_once_with(x, weights, indices)
 
 
 if __name__ == "__main__":

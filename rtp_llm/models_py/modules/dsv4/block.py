@@ -32,6 +32,7 @@ def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 
 class Block(nn.Module):
+
     def __init__(
         self,
         layer_id: int,
@@ -80,6 +81,7 @@ class Block(nn.Module):
         moe_tp_rank: int = 0,
         cp_size: int = 1,
         cp_enabled: bool = False,
+        stage_context: Optional[object] = None,
         commit_only: bool = False,
     ):
         super().__init__()
@@ -148,6 +150,7 @@ class Block(nn.Module):
             moe_tp_rank=moe_tp_rank,
             cp_size=cp_size,
             cp_enabled=cp_enabled,
+            stage_context=stage_context,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight

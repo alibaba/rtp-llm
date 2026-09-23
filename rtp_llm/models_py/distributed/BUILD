@@ -23,6 +23,18 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# Stage-local expert-parallel context: the CP4EP4PP2 stage roster plus the
+# strict resolver for the experimental DSV4_PP_EP_* opt-in. Pure metadata over
+# rank_layout; imports torch only lazily inside the verification helper.
+py_library(
+    name = "ep_stage_context",
+    srcs = ["ep_stage_context.py"],
+    deps = [
+        ":rank_layout",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "deepep_wrapper",
     srcs = ["deepep_wrapper.py"],

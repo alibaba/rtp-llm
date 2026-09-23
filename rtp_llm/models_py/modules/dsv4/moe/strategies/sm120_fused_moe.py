@@ -192,11 +192,17 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> torch.Tensor:
-        """SM120 correctness fallback: all-gather + FusedMoe + all-reduce."""
-
+        """WORLD-based fallback is invalid across PP stages; reject a stage-local context."""
         dist = torch.distributed
         if not dist.is_initialized():
             raise RuntimeError("SM120 collective MoE requires torch.distributed")
+        if self.cfg.stage_context is not None:
+            raise RuntimeError(
+                "Sm120FusedMoeStrategy's WORLD collective fallback is not valid under "
+                "PP+EP: WORLD spans every pipeline stage. The reachable CP4EP4PP2 path "
+                "is the CP router (cp_enabled and cp_size == ep_size); check that "
+                "moe_cp_enabled/moe_cp_size reached the MoE layer."
+            )
         group = dist.group.WORLD
         world, rank = _validate_world_collective_topology(self.cfg, dist, group)
         if torch.cuda.is_current_stream_capturing():
