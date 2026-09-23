@@ -236,8 +236,17 @@ cc_library(
 cc_library(
     name = "forward_trace",
     hdrs = ["ForwardTrace.h"],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# The engine and compute bindings must use the same thread-local session.
+# Link definitions only into librtp_compute_ops.so, as with exec_ctx_state.
+cc_library(
+    name = "forward_trace_state",
     srcs = ["ForwardTrace.cc"],
-    deps = torch_deps() + select({
+    deps = [":forward_trace"] + select({
         "//:using_cuda": [
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
@@ -245,6 +254,7 @@ cc_library(
         "//conditions:default": [],
     }),
     copts = copts(),
+    alwayslink = True,
     visibility = ["//visibility:public"],
 )
 
@@ -259,6 +269,6 @@ cc_library(
 cc_test(
     name = "forward_trace_test",
     srcs = ["test/ForwardTraceTest.cc"],
-    deps = [":forward_trace"],
+    deps = [":forward_trace_state"],
     copts = copts(),
 )
