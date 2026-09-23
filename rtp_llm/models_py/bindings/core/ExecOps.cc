@@ -38,6 +38,9 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 namespace rtp_llm {
 GreedyOutput     sampleGreedy(const GreedyParams& params);
 torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
+torch::Tensor    prepareDSparkLogits(const torch::Tensor& base_logits,
+                                     const torch::Tensor& markov_bias,
+                                     const torch::Tensor& temperature);
 BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params);
 void             chainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             rejectionSampling(const RejectionSamplingParams& params);
@@ -547,6 +550,12 @@ GreedyOutput execSampleGreedy(const GreedyParams& params) {
 
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
     return sampleFromProbs(probabilities);
+}
+
+torch::Tensor execPrepareDSparkLogits(const torch::Tensor& base_logits,
+                                      const torch::Tensor& markov_bias,
+                                      const torch::Tensor& temperature) {
+    return prepareDSparkLogits(base_logits, markov_bias, temperature);
 }
 
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params) {

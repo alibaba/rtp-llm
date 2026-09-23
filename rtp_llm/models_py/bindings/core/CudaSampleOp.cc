@@ -1,6 +1,8 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include <cstdlib>
+#include <cstring>
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -12,6 +14,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/vocab_prune/mapping.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/dspark_logits.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "pybind11/pybind11.h"
 #include <cstddef>
@@ -22,6 +25,22 @@
 using namespace std;
 
 namespace rtp_llm {
+
+torch::Tensor prepareDSparkLogits(const torch::Tensor& base_logits,
+                                  const torch::Tensor& markov_bias,
+                                  const torch::Tensor& temperature) {
+#if USING_CUDA
+    const auto* enabled = std::getenv("DSV41_FUSED_DSPARK_LOGITS");
+    if (enabled == nullptr || std::strcmp(enabled, "0") != 0) {
+        auto fused = tryPrepareDSparkLogits(base_logits, markov_bias, temperature);
+        if (fused.defined()) {
+            return fused;
+        }
+    }
+#endif
+    auto logits = base_logits + markov_bias.to(torch::kFloat32);
+    return logits.div_(temperature.unsqueeze(1));
+}
 
 #if USING_CUDA
 

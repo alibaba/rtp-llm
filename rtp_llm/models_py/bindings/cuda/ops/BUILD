@@ -118,6 +118,7 @@ cc_library(
     deps = [
         ":gpu_base",
         ":torch_beam_search_op_impl",
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:dspark_logits",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
         "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
