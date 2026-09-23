@@ -41,7 +41,7 @@ Spectrum 业务来源标识仍待补充，`frontend` 仅表示采集位置。cod
 - `source.spectrum`：Spectrum 业务来源标识、确认状态、信息依据。目前没有自动化查询链，需人工补充。
 - `source.model`：真实服务模型名称、确认状态、信息依据。未知时 `name: null, status: unconfirmed`，不从部署名或 mock 性能配置推断。
 - `capture_window`、`provenance`：可读时间窗，以及文件内保留的 Pod 覆盖和原始来源校验信息。
-- `statistics`：请求数、平均 QPS、含空闲桶的每秒请求数分位数、块对齐输入长度分布及总量、prefix 共享分布。
+- `statistics`：请求数、平均 QPS、含空闲桶的每秒请求数分位数、输入长度分布及总量（v3 精确长度，v2 块对齐）、prefix 共享分布。
 - `codec`、`bytes`、`sha256`：解码格式和文件完整性；原始请求文本不入库。
 
 统计范围仅是捕获请求。分位数采用 nearest-rank；每秒桶从首个事件开始，包含最后一个可能不足一秒的桶。
@@ -57,7 +57,7 @@ python3 scripts/pipeline/describe_traffic.py data/traffic_models/glm-5.3_2026092
 也可通过 `--source-info /path/to/source.json` 提供完整 `source` 对象。
 确认后填写 Spectrum `identity`、模型 `name`、`status: confirmed` 及各自的 `evidence`；
 未确认字段保持 `null/unconfirmed`。这一步描述已存在的文件，不自动授权提交新数据。
-编译 v1 模型时，`python3 -m traffic.prefix_lineage` 会同时写出这份 sidecar。
+`fit_frontend_prefix.py` 拟合时同时写出这份 sidecar。
 
 ## 性能参数
 
@@ -69,3 +69,41 @@ python3 scripts/pipeline/describe_traffic.py data/traffic_models/glm-5.3_2026092
 
 合成画像 schema 2 保存联合分布；默认仍保持独立采样的旧 seed 语义。显式 `sampling: joint` 使用联合采样，
 独立对比工具及限制见[合成保真度](../docs/reference/concepts/synthetic-fidelity.md)。
+
+## 采集契约与归档
+
+[capture_contract.py](../src/traffic/capture_contract.py) 是 capture→fit 行契约的唯一出处，
+声明字段名、类型、可空性、语义及匿名化规格；capture/fit 均执行它的校验。
+行文件和 summary 都记录 `schema_version` 与 `block_size`。块大小在该模块单点声明，
+默认 512；修改后采集、拟合和 codec 同步使用新值，不匹配的历史件会被拒绝，不能混用。
+缺到达时间戳等不可用日志行在 summary 显式计数；契约字段不能静默补齐。
+无 schema 的旧行文件不被自动猜测接纳，需根据真实来源核验契约，不能用拟合件冒充。
+
+仓库外按 `<来源>/<UTC起止窗口>/capture/pod-N.jsonl.gz`（或 `.jsonl.xz`）及
+`capture/pod-N.summary.json` 成对归档；Pod 索引映射和来源信息随窗口保存。
+这是“拟合前原始中间件”的唯一来源，不含原始 token。派生文件保存到同窗口的
+`fit/v3/`（历史复拟合为 `fit/v2/`），包括 `.xz`、manifest 和 fit-report。
+行文件的压缩字节 SHA256 由 summary 绑定，fit-report 保存所消费的 summary。
+**以拟合后文件冒名 original 属事故**：`.xz` 扩展名不能证明它是原始中间件。
+不覆盖原始归档，不以拟合件恢复、推算或生成已丢失的精确长度。
+
+采集支持 `--log-dir`、`--log-glob`；运行位置、部署/Pod 定位由外部执行环境负责。
+护栏默认 `--time-budget-s 900 --tail-bytes 16000000 --completion-grace-ms 300000`。
+超预算默认 `--on-budget error` 返回失败，仍写 summary；显式 `truncate` 正常返回，
+但 summary 必须标记 `complete: false`、`truncated: true` 和 `budget_exceeded`。
+fit 拒绝不完整窗口。增加预算或分成更小的到达窗口重新采集，再分别拟合；
+不实现基于文件偏移的续采，以免轮转后的偏移被误认作同一日志。
+
+## 编码代际与复算
+
+新采集默认拟合 v3：保留精确输入总长，仅完整块参与前缀匹配，残缺尾块私有。
+显式 `--model-version 2 --v2-reason '历史复拟合理由'` 才生成 v2，理由进入 provenance。
+v2 读取路径保留。现有 v2 件、SHA、画像、夹具与场景 pin 是历史工件，不能原地换代。
+唯一退役路径是“重采新窗口 → v3 文件与 manifest 入库 → 引用方换代重标定”。
+文件发现、manifest 校验、`run_stress --traffic-model` 与场景 SHA pin 同时支持 v2/v3；
+不因 v3 成为默认而修改既有默认门禁数据或阈值。
+
+禁止以格式转换或尾长生成冒充实测 v3。若另行开展尾长合成实验，manifest 必须
+独立声明合成来源，产物留在实验归档，不得进入真实流量目录或门禁输入。
+同场景跨 codec 代际或 tail 语义不能直接比较命中率/TPS 绝对值、32k 过滤后的请求集；
+现有 `comparison_notice` 通道提示该差异，重标定后才能建立新的对照结论。

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from traffic.traffic_source import materialize
-from traffic.prefix_lineage import decode
+from traffic.prefix_lineage_v3 import decode
 
 
 class FrontendPrefixFitTest(unittest.TestCase):
@@ -87,6 +87,9 @@ class FrontendPrefixFitTest(unittest.TestCase):
                 "--output-tokens",
                 "420",
             ]
+            rejected = subprocess.run(command + ["--model-version", "2"], capture_output=True, text=True)
+            self.assertNotEqual(0, rejected.returncode)
+            self.assertIn("--v2-reason", rejected.stderr)
             subprocess.run(command, check=True, capture_output=True)
             report = json.loads((root / "fit/fit-report.json").read_text())
             self.assertEqual(report["missing_pod_indices"], [1])
@@ -106,7 +109,7 @@ class FrontendPrefixFitTest(unittest.TestCase):
                 dict(
                     kind="trace",
                     model="prefix_lineage",
-                    version="2",
+                    version="3",
                     parameters=dict(
                         path=str(model),
                         sha256=hashlib.sha256(model.read_bytes()).hexdigest(),
@@ -130,9 +133,12 @@ class FrontendPrefixFitTest(unittest.TestCase):
                 self.assertEqual(
                     a["ol"], 420
                 )  # Error-censored zero outputs are excluded.
-            subprocess.run(command + ["--model-version", "3", "--out", str(root / "fit3")],
+            subprocess.run(command + ["--model-version", "2", "--v2-reason", "historical regression", "--out", str(root / "fit2")],
                            check=True, capture_output=True)
-            exact = read_manifest(root / "fit3/lineage-model.xz")
+            exact = manifest
+            legacy = read_manifest(root / "fit2/lineage-model.xz")
+            self.assertEqual(legacy['codec']['version'], 2)
+            self.assertEqual(legacy['provenance']['v2_reason'], 'historical regression')
             self.assertEqual(exact['codec']['version'], 3)
             self.assertEqual(exact['statistics']['input_tokens']['resolution_tokens'], 1)
             self.assertEqual(exact['statistics']['input_tokens']['total'], 3075)

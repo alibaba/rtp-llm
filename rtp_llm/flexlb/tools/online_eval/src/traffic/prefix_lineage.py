@@ -3,15 +3,13 @@
 No raw text is stored. Token lengths are block aligned; arrival timestamps are
 never paced here. The allocation bitmap preserves v1 complete-block labels.
 """
-import argparse
-import gzip
 import hashlib
 import json
 import lzma
 from pathlib import Path
 
 MAGIC = b'PFL2\0'
-BLOCK = 512
+from traffic.capture_contract import BLOCK_SIZE as BLOCK
 MAX_EVENTS = 1_000_000
 
 
@@ -164,30 +162,3 @@ def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
                 token_adjustment=metadata['token_adjustment'],
                 **(dict(output_semantics=output_semantics(p), output_distribution=p['output_distribution'],
                         output_cap=p['output_tokens']) if p.get('output_distribution') else {}))
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('v1_model', type=Path)
-    parser.add_argument('--fit-report', type=Path, required=True)
-    parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--source-info', type=Path, help='manual Spectrum/model source metadata JSON')
-    args = parser.parse_args()
-    model = json.loads(gzip.decompress(args.v1_model.read_bytes()))
-    if model.get('version') != 1 or model.get('block_size') != BLOCK:
-        raise ValueError('expected lineage v1 model')
-    report = json.loads(args.fit_report.read_text())
-    provenance = {k:report.get(k) for k in ('missing_pod_indices','source_start','source_end','expected_pods','source_pods')}
-    provenance['v1_sha256'] = hashlib.sha256(args.v1_model.read_bytes()).hexdigest()
-    provenance['fit_report_sha256'] = hashlib.sha256(args.fit_report.read_bytes()).hexdigest()
-    raw = encode(model['events'], provenance)
-    args.out.write_bytes(raw)
-    from traffic.datasets import build_manifest
-    source = json.loads(args.source_info.read_text()) if args.source_info else None
-    manifest = build_manifest(args.out, source)
-    args.out.with_suffix('.manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    print(json.dumps(dict(path=str(args.out), **manifest), indent=2))
-
-
-if __name__ == '__main__':
-    main()

@@ -84,13 +84,17 @@ def comparison_notice(a,b):
     differences=[k for k in fields if a.get(k)!=b.get(k)]
     if a.get('source',{}).get('kind')!=b.get('source',{}).get('kind'):
         differences.append('source kind')
+    left, right = a.get('source', {}), b.get('source', {})
+    if (left.get('kind') == 'trace' or right.get('kind') == 'trace') and (
+            (left.get('model'), left.get('version')) != (right.get('model'), right.get('version'))):
+        differences.append('trace codec version')
     for k in ('identity','retain_probability','seed','rate_curve','arrival','retain_schedule'):
         if a.get('playback',{}).get(k)!=b.get('playback',{}).get(k):differences.append(k)
     for k in ('output_distribution','output_semantics','output_cap'):
         if a.get(k)!=b.get(k): differences.append(k)
     if a.get('source',{}).get('parameters',{}).get('output_distribution') != b.get('source',{}).get('parameters',{}).get('output_distribution'):
         differences.append('source.output_distribution')
-    return ('DIFFERENT / 不可直比命中率绝对值 / cache-hit absolute values are not directly comparable: '+', '.join(differences)) if differences else None
+    return ('DIFFERENT / 不可直比命中率/TPS 绝对值 / cache-hit/TPS absolute values are not directly comparable: '+', '.join(differences)) if differences else None
 
 
 def iteration_windows(rows):

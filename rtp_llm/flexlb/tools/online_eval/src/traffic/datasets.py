@@ -9,15 +9,8 @@ import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from traffic.prefix_lineage import BLOCK, decode as decode_v2
-from traffic.prefix_lineage_v3 import decode as decode_v3
-
-
-def decode(raw):
-    try:
-        return decode_v2(raw)
-    except ValueError:
-        return decode_v3(raw)
+from traffic.capture_contract import BLOCK_SIZE as BLOCK
+from traffic.codecs import decode
 
 DATA = Path(__file__).resolve().parents[2] / "data"
 DEFAULT_TRACE = "glm-5.3_20260921_1400_15m"
@@ -114,7 +107,10 @@ def read_manifest(path):
     raw = path.read_bytes()
     if manifest.get("bytes") != len(raw) or manifest.get("sha256") != hashlib.sha256(raw).hexdigest():
         raise ValueError(f"{path}: model and manifest bytes/SHA256 disagree")
-    metadata, events = decode(raw)
+    try:
+        metadata, events = decode(raw, manifest)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"{path}: manifest codec / model mismatch: {exc}") from None
     for field, value in metadata.items():
         if manifest.get(field) != value:
             raise ValueError(f"{path}: manifest {field} disagrees with model contents")

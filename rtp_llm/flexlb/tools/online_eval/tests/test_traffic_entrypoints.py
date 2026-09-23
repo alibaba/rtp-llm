@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from traffic.prefix_lineage import encode
+from traffic.datasets import build_manifest
 
 
 class TrafficEntrypointTest(unittest.TestCase):
@@ -36,10 +37,7 @@ class TrafficEntrypointTest(unittest.TestCase):
             directory = Path(tmp)
             model = directory / "small.xz"
             model.write_bytes(encode([(0, 512, -1, 0), (10, 1024, 0, 1)]))
-            model.with_suffix(".manifest.json").write_text(json.dumps(dict(
-                bytes=model.stat().st_size,
-                sha256=hashlib.sha256(model.read_bytes()).hexdigest(), count=2,
-            )))
+            model.with_suffix(".manifest.json").write_text(json.dumps(build_manifest(model)))
             lineage = directory / "lineage.jsonl"
             subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
                             "--lineage-model", str(model), "--namespace", "check",

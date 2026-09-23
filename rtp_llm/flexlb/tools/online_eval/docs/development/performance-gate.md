@@ -46,7 +46,7 @@ predicted execution=550ms。它们是本轮显式比较对象，不能称为线�
 `request_enter_ts_epoch_ms` 严格筛选 `[start,end)`；缺少到达时间的记录计数后跳过，
 不使用完成时间替代，避免混入切流前请求。原始 token 不落入采集文件。
 
-拟合时选择 `fit_frontend_prefix.py --model-version 3`，保留精确输入长度。
+拟合默认使用 `fit_frontend_prefix.py` 的 v3 编码，保留精确输入长度。
 回放 source 使用 `kind: trace / model: prefix_lineage / version: '3'`，
 参数仍需固定 `path, sha256, count, output_tokens, priority`，可额外指定
 `max_input_tokens: 32768`。该上界是包含边界的输入长度过滤，不截断请求，
@@ -141,3 +141,8 @@ A 为第一个输入，B 为第二个输入；A 虚线，B 实线。同指标同
 请求曲线按 1 秒分桶：TPS 按成功完成时刻，延迟/成功率按到达 cohort（包含窗口后终态），不能把桶 p99 当作整个测量窗口 p99。
 监控曲线从 evidence 同级 `telemetry/*/queries.json` 读取，保留 P、D 两种角色和缺采。
 离线比较会复制这些查询归档到 A/B 子目录；报告不会从日志伪造缺失的监控曲线。
+
+采集行契约见 [capture_contract.py](../../src/traffic/capture_contract.py)，归档与代际规则见
+[data/README.md](../../data/README.md)。采集脚本只处理本地可读的 frontend 日志，
+以 `--log-dir` / `--log-glob` 指定来源；Whale 定位、容器执行和日志下载由环境 skill 负责。
+到达窗严格为 `[start, end)`；完成时间只作文件候选过滤，不能替代到达时间。

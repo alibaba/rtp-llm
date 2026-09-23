@@ -1,16 +1,14 @@
-"""Fit an anonymized empirical prefix-lineage model; no raw tokens retained.
+"""拟合匿名前缀流量；行契约见 traffic.capture_contract。
 
-This first calibration preserves measured 512-token sharing exactly instead of
-assuming a Zipf family model. It is an empirical event model, not a validated
-small-parameter statistical generator. True arrivals are retained; playback
-controls the rate. Output behavior is independently specified.
+保留完整块共享、真实到达时间与精确总长度；残缺尾块不参与匹配。
 """
 
 import argparse, collections, gzip, lzma, hashlib, json, math, time, sys
 from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from traffic.prefix_lineage import encode, write_trace
+from traffic.capture_contract import BLOCK_SIZE, validate_metadata, validate_row
+from traffic.codecs import codec_for_version
 from traffic.datasets import build_manifest
 
 
@@ -21,13 +19,24 @@ def main():
     p.add_argument("--expected-pods", type=int, required=True)
     p.add_argument("--output-tokens", type=int, required=True)
     p.add_argument("--source-info", type=Path, help="manual Spectrum/model source metadata JSON")
-    p.add_argument("--model-version", choices=("2", "3"), default="2")
+    p.add_argument("--model-version", choices=("2", "3"), default="3")
+    p.add_argument("--v2-reason", help="仅历史复拟合：说明显式生成 v2 的理由")
     a = p.parse_args()
-    global encode, write_trace
-    if a.model_version == "3":
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from traffic.prefix_lineage_v3 import encode, write_trace
+    a.out.mkdir(parents=True, exist_ok=True)
+    try:
+        fit(a)
+    except Exception as exc:
+        (a.out / "fit.summary.json").write_text(json.dumps(dict(
+            complete=False, errors=[str(exc)]), indent=2) + "\n")
+        raise
+    (a.out / "fit.summary.json").write_text(json.dumps(dict(complete=True, errors=[])) + "\n")
+
+
+def fit(a):
+    if a.model_version == "2" and not (a.v2_reason and a.v2_reason.strip()):
+        raise ValueError("--model-version 2 requires --v2-reason for historical refitting")
+    codec = codec_for_version(int(a.model_version))
+    encode, write_trace = codec.encode, codec.write_trace
     a.out.mkdir(parents=True, exist_ok=True)
     rows = []
     sources = {}
@@ -37,14 +46,21 @@ def main():
         )
         if hashlib.sha256(path.read_bytes()).hexdigest() != summary["sha256"]:
             raise ValueError("capture checksum mismatch: " + str(path))
+        validate_metadata(summary, str(path) + " summary")
+        if summary.get("complete") is not True or summary.get("truncated") is not False:
+            raise ValueError(f"{path}: incomplete capture; recapture a smaller window or increase budget")
         sources[path.name] = summary
-        for line in (lzma.open if path.suffix == ".xz" else gzip.open)(path, "rt"):
-            row = json.loads(line)
-            row["pod"] = path.name
-            row["keys"] = [bytes.fromhex(k) for k in row["keys"]]
-            if len(row["keys"]) != row["il"] // 512:
-                raise ValueError("capture block count mismatch")
-            rows.append(row)
+        with (lzma.open if path.suffix == ".xz" else gzip.open)(path, "rt") as stream:
+            for number, line in enumerate(stream, 1):
+                location = f"{path}:{number}"
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    raise ValueError(f"{location}: invalid JSON") from None
+                validate_row(row, location)
+                row["pod"] = path.name
+                row["keys"] = [bytes.fromhex(k) for k in row["keys"]]
+                rows.append(row)
     windows = {(v["start"], v["end"]) for v in sources.values()}
     if len(windows) != 1:
         raise ValueError("capture intervals differ")
@@ -94,13 +110,13 @@ def main():
                 parent = seen[keys[shared - 1]]
                 gaps.append(row["ts"] - rows[parent]["ts"])
             blocks = token_paths[parent][:shared] if parent >= 0 else []
-            fresh = math.ceil(row["il"] / 512) - shared
+            fresh = math.ceil(row["il"] / BLOCK_SIZE) - shared
             blocks.extend(range(next_token, next_token + fresh))
             next_token += fresh
             token_paths.append(blocks)
             for key in keys:
                 seen[key] = i
-            potential += shared * 512
+            potential += shared * BLOCK_SIZE
             lengths.append(row["il"])
             status[str(row["status"])] += 1
             families[keys[7] if len(keys) >= 8 else ("short", row["tail_hash"])] += 1
@@ -111,7 +127,7 @@ def main():
             )
             w["requests"] += 1
             w["tokens"] += row["il"]
-            w["potential_tokens"] += shared * 512
+            w["potential_tokens"] += shared * BLOCK_SIZE
             w["errors"] += row["status"] != "OK"
             model.append([row["ts"] - source_origin, row["il"], parent, shared])
             if i % 20000 == 0:
@@ -122,7 +138,8 @@ def main():
     model_path = a.out / "lineage-model.xz"
     raw = encode(model, dict(missing_pod_indices=missing,source_start=rows[0]['ts'],
         source_end=rows[-1]['ts'],capture_start=capture_start,capture_end=capture_end,
-        source_pods=len(sources),expected_pods=a.expected_pods))
+        source_pods=len(sources),expected_pods=a.expected_pods,
+        **(dict(v2_reason=a.v2_reason) if a.model_version == "2" else {})))
     model_path.write_bytes(raw)
     source = json.loads(a.source_info.read_text()) if a.source_info else None
     model_path.with_suffix('.manifest.json').write_text(

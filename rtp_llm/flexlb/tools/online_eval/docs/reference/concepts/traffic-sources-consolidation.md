@@ -5,10 +5,11 @@
 
 ## 源层只生成内容
 
-注册表仅保留两个入口。功能场景内联 `requests:` 不变。
+注册表包含真实流量的 v2/v3 和合成流量入口。功能场景内联 `requests:` 不变。
 
 | 源 | 数据 | 时间字段 | 口径 |
 |---|---|---|---|
+| `trace/prefix_lineage/3` | SHA 固定的 XZ 精确长度模型 | 原始相对毫秒 | 新采集默认；完整块共享，残缺尾块私有，总长精确 |
 | `trace/prefix_lineage/2` | SHA 固定的 XZ 列式模型 | 原始相对毫秒 | 实测前缀结构；token 长度块对齐有损 |
 | `synthetic/realistic/1` | seed、长度分布、族/会话、精确块 | 请求序号 | 参数分布；客户端负责节奏 |
 
@@ -37,11 +38,9 @@ SHA、token 调整统计。输出长度从独立的 `output_tokens` 指定，不
 截断为零的采集结果推断。不存在 source `qps` 参数。
 
 ```sh
+# 默认生成 v3；v2 仅用于带理由的历史复拟合。
 python3 -m traffic.fit_frontend_prefix --source CAPTURE_DIR --out FIT_DIR \
   --expected-pods 20 --output-tokens 420
-# 旧模型的一次性迁移入口；运行时注册表不支持 v1：
-python3 -m traffic.prefix_lineage old-model.json.gz \
-  --fit-report fit-report.json --out lineage-model.xz
 ```
 
 ### Realistic

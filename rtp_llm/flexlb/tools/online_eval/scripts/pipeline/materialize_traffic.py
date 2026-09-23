@@ -9,7 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from traffic.traffic_source import materialize, sha256_file
+from traffic.traffic_source import materialize
+from traffic.datasets import read_manifest
 
 
 def main(argv=None):
@@ -28,10 +29,8 @@ def main(argv=None):
         base_dir = args.spec.resolve().parent
     else:
         model = args.lineage_model.resolve()
-        manifest = json.loads(model.with_suffix(".manifest.json").read_text())
-        if model.stat().st_size != manifest["bytes"] or sha256_file(model) != manifest["sha256"]:
-            raise ValueError("lineage model differs from its pinned manifest")
-        spec = dict(kind="trace", model="prefix_lineage", version="2", parameters=dict(
+        manifest = read_manifest(model)
+        spec = dict(kind="trace", model="prefix_lineage", version=str(manifest["codec"]["version"]), parameters=dict(
             path=model.name, sha256=manifest["sha256"], count=manifest["count"],
             output_tokens=args.output_tokens, priority=args.priority,
         ))

@@ -8,13 +8,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from traffic.prefix_lineage import decode
+from traffic.codecs import decode, block_events
+from traffic.capture_contract import BLOCK_SIZE as BLOCK
+from traffic.datasets import read_manifest
 from traffic.structure import capture_shape, joint_distribution
 
 
-def calibrate(raw, report, report_sha):
-    metadata, events=decode(raw)
-    sizes=sorted(e[1]*512 for e in events)
+def calibrate(raw, report, report_sha, manifest=None):
+    metadata, events=decode(raw, manifest)
+    sizes=sorted(e[1] * (1 if metadata["version"] == 3 else BLOCK) for e in events)
+    events=block_events(metadata, events)
     # A dense empirical inverse CDF preserves the long tail and mean better than
     # interpolating three percentiles. Deterministic, bounded profile size.
     values=[sizes[int(q*(len(sizes)-1)/1000)] for q in range(1001)]
@@ -33,7 +36,7 @@ def calibrate(raw, report, report_sha):
     # Family concentration is defined at 4K in the empirical report.
     depth=max(8,depth)
     return dict(schema_version=2, data_kind='synthetic', generator=dict(kind='synthetic',model='realistic',version='1'),
-        parameters=dict(block_size=512,families=families,shared_blocks=0,
+        parameters=dict(block_size=BLOCK,families=families,shared_blocks=0,
         prefix_blocks=depth,suffix_blocks=1,zipf_alpha=(lo+hi)/2,cold_fraction=cold,
         session_requests=1,session_growth_blocks=0,
         input_distribution=dict(values=values,weights=[1]*len(values)),
@@ -56,7 +59,7 @@ def main():
     parser.add_argument('--fit-report',type=Path,required=True)
     parser.add_argument('--out',type=Path,required=True)
     a=parser.parse_args();raw=a.fit_report.read_bytes()
-    result=calibrate(a.model.read_bytes(),json.loads(raw),hashlib.sha256(raw).hexdigest())
+    result=calibrate(a.model.read_bytes(),json.loads(raw),hashlib.sha256(raw).hexdigest(), read_manifest(a.model))
     result['source_capture']=os.path.relpath(a.model.resolve(), a.out.resolve().parent)
     a.out.write_text(json.dumps(result,indent=2)+'\n')
 
