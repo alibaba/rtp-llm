@@ -806,7 +806,20 @@ class FinalizeOutputVocabConfigTest(unittest.TestCase):
     def test_missing_lm_head_raises(self):
         fake = self._make_fake(tp=1, dp=1, ep=1, has_lm_head=False)
         with self.assertRaisesRegex(ValueError, "requires a model LM head"):
-            BaseModel._finalize_output_vocab_config(fake)
+            self._finalize_with_manifest(fake, [1, 3, 5])
+
+    def test_missing_manifest_disables_pruning_and_clears_stale_config(self):
+        for has_lm_head in (True, False):
+            with self.subTest(has_lm_head=has_lm_head):
+                fake = self._make_fake(tp=2, dp=1, ep=1, has_lm_head=has_lm_head)
+                with tempfile.TemporaryDirectory() as checkpoint_path:
+                    fake.model_config.ckpt_path = checkpoint_path
+                    with self.assertLogs(level="INFO"):
+                        BaseModel._finalize_output_vocab_config(fake)
+                self.assertFalse(fake.model_config.enable_output_vocab_pruning)
+                self.assertEqual(fake.model_config.output_vocab_ids, [])
+                self.assertEqual(fake.model_config.output_vocab_groups, [])
+                self.assertEqual(fake.model_config.output_vocab_padded_size, 0)
 
 
 if __name__ == "__main__":
