@@ -31,8 +31,10 @@ Returns:
 Shapes constraints (V4-Flash defaults):
   H = 64, D = 128 — both fit in registers per program; we tile S × T.
 """
+
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -198,18 +200,21 @@ def v4_indexer_score(
     if S == 0 or T == 0:
         return out
 
-    # Tile sizes tuned on SM100 (GB200) for V4-Flash 64k+CP=4 (S=T=16384,
-    # H=64, D=128).  Best config across the 4-of-4 shape sweep was
-    # BLOCK_S=16 / BLOCK_T=256 / num_warps=4 / num_stages=2, with the
-    # BF16 tensor-core mma path enabled in the kernel above.  Smaller
-    # BLOCK_S beats the previous BLOCK_S=32 default because each program
-    # streams Q across 64 heads — fewer rows × wider T columns gives
-    # better Q reuse and more T-axis parallelism per SM.
-    # Triton 3.4 rejects tl.dot tiles with M or N below 16.  Short prompts
-    # can produce S/T < 16, so keep the MMA tile at the legal minimum and
-    # rely on the masks above to discard padded rows/columns.
+    # Keep shipped SM100 defaults unless DSV4_INDEXER_TILE is explicitly set.
+    # MMA tiles require dimensions >=16; masks discard short-input padding.
     BLOCK_S = 16
     BLOCK_T = 256 if T >= 256 else max(16, triton.next_power_of_2(T))
+    num_warps, num_stages = 4, 2
+    _tile = os.environ.get("DSV4_INDEXER_TILE")
+    if _tile:
+        try:
+            _bs, _bt, _w, _st = (int(v) for v in _tile.split(","))
+            BLOCK_S, BLOCK_T = _bs, max(
+                16, min(_bt, triton.next_power_of_2(max(T, 16)))
+            )
+            num_warps, num_stages = _w, _st
+        except ValueError:
+            pass
 
     grid = (B, triton.cdiv(S, BLOCK_S), triton.cdiv(T, BLOCK_T))
 
@@ -237,7 +242,7 @@ def v4_indexer_score(
         BLOCK_S=BLOCK_S,
         BLOCK_T=BLOCK_T,
         APPLY_MASK=apply_mask,
-        num_warps=4,
-        num_stages=2,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out
