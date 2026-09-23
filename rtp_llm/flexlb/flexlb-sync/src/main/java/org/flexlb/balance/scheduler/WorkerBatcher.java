@@ -247,8 +247,9 @@ public final class WorkerBatcher {
         this.key = key;
         this.prefillEndpoint = prefillEp;
         this.config = config;
-        this.maxOutstandingRequests = config.getDispatcher().getType() == DispatcherConfig.Type.BATCH
-                ? 0L : config.getDispatcher().getMaxInflightPerPrefillWorker();
+        // fe736c60 equivalent: prefill is always available; the inflight
+        // request cap must not reject admission. BATCH already used 0.
+        this.maxOutstandingRequests = 0L;
         this.queueScheduling = config.isQueue();
         this.singleDecision = config.isSingleDecision();
         DecisionPolicyConfig resolvedDecision = queueScheduling
