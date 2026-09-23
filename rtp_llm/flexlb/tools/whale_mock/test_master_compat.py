@@ -25,8 +25,15 @@ class MasterCompatibilityTest(unittest.TestCase):
                          ["prefill"]["executionTimeEstimator"]["expression"])
         with self.assertRaises(ValueError): mock_formula_config(raw, True, " ")
         self.assertNotIn("scheduler", mock)
-        with self.assertRaises(ValueError): mock_formula_config(raw, False)
+        # schemaVersion 1 is now accepted for non-legacy master (0ca29bf6f supports it).
+        self.assertEqual(raw, mock_formula_config(raw, False))
+        # schemaVersion 3 is rejected for legacy master.
         with self.assertRaises(ValueError): mock_formula_config('{"schemaVersion":3}', True)
+        # Flat config (no schemaVersion) is accepted for legacy master.
+        flat = json.dumps({"loadBalanceStrategy": "CACHE_AFFINITY_FIRST"})
+        flat_mock = json.loads(mock_formula_config(flat, True))
+        self.assertEqual(3, flat_mock["schemaVersion"])
+        self.assertIn("expression", flat_mock["router"]["roles"]["prefill"]["executionTimeEstimator"])
 
     def test_old_static_discovery_uses_each_rpc_port_minus_one(self):
         endpoints = {"env": {"MODEL_SERVICE_CONFIG": '{"discovery_file":"unused"}'},
