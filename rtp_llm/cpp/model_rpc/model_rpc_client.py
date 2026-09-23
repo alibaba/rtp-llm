@@ -40,10 +40,6 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     RoleAddr,
 )
-from rtp_llm.server.request_headers import (
-    extract_correlation_request_id,
-    extract_trace_id,
-)
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import (
     trans_from_tensor,
@@ -480,24 +476,6 @@ def trans_input(input_py: GenerateInput):
             tracestate = carrier.get("tracestate", "")
             if tracestate:
                 input_pb.request_info.trace_context.tracestate = tracestate
-
-    request_info = getattr(input_py, "request_info", None)
-    if request_info is not None:
-        input_pb.request_info.frontend_ip = getattr(request_info, "frontend_ip", "") or ""
-        input_pb.request_info.dash_ip = getattr(request_info, "dash_ip", "") or ""
-        input_pb.request_info.trace_id = getattr(request_info, "trace_id", "") or ""
-        input_pb.request_info.request_id = getattr(request_info, "request_id", "") or ""
-        input_pb.request_info.source_role = getattr(request_info, "source_role", "") or ""
-    if not input_pb.request_info.trace_id:
-        input_pb.request_info.trace_id = str(
-            input_py.generate_config.trace_id
-            or extract_trace_id(getattr(input_py, "headers", None))
-            or ""
-        )
-    if not input_pb.request_info.request_id:
-        input_pb.request_info.request_id = extract_correlation_request_id(
-            getattr(input_py, "headers", None)
-        ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # Preserve main's regular GenerateConfig validation at the RPC boundary,

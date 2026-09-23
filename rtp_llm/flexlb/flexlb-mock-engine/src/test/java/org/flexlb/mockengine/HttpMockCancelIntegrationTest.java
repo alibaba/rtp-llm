@@ -128,7 +128,7 @@ class HttpMockCancelIntegrationTest {
         // Iron rule 4: release confirmation via the next WorkerStatus report.
         EngineRpcService.WorkerStatusPB status = workerStatus(decodeService, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId().equals("2")
+                .anyMatch(task -> task.getRequestId() == 2L
                         && task.getErrorInfo().getErrorCode()
                         == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
         assertTrue(cancelledReported,
@@ -178,7 +178,7 @@ class HttpMockCancelIntegrationTest {
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, second);
         long terminalCount = workerStatus(prefillService, -1).getFinishedTaskListList().stream()
-                .filter(task -> task.getRequestId().equals("21")
+                .filter(task -> task.getRequestId() == 21L
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB

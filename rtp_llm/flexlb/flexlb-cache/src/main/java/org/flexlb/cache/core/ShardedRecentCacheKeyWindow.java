@@ -27,8 +27,12 @@ public class ShardedRecentCacheKeyWindow {
         this.window = new RecentCacheKeyWindow(timeWindowMs, maxCacheKeys, nowSupplier);
     }
 
-    public RecentCacheKeyWindow.Snapshot record(long requestId, List<Long> cacheKeys) {
+    public RecentCacheKeyWindow.Snapshot record(String requestId, List<Long> cacheKeys) {
         return window.record(cacheKeys);
+    }
+
+    public RecentCacheKeyWindow.Snapshot record(long requestId, List<Long> cacheKeys) {
+        return record(Long.toString(requestId), cacheKeys);
     }
 
 }

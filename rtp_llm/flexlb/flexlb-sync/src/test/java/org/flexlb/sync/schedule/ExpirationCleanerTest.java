@@ -20,6 +20,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,7 +39,7 @@ class ExpirationCleanerTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
-            context.registerBean("configService", ConfigService.class, () -> configService);
+            context.getBeanFactory().registerSingleton("configService", configService);
             context.registerBean(CacheAwareService.class, () -> mock(CacheAwareService.class));
             context.registerBean(WorkerDirectory.class, () -> mock(WorkerDirectory.class));
             context.registerBean(TaskScheduler.class, () -> mock(TaskScheduler.class));

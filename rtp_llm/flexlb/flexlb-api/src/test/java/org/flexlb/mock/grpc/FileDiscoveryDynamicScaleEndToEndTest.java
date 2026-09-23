@@ -241,7 +241,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         awaitUntil(3_000, () -> mockPrefillWorker.getWorkerStatusCallCount() > 0
                         && workerB.getWorkerStatusCallCount() > 0
                         && mockDecodeWorker.getWorkerStatusCallCount() > 0
-                        && endpointRegistry.endpointAddressSnapshot(RoleType.DECODE).contains(decodeIpPort)
+                        && endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)
+                                .contains(logicalWorkerIpPort(decodeIpPort))
                         && prefillAddressesRoutable(prefillIpPort, workerIpPort(workerB)),
                 "discovery loop should poll both initial workers and publish "
                         + "routable prefill endpoints for both");

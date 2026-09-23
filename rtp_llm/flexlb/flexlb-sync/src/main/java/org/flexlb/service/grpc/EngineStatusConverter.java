@@ -240,7 +240,7 @@ public class EngineStatusConverter {
             String errorMessage = errorCode == 0L
                     ? null : task.getErrorInfo().getErrorMessage();
             TaskObservation observation = new TaskObservation(
-                    task.getRequestId(),
+                    RequestId.parse(task),
                     task.getPrefixLength(),
                     0L,
                     task.getInputLength(),

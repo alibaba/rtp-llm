@@ -220,7 +220,7 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(endpoint.finishPreemption(102L, DecodeEndpoint.PreemptionDecision.COMMIT));
 
         assertFalse(isConfirmed(1L));
-        assertTrue(endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertTrue(endpoint.resourceSnapshot().reserved().containsKey("9"));
         assertEquals(1, endpoint.routingView().totalLoad());
         // The same late Decode sample rejected by typed-CANCELED fencing must
         // also be rejected after the stronger absent+terminal record proof.
@@ -286,7 +286,7 @@ class DecodeEndpointLayeredViewTest {
         // reservation is provisional until typed Prefill CANCELED settles it.
         assertTrue(isConfirmed(2L));
         assertTrue(confirmedView(2L).claimedForPreemption());
-        assertTrue(endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertTrue(endpoint.resourceSnapshot().reserved().containsKey("9"));
         assertEquals(700, endpoint.routingView().inflightHardKv());
         assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
         assertTrue(endpoint.updatePreemption(
@@ -350,7 +350,7 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE, result);
         assertFalse(confirmedView(1L).claimedForPreemption());
-        assertFalse(endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertFalse(endpoint.resourceSnapshot().reserved().containsKey("9"));
     }
 
     @Test
@@ -363,7 +363,7 @@ class DecodeEndpointLayeredViewTest {
                 beginPreemption(101L, List.of(2L, 999L),
                         9L, 700, 708, 70));
         assertFalse(confirmedView(2L).claimedForPreemption());
-        assertFalse(endpoint.resourceSnapshot().reserved().containsKey(9L));
+        assertFalse(endpoint.resourceSnapshot().reserved().containsKey("9"));
         assertEquals(version, endpoint.routingView().admissionVersion());
     }
 
@@ -400,7 +400,7 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(0, endpoint.evictExpiredRequests(
                 100, requestId -> false));
-        assertTrue(endpoint.resourceSnapshot().reserved().containsKey(1L),
+        assertTrue(endpoint.resourceSnapshot().reserved().containsKey("1"),
                 "generic TTL cleanup must not deduct a claimed victim");
         assertEquals(1_200, endpoint.routingView().inflightHardKv(),
                 "victim and provisional incoming remain fully charged");
@@ -408,7 +408,7 @@ class DecodeEndpointLayeredViewTest {
         endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.ABORT);
         assertEquals(1, endpoint.evictExpiredRequests(
                 100, requestId -> false));
-        assertFalse(endpoint.resourceSnapshot().reserved().containsKey(1L));
+        assertFalse(endpoint.resourceSnapshot().reserved().containsKey("1"));
         assertEquals(0, endpoint.routingView().inflightHardKv());
     }
 
@@ -480,9 +480,9 @@ class DecodeEndpointLayeredViewTest {
                 "3", runningTask(3L, TaskPhase.RUNNING, 512)), null, 10_000);
 
         DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
-        assertEquals(List.of(1L), ids(snapshot.reserved()));
-        assertEquals(List.of(2L), ids(snapshot.accepted()));
-        assertEquals(List.of(3L), ids(snapshot.running()));
+        assertEquals(List.of("1"), ids(snapshot.reserved()));
+        assertEquals(List.of("2"), ids(snapshot.accepted()));
+        assertEquals(List.of("3"), ids(snapshot.running()));
         DecodeRequestView accepted = snapshot.accepted().get(0);
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, accepted.phase());
         assertEquals(256, accepted.kvTokens());
@@ -552,13 +552,13 @@ class DecodeEndpointLayeredViewTest {
         assertFalse(endpoint.finishPreemption(704L, DecodeEndpoint.PreemptionDecision.COMMIT));
     }
 
-    private static List<Long> ids(List<DecodeRequestView> entries) {
+    private static List<String> ids(List<DecodeRequestView> entries) {
         return entries.stream().map(DecodeRequestView::requestId).toList();
     }
 
     private DecodeEndpoint.DecodeRequestView confirmedView(long requestId) {
         return endpoint.resourceSnapshot().confirmed().stream()
-                .filter(view -> view.requestId() == requestId)
+                .filter(view -> view.requestId().equals(Long.toString(requestId)))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("request " + requestId + " not tracked"));
     }
@@ -589,7 +589,7 @@ class DecodeEndpointLayeredViewTest {
 
     private boolean isConfirmed(long requestId) {
         return endpoint.resourceSnapshot().confirmed().stream()
-                .anyMatch(view -> view.requestId() == requestId);
+                .anyMatch(view -> view.requestId().equals(Long.toString(requestId)));
     }
 
     private DecodeEndpoint.PreemptionBeginResult beginPreemption(

@@ -107,15 +107,17 @@ class RequestBlockHashServiceTest {
     }
 
     @Test
-    void failsWhenWorkerBlockHashConfigIsUnavailable() {
+    void acceptsInputIdsWhenWorkerBlockHashConfigIsUnavailable() {
         Request request = new Request();
         request.setInputIds(new int[]{1});
         when(configResolver.resolve()).thenThrow(
                 new IllegalStateException("block hash configuration is unavailable"));
 
-        assertThrows(
-                IllegalStateException.class,
-                () -> service.prepareBlockCacheKeys(contextFor(request)).block());
+        service.prepareBlockCacheKeys(contextFor(request)).block();
+
+        assertNull(request.getBlockCacheKeys());
+        assertEquals(1, request.getInputIds().size());
+        verifyNoInteractions(executor, localStandbyHashService);
     }
 
     @Test

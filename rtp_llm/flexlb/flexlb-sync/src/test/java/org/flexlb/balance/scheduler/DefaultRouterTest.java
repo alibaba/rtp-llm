@@ -47,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -74,7 +75,7 @@ class DefaultRouterTest {
         configService = mock(ConfigService.class);
         modelMeta = mock(ModelMetaConfig.class);
         requests = mock(RequestRegistry.class);
-        when(requests.claimAdmissionHandle(anyLong(), any())).thenReturn(mock(AdmissionHandle.class));
+        when(requests.claimAdmissionHandle(anyString(), any())).thenReturn(mock(AdmissionHandle.class));
         when(requests.register(any())).thenReturn(new CompletableFuture<>());
         when(requests.commitRoute(any(), any())).thenAnswer(call ->
                 ((java.util.function.BooleanSupplier) call.getArgument(1)).getAsBoolean()
@@ -90,7 +91,7 @@ class DefaultRouterTest {
             }).when(requests).publishRoute(eq(claim), any(), anyLong());
             return claim;
         });
-        when(requests.publishDecisionResponseAsync(anyLong(), any(), any())).thenAnswer(call ->
+        when(requests.publishDecisionResponseAsync(anyString(), any(), any())).thenAnswer(call ->
                 call.getArgument(1, CompletableFuture.class).complete(call.getArgument(2)));
     }
 
@@ -127,7 +128,7 @@ class DefaultRouterTest {
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
                 .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
-        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(7L), eq(32L), eq(48L), eq(50)))
+        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq("7"), eq(32L), eq(48L), eq(50)))
                 .thenReturn(reservation);
         var permit = stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
 
@@ -159,7 +160,7 @@ class DefaultRouterTest {
         when(decodeSelector.select(DecodeBinding.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
-        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(8L), eq(32L), eq(48L), eq(50)))
+        when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq("8"), eq(32L), eq(48L), eq(50)))
                 .thenReturn(reservation);
         stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
         when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
@@ -223,7 +224,7 @@ class DefaultRouterTest {
             when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
                     .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED,
                             mock(PrefillState.RouteReservation.class)));
-            when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq(9L), eq(32L), eq(48L), eq(50))).thenReturn(reservation);
+            when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq("9"), eq(32L), eq(48L), eq(50))).thenReturn(reservation);
             stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
             when(((DecodeEndpoint) decode.endpoint).isAcceptedByEngine(reservation)).thenReturn(true);
 
@@ -304,7 +305,7 @@ class DefaultRouterTest {
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
         var reservation = new DecodeEndpoint.ReservationHandle(1L, 701L, 1L);
-        when(decode.reserve(any(), anyLong(), anyLong(), anyLong(), anyInt(), eq(frozen.capacity())))
+        when(decode.reserve(any(), anyString(), anyLong(), anyLong(), anyInt(), eq(frozen.capacity())))
                 .thenReturn(reservation);
         when(decode.acquireDispatchPermit(reservation, frozen.capacity())).thenReturn(
                 new DecodeEndpoint.EngineDispatchPermitAcquisition(
@@ -339,10 +340,10 @@ class DefaultRouterTest {
             assertFalse(delivery.accepted());
             assertTrue(delivery.boundary().unavailable());
             assertFalse(delivery.boundary().availability().isAvailable());
-            verify(decode).shouldRetryDispatch(701L, frozen.capacity());
+            verify(decode).shouldRetryDispatch("701", frozen.capacity());
             verify(decode).acquireDispatchPermit(reservation, frozen.capacity());
-            verify(decode).reserve(any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73), eq(frozen.capacity()));
-            verify(decode, never()).reserve(any(), anyLong(), anyLong(), anyLong(), anyInt());
+            verify(decode).reserve(any(), eq("701"), eq(hardKv), eq(expectedKv), eq(73), eq(frozen.capacity()));
+            verify(decode, never()).reserve(any(), anyString(), anyLong(), anyLong(), anyInt());
         }
         verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
     }
@@ -648,6 +649,15 @@ class DefaultRouterTest {
             String ip,
             int httpPort,
             String group) {
+        return selection(role, Long.toString(requestId), ip, httpPort, group);
+    }
+
+    private static SelectionFixture selection(
+            RoleType role,
+            String requestId,
+            String ip,
+            int httpPort,
+            String group) {
         SelectedRole selection = mock(SelectedRole.class);
         WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
         WorkerEndpoint endpoint = switch (role) {
@@ -666,6 +676,7 @@ class DefaultRouterTest {
         when(selection.prefillWorkMs()).thenReturn(1L);
         when(selection.takeGenerationPin()).thenReturn(pin);
         when(pin.endpoint()).thenReturn(endpoint);
+        when(endpoint.ipPort()).thenReturn(ip + ":" + httpPort);
         return new SelectionFixture(selection, pin, endpoint, status);
     }
 

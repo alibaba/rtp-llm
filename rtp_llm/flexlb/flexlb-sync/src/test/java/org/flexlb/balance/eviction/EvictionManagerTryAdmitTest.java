@@ -2,11 +2,12 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.SchedulerConfig;
@@ -22,7 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.EnumSet;
@@ -78,8 +79,9 @@ class EvictionManagerTryAdmitTest {
     }
 
     @ParameterizedTest
-    @ValueSource(longs = {1_000L, 2_750L})
-    void enginePreemptionUsesFrozenAdmissionAndConfiguredCompletionTimeout(long completionTimeoutMs) {
+    @CsvSource({"1000,RPC", "2750,RPC", "1000,RETURN"})
+    void enginePreemptionUsesFrozenAdmissionAndConfiguredCompletionTimeout(
+            long completionTimeoutMs, EngineCancellationConfig.Mode cancellationMode) {
         var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         PreemptionConfig preemption = new PreemptionConfig();
@@ -87,6 +89,7 @@ class EvictionManagerTryAdmitTest {
         if (completionTimeoutMs != 1_000L) {
             preemption.setTimeoutMs(completionTimeoutMs);
         }
+        preemption.getEngineCancellation().setMode(cancellationMode);
         config.priorityOrdering().setPreemption(preemption);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
 
@@ -105,15 +108,17 @@ class EvictionManagerTryAdmitTest {
 
         when(cancelChannel.isSupported(endpoint)).thenReturn(true);
         when(preemptionCoordinator.preempt(any())).thenReturn(new CompletableFuture<>());
+        when(preemptionCoordinator.prepareReturnedPreemption(any()))
+                .thenReturn(new CompletableFuture<>());
         var incoming = new Request();
-        incoming.setRequestId(902L);
+        incoming.setRequestId("902");
         incoming.setSeqLen(128L);
         incoming.setPriority(70);
         var context = new BalanceContext(config);
         context.setRequest(incoming);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
         var future = new CompletableFuture<Response>();
-        when(requests.claimAdmissionHandle(902L, future)).thenReturn(mock(AdmissionHandle.class));
+        when(requests.claimAdmissionHandle("902", future)).thenReturn(mock(AdmissionHandle.class));
         var frozenRequest = DecodeBinding.capture(context);
         when(admission.decodeBinding()).thenReturn(frozenRequest);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(99L);
@@ -124,7 +129,11 @@ class EvictionManagerTryAdmitTest {
         assertTrue(manager.tryAdmit(context, future, admission, endpoint));
 
         var command = ArgumentCaptor.forClass(DecodePreemptionCoordinator.PreemptionCommand.class);
-        verify(preemptionCoordinator).preempt(command.capture());
+        if (cancellationMode == EngineCancellationConfig.Mode.RETURN) {
+            verify(preemptionCoordinator).prepareReturnedPreemption(command.capture());
+        } else {
+            verify(preemptionCoordinator).preempt(command.capture());
+        }
         assertEquals(completionTimeoutMs, command.getValue().preemptionTimeoutMs());
         assertEquals(50L, command.getValue().cancelAckTimeoutMs());
         assertSame(endpoint, command.getValue().endpoint());

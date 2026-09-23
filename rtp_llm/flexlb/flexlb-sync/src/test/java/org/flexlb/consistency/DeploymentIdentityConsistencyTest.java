@@ -3,10 +3,12 @@ package org.flexlb.consistency;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.core.env.Environment;
@@ -14,6 +16,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DeploymentIdentityConsistencyTest {
@@ -25,7 +28,8 @@ class DeploymentIdentityConsistencyTest {
         when(identity.getDeploymentId()).thenReturn(deploymentId);
 
         LBStatusConsistencyService service = new LBStatusConsistencyService(
-                mock(ZookeeperMasterElectService.class), mock(Environment.class), configService(), identity);
+                mock(ZookeeperMasterElectService.class), mock(Environment.class),
+                configService(true), identity);
         MasterChangeNotifyReq request = new MasterChangeNotifyReq();
         request.setRoleId(deploymentId);
 
@@ -41,7 +45,7 @@ class DeploymentIdentityConsistencyTest {
         when(identity.getDeploymentId()).thenReturn(deploymentId);
         ZookeeperMasterElectService service = new ZookeeperMasterElectService(
                 mock(GeneralHttpNettyService.class), mock(EngineHealthReporter.class),
-                mock(Environment.class), configService(), identity);
+                mock(Environment.class), configService(false), identity);
 
         ReflectionTestUtils.invokeMethod(service, "initializeRoleId");
 
@@ -49,9 +53,24 @@ class DeploymentIdentityConsistencyTest {
                 .isEqualTo(deploymentId);
     }
 
-    private ConfigService configService() {
+    @Test
+    void disabledConsistencyDoesNotRequireDeploymentIdentity() {
+        DeploymentIdentity identity = mock(DeploymentIdentity.class);
+
+        new LBStatusConsistencyService(
+                mock(ZookeeperMasterElectService.class), mock(Environment.class),
+                configService(false), identity);
+
+        verifyNoInteractions(identity);
+    }
+
+    private ConfigService configService(boolean consistencyEnabled) {
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        FlexlbConfig config = new FlexlbConfig();
+        if (consistencyEnabled) {
+            config.setConsistency(new ZookeeperConsistencyConfig());
+        }
+        when(configService.loadBalanceConfig()).thenReturn(config);
         return configService;
     }
 }

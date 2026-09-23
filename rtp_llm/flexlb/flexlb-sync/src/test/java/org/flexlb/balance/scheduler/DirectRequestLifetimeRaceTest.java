@@ -56,7 +56,7 @@ class DirectRequestLifetimeRaceTest {
             var metadata = new ServerStatus();
             metadata.setSuccess(true);
             metadata.setRole(RoleType.PDFUSION);
-            metadata.setRequestId(101L);
+            metadata.setRequestId("101");
             metadata.setServerIp("127.0.0.1");
             metadata.setHttpPort(8080);
             metadata.setGrpcPort(8081);

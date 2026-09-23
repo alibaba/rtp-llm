@@ -19,6 +19,7 @@ import reactor.netty.resources.LoopResources;
 
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,8 +53,8 @@ class EngineHealthReporterSelectionMetricTest {
         when(loopResources.onServerSelect(true)).thenReturn(serverSelector);
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(grpcEventLoop);
         reporter = new EngineHealthReporter(
-                monitor, cacheMetricsReporter, cacheMatchConfiguration,
-                engineGrpcClient, loopResources, workerDirectory);
+                monitor, cacheMetricsReporter, mock(CacheMatchConfiguration.class), engineGrpcClient,
+                loopResources, workerDirectory);
     }
 
     @Test

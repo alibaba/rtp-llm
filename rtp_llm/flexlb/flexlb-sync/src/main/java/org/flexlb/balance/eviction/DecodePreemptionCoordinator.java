@@ -45,7 +45,7 @@ public final class DecodePreemptionCoordinator {
 
     record PreemptionCommand(
             DecodeEndpoint endpoint,
-            long incomingRequestId,
+            String incomingRequestId,
             long incomingKvTokens,
             long incomingExpectedKvTokens,
             int incomingPriority,
@@ -60,7 +60,7 @@ public final class DecodePreemptionCoordinator {
                 throw new IllegalArgumentException("endpoint and victims are required");
             }
             victims = List.copyOf(victims);
-            if (incomingRequestId <= 0L) {
+            if (incomingRequestId == null || incomingRequestId.isBlank()) {
                 throw new IllegalArgumentException(
                         "incoming request id must be positive");
             }
@@ -69,7 +69,8 @@ public final class DecodePreemptionCoordinator {
             }
             Set<String> victimIds = new LinkedHashSet<>();
             for (DecodeRequestView victim : victims) {
-                if (victim.requestId() <= 0L || victim.reservationToken() <= 0L) {
+                if (victim.requestId() == null || victim.requestId().isBlank()
+                        || victim.reservationToken() <= 0L) {
                     throw new IllegalArgumentException(
                             "victim requestId and reservation token must be positive");
                 }

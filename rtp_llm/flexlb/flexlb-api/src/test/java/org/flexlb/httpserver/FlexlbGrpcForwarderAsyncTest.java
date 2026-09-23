@@ -73,7 +73,7 @@ class FlexlbGrpcForwarderAsyncTest {
                 FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, mock(EngineHealthReporter.class));
                 CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending;
                 try (var scope = traceParent().makeCurrent()) {
-                    pending = forwarder.forwardScheduleToMaster(request(901L));
+                    pending = forwarder.forwardScheduleToMaster(request("901"));
                 }
                 assertTrue(received.await(3, TimeUnit.SECONDS));
                 assertTrue(capture.spans.isEmpty(), "async return must not end the CLIENT span");
@@ -124,7 +124,7 @@ class FlexlbGrpcForwarderAsyncTest {
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, mock(EngineHealthReporter.class));
             CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending;
             try (var scope = traceParent().makeCurrent()) {
-                pending = forwarder.forwardScheduleToMaster(request(902L));
+                pending = forwarder.forwardScheduleToMaster(request("902"));
             }
             assertTrue(received.await(3, TimeUnit.SECONDS));
             pending.toCompletableFuture().cancel(true);
@@ -152,7 +152,7 @@ class FlexlbGrpcForwarderAsyncTest {
             Context.CancellableContext cancelled = Context.current().withCancellation();
             cancelled.cancel(null);
             var result = cancelled.call(() -> Context.ROOT.call(() -> forwarder.forwardCompensatingCancelToMaster(
-                    FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder().setRequestId(903L).build(),
+                    FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder().setRequestId("903").build(),
                     MASTER_HTTP_ADDRESS, traceParent()))).toCompletableFuture().get(3, TimeUnit.SECONDS);
             assertTrue(result.response().getFound());
             assertTrue(capture.ended.await(3, TimeUnit.SECONDS));
@@ -260,7 +260,7 @@ class FlexlbGrpcForwarderAsyncTest {
                 .usePlaintext().disableRetry().build();
         FlexlbGrpcForwarder forwarder = forwarder(channel, mock(EngineHealthReporter.class));
         try {
-            var result = await(forwarder.forwardScheduleToMaster(request(107L)));
+            var result = await(forwarder.forwardScheduleToMaster(request("107")));
             assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(result.error()).getCode());
             Throwable cause = result.error();
             while (cause != null && !(cause instanceof java.net.UnknownHostException)) {
@@ -447,7 +447,7 @@ class FlexlbGrpcForwarderAsyncTest {
     private static FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest(
             long requestId) {
         return FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(Long.toString(requestId))
                 .build();
     }
 

@@ -86,7 +86,6 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
-
     /** Return an independent copy, or null when the source is null. */
     public static ServerStatus copyOf(ServerStatus source) {
         if (source == null) {
@@ -99,6 +98,10 @@ public class ServerStatus {
         copy.grpcPort = source.grpcPort;
         copy.preemptRequestIds = List.copyOf(source.preemptRequestIds);
         copy.dpRank = source.dpRank;
+        copy.engineIndex = source.engineIndex;
+        copy.routingEngineIndex = source.routingEngineIndex;
+        copy.routingMultiEngineNum = source.routingMultiEngineNum;
+        copy.workerIdentity = source.workerIdentity;
         copy.prefillTime = source.prefillTime;
         copy.group = source.group;
         copy.debugInfo = DebugInfo.copyOf(source.debugInfo);

@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.MicrometerFlexMonitor;
 import org.flexlb.metric.NoOpFlexMonitor;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingClass;
@@ -26,6 +27,7 @@ public class MonitorClientConfig {
     @Bean
     @ConditionalOnMissingBean(FlexMonitor.class)
     @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
+    @ConditionalOnBean(MeterRegistry.class)
     @ConditionalOnMissingClass("com.taobao.kmonitor.KMonitor")
     public FlexMonitor micrometerFlexMonitor(MeterRegistry meterRegistry) {
         log.info("Creating MicrometerFlexMonitor - bridging FlexMonitor to micrometer/Prometheus");

@@ -40,7 +40,7 @@ class RecentCacheKeyTraceReporterTest {
         BalanceContext firstContext = mock(BalanceContext.class);
         when(firstContext.getRequestId()).thenReturn("Aa");
         Request firstRequest = mock(Request.class);
-        when(firstContext.getRequestId()).thenReturn(1L);
+        when(firstContext.getRequestId()).thenReturn("1");
         when(firstContext.getRequest()).thenReturn(firstRequest);
         when(firstRequest.getBlockCacheKeys()).thenReturn(List.of(1L, 2L, 3L));
         when(firstRequest.getSeqLen()).thenReturn(300L);
@@ -49,7 +49,7 @@ class RecentCacheKeyTraceReporterTest {
         BalanceContext secondContext = mock(BalanceContext.class);
         when(secondContext.getRequestId()).thenReturn("BB");
         Request secondRequest = mock(Request.class);
-        when(secondContext.getRequestId()).thenReturn(2L);
+        when(secondContext.getRequestId()).thenReturn("2");
         when(secondContext.getRequest()).thenReturn(secondRequest);
         when(secondRequest.getBlockCacheKeys()).thenReturn(List.of(2L, 3L, 4L));
         when(secondRequest.getSeqLen()).thenReturn(300L);

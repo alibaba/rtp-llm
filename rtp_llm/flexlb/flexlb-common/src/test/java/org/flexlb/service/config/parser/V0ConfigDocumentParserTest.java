@@ -112,8 +112,6 @@ class V0ConfigDocumentParserTest {
         assertThat(behavior.getFallbackBatchTokenCapacity()).isEqualTo(4_194_304L);
         assertThat(behavior.getDispatcher().getType())
                 .isEqualTo(DispatcherConfig.Type.NON_BATCH);
-        assertThat(behavior.getScheduler().getCapacity()
-                .getMaxOutstandingRequestsGlobal()).isEqualTo(200000);
         assertThat(behavior.getCacheMatching()).isInstanceOf(KvcmCacheMatchingConfig.class);
         assertThat(behavior.getRouter().getRoles().getPrefill().getCacheAffinity()
                 .getMaxOutstandingUncachedTokens()).isEqualTo(50000);

@@ -61,7 +61,7 @@ class RouteServiceTraceTest {
                     mock(RecentCacheKeyTraceReporter.class));
             BalanceContext ctx = new BalanceContext(config);
             Request request = new Request();
-            request.setRequestId(700L);
+            request.setRequestId("700");
             ctx.setRequest(request);
             ctx.setGenerateInputPb(ByteString.copyFromUtf8("input"));
             Span span = mock(Span.class);
@@ -84,7 +84,7 @@ class RouteServiceTraceTest {
                 mock(RecentCacheKeyTraceReporter.class));
         BalanceContext ctx = new BalanceContext(config);
         Request request = new Request();
-        request.setRequestId(701L);
+        request.setRequestId("701");
         ctx.setRequest(request);
         Span span = mock(Span.class);
         when(span.storeInContext(any(Context.class))).thenCallRealMethod();
