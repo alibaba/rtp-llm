@@ -232,3 +232,33 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "forward_trace",
+    hdrs = ["ForwardTrace.h"],
+    srcs = ["ForwardTrace.cc"],
+    deps = torch_deps() + select({
+        "//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "forward_trace_export",
+    srcs = ["ForwardTraceExport.cc"],
+    deps = [":forward_trace", "@havenask//aios/autil:json"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "forward_trace_test",
+    srcs = ["test/ForwardTraceTest.cc"],
+    deps = [":forward_trace"],
+    copts = copts(),
+)

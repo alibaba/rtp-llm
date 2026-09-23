@@ -64,6 +64,7 @@ cc_library(
         "cuda_graph_decode.cc",
     ],
     deps = torch_deps() + [
+        "//rtp_llm/cpp/utils:forward_trace",
         ":cuda_graph_base",
         ":cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",

@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/ForwardTrace.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #if USING_CUDA
@@ -809,6 +810,21 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         prepareInputs(inputs, state);
     } else {
         prepareInputData(inputs, state);
+    }
+
+    if (auto* trace = activeForwardTrace(); trace && trace->parent_id > 0) {
+        auto& record = *trace->records.at(trace->parent_id - 1);
+        const auto key = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+        const auto& attention = graph_instances_[key].mem_hold_.py_model_inputs_.attention_inputs;
+        record.integers["physical_requests"] = attention.physical_request_count;
+        record.integers["physical_tokens"] = attention.physical_token_count;
+        record.integers["graph_batch_bucket"] = state.current_real_graph_bs;
+        record.integers["graph_sequence_bucket"] = state.current_real_graph_seq_len;
+        // Snapshot fixed-address graph metadata after its normal prepare path,
+        // before replay or the next step can overwrite it. No new stream wait.
+        trace->snapshot(record, "executed_input_lengths", attention.input_lengths);
+        trace->snapshot(record, "executed_sequence_lengths", attention.sequence_lengths);
+        trace->snapshot(record, "executed_prefix_lengths", attention.prefix_lengths);
     }
 
     if (is_prefill_cuda_graph_mode_) {

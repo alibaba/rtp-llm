@@ -2,9 +2,24 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/TimeUtility.h"
 #include <string>
+#include <cstdio>
+#include <stdexcept>
 
 namespace rtp_llm {
 namespace tap = torch::autograd::profiler;
+
+namespace {
+void saveProfile(tap::ProfilerResult& result, const std::string& file_name, ForwardTraceSession& metadata) {
+    // Publish only the enriched file. A failed export leaves a .partial file,
+    // never a normal-looking trace without its reproduction metadata.
+    const auto partial = file_name + ".partial";
+    result.save(partial);
+    enrichForwardTrace(partial, metadata);
+    if (std::rename(partial.c_str(), file_name.c_str()) != 0) {
+        throw std::runtime_error("cannot publish profiler trace: " + file_name);
+    }
+}
+}  // namespace
 
 // ---- TorchProfile ----
 
@@ -20,26 +35,31 @@ TorchProfile::~TorchProfile() {
 }
 
 void TorchProfile::start() {
+    if (activeForwardTrace()) throw std::logic_error("nested forward trace session");
+    forward_trace_ = std::make_unique<ForwardTraceSession>();
     count_ += 1;
     stopped_ = false;
     tap::prepareProfiler(config_, activities_);
     tap::enableProfiler(config_, activities_);
+    setActiveForwardTrace(forward_trace_.get());
 }
 
-std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopAndCollect() {
+TorchProfile::Collected TorchProfile::stopAndCollect() {
     if (stopped_) {
-        return {nullptr, ""};
+        return {nullptr, "", nullptr};
     }
+    setActiveForwardTrace(nullptr);
+    forward_trace_->seal();
     auto        res       = tap::disableProfiler();
     std::string file_name = output_dir_ + "/" + prefix_ + std::to_string(count_) + ".json";
     stopped_              = true;
-    return {std::move(res), std::move(file_name)};
+    return {std::move(res), std::move(file_name), std::move(forward_trace_)};
 }
 
 void TorchProfile::stop() {
-    auto [res, file_name] = stopAndCollect();
+    auto [res, file_name, metadata] = stopAndCollect();
     if (res) {
-        res->save(file_name);
+        saveProfile(*res, file_name, *metadata);
     }
 }
 
@@ -56,10 +76,11 @@ ProfilerSaveWorker::~ProfilerSaveWorker() {
     thread_.join();
 }
 
-void ProfilerSaveWorker::enqueue(std::unique_ptr<tap::ProfilerResult> result, std::string file_name) {
+void ProfilerSaveWorker::enqueue(std::unique_ptr<tap::ProfilerResult> result, std::string file_name,
+                                 std::unique_ptr<ForwardTraceSession> metadata) {
     {
         std::lock_guard<std::mutex> lock(mu_);
-        tasks_.push({std::move(result), std::move(file_name)});
+        tasks_.push({std::move(result), std::move(file_name), std::move(metadata)});
     }
     cv_.notify_one();
 }
@@ -78,7 +99,7 @@ void ProfilerSaveWorker::run() {
         }
         RTP_LLM_LOG_INFO("saving profiler trace to %s (async)", task.file_name.c_str());
         try {
-            task.result->save(task.file_name);
+            saveProfile(*task.result, task.file_name, *task.metadata);
             RTP_LLM_LOG_INFO("profiler trace saved: %s", task.file_name.c_str());
         } catch (const std::exception& e) {
             RTP_LLM_LOG_ERROR("failed to save profiler trace %s: %s", task.file_name.c_str(), e.what());
@@ -129,9 +150,9 @@ void StepWindowProfiler::tick() {
     if (reconfigure_.exchange(false)) {
         std::lock_guard<std::mutex> lock(mu_);
         if (profiler_) {
-            auto [res, file_name] = profiler_->stopAndCollect();
+            auto [res, file_name, metadata] = profiler_->stopAndCollect();
             if (res) {
-                save_worker_.enqueue(std::move(res), std::move(file_name));
+                save_worker_.enqueue(std::move(res), std::move(file_name), std::move(metadata));
             }
             profiler_.reset();
             has_profiler_.store(false, std::memory_order_relaxed);
@@ -174,9 +195,9 @@ void StepWindowProfiler::tick() {
     const int target = num_steps_.load();
     if (target > 0 && profiled_steps_ >= target) {
         enabled_.store(false);
-        auto [res, file_name] = profiler_->stopAndCollect();
+        auto [res, file_name, metadata] = profiler_->stopAndCollect();
         if (res) {
-            save_worker_.enqueue(std::move(res), std::move(file_name));
+            save_worker_.enqueue(std::move(res), std::move(file_name), std::move(metadata));
         }
         profiler_.reset();
         has_profiler_.store(false, std::memory_order_relaxed);
@@ -200,9 +221,9 @@ void StepWindowProfiler::startStep() {
     if (reconfigure_.exchange(false)) {
         std::lock_guard<std::mutex> lock(mu_);
         if (profiler_) {
-            auto [res, file_name] = profiler_->stopAndCollect();
+            auto [res, file_name, metadata] = profiler_->stopAndCollect();
             if (res) {
-                save_worker_.enqueue(std::move(res), std::move(file_name));
+                save_worker_.enqueue(std::move(res), std::move(file_name), std::move(metadata));
             }
             profiler_.reset();
             has_profiler_.store(false, std::memory_order_relaxed);
@@ -253,9 +274,9 @@ void StepWindowProfiler::finishStep() {
     const int target = num_steps_.load();
     if (target > 0 && profiled_steps_ >= target) {
         enabled_.store(false);
-        auto [res, file_name] = profiler_->stopAndCollect();
+        auto [res, file_name, metadata] = profiler_->stopAndCollect();
         if (res) {
-            save_worker_.enqueue(std::move(res), std::move(file_name));
+            save_worker_.enqueue(std::move(res), std::move(file_name), std::move(metadata));
         }
         profiler_.reset();
         has_profiler_.store(false, std::memory_order_relaxed);
@@ -270,9 +291,9 @@ StepWindowProfiler::~StepWindowProfiler() {
 void StepWindowProfiler::stopProfiler(const char* reason) {
     std::lock_guard<std::mutex> lock(mu_);
     if (profiler_) {
-        auto [res, file_name] = profiler_->stopAndCollect();
+        auto [res, file_name, metadata] = profiler_->stopAndCollect();
         if (res) {
-            save_worker_.enqueue(std::move(res), std::move(file_name));
+            save_worker_.enqueue(std::move(res), std::move(file_name), std::move(metadata));
         }
         profiler_.reset();
         has_profiler_.store(false, std::memory_order_relaxed);

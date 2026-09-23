@@ -516,6 +516,9 @@ GptModelInputs MtpExecutor::makePrefillRoundInput(const GptModelInputs&    full_
     sliceRoundMultimodalInputs(chunk, full_inputs, round, total_tokens, /*source_shift=*/0);
 
     chunk.last_hidden_states      = torch::Tensor();
+    chunk.trace_logical_batch_size = round.slices.size();
+    chunk.trace_request_count = full_inputs.trace_request_count == static_cast<int64_t>(request_count) ?
+                                   static_cast<int64_t>(round.slices.size()) : -1;
     chunk.is_prefill_chunk        = true;
     chunk.prefill_chunk_kv_length = static_cast<size_t>(round.kv_length());
     return chunk;

@@ -19,6 +19,8 @@
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/ForwardTrace.h"
+#include <set>
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
@@ -934,6 +936,14 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     for (size_t i = 0; i < split_inputs.size(); ++i) {
         const auto& micro_inputs =
             split_inputs[i].kv_cache_kernel_block_id.defined() ? split_inputs[i] : split_inputs[0];
+        if (auto* trace = activeForwardTrace(); trace && trace->parent_id > 0) {
+            auto& record = *trace->records.at(trace->parent_id - 1);
+            const auto prefix = "micro_" + std::to_string(i) + "_";
+            record.integers["micro_batch_count"] = split_inputs.size();
+            trace->snapshot(record, prefix + "input_lengths", micro_inputs.input_lengths);
+            trace->snapshot(record, prefix + "sequence_lengths", micro_inputs.sequence_lengths);
+            trace->snapshot(record, prefix + "prefix_lengths", micro_inputs.prefix_lengths);
+        }
         auto py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
@@ -1227,6 +1237,73 @@ void PyWrappedModel::finalizeLinearReplay(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    ForwardTraceScope forward_trace;
+    if (forward_trace) {
+        auto& r = forward_trace.record();
+        const int64_t batch = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
+        const int64_t decode = inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
+        r.integers = {{"model_id", model_id_}, {"tp_rank", device_props_.tp_rank},
+                      {"tp_size", device_props_.tp_size}, {"ktp_size", ktp_size_},
+                      {"world_rank", trace_parallelism_.world_rank}, {"dp_size", trace_parallelism_.dp_size},
+                      {"ep_size", trace_parallelism_.ep_size}, {"pp_size", trace_parallelism_.pp_size},
+                      {"dp_rank", trace_parallelism_.dp_rank}, {"ep_rank", trace_parallelism_.ep_rank},
+                      {"cp_enabled", device_props_.enable_prefill_cp},
+                      {"cp_kv_sharded", device_props_.prefill_cp_kv_cache_sharded},
+                      {"logical_sequences", inputs.is_fake_stream ? 0 :
+                          (inputs.trace_logical_batch_size >= 0 ? inputs.trace_logical_batch_size : batch)},
+                      {"physical_requests", batch},
+                      {"input_token_count", inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0},
+                      {"physical_tokens", inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0},
+                      {"kv_block_tokens", inputs.seq_size_per_block},
+                      {"kernel_kv_block_tokens", inputs.kernel_seq_size_per_block},
+                      {"force_disable_sp_run", inputs.force_disable_sp_run},
+                      {"is_fake_stream", inputs.is_fake_stream}, {"layers", layer_num_},
+                      {"hidden_size", trace_hidden_size_}, {"mtp_propose_steps", trace_propose_steps_},
+                      {"attention_heads", description_.attention_conf.head_num},
+                      {"kv_heads", description_.attention_conf.kv_head_num},
+                      {"head_dim", description_.attention_conf.size_per_head},
+                      {"act_qscheme", static_cast<int64_t>(description_.act_qscheme)},
+                      {"kv_cache_dtype", static_cast<int64_t>(description_.attention_conf.kv_cache_dtype)},
+                      {"attention_sparse", description_.attention_conf.is_sparse},
+                      {"indexer_topk", description_.attention_conf.indexer_topk}};
+        if (inputs.trace_request_count >= 0) {
+            r.integers["request_count"] = inputs.is_fake_stream ? 0 : inputs.trace_request_count;
+        }
+        r.strings["kind"] = "model";
+        r.strings["dtype"] = c10::toString(dataTypeToTorchType(description_.data_type));
+        r.integers["mla_ops_type"] = static_cast<int64_t>(mla_ops_type_);
+        r.strings["phase"] = inputs.is_target_verify ? "target_verify" :
+            inputs.is_mtp_draft_update ? "draft_update" :
+            decode ? (model_id_ == 0 ? "decode_target" : "decode_draft") :
+                     (model_id_ == 0 ? "prefill_target" : "prefill_draft");
+        // MTP device-state paths may have stale host bookkeeping. Always take
+        // their authoritative device values; ordinary paths can use ready mirrors.
+        const bool use_host = model_id_ == 0 && !inputs.is_target_verify && !inputs.is_mtp_draft_update;
+        auto snapshot = [&](const char* key, const torch::Tensor& value, const torch::Tensor& mirror) {
+            if (!value.defined() || value.numel() == 0) {
+                r.arrays[key] = ForwardTraceValues{};
+            } else {
+                forward_trace.snapshot(key, use_host && mirror.defined() && mirror.device().is_cpu()
+                    && mirror.numel() == value.numel() ? mirror : value);
+            }
+        };
+        snapshot("input_lengths", inputs.input_lengths, inputs.input_lengths_host_for_log);
+        snapshot("sequence_lengths", inputs.sequence_lengths, inputs.sequence_lengths_host_for_log);
+        snapshot("prefix_lengths", inputs.prefix_lengths, inputs.prefix_lengths_host_for_log);
+        // Trace IDs are not TP-broadcast. Do not invent a request count on ranks
+        // without them, or confuse physical padding rows with actual requests.
+        if (inputs.trace_ids.size() == static_cast<size_t>(batch)) {
+            std::map<std::string, int64_t> groups;
+            bool valid_ids = true;
+            auto& ids = r.arrays["request_groups"].host;
+            for (const auto& id : inputs.trace_ids) {
+                if (id.empty()) valid_ids = false;
+                auto it = groups.emplace(id, groups.size()).first;
+                ids.push_back(it->second);
+            }
+            if (!valid_ids) r.arrays.erase("request_groups");
+        }
+    }
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
@@ -1263,6 +1340,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 "K3 whole-model Prefill does not support framework layer micro-batching: tokens=%ld chunk=%ld",
                 inputs.combo_tokens.size(0),
                 whole_chunk_tokens);
+            if (forward_trace) forward_trace.record().strings["kind"] = "micro_batch";
             auto output = forwardMicroBatched(inputs);
             finalizeLinearReplay(inputs);
             return output;
@@ -1326,6 +1404,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_.attr("apply_ktp_step_plan")(py_model_inputs, ktp_step_plan_).cast<PyModelInputs>();
             ktp_step_plan_ = py::none();
             if (py_model_inputs.ktp_all_idle) {
+                if (forward_trace) forward_trace.record().strings["kind"] = "skipped";
                 GptModelOutputs skipped;
                 skipped.skip_run = true;
                 return skipped;
@@ -1338,7 +1417,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool use_cuda_graph = ktp_size_ > 1 ?
                                         py_model_inputs.ktp_use_cuda_graph :
                                         enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_);
+        if (forward_trace) {
+            auto& r = forward_trace.record();
+            r.integers["cuda_graph"] = use_cuda_graph;
+            r.integers["whole_model_chunk_budget"] = whole_chunk_tokens;
+        }
         if (use_cuda_graph) {
+            if (forward_trace) {
+                auto& r = forward_trace.record();
+                r.integers["graph_batch_bucket"] = graph_state_.current_real_graph_bs;
+                r.integers["graph_sequence_bucket"] = graph_state_.current_real_graph_seq_len;
+            }
             RTP_LLM_CHECK_WITH_INFO(ktp_size_ <= 1 || ktp_graph_ready_,
                                     "Projection-KTP CUDA Graph forward has no prepared common graph state");
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
@@ -1357,6 +1446,24 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // the C++/Python model boundary. CUDA graph replay performs the
             // equivalent padding into its fixed-address capture buffers.
             padTensorParallelInputs(py_model_inputs);
+            if (forward_trace) {
+                auto& r = forward_trace.record();
+                const auto& a = py_model_inputs.attention_inputs;
+                r.integers["physical_requests"] = a.physical_request_count > 0 ?
+                    a.physical_request_count : a.input_lengths.numel();
+                r.integers["physical_tokens"] = py_model_inputs.input_ids.numel();
+                if (device_props_.enable_prefill_cp || ktp_size_ > 1) {
+                    forward_trace.snapshot("executed_input_lengths", a.input_lengths);
+                    forward_trace.snapshot("executed_sequence_lengths", a.sequence_lengths);
+                    forward_trace.snapshot("executed_prefix_lengths", a.prefix_lengths);
+                }
+                // CP planner tensors are CPU-resident here. Record the real
+                // local partition, never approximate global KV / cp_size.
+                if (a.context_parallel_info) {
+                    forward_trace.snapshot("cp_chunk_lengths", a.context_parallel_info->prefill_cp_chunk_lengths);
+                    forward_trace.snapshot("cp_padding_lengths", a.context_parallel_info->prefill_cp_padding_lengths);
+                }
+            }
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");

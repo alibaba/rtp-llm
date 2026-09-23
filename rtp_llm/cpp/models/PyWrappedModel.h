@@ -82,6 +82,9 @@ public:
     void setChunkPrefillRoundHook(std::function<void(py::object, bool)> hook);
 
 private:
+    ParallelismConfig trace_parallelism_;
+    int64_t trace_hidden_size_ = 0;
+    int64_t trace_propose_steps_ = 0;
     // A Python attention implementation can own pinned planner workspaces used by
     // asynchronous H2D copies.  Replacing its last py::object reference before
     // the backend stream reaches those copies allows the pinned storage to be
@@ -266,6 +269,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         "Tensor parallelism and Projection-KTP cannot be enabled together: tp_size=%ld ktp_size=%ld",
         params.parallelism_config.tp_size,
         ktp_size_);
+    trace_parallelism_     = params.parallelism_config;
+    trace_hidden_size_     = params.hidden_size;
+    trace_propose_steps_   = params.sp_config.gen_num_per_cycle;
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;

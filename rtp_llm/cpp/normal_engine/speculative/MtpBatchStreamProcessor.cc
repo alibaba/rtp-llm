@@ -124,6 +124,7 @@ void padDraftUpdateMetadata(GptModelInputs& model_input,
                             int64_t         logical_batch_size,
                             int64_t         physical_batch_size,
                             int64_t         tokens_per_request) {
+    model_input.trace_logical_batch_size = logical_batch_size;
     if (logical_batch_size == physical_batch_size) {
         return;
     }

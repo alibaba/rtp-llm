@@ -1,8 +1,12 @@
 #include "OpDefs.h"
+#include "rtp_llm/cpp/utils/ForwardTrace.h"
 
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
+    m.def("forward_trace_active", [] { return rtp_llm::activeForwardTrace() != nullptr; });
+    m.def("record_forward_trace_chunk", &rtp_llm::recordForwardTraceChunk);
+    m.def("finish_forward_trace_chunk", &rtp_llm::finishForwardTraceChunk);
     pybind11::enum_<rtp_llm::CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
         .value("FULL", rtp_llm::CacheGroupType::FULL)

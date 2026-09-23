@@ -8,6 +8,8 @@ draft-model input.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import copy
 import json
 import logging
@@ -16,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
+from rtp_llm.ops import compute_ops as _trace_ops
 from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyEmbeddingInputs,
@@ -1234,7 +1237,21 @@ class KimiK3ChunkSession:
             # and all-gathers the next 3-layer Eagle hidden tensor.
             model._release_prefill_mtp_hidden_buffer()
             chunk_publish_context = chunk_cache_publisher.begin_round(logical_round)
-            with torch.profiler.record_function(
+            trace_id = 0
+            if _trace_ops.forward_trace_active():
+                trace_id = _trace_ops.record_forward_trace_chunk(
+                    round_idx,
+                    [item.original_batch_idx for item in logical_round.slices],
+                    [item.new_length for item in logical_round.slices],
+                    [item.absolute_start for item in logical_round.slices],
+                    chunk_attention.physical_request_count,
+                    chunk_attention.physical_token_count,
+                )
+            trace_scope = (
+                torch.profiler.record_function(f"RTP::model_forward(id={trace_id})")
+                if trace_id else nullcontext()
+            )
+            with trace_scope, torch.profiler.record_function(
                 f"RTP::kimi_k3.chunk_prefill.target_forward({round_label})"
             ):
                 round_output = model._forward_impl_one(
@@ -1244,6 +1261,8 @@ class KimiK3ChunkSession:
                     round_plan=round_plan,
                     chunk_publish_context=chunk_publish_context,
                 )
+            if trace_id:
+                _trace_ops.finish_forward_trace_chunk(trace_id)
             chunk_cache_publisher.commit_round(chunk_publish_context)
             if os.environ.get("KIMI_K3_SMOKE_EVIDENCE") == "1":
                 logging.info(

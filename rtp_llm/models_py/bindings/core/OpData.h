@@ -166,6 +166,10 @@ struct GptModelInputs {
     // selection does not infer it from request lengths.
     bool is_mtp_draft_update = false;
 
+    // Logical row count before executor-side draft padding; padding runs on every TP rank.
+    int64_t trace_logical_batch_size = -1;
+    int64_t trace_request_count = -1;
+
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 

@@ -81,6 +81,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::pdSeparation] = inputs.pd_separation;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::traceRequestCount] = inputs.trace_request_count;
+    shape_hints_ptr[GptModelInputIndex::traceLogicalBatchSize] = inputs.trace_logical_batch_size;
     shape_hints_ptr[GptModelInputIndex::linearReplayBatch] =
         inputs.linear_replay ? inputs.linear_replay->slot_ids.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::linearReplayGroups] =
@@ -179,6 +181,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.force_disable_sp_run            = shape_hints_ptr[GptModelInputIndex::forceDisableSpRun];
     inputs.pd_separation                   = shape_hints_ptr[GptModelInputIndex::pdSeparation];
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    inputs.trace_request_count = shape_hints_ptr[GptModelInputIndex::traceRequestCount];
+    inputs.trace_logical_batch_size = shape_hints_ptr[GptModelInputIndex::traceLogicalBatchSize];
     if (inputs.skip_run) {
         return;
     }

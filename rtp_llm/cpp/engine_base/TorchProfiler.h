@@ -7,6 +7,8 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <tuple>
+#include "rtp_llm/cpp/utils/ForwardTrace.h"
 #include "torch/csrc/autograd/profiler_kineto.h"
 
 namespace rtp_llm {
@@ -21,9 +23,11 @@ public:
     ~TorchProfile();
     void start();
 
-    // Stops profiling and returns the result + filename for async saving.
-    // Returns {nullptr, ""} if already stopped.
-    std::pair<std::unique_ptr<torch::autograd::profiler::ProfilerResult>, std::string> stopAndCollect();
+    // Stops profiling and transfers the result, filename and immutable metadata to export.
+    // Returns {nullptr, "", nullptr} if already stopped.
+    using Collected = std::tuple<std::unique_ptr<torch::autograd::profiler::ProfilerResult>,
+                                 std::string, std::unique_ptr<ForwardTraceSession>>;
+    Collected stopAndCollect();
 
     // Legacy synchronous stop (calls stopAndCollect + save inline).
     void stop();
@@ -32,6 +36,7 @@ public:
     TorchProfile& operator=(const TorchProfile&) = delete;
 
 private:
+    std::unique_ptr<ForwardTraceSession> forward_trace_;
     std::string                 prefix_;
     std::string                 output_dir_;
     static std::atomic<size_t>  count_;
@@ -47,7 +52,8 @@ public:
     ~ProfilerSaveWorker();
 
     // Enqueue a save task. Non-blocking, returns immediately.
-    void enqueue(std::unique_ptr<torch::autograd::profiler::ProfilerResult> result, std::string file_name);
+    void enqueue(std::unique_ptr<torch::autograd::profiler::ProfilerResult> result, std::string file_name,
+                 std::unique_ptr<ForwardTraceSession> metadata);
 
     ProfilerSaveWorker(const ProfilerSaveWorker&)            = delete;
     ProfilerSaveWorker& operator=(const ProfilerSaveWorker&) = delete;
@@ -58,6 +64,7 @@ private:
     struct SaveTask {
         std::unique_ptr<torch::autograd::profiler::ProfilerResult> result;
         std::string                                                file_name;
+        std::unique_ptr<ForwardTraceSession> metadata;
     };
 
     std::mutex              mu_;

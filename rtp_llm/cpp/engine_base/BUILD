@@ -43,6 +43,8 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:forward_trace",
+        "//rtp_llm/cpp/utils:forward_trace_export",
     ],
     visibility = ["//visibility:public"],
 )
