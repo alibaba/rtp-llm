@@ -312,6 +312,16 @@ class CacheGateTest(unittest.TestCase):
         )
         self.assertIn("cache_scale_in_check", [s["action"] for s in plans[0]["stages"]])
 
+    def test_topology_budget_includes_drain_close_and_sampling(self):
+        import yaml
+        from cases.config import configure_program
+        case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
+        for seconds in (30, 31, 36):
+            changed = copy.deepcopy(case)
+            changed["parameters"]["gate"]["topology_timeout_s"] = seconds
+            with self.assertRaisesRegex(Exception, "must cover drain timeout"):
+                compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
+
     def test_staircase_validates_order_hold_and_traffic_budget(self):
         import yaml
 

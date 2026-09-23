@@ -87,6 +87,11 @@ def validate(params, plan):
         raise ValueError("observation cannot cover sustained collapse")
     if p["drain_timeout_ms"] > 30000 or p["topology_timeout_s"] <= 0:
         raise ValueError("removal must have bounded drain and topology budgets")
+    # Reserve time after the full per-engine drain for transport shutdown,
+    # discovery updates and at least one final sample.
+    minimum_topology_s = p["drain_timeout_ms"] / 1000 + 2 + p["max_gap_s"]
+    if p["topology_timeout_s"] < minimum_topology_s:
+        raise ValueError("topology_timeout_s must cover drain timeout + transport close + sampling slack")
     from scenario.compiler import environment
 
     for profile in plan.profiles:
@@ -165,6 +170,8 @@ def observe(ctx, p, deadline):
                        "GRPC_TARGET", "OUTPUT_DIR"}
     }
     path = ctx.artifact_dir / "cache-gate-evidence.json"
+    futures = []
+    intermediate_removals = []
 
     def event(name):
         evidence["events"].append(
@@ -346,6 +353,17 @@ def observe(ctx, p, deadline):
         if pool:
             # The underlying HTTP calls and server drains are deadline-bounded.
             pool.shutdown(wait=True, cancel_futures=True)
+        # Preserve individual drain outcomes even if topology observation failed.
+        evidence["removals"] = list(intermediate_removals)
+        for index, future in enumerate(futures):
+            try:
+                evidence["removals"].append(future.result())
+            except Exception as exc:
+                evidence.setdefault("removal_errors", []).append(dict(index=index, error=str(exc)))
+        if any(not r.get("drained", False) for r in evidence["removals"]):
+            error = "graceful drain timed out; removal introduced request loss"
+            if error not in evidence["errors"]:
+                evidence["errors"].append(error)
         path.write_text(json.dumps(evidence, indent=2))
     return StageOutput(
         {"evidence": ctx.register_resource("snapshot", evidence, historical=True)},

@@ -45,7 +45,7 @@ parameters:
     min_waiting: 64
     max_pacing_lag_ms: 1000
     drain_timeout_ms: 30000
-    topology_timeout_s: 30
+    topology_timeout_s: 37  # 30s drain + 2s transport close + 5s sampling slack
   flow:
     group_id: scale_in
     phase_id: continuous

@@ -336,6 +336,57 @@ class DynamicEngineScaleTest {
     }
 
     @Test
+    void transportShutdownDoesNotSerializeOtherEngineRemovalsOrAdds() throws Exception {
+        startCluster(model("10", 1.0), 2, 1);
+        List<JavaMockEngineCluster.FastRpcService> victims = services.values().stream()
+                .filter(v -> "PREFILL".equals(v.getRoleName())).toList();
+        CountDownLatch closing = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        for (var victim : victims) {
+            serversByPort.get(victim.getGrpcPort()).shutdownNow();
+            serversByPort.put(victim.getGrpcPort(), new Server() {
+                private volatile boolean terminated;
+                @Override public Server start() { return this; }
+                @Override public Server shutdown() { return this; }
+                @Override public Server shutdownNow() { terminated = true; return this; }
+                @Override public boolean isShutdown() { return true; }
+                @Override public boolean isTerminated() { return terminated; }
+                @Override public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+                    closing.countDown();
+                    // Controlled transport stall: release in finally even if the assertion fails.
+                    terminated = release.await(10, TimeUnit.SECONDS);
+                    return terminated;
+                }
+                @Override public void awaitTermination() throws InterruptedException { release.await(); }
+            });
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            List<Future<DynamicEngineManager.RemovedEngine>> removed = new ArrayList<>();
+            for (var victim : victims) {
+                removed.add(pool.submit(() -> engineManager.removeEngine(victim, "graceful", 1000)));
+            }
+            assertTrue(closing.await(3, TimeUnit.SECONDS), "transport closes must overlap, not hold mutationLock");
+            assertEquals(List.of(), hostList(readDiscoveryFile(), "mock.prefill.hosts.address"));
+            assertTrue(victims.stream().allMatch(v -> services.containsKey(v.getGrpcPort())),
+                    "ports remain reserved while transports are closing");
+            var added = pool.submit(() -> engineManager.addEngine("decode", null)).get(3, TimeUnit.SECONDS);
+            assertTrue(services.containsKey(added.grpcPort()), "a stalled close must not block other mutations");
+            release.countDown();
+            for (var future : removed) {
+                var result = future.get(3, TimeUnit.SECONDS);
+                assertTrue(result.drained());
+                assertTrue(result.remainingWork().values().stream().allMatch(n -> n == 0));
+                assertTrue(result.totalMs() >= result.drainMs());
+                assertFalse(services.containsKey(result.grpcPort()));
+            }
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void concurrentRemoveOfSameEngineIsIdempotent() throws Exception {
         startCluster(model("10", 1500.0), 1, 1);
         JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");

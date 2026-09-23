@@ -6049,6 +6049,23 @@ public final class JavaMockEngineCluster {
          * Post-completion visibility is the master's scale-in contract, not the
          * engine's.
          */
+        Map<String, Integer> inflightWorkSnapshot() {
+            Map<String, Integer> work = new LinkedHashMap<>();
+            work.put("running_tasks", runningTasks.size());
+            work.put("waiting_prefill", waitingPrefillRequests.get());
+            work.put("active_prefill_batches", activePrefillBatches.get());
+            work.put("active_prefill_requests", activePrefillRequests.get());
+            work.put("active_decode_requests", activeDecodeRequests.get());
+            work.put("prefill_pending", prefillPendingQueueSize());
+            work.put("decode_pending", decodePendingQueueSize());
+            work.put("direct_prefill", directPrefillQueueSize());
+            work.put("downstream_decode_owners", downstreamDecodeOwners.size());
+            work.put("remote_decode_owners", remoteDecodeLeaseOwners.size());
+            work.put("remote_prefill_owners", remotePrefillOwners.size());
+            work.put("upstream_prefill_owners", upstreamPrefillOwners.size());
+            return work;
+        }
+
         boolean hasInflightWork() {
             return !runningTasks.isEmpty()
                     || waitingPrefillRequests.get() != 0

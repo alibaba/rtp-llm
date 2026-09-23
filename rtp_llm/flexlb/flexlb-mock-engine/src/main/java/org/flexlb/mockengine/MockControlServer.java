@@ -942,6 +942,10 @@ final class MockControlServer {
             response.put("mode", removed.mode());
             response.put("drained", removed.drained());
             response.put("drain_ms", removed.drainMs());
+            response.put("withdrawal_ms", removed.withdrawalMs());
+            response.put("teardown_ms", removed.teardownMs());
+            response.put("total_ms", removed.totalMs());
+            response.put("remaining_work", removed.remainingWork());
             sendJson(exchange, 200, response);
         } catch (DynamicEngineManager.EngineOperationException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
