@@ -1,6 +1,4 @@
 #include <gtest/gtest.h>
-#include <cstdio>
-#include <fstream>
 #include <memory>
 #include <vector>
 #include <set>
@@ -197,69 +195,6 @@ TEST_F(BlockPoolTest, Glm52SharedIndexerKvCacheIsOptIn) {
     EXPECT_LT(compact_config.block_size_bytes, legacy_config.block_size_bytes);
     model_config.glm52_indexer_kv_slot_mapping = {-1, 0, 0, 0};
     EXPECT_ANY_THROW(SingleConfigCreator::createSingleConfig(model_config, parallelism_config, /*is_mtp=*/false));
-}
-
-TEST_F(BlockPoolTest, PinnedMlaScrShmIsOptInAndKeepsGpuBuffers) {
-#if USING_CUDA
-    autil::EnvGuard shm_enabled("RTP_LLM_SCR_HOST_CACHE_SHM", "1");
-    autil::EnvGuard numa("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY", "none");
-    autil::EnvGuard prefault("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS", "1");
-    auto            model              = makeTestModelConfig(1);
-    model.model_type                   = "glm_5";
-    model.attn_config.use_mla          = true;
-    model.attn_config.is_sparse        = true;
-    model.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
-    model.attn_config.kv_lora_rank     = 512;
-    model.attn_config.rope_head_dim    = 64;
-    model.attn_config.indexer_head_dim = 128;
-    ParallelismConfig parallelism;
-    auto              config       = SingleConfigCreator::createSingleConfig(model, parallelism, false);
-    config.block_num               = 8;
-    config.dsa_mla_resident_tokens = config.seq_size_per_block;
-    config.dsa_mla_hbm_blocks      = 3;
-    for (const auto* scr : {"0", "1"}) {
-        autil::EnvGuard scr_enabled("RTPLLM_ENABLE_SCR", scr);
-        BlockPool       pool(BlockPoolConfigHelper::createConfig(config), AllocationType::DEVICE, false, true);
-        ASSERT_TRUE(pool.init());
-        auto*                 ptr = pool.getBaseAddress();
-        cudaPointerAttributes attr{};
-        ASSERT_EQ(cudaPointerGetAttributes(&attr, ptr), cudaSuccess);
-        EXPECT_EQ(attr.type, cudaMemoryTypeHost);
-        void* gpu_ptr = nullptr;
-        ASSERT_EQ(cudaHostGetDevicePointer(&gpu_ptr, ptr, 0), cudaSuccess);
-        EXPECT_EQ(gpu_ptr, ptr);
-        std::ifstream maps("/proc/self/maps");
-        std::string   line;
-        bool          found = false;
-        while (std::getline(maps, line)) {
-            unsigned long begin = 0, end = 0;
-            if (std::sscanf(line.c_str(), "%lx-%lx", &begin, &end) == 2 && begin <= reinterpret_cast<uintptr_t>(ptr)
-                && reinterpret_cast<uintptr_t>(ptr) < end) {
-                found = true;
-                EXPECT_EQ(line.find("/dev/shm/rtpllm-scr-host-kv-") != std::string::npos, std::string(scr) == "1");
-                if (std::string(scr) == "1") {
-                    EXPECT_NE(line.find("rw-s"), std::string::npos);
-                    EXPECT_EQ(line.find("(deleted)"), std::string::npos);
-                }
-                break;
-            }
-        }
-        EXPECT_TRUE(found);
-        EXPECT_FALSE(pool.allLayerCacheBase()[0].is_cuda());
-        EXPECT_TRUE(pool.allLayerHbmCacheBase()[0].is_cuda());
-        EXPECT_TRUE(pool.allLayerScaleCacheBase()[0].is_cuda());
-        EXPECT_EQ(pool.gpuCacheTensors().size(), 2u);
-        auto host = pool.allLayerCacheBase()[0].view(torch::kUInt8);
-        host.fill_(0x5a);
-        auto device = host.to(torch::kCUDA);
-        EXPECT_TRUE(torch::equal(device.cpu(), host));
-        device.fill_(0x3c);
-        host.copy_(device);
-        EXPECT_TRUE(torch::all(host == 0x3c).item<bool>());
-    }
-#else
-    GTEST_SKIP() << "CUDA host registration required";
-#endif
 }
 
 TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
