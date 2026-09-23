@@ -12,6 +12,14 @@ public class TaskInfo {
 
     @JsonProperty("request_id")
     private String requestId;
+
+    public void setRequestId(String requestId) {
+        this.requestId = requestId;
+    }
+
+    public void setRequestId(long requestId) {
+        this.requestId = Long.toString(requestId);
+    }
     @JsonProperty("prefix_length")
     private long prefixLength;    // cache hit len
     @JsonProperty("prefix_length_valid")

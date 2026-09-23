@@ -384,51 +384,6 @@ cc_test(
 )
 
 cc_test(
-    name = "swa_kv_cache_group_test",
-    srcs = [
-        "SWAKVCacheGroupTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
-    name = "swa_kv_cache_group_malloc_range_test",
-    srcs = [
-        "SWAKVCacheGroupMallocRangeTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/cache:kv_cache_group",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ] + torch_deps(),
-    env = {
-        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
-    },
-)
-
-cc_test(
-    name = "dsv4_cache_test",
-    srcs = [
-        "DSV4CacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "kv_cache_resource_test",
     srcs = [
         "KVCacheResourceTest.cc",

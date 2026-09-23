@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
-#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -22,7 +21,6 @@ TcpCacheStoreLoadServiceClosure::~TcpCacheStoreLoadServiceClosure() {
 }
 
 void TcpCacheStoreLoadServiceClosure::Run() {
-    pinThreadToDeviceOnce(device_id_);
     collector_->markRequestCallEnd(currentTimeUs() - response_->response_send_start_time_us());
     if (!tryPinThreadDevice(device_id_, "cache load request")) {
         end(false, CacheStoreErrorCode::LoadErrorUnknown);

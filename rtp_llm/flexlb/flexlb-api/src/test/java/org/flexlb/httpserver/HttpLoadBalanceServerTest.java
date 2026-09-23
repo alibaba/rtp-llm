@@ -9,8 +9,6 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
-import org.flexlb.service.address.FlexlbInstanceAddressService;
-import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.Test;
@@ -19,8 +17,8 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.util.Map;
 
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -38,9 +36,7 @@ class HttpLoadBalanceServerTest {
                 mock(EndpointRegistry.class),
                 mock(WorkerDirectory.class),
                 mock(MasterEngineSynchronizer.class),
-                new ServerScheduleLatencyRecorder(),
-                mock(FlexlbInstanceAddressService.class),
-                mock(FlexlbLogManager.class));
+                new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
@@ -64,13 +60,9 @@ class HttpLoadBalanceServerTest {
         RequestScheduler scheduler = mock(RequestScheduler.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
-        FlexlbInstanceAddressService instanceAddressService = mock(FlexlbInstanceAddressService.class);
-        FlexlbLogManager flexlbLogManager = mock(FlexlbLogManager.class);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
         when(scheduler.getQueuedRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
-        when(instanceAddressService.getPodIp()).thenReturn("10.0.0.8");
-        when(instanceAddressService.getInstanceIp()).thenReturn("192.168.0.8");
 
         HttpLoadBalanceServer server = new HttpLoadBalanceServer(
                 consistency,
@@ -79,9 +71,7 @@ class HttpLoadBalanceServerTest {
                 endpointRegistry,
                 mock(WorkerDirectory.class),
                 synchronizer,
-                new ServerScheduleLatencyRecorder(),
-                instanceAddressService,
-                flexlbLogManager);
+                new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
@@ -96,8 +86,6 @@ class HttpLoadBalanceServerTest {
                 .expectBody()
                 .jsonPath("$.queue_length").isEqualTo(7)
                 .jsonPath("$.real_master_host").isEqualTo("127.0.0.1:7001")
-                .jsonPath("$.pod_ip").isEqualTo("10.0.0.8")
-                .jsonPath("$.instance_ip").isEqualTo("192.168.0.8")
                 .jsonPath("$.ready").isEqualTo(true);
 
         verify(scheduler).getQueuedRequestCount();
@@ -165,9 +153,7 @@ class HttpLoadBalanceServerTest {
                 mock(EndpointRegistry.class),
                 mock(WorkerDirectory.class),
                 mock(MasterEngineSynchronizer.class),
-                new ServerScheduleLatencyRecorder(),
-                mock(FlexlbInstanceAddressService.class),
-                mock(FlexlbLogManager.class));
+                new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();

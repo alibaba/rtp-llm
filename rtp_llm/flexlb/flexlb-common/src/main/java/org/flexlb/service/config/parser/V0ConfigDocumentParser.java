@@ -88,24 +88,11 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         boolean queueingEnabled = v0Config.path("enableQueueing").asBoolean(false);
         ObjectNode scheduler = flexlbConfig.putObject("scheduler");
         scheduler.put("type", queueingEnabled ? "QUEUE" : "DIRECT");
-        if (queueingEnabled
-                && (v0Config.has("maxQueueSize")
-                || v0Config.has("prefillQueueSizeThreshold"))) {
-            ObjectNode capacity = scheduler.putObject("capacity");
-            copyField(v0Config, capacity,
-                    "maxQueueSize", "maxOutstandingRequestsGlobal");
-            copyField(v0Config, capacity,
-                    "prefillQueueSizeThreshold",
-                    "maxWaitingRequestsPerPrefillWorker");
-        }
         flexlbConfig.putObject("dispatcher").put("type", "NON_BATCH");
     }
 
     private static void configureRouting(ObjectNode v0Config, ObjectNode flexlbConfig) {
         ObjectNode prefill = flexlbConfig.putObject("router").putObject("roles").putObject("prefill");
-        ObjectNode candidateChoice = prefill.putObject("candidateChoice");
-        candidateChoice.put("type", "RANDOM_WITHIN_TOLERANCE");
-        copyField(v0Config, candidateChoice, "shortestTtftSimilarityThresholdRatio", "relativeTolerance");
         configureCacheAffinity(v0Config, prefill);
     }
 

@@ -184,22 +184,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "DISK_CACHE_PATHS。",
     )
     kv_cache_group.add_argument(
-        "--prefix_tree_memory_state_swa_pool_ratio",
-        env_name="PREFIX_TREE_MEMORY_STATE_SWA_POOL_RATIO",
-        bind_to=(kv_cache_config, "prefix_tree_memory_state_swa_pool_ratio"),
-        type=int,
-        default=0,
-        help="新 prefix-tree memory cache 中 state/SWA pool 占总 memory cache 字节数的百分比。0 表示沿用按 key 等容量切分。",
-    )
-    kv_cache_group.add_argument(
-        "--enable_dsv4_state_block_independent_eviction",
-        env_name="ENABLE_DSV4_STATE_BLOCK_INDEPENDENT_EVICTION",
-        bind_to=(kv_cache_config, "enable_dsv4_state_block_independent_eviction"),
-        type=str2bool,
-        default=False,
-        help="DSV4 新 tree memory reuse 下启用 state/SWA block 独立淘汰。默认关闭。",
-    )
-    kv_cache_group.add_argument(
         "--memory_cache_size_mb",
         env_name="MEMORY_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_cache_size_mb"),
@@ -472,32 +456,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_client_config"),
         type=str,
         default="",
-    )
-    kv_cache_group.add_argument(
-        "--dsv4_fixed_pool_blocks",
-        env_name="DSV4_FIXED_POOL_BLOCKS",
-        bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
-        type=int,
-        default=0,
-        help="DSV4 固定池 block 数。>0 时用于 INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV 四个 pool；"
-        "不配置或配置为 0 时，这四个 pool 按 linear_step 派生 block 数，并保持一致。",
-    )
-    kv_cache_group.add_argument(
-        "--dsv4_hca_state_pool_blocks",
-        env_name="DSV4_HCA_STATE_POOL_BLOCKS",
-        bind_to=(kv_cache_config, "dsv4_hca_state_pool_blocks"),
-        type=int,
-        default=0,
-        help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
-        "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或 linear_step 派生 block 数。",
-    )
-    kv_cache_group.add_argument(
-        "--dsv4_fixed_pool_use_memory",
-        env_name="DSV4_FIXED_POOL_USE_MEMORY",
-        bind_to=(kv_cache_config, "dsv4_fixed_pool_use_memory"),
-        type=str2bool,
-        default=False,
-        help="DSV4 固定池（INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV）是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
     )
     kv_cache_group.add_argument(
         "--dsv4_fixed_pool_blocks",

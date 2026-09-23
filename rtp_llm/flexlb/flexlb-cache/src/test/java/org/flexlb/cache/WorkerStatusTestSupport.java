@@ -33,7 +33,12 @@ public final class WorkerStatusTestSupport {
                 role, "default", ip, port, port + 1, "");
         publishObservation(workerStatus, role, alive, cacheMatchRollbackBlocks);
         if (cacheStatus != null) {
-            workerStatus.publishCacheStatus(cacheStatus);
+            workerStatus.lock.lock();
+            try {
+                workerStatus.publishCacheStatus(cacheStatus);
+            } finally {
+                workerStatus.lock.unlock();
+            }
         }
         return workerStatus;
     }

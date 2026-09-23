@@ -342,9 +342,9 @@ class WorkerBatcherSchedulingTest {
             decision.setMaxCollectionWaitMs(windowMs);
         }
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        when(endpoint.getIp()).thenReturn("10.0.0.1");
-        when(endpoint.reservePublishedRouteCredit(org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyInt()))
+        when(endpoint.reserveRouteOwnership(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyLong()))
                 .thenAnswer(ignored -> new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
                         org.flexlb.balance.endpoint.PrefillState.CapacityStatus.ACQUIRED,
                         mock(org.flexlb.balance.endpoint.PrefillState.RouteReservation.class)));
@@ -361,7 +361,10 @@ class WorkerBatcherSchedulingTest {
                     member.future().complete(new Response());
                 }
                 return null;
-            }).when(transaction).handoff(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyInt());
+            }).when(transaction).handoff(
+                    org.mockito.ArgumentMatchers.anyString(),
+                    org.mockito.ArgumentMatchers.anyInt(),
+                    org.mockito.ArgumentMatchers.any());
             return transaction;
         });
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
@@ -510,6 +513,7 @@ class WorkerBatcherSchedulingTest {
     private static WorkerStatus stableStatus() {
         WorkerStatus status = mock(WorkerStatus.class);
         when(status.committedEngineObservation()).thenReturn(capacity());
+        when(status.getMetricIpPort()).thenReturn("10.0.0.1");
         return status;
     }
 

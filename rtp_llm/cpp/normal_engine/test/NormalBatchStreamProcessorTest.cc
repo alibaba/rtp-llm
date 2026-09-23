@@ -176,42 +176,6 @@ private:
     int64_t accepted_token_len_ = 0;
 };
 
-class TestStatefulLogitsProcessor: public BaseLogitsProcessor {
-public:
-    explicit TestStatefulLogitsProcessor(bool async_device_state): async_device_state_(async_device_state) {}
-
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
-        (void)inputs;
-        (void)start_idx;
-        (void)finish_idx;
-    }
-
-    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override {
-        (void)src_batch_indices;
-    }
-
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {
-        (void)new_tokens;
-        accepted_token_len_ += num_new_tokens;
-    }
-
-    bool isStateful() const override {
-        return true;
-    }
-
-    bool supportsNormalAsyncDeviceState() const override {
-        return async_device_state_;
-    }
-
-    int64_t acceptedTokenLen() const override {
-        return accepted_token_len_;
-    }
-
-private:
-    bool    async_device_state_;
-    int64_t accepted_token_len_ = 0;
-};
-
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;
     ModelConfig     model_config;

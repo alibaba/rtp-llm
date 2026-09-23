@@ -237,7 +237,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # ------------------------------------------------------------------
 
     def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
-        return self.main_norm(self.main_proj(features))  # type: ignore[operator]
+        assert self.main_norm is not None and self.main_proj is not None
+        return self.main_norm(self.main_proj(features))
 
     # ------------------------------------------------------------------
     # Framework/paged-cache metadata helpers

@@ -197,7 +197,16 @@ class KvCacheManagerTest {
         EngineLocalView localView = new EngineLocalView();
         ReflectionTestUtils.setField(
                 localView, "dynamicIntervalManager",
-                (DynamicCacheIntervalService) diffSize -> { });
+                new DynamicCacheIntervalService() {
+                    @Override
+                    public void updateDiffStatistics(int diffSize) {
+                    }
+
+                    @Override
+                    public long getCurrentIntervalMs() {
+                        return 0;
+                    }
+                });
         ReflectionTestUtils.setField(
                 manager, "globalCacheIndex", new GlobalCacheIndex());
         ReflectionTestUtils.setField(

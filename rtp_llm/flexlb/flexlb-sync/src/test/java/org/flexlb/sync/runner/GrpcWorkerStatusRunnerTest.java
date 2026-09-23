@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -45,7 +45,7 @@ class GrpcWorkerStatusRunnerTest {
                 role, null, "127.0.0.1", 8080, 8081, "test-site");
         WorkerDirectory directory = directory(registry, status);
         WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(
-                registry, role, status.getIpPort(), status);
+                registry, role, status.getLogicalIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(
@@ -57,21 +57,21 @@ class GrpcWorkerStatusRunnerTest {
             WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
             assertNotNull(lease);
             new GrpcWorkerStatusRunner(
-                    "test-model", status.getIpPort(), "test-site", role, null,
+                    "test-model", status.getLogicalIpPort(), "test-site", role, null,
                     status, lease, directory, mock(EngineHealthReporter.class),
                     grpc, 5_000L, cache, Runnable::run).run();
             if (failure < 3) {
-                assertSame(status, directory.statusSnapshot(role).get(status.getIpPort()));
-                assertSame(endpoint, registry.get(role, status.getIpPort()));
+                assertSame(status, directory.statusSnapshot(role).get(status.getLogicalIpPort()));
+                assertSame(endpoint, registry.get(role, status.getLogicalIpPort()));
                 verifyNoInteractions(cache);
             }
         }
 
-        assertNull(registry.get(role, status.getIpPort()));
+        assertNull(registry.get(role, status.getLogicalIpPort()));
         assertTrue(directory.statusSnapshot(role).isEmpty());
         assertNull(status.tryBeginStatusPoll(), "retired generation cannot poll again");
         if (needsCacheKeys) {
-            verify(cache).removeEngineBlockCache(status.getIpPort());
+            verify(cache).removeEngineBlockCache(status.getLogicalIpPort());
         } else {
             verifyNoInteractions(cache);
         }
@@ -196,7 +196,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(activity);
 
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("123")
+                .setRequestId(123L)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
         EngineRpcService.WorkerStatusPB response =

@@ -15,9 +15,9 @@ public final class RequestId {
     private RequestId() {
     }
 
-    /** 直接读取字符串 ID；缺失时兼容同编号的旧整数编码。OrBuilder 同时支持消息和 Builder。 */
+    /** 将引擎状态消息中的 int64 请求 ID 转为字符串。 */
     public static String parse(EngineRpcService.TaskInfoPBOrBuilder message) {
-        return parseString(message.getRequestId(), message.getUnknownFields(), EngineRpcService.TaskInfoPB.REQUEST_ID_FIELD_NUMBER);
+        return Long.toString(message.getRequestId());
     }
 
     /** 直接读取字符串 ID；缺失时兼容同编号的旧整数编码。OrBuilder 同时支持消息和 Builder。 */

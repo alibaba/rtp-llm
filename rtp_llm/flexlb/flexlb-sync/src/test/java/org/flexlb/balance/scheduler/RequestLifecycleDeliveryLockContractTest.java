@@ -144,20 +144,6 @@ class RequestLifecycleDeliveryLockContractTest {
     }
 
     @Test
-    void queueAdmissionCopyRetainsLogicalEngineIdentity() {
-        ServerStatus source = new ServerStatus();
-        source.setServerIp("127.0.0.1");
-        source.setHttpPort(8080);
-        source.setSelectedEngineIndex(0, 2);
-
-        ServerStatus copy = RequestRegistry.copyOf(source);
-
-        assertEquals("127.0.0.1:8080@0", copy.getLogicalIpPort());
-        assertEquals(0, copy.getEngineIndex());
-        assertEquals(2, copy.getRoutingMultiEngineNum());
-    }
-
-    @Test
     void declinedPublicationClearsTheProvisionalSlotBinding() {
         Registered registered = registerItem(111L);
         RequestSlot slot = lifecycle.requestSlot(registered.item().requestId());
@@ -548,6 +534,10 @@ class RequestLifecycleDeliveryLockContractTest {
     }
 
     private void assertQueuedWithoutClaim(long requestId) {
+        assertQueuedWithoutClaim(Long.toString(requestId));
+    }
+
+    private void assertQueuedWithoutClaim(String requestId) {
         RequestState snapshot = lifecycle.getRequestState(
                 requestId, 0L);
         assertEquals(RequestState.Phase.QUEUED, snapshot.state());

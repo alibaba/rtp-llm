@@ -82,7 +82,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 # Process-local cache for the device-side cos_sin tensor derived from a
 # given freqs_cis source. DSV4 has ~91 CompressorFP8 instances (main +

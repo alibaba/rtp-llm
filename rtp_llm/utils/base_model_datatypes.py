@@ -131,9 +131,6 @@ class AuxInfo:
         GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
     )
 
-    speculative_draft_rounds: int = 0
-    speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
-
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 

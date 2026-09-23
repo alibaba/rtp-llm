@@ -45,19 +45,15 @@ class EngineStatusConverterTest {
     }
 
     @Test
-    void convertsOldIntegerAndNewStringTaskIdsWithoutChangingOtherFields() throws Exception {
-        var bytes = new ByteArrayOutputStream();
-        var wire = CodedOutputStream.newInstance(bytes);
-        wire.writeInt64(1, 123);
-        wire.flush();
-        var oldTask = EngineRpcService.TaskInfoPB.parseFrom(bytes.toByteArray()).toBuilder()
+    void convertsNumericTaskIdsToCanonicalStringsWithoutChangingOtherFields() {
+        var oldTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(123)
                 .setBatchId(42).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
-        var newTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("req-abc-001").build();
+        var newTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(456).build();
         var response = EngineStatusConverter.convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB.newBuilder()
                 .addRunningTaskInfo(oldTask).addFinishedTaskList(newTask).build());
         assertEquals("123", response.getRunningTaskInfo().get("123").getRequestId());
         assertEquals(42, response.getRunningTaskInfo().get("123").getBatchId());
-        assertEquals("req-abc-001", response.getFinishedTaskInfo().get("req-abc-001").getRequestId());
+        assertEquals("456", response.getFinishedTaskInfo().get("456").getRequestId());
     }
 
     @Test
@@ -88,7 +84,7 @@ class EngineStatusConverterTest {
     void preservesRequestIdFromWorkerStatus() {
         long requestId = 123L;
         EngineRpcService.TaskInfoPB finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(String.valueOf(requestId))
+                .setRequestId(requestId)
                 .build();
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
                 .addFinishedTaskList(finishedTask)
@@ -104,7 +100,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesPrefixLengthValidityFromWorkerStatus() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(String.valueOf(1L))
+                .setRequestId(1L)
                 .setPrefixLength(128)
                 .setPrefixLengthValid(true)
                 .build();
@@ -122,7 +118,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesPrefillTimingAndCacheBreakdownFromWorkerStatus() {
         EngineRpcService.TaskInfoPB finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(String.valueOf(1L))
+                .setRequestId(1L)
                 .setInputQueueEnqueueTimeMs(1000)
                 .setInputQueueDrainTimeMs(1100)
                 .setRemoteKvWaitMs(200)
@@ -159,7 +155,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesPostForwardPrefillProgressWithPresence() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(String.valueOf(1L))
+                .setRequestId(1L)
                 .setCompletedPrefillTokens(0)
                 .setRemainingPrefillTokens(48_000)
                 .setLastCompletedPrefillStepId(0)
@@ -179,7 +175,7 @@ class EngineStatusConverterTest {
     @Test
     void keepsMissingRemainingPrefillTokensAsNegativeOne() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(String.valueOf(2L))
+                .setRequestId(2L)
                 .build();
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
                 .addRunningTaskInfo(runningTask)
@@ -194,7 +190,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesExplicitZeroRemainingPrefillTokens() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(String.valueOf(3L))
+                .setRequestId(3L)
                 .setRemainingPrefillTokens(0)
                 .build();
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()

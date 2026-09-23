@@ -132,11 +132,15 @@ public class BalanceContext {
 
     //===================== Method ===================//
 
+    public BalanceContext() {
+        this(new FlexlbConfig());
+    }
+
     public BalanceContext(FlexlbConfig config) {
         this.config = Objects.requireNonNull(config, "config");
     }
 
-    public long getRequestId() {
+    public String getRequestId() {
         return request.getRequestId();
     }
 

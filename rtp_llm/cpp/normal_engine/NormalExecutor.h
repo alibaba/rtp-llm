@@ -4,7 +4,6 @@
 #include <memory>
 #include <optional>
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -97,14 +96,14 @@ private:
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
-    RoleType                                                                 role_type_ = RoleType::PDFUSION;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
-    bool enable_ffn_disaggregate_ = false;
-    bool enable_detail_log_       = false;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
+        wall_tps_reporter_;
+    bool                                                                     enable_ffn_disaggregate_ = false;
+    bool                                                                     enable_detail_log_       = false;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;

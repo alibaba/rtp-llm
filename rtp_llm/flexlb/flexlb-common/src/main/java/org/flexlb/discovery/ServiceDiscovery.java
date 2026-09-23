@@ -27,6 +27,10 @@ public interface ServiceDiscovery {
      */
     List<WorkerHost> getHosts(Endpoint endpoint);
 
+    default List<WorkerHost> getHosts(String address) {
+        throw new UnsupportedOperationException("address-only discovery is not supported");
+    }
+
     /**
      * Listen for host changes for an endpoint.
      *
@@ -34,6 +38,10 @@ public interface ServiceDiscovery {
      * @param listener Host change listener
      */
     void listen(Endpoint endpoint, ServiceHostListener listener);
+
+    default void listen(String address, ServiceHostListener listener) {
+        throw new UnsupportedOperationException("address-only discovery is not supported");
+    }
 
     /**
      * Stop all listeners

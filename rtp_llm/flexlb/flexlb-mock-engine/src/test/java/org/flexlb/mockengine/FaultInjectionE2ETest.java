@@ -319,7 +319,7 @@ class FaultInjectionE2ETest {
                     "missing ACK stays pending before the request inactivity deadline");
             assertFalse(crashed.isDone(), "the unconfirmed request stays incomplete before TTL");
             if (clientCancellation) {
-                h.scheduler.cancelRequest(9902L, 0L, CancelReason.CLIENT_CANCELLED);
+                h.scheduler.cancelRequest("9902", 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(0L, engineCancelCalls(prefill),
                     "uncertain delivery and ordinary cancellation must not send Engine Cancel");

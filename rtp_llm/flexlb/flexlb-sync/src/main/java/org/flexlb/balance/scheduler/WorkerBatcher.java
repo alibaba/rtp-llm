@@ -1145,6 +1145,9 @@ public final class WorkerBatcher {
         if (engineCapacity <= 0) {
             engineCapacity = engineStatus.maxSeqLen();
         }
+        if (engineCapacity <= 0) {
+            engineCapacity = config.getFallbackBatchTokenCapacity();
+        }
         long batchTokenCapacity = positiveOrUnlimited(engineCapacity);
         long total = engineStatus.totalKvCacheTokens();
         if (total <= 0) {

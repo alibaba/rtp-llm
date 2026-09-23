@@ -451,12 +451,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request = buildAllocateRequest(prefill_context);
 
-    // Propagate CP size so decode knows prefill used context-parallel page-RR.
-    const auto& cp_cfg = maga_init_params_.parallelism_config.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
-        alloc_request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
-    }
-
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
     GenerateOutputsPB allocate_response;
@@ -589,7 +583,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
     std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
-    RTP_LLM_LOG_DEBUG("remote generate stream[%s]: %s", stream->streamLogTag().c_str(), stream->debugString().c_str());
+    RTP_LLM_LOG_DEBUG("remote generate stream[%ld]: %s", stream->streamId(), stream->debugString().c_str());
     vector<int> all_token   = stream->currentExecuteTokens();
     int         first_token = all_token[all_token.size() - 1];
     RTP_LLM_LOG_DEBUG("first token token id %d", first_token);

@@ -1,5 +1,6 @@
 package org.flexlb.config;
 
+import lombok.AccessLevel;
 import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -20,6 +21,8 @@ public class DeploymentIdentity {
     private final String spectrumWorkspaceId;
     private final String spectrumDeploymentName;
     private final String deploymentId;
+    @Getter(AccessLevel.NONE)
+    private final String missingIdentityMessage;
 
     public DeploymentIdentity() {
         String spectrumWorkspaceId = StringUtils.trimToNull(System.getenv(SPECTRUM_WORKSPACE_ID));
@@ -31,6 +34,7 @@ public class DeploymentIdentity {
             this.spectrumDeploymentName = spectrumDeploymentName;
             deploymentId = SPECTRUM_IDENTITY_PREFIX + spectrumWorkspaceId + ":" + applicationName + ":"
                     + spectrumDeploymentName;
+            missingIdentityMessage = null;
             return;
         }
 
@@ -42,18 +46,30 @@ public class DeploymentIdentity {
             this.spectrumWorkspaceId = null;
             this.spectrumDeploymentName = null;
             deploymentId = bizName + ":" + runtimeDeploymentName + ":" + zoneName;
+            missingIdentityMessage = null;
             return;
         }
 
-        throw new IllegalStateException("Deployment identity requires a complete Spectrum or runtime triplet: "
+        this.spectrumWorkspaceId = null;
+        this.spectrumDeploymentName = null;
+        deploymentId = null;
+        missingIdentityMessage = "Deployment identity requires a complete Spectrum or runtime triplet: "
                 + SPECTRUM_WORKSPACE_ID + "=" + spectrumWorkspaceId + ", "
                 + SPECTRUM_APPLICATION_NAME + "=" + applicationName + ", "
                 + SPECTRUM_DEPLOYMENT_NAME + "=" + spectrumDeploymentName + "; "
-                + WHALE_BIZ_NAME + "=" + bizName + ", " + WHALE_DEPLOYMENT_NAME + "=" + runtimeDeploymentName + ", "
-                + WHALE_ZONE_NAME + "=" + zoneName);
+                + WHALE_BIZ_NAME + "=" + bizName + ", "
+                + WHALE_DEPLOYMENT_NAME + "=" + runtimeDeploymentName + ", "
+                + WHALE_ZONE_NAME + "=" + zoneName;
     }
 
     public boolean isSpectrum() {
         return spectrumWorkspaceId != null;
+    }
+
+    public String getDeploymentId() {
+        if (deploymentId == null) {
+            throw new IllegalStateException(missingIdentityMessage);
+        }
+        return deploymentId;
     }
 }

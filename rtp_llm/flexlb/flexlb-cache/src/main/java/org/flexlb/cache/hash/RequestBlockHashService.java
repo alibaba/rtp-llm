@@ -58,7 +58,12 @@ public class RequestBlockHashService {
             return Mono.empty();
         }
 
-        BlockHashConfig hashConfig = blockHashConfigResolver.resolve();
+        BlockHashConfig hashConfig;
+        try {
+            hashConfig = blockHashConfigResolver.resolve();
+        } catch (IllegalStateException unavailable) {
+            return Mono.empty();
+        }
         long blockSize = request.getBlockSize() > 0
                 ? request.getBlockSize()
                 : hashConfig.blockSize();

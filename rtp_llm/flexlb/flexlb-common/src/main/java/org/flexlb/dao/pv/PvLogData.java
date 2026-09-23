@@ -41,6 +41,8 @@ public class PvLogData {
     private long batchId;
     private String requestState;
     private String realMasterHost;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private Map<String, Object> schedulingDiagnostics;
 
     private long totalUs;
     private Long arrivalMs;
@@ -104,6 +106,9 @@ public class PvLogData {
         }
         this.error = ctx.getErrorMessage();
         this.success = ctx.isSuccess();
+        if (!success) {
+            this.schedulingDiagnostics = ctx.getSchedulingDiagnostics();
+        }
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();
         this.totalUs = ctx.getTotalTimeUs();

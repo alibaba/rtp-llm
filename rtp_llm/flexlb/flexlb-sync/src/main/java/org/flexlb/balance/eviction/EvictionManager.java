@@ -484,7 +484,7 @@ public class EvictionManager {
                     ctx, future, decodeEp, reservation, admission,
                     returnInstructions
                             ? proposal.victims().stream()
-                                    .map(victim -> Long.toString(victim.requestId()))
+                                    .map(DecodeRequestView::requestId)
                                     .toList()
                             : List.of());
         }

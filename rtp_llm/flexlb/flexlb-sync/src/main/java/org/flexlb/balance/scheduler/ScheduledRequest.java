@@ -178,7 +178,7 @@ public final class ScheduledRequest implements Prioritized {
 
     // -- derived accessors --
 
-    public long requestId() {
+    public String requestId() {
         return decodeBinding.requestId();
     }
 
@@ -215,7 +215,7 @@ public final class ScheduledRequest implements Prioritized {
             ServerStatus status,
             DecodeEndpoint endpoint,
             DecodeEndpoint.ReservationHandle reservation,
-            long requestId,
+            String requestId,
             int priority,
             long hardKvTokens,
             long expectedKvTokens,
@@ -226,7 +226,7 @@ public final class ScheduledRequest implements Prioritized {
             Objects.requireNonNull(capacity, "capacity");
             Objects.requireNonNull(mode, "mode");
             Objects.requireNonNull(costFormula, "costFormula");
-            if (reservation != null && reservation.requestId() != requestId) {
+            if (reservation != null && !Objects.equals(reservation.requestId(), requestId)) {
                 throw new IllegalArgumentException("Decode reservation belongs to another request");
             }
         }

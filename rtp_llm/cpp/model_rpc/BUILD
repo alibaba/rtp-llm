@@ -95,7 +95,6 @@ cc_library(
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
-        "//rtp_llm/cpp/utils:torch_cuda_oom",
     ],
 )
 

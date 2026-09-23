@@ -36,7 +36,7 @@ class PrefillStateSnapshotTest {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillActiveIndex waiting = PrefillActiveIndex.ordered(4,
-            Comparator.comparingLong(ScheduledRequest::requestId));
+            Comparator.comparing(ScheduledRequest::requestId));
     private final PrefillState state = new PrefillState(lock, waiting, clock::get, () -> { });
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
@@ -59,7 +59,7 @@ class PrefillStateSnapshotTest {
             for (var reader : readers) {
                 assertSame(shared, reader.get(5, TimeUnit.SECONDS));
             }
-            assertEquals(List.of(1L, 2L), shared.requests().stream()
+            assertEquals(List.of("1", "2"), shared.requests().stream()
                     .map(WorkSnapshot.RequestWork::requestId).toList());
             second.close();
             first.close();
@@ -116,7 +116,7 @@ class PrefillStateSnapshotTest {
                 assertTrue(waitingItems().isEmpty());
                 assertEquals(0L, handoff.precedingWork().totalRemainingWorkMs().orElseThrow(),
                         "the selected group's own provisional work is excluded");
-                assertEquals(List.of(1L, 2L), state.committedSnapshot().requests().stream()
+                assertEquals(List.of("1", "2"), state.committedSnapshot().requests().stream()
                         .map(work -> work.requestId()).toList());
                 assertEquals(70L, state.committedSnapshot().knownRemainingWorkMsAt(System.currentTimeMillis()));
             }
@@ -256,7 +256,7 @@ class PrefillStateSnapshotTest {
 
         clock.set(150);
         assertTrue(state.terminalizeCommittedItem(a));
-        assertEquals(List.of(2L, 3L), state.committedSnapshot().batches().getFirst().requestIds());
+        assertEquals(List.of("2", "3"), state.committedSnapshot().batches().getFirst().requestIds());
         assertEquals(250L, remainingWork());
         clock.set(190);
         assertTrue(state.terminalizeCommittedItem(b));
@@ -375,7 +375,7 @@ class PrefillStateSnapshotTest {
 
     private static ScheduledRequest item(long id) {
         var item = mock(ScheduledRequest.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(Long.toString(id));
         when(item.seqLen()).thenReturn(100L);
         return item;
     }

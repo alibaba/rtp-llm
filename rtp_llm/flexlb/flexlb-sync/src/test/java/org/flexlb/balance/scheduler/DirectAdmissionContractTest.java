@@ -104,7 +104,7 @@ class DirectAdmissionContractTest {
             assertEquals(48L, fixture.decode.routingView().inflightExpectedKv());
             assertEquals(0, fixture.decode.resourceSnapshot().queuedCount());
             assertEquals(1, fixture.scheduler.getInflightSize());
-            assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.scheduler.getRequestState(101L, 0L).state());
+            assertEquals(RequestState.Phase.ACKNOWLEDGED, fixture.scheduler.getRequestState("101", 0L).state());
             var reservation = fixture.decode.reservationHandle(101L);
             assertNotNull(reservation);
             assertThrows(IllegalStateException.class, () -> fixture.decode.release(
@@ -159,7 +159,7 @@ class DirectAdmissionContractTest {
             AtomicBoolean raced = new AtomicBoolean();
             doAnswer(call -> {
                 DecodeEndpoint.ReservationHandle reservation = call.getArgument(0);
-                assertEquals(103L, reservation.requestId());
+                assertEquals("103", reservation.requestId());
                 fixture.assertItemNotBound(103L);
                 fixture.observe(fixture.decode, Map.of("103", task(103L, TaskPhase.KV_ALLOCATED)), Map.of());
                 var acquired = (DecodeEndpoint.EngineDispatchPermitAcquisition) call.callRealMethod();
@@ -327,7 +327,7 @@ class DirectAdmissionContractTest {
             return response;
         }
 
-        private static ServerStatus metadata(WorkerEndpoint endpoint, long requestId) {
+        private static ServerStatus metadata(WorkerEndpoint endpoint, String requestId) {
             var result = new ServerStatus();
             result.setSuccess(true);
             result.setRequestId(requestId);

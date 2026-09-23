@@ -128,6 +128,10 @@ public final class WorkSnapshot {
                         "remaining request work must be non-negative");
             }
         }
+
+        public RequestWork(long requestId, Phase phase, long remainingWorkMs) {
+            this(Long.toString(requestId), phase, remainingWorkMs);
+        }
     }
 
     /** One EnqueueBatch work unit, identified by batch id and its live members. */

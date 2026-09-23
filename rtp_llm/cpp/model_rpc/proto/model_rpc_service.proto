@@ -562,7 +562,7 @@ enum PriorityPreemptionProgressPB {
 }
 
 message TaskInfoPB {
-    string request_id = 1;
+    int64 request_id = 1;
     reserved 2;
     reserved "inter_request_id";
     int64 prefix_length = 3;

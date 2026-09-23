@@ -17,8 +17,8 @@ import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -277,7 +277,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private MasterForwardResult forwardFailure(
-            long requestId,
+            String requestId,
             ForwardGuard guard,
             Throwable error) {
         return new MasterForwardResult(null, true,
@@ -286,7 +286,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private CancelForwardResult cancelForwardFailure(
-            long requestId,
+            String requestId,
             ForwardGuard guard,
             Throwable error) {
         return CancelForwardResult.failed(
@@ -295,7 +295,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private String recordForwardFailure(
-            long requestId,
+            String requestId,
             ForwardGuard guard,
             Throwable error) {
         Status status = Status.fromThrowable(error);
@@ -435,7 +435,7 @@ public class FlexlbGrpcForwarder {
         private final Context context;
         private final AtomicBoolean finished = new AtomicBoolean();
 
-        private ForwardTrace(String name, Context parent, long requestId, String masterHost) {
+        private ForwardTrace(String name, Context parent, String requestId, String masterHost) {
             span = FlexlbTrace.startClient(name, parent);
             context = FlexlbTrace.withSpan(span, parent);
             FlexlbTrace.setRequestAttributes(span, requestId);
@@ -506,7 +506,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private ForwardGuard applyForwardGuard(
-            long requestId,
+            String requestId,
             int encodedHop,
             ForwardOperation operation) {
         return applyForwardGuard(requestId, encodedHop, operation,
@@ -514,7 +514,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private ForwardGuard applyForwardGuard(
-            long requestId,
+            String requestId,
             int encodedHop,
             ForwardOperation operation,
             String masterHostIpPort) {

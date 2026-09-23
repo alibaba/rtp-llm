@@ -60,7 +60,7 @@ class RandomStrategyTest {
                 context(3L), RoleType.VIT, "group-a")) {
             assertNotNull(selected);
             assertEquals(RoleType.VIT, selected.serverStatus().getRole());
-            assertEquals(3L, selected.serverStatus().getRequestId());
+            assertEquals("3", selected.serverStatus().getRequestId());
             assertEquals("127.0.0.3", selected.serverStatus().getServerIp());
             assertEquals(8080, selected.serverStatus().getHttpPort());
             assertEquals(8081, selected.serverStatus().getGrpcPort());

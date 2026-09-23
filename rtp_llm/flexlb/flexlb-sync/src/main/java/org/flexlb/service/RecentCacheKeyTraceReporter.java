@@ -172,13 +172,13 @@ public class RecentCacheKeyTraceReporter {
                                               Request request,
                                               CacheHitTheoryStats.Snapshot snapshot) {
         return String.format(Locale.ROOT,
-                "time=%s ts_ms=%d source=master master_request_id=%s request_id=%d seq_len=%d "
+                "time=%s ts_ms=%d source=master master_request_id=%s request_id=%s seq_len=%d "
                         + "cache_key_block_size=%d request_hit_tokens=%d request_input_tokens=%d request_ratio=%.6f "
                         + "all_hit_tokens=%d all_input_tokens=%d all_ratio=%.6f",
                 formatTimestamp(snapshot.getNowMs()),
                 snapshot.getNowMs(),
                 balanceContext == null ? "" : String.valueOf(balanceContext.getRequestId()),
-                request == null ? 0L : request.getRequestId(),
+                request == null ? "" : request.getRequestId(),
                 request == null ? 0L : request.getSeqLen(),
                 request == null ? 0L : request.getCacheKeyBlockSize(),
                 snapshot.getRequestHitCount(),

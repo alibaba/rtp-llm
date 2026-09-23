@@ -48,11 +48,11 @@ class UniConfigConfigSourceTest {
     private static final String CONFIG_PATH = "/v2/configs/modelstudio.spectrum.deployment."
             + "df4a7748.flexlb-test-wlcb.runtime.meta";
     private static final String INITIAL_CONFIG = """
-            {"schemaVersion":2,"consistency":{"type":"NONE"},
+            {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"consistency":{"type":"NONE"},
             "fallbackBatchTokenCapacity":1048585}
             """;
     private static final String UPDATED_CONFIG = """
-            {"schemaVersion":2,"consistency":{"type":"NONE"},
+            {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"consistency":{"type":"NONE"},
             "fallbackBatchTokenCapacity":1048586}
             """;
 
@@ -121,7 +121,7 @@ class UniConfigConfigSourceTest {
         assertThat(configService.loadBalanceConfig()).isSameAs(original);
         assertThat(updates).hasValue(1);
         String currentConfig = """
-                {"schemaVersion":2,"scheduler":{"type":"DIRECT"},
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"scheduler":{"type":"DIRECT"},
                 "dispatcher":{"type":"NON_BATCH"},"consistency":{"type":"NONE"},
                 "fallbackBatchTokenCapacity":1048585}
                 """;
@@ -311,8 +311,8 @@ class UniConfigConfigSourceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"{", "{\"schemaVersion\":2,\"unknown\":true}",
-            "{\"schemaVersion\":2,\"scheduler\":{\"type\":\"DIRECT\"},\"dispatcher\":{\"type\":\"BATCH\"}}"})
+    @ValueSource(strings = {"{", "{\"schemaVersion\":3,\"unknown\":true}",
+            "{\"schemaVersion\":3,\"scheduler\":{\"type\":\"DIRECT\"},\"dispatcher\":{\"type\":\"BATCH\"}}"})
     void retainsLastGoodConfigOnInvalidUpdatesAndRecovers(String invalidConfig) throws Exception {
         initializeSource();
         initializeConfigService();

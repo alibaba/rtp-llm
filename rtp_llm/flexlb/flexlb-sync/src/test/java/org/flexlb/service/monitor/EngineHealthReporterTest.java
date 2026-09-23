@@ -6,7 +6,6 @@ import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.LocalStandbyConfig;
-import org.flexlb.config.RoutingConfig;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -62,8 +61,8 @@ class EngineHealthReporterTest {
         when(cacheMatchConfiguration.isLocalStandbyEnabled()).thenReturn(true);
         when(cacheMatchConfiguration.getLocalStandbyConfig()).thenReturn(localStandbyConfig);
         reporter = new EngineHealthReporter(
-                monitor, cacheMetricsReporter, cacheMatchConfiguration,
-                engineGrpcClient, loopResources, workerDirectory);
+                monitor, cacheMetricsReporter, cacheMatchConfiguration, engineGrpcClient,
+                loopResources, workerDirectory);
     }
 
     @Test
@@ -91,8 +90,6 @@ class EngineHealthReporterTest {
     void shouldRegisterCacheHitComparisonMetrics() {
         reporter.init();
 
-        verify(monitor).register("app.engine.health.check.in.transit.task.size",
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.predicted.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.actual.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.delta.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -187,18 +184,16 @@ class EngineHealthReporterTest {
         response.setSuccess(true);
         response.setCode(200);
         response.setServerStatus(List.of(serverStatus));
-        FlexlbConfig config = new FlexlbConfig();
-        config.getRouter().getRoles().getPrefill().getCandidateChoice()
-                .setType(RoutingConfig.CandidateChoiceType.LEAST_RECENTLY_USED_IN_POOL);
-        BalanceContext context = new BalanceContext();
-        context.setConfig(config);
+        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        context.recordSelectionReason(
+                RoleType.PREFILL, "LEAST_RECENTLY_USED_IN_POOL");
         context.setResponse(response);
 
         reporter.reportBalancingService(context);
 
         verify(monitor).report("app.engine.balancing.master.select.detail", FlexMetricTags.of(
                 "role", "PREFILL",
-                "strategy", "LEAST_RECENTLY_USED_IN_POOL",
+                "reason", "LEAST_RECENTLY_USED_IN_POOL",
                 "engineIp", "10.0.0.1:8080",
                 "success", "true",
                 "code", "200"), 1.0);
@@ -637,9 +632,6 @@ class EngineHealthReporterTest {
             CacheStatus cacheStatus) {
         WorkerStatus workerStatus = WorkerStatus.createDiscovered(
                 role, null, ip, 8080, 8081, "test-site");
-        if (cacheStatus != null) {
-            workerStatus.publishCacheStatus(cacheStatus);
-        }
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setAlive(true);
@@ -652,6 +644,9 @@ class EngineHealthReporterTest {
 
         workerStatus.lock.lock();
         try {
+            if (cacheStatus != null) {
+                workerStatus.publishCacheStatus(cacheStatus);
+            }
             WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(
                     workerStatus.freezeStatusResponse(response));
             workerStatus.publishPreparedStatus(prepared);

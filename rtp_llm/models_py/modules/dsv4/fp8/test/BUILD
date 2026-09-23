@@ -13,7 +13,6 @@ _DSV4_FP8_TEST_DEPS = [
 _GPU_TESTS = [
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
-    "test_cp_pool_reader_owned_lens",
     "test_compressor_forward_flat_input",
     "test_compressor_fp8_per_token",
     "test_compressor_prepare_metadata_varlen",
@@ -69,40 +68,6 @@ _CONTRACT_TESTS = [
     "test_fp8_sparse_attn_decode_op",
     "test_compressor_cp_merged_gather",
 ]
-
-py_test(
-    name = "test_decode_attn_metadata_start_pos",
-    srcs = ["test_decode_attn_metadata_start_pos.py"],
-    deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
-)
-
-py_test(
-    name = "test_fp8_sparse_attn_decode_op",
-    srcs = ["test_fp8_sparse_attn_decode_op.py"],
-    deps = _DSV4_FP8_TEST_DEPS,
-)
-
-py_test(
-    name = "test_pool_slot_mapping_split",
-    srcs = ["test_pool_slot_mapping_split.py"],
-    deps = _DSV4_FP8_TEST_DEPS,
-)
-
-py_test(
-    name = "test_flash_mla_decode_kernel_layout",
-    srcs = ["test_flash_mla_decode_kernel_layout.py"],
-    deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
-)
-
-py_test(
-    name = "test_compressor_cp_merged_gather",
-    srcs = ["test_compressor_cp_merged_gather.py"],
-    deps = _DSV4_FP8_TEST_DEPS,
-)
 
 [
     dsv4_py_test(

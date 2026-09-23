@@ -1658,8 +1658,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_spec_logits_verify_async)");
         spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
     }
-    if (spec_logits_processor_present && !spec_logits_result->has_active_processor
-        && spec_logits_result->skipped_ineligible_processors == 0) {
+    if (spec_logits_processor_present && !spec_logits_result->has_active_processor) {
         return absl::InternalError("MTP async spec logits processor is present but no verify artifact was produced; "
                                    "disable MTP/async or implement spec verify for this processor");
     }
@@ -2645,6 +2644,13 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 bool MtpExecutor::useStreamAsync() const {
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "stream-async", "useStreamAsync");
+    }();
+    return enabled;
+}
+
+bool MtpExecutor::useAsyncDeviceState() const {
+    static const bool enabled = []() {
+        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "async-device-state", "enabled");
     }();
     return enabled;
 }

@@ -64,6 +64,12 @@ public final class GroupPlanner {
                         "hitCache must be in [0, seqLen]");
             }
         }
+
+        public Item(long requestId, int priority, long enqueueSeq,
+                    long enqueuedAtMs, long expiresAtMs, long seqLen, long hitCache) {
+            this(Long.toString(requestId), priority, enqueueSeq,
+                    enqueuedAtMs, expiresAtMs, seqLen, hitCache);
+        }
     }
 
     /** Compute and KV resource shape of one planned group. */

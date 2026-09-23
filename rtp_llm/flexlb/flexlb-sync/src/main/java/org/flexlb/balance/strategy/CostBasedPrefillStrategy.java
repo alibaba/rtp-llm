@@ -62,7 +62,7 @@ public class CostBasedPrefillStrategy {
             RoleType roleType,
             String group) {
         balanceContext.beginRoutingAttempt(roleType);
-        long requestId = balanceContext.getRequestId();
+        String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
@@ -512,9 +512,11 @@ public class CostBasedPrefillStrategy {
                     endpointAddress, ep, projection,
                     projectionInputs.ownershipVersion());
             if (Logger.isTraceEnabled()) {
-                Logger.trace("Prefill projection - ip: {}, order: {}, hitCache: {}, ttftMs: {}",
-                        endpointAddress, balanceContext.getConfig().isPriorityOrdering() ? "PRIORITY" : "FIFO",
-                        cacheHit, projection.projectedTtftMsValue());
+                Logger.trace("Prefill projection - ip: " + endpointAddress
+                        + ", order: "
+                        + (balanceContext.getConfig().isPriorityOrdering() ? "PRIORITY" : "FIFO")
+                        + ", hitCache: " + cacheHit
+                        + ", ttftMs: " + projection.projectedTtftMsValue());
             }
         }
 
@@ -682,7 +684,7 @@ public class CostBasedPrefillStrategy {
     private SelectedRole buildSelectedRole(
             PrefillEndpoint ep,
             RoleType roleType,
-            long requestId,
+            String requestId,
             long projectedTtftMs,
             long selectedPrefillMs,
             long bestCacheHit,

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.Endpoint;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,6 +45,18 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
     }
 
     @Override
+    public void validate(Endpoint endpoint) {
+        if (endpoint == null || StringUtils.isBlank(endpoint.getAddress())) {
+            throw new IllegalArgumentException("endpoint address must not be blank");
+        }
+    }
+
+    @Override
+    public List<WorkerHost> getHosts(Endpoint endpoint) {
+        validate(endpoint);
+        return getHosts(endpoint.getAddress());
+    }
+
     public List<WorkerHost> getHosts(String address) {
         if (StringUtils.isBlank(address)) {
             return List.of();
@@ -62,12 +75,17 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
         return lastGoodSnapshot.getOrDefault(address, List.of());
     }
 
-    @Override
     public void listen(String address, ServiceHostListener listener) {
         // Notify the listener once with the current view.
         if (listener != null) {
             listener.onHostsChanged(getHosts(address));
         }
+    }
+
+    @Override
+    public void listen(Endpoint endpoint, ServiceHostListener listener) {
+        validate(endpoint);
+        listen(endpoint.getAddress(), listener);
     }
 
     @Override

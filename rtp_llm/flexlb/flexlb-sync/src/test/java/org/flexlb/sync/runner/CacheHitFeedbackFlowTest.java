@@ -125,7 +125,8 @@ class CacheHitFeedbackFlowTest {
         when(engineClient.getEventLoopGroup()).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         when(loops.onServer(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         when(loops.onServerSelect(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
-        reporter = new EngineHealthReporter(monitor, cacheMetrics, cacheConfig, engineClient, loops, directory);
+        reporter = new EngineHealthReporter(
+                monitor, cacheMetrics, cacheConfig, engineClient, loops, directory);
         strategy = new CostBasedPrefillStrategy(directory, cache, reporter);
         pv.start();
         ((ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger")).addAppender(pv);
@@ -140,12 +141,12 @@ class CacheHitFeedbackFlowTest {
 
     @Test
     void realSelectionAndStatusPollingEmitComparisonPvAndMetricsExactlyOnce() throws Exception {
-        select("request-1");
-        poll(worker, task("request-1", false, 0), false, 2);
+        select("1001");
+        poll(worker, task("1001", false, 0), false, 2);
         assertTrue(events("cache_hit_comparison").isEmpty(), "missing validity must not mean zero cache hit");
-        poll(worker, task("request-1", true, 500), false, 3);
-        poll(worker, task("request-1", true, 500), true, 4);
-        poll(worker, task("request-1", true, 500), true, 4);
+        poll(worker, task("1001", true, 500), false, 3);
+        poll(worker, task("1001", true, 500), true, 4);
+        poll(worker, task("1001", true, 500), true, 4);
         JsonNode comparison = events("cache_hit_comparison").getFirst();
         assertEquals(1, events("cache_hit_comparison").size());
         assertEquals(500, comparison.path("actual").path("hit").asLong());
@@ -169,8 +170,8 @@ class CacheHitFeedbackFlowTest {
 
     @Test
     void truncatedPrefillLengthPreservesLogicalDenominatorAndReportsOnce() throws Exception {
-        select("truncated");
-        EngineRpcService.TaskInfoPB feedback = task("truncated", true, 500).toBuilder().setInputLength(996).build();
+        select("1002");
+        EngineRpcService.TaskInfoPB feedback = task("1002", true, 500).toBuilder().setInputLength(996).build();
         poll(worker, feedback, false, 2);
         poll(worker, feedback, true, 3);
         assertEquals(1, events("cache_hit_comparison").size());
@@ -188,8 +189,8 @@ class CacheHitFeedbackFlowTest {
     @Test
     void fallbackReportsStandbyWithoutPretendingItIsKvcm() throws Exception {
         when(failover.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
-        select("standby");
-        poll(worker, task("standby", true, 0), true, 2);
+        select("1003");
+        poll(worker, task("1003", true, 0), true, 2);
         JsonNode event = events("cache_hit_comparison").getFirst();
         assertFalse(event.hasNonNull("kvcm"));
         assertEquals("LOCAL_STANDBY", event.path("source").asText());
@@ -202,8 +203,8 @@ class CacheHitFeedbackFlowTest {
     void failedStandbyDoesNotSuppressKvcmComparison() throws Exception {
         when(standby.asyncLocalStandbyMatch(any())).thenReturn(CompletableFuture.failedFuture(
                 new IllegalStateException("standby unavailable")));
-        select("failed-standby");
-        poll(worker, task("failed-standby", true, 500), true, 2);
+        select("1004");
+        poll(worker, task("1004", true, 500), true, 2);
         JsonNode event = events("cache_hit_comparison").getFirst();
         assertTrue(event.hasNonNull("kvcm"));
         assertFalse(event.hasNonNull("localStandby"));
@@ -214,9 +215,9 @@ class CacheHitFeedbackFlowTest {
     void delayedStandbyComparisonDoesNotBlockPollingOrDuplicateFeedback() throws Exception {
         CompletableFuture<CacheMatchResult> delayed = new CompletableFuture<>();
         when(standby.asyncLocalStandbyMatch(any())).thenReturn(delayed);
-        select("async");
-        poll(worker, task("async", true, 500), true, 2);
-        poll(worker, task("async", true, 500), true, 2);
+        select("1005");
+        poll(worker, task("1005", true, 500), true, 2);
+        poll(worker, task("1005", true, 500), true, 2);
         var lease = worker.tryBeginStatusPoll();
         assertNotNull(lease, "comparison must not retain the poll lease");
         lease.close();
@@ -230,22 +231,22 @@ class CacheHitFeedbackFlowTest {
     @Test
     void unavailableStandbyTimesOutWithoutLosingPrimaryComparison() throws Exception {
         when(standby.asyncLocalStandbyMatch(any())).thenReturn(new CompletableFuture<>());
-        select("timeout");
-        poll(worker, task("timeout", true, 500), true, 2);
+        select("1006");
+        poll(worker, task("1006", true, 500), true, 2);
         verify(monitor, timeout(3000).times(1)).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
         JsonNode event = events("cache_hit_comparison").getFirst();
         assertEquals(500, event.path("actual").path("hit").asLong());
         assertFalse(event.hasNonNull("localStandby"));
-        poll(worker, task("timeout", true, 500), true, 2);
+        poll(worker, task("1006", true, 500), true, 2);
         assertEquals(1, events("cache_hit_comparison").size());
     }
 
     @Test
     void unknownRequestAndInvalidPrefixNeverFabricateCacheComparison() throws Exception {
-        poll(worker, task("untracked", true, 500), true, 2);
+        poll(worker, task("1007", true, 500), true, 2);
         assertTrue(events("cache_hit_comparison").isEmpty());
-        select("missing");
-        poll(worker, task("missing", false, 0), true, 3);
+        select("1008");
+        poll(worker, task("1008", false, 0), true, 3);
         assertTrue(events("cache_hit_comparison").isEmpty());
         JsonNode status = events("prefill_worker_status").getFirst();
         assertFalse(status.hasNonNull("actualHitTokens"));
@@ -255,13 +256,13 @@ class CacheHitFeedbackFlowTest {
 
     @Test
     void anotherGenerationCannotConsumeSelectedWorkersPrediction() throws Exception {
-        select("generation");
+        select("1009");
         WorkerStatus replacement = RunnerTestSupport.discovered(RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
         var observation = org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(replacement,
-                response(task("generation", true, 500), true, 2));
+                response(task("1009", true, 500), true, 2));
         assertTrue(cache.observeCacheHitFeedback(replacement, observation).isEmpty());
         assertTrue(events("cache_hit_comparison").isEmpty());
-        poll(worker, task("generation", true, 500), true, 2);
+        poll(worker, task("1009", true, 500), true, 2);
         assertEquals(1, events("cache_hit_comparison").size());
     }
 
@@ -272,9 +273,9 @@ class CacheHitFeedbackFlowTest {
         CacheMatchResult matches = new CacheMatchResult(Map.of(
                 "10.0.0.1:8080@0", HostCacheMatch.local(1),
                 "10.0.0.1:8080@1", HostCacheMatch.local(4)), CacheMatchSource.KVCM, 1, 100);
-        cache.trackRoutingPrediction("logical-engine", RoleType.PREFILL, "group", engine, 1000, 400, matches);
+        cache.trackRoutingPrediction("1010", RoleType.PREFILL, "group", engine, 1000, 400, matches);
         var observation = org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(engine,
-                response(task("logical-engine", true, 500), true, 2));
+                response(task("1010", true, 500), true, 2));
         var results = cache.observeCacheHitFeedback(engine, observation);
         assertEquals(1, results.size());
         var comparison = results.getFirst().get();
@@ -295,9 +296,8 @@ class CacheHitFeedbackFlowTest {
         request.setBlockCacheKeys(List.of(1L));
         request.setLocalStandbyBlockSize(100);
         request.setLocalStandbyBlockCacheKeys(List.of(1L));
-        BalanceContext context = new BalanceContext();
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setConfig(config);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
         var selected = strategy.select(context, RoleType.PREFILL, "group");
         assertEquals(PlacementResult.Status.SUCCESS, selected.status());
@@ -316,7 +316,7 @@ class CacheHitFeedbackFlowTest {
     }
 
     private EngineRpcService.TaskInfoPB task(String id, boolean valid, long hit) {
-        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(id).setInputLength(1000)
+        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(Long.parseLong(id)).setInputLength(1000)
                 .setPrefixLength(hit).setPrefixLengthValid(valid).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING);
         if (valid) {
             task.setRequestReceivedTimeMs(990).setInputQueueEnqueueTimeMs(1000).setInputQueueDrainTimeMs(1010)

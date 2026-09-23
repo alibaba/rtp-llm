@@ -1,11 +1,11 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -37,12 +37,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class GlobalQueueProgressTest {
@@ -328,17 +328,17 @@ class GlobalQueueProgressTest {
             when(lifecycle.register(any())).thenAnswer(i -> {
                 BalanceContext context = i.getArgument(0);
                 CompletableFuture<Response> future = new CompletableFuture<>();
-                requests.put(context.getRequestId(), future);
+                requests.put(Long.parseLong(context.getRequestId()), future);
                 return future;
             });
-            when(lifecycle.claimAdmissionHandle(anyLong(), any())).thenAnswer(i -> {
+            when(lifecycle.claimAdmissionHandle(anyString(), any())).thenAnswer(i -> {
                 AdmissionHandle mutation = mock(AdmissionHandle.class);
-                mutations.put(i.getArgument(0), mutation);
+                mutations.put(Long.parseLong(i.getArgument(0)), mutation);
                 return mutation;
             });
             when(router.select(any(), nullable(String.class))).thenAnswer(i -> {
                 BalanceContext context = i.getArgument(0);
-                long id = context.getRequestId();
+                long id = Long.parseLong(context.getRequestId());
                 selected.add(id);
                 onSelection.accept(id);
                 if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {

@@ -180,19 +180,6 @@ cc_test(
 )
 
 cc_test(
-    name = "local_rpc_server_worker_status_test",
-    srcs = [
-        "LocalRpcServerWorkerStatusTest.cc",
-    ],
-    copts = test_copts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "rpc_server_runtime_meta_test",
     srcs = [
         "RpcServerRuntimeMetaTest.cc",
@@ -203,30 +190,6 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "rpc_pool_test",
-    srcs = ["RPCPoolTest.cc"],
-    copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_test(
-    name = "recent_cache_key_window_test",
-    srcs = [
-        "RecentCacheKeyWindowTest.cc",
-    ],
-    copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/cache:recent_cache_key_window",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
 )
 
 cc_test(

@@ -13,8 +13,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RequestIdTest {
     @Test
-    void scheduleAndWorkerContractsHaveOneStringIdAtOriginalTag() {
-        for (var descriptor : List.of(EngineRpcService.TaskInfoPB.getDescriptor(),
+    void scheduleContractsHaveOneStringIdAtOriginalTag() {
+        for (var descriptor : List.of(
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDescriptor(),
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.getDescriptor(),
                 FlexlbScheduleProtocol.GetRequestStateRequestPB.getDescriptor(),
@@ -23,23 +23,22 @@ class RequestIdTest {
             assertEquals(Descriptors.FieldDescriptor.Type.STRING, descriptor.findFieldByNumber(1).getType());
             assertEquals(1, descriptor.getFields().stream().filter(field -> field.getName().startsWith("request_id")).count());
         }
+        assertEquals(Descriptors.FieldDescriptor.Type.INT64,
+                EngineRpcService.TaskInfoPB.getDescriptor()
+                        .findFieldByNumber(1).getType());
     }
 
     @Test
     void preservesOriginalStrings() {
         for (String id : new String[]{"req-abc-001", "00123", "123", "0", "9223372036854775808"}) {
-            assertEquals(id, RequestId.parse(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(id)));
             assertEquals(id, RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(id)));
         }
     }
 
     @Test
-    void readsOldIntegerEncodingForScheduleCancelStateAndTask() throws Exception {
+    void readsOldIntegerEncodingForScheduleCancelAndState() throws Exception {
         for (long id : new long[]{123, Long.MAX_VALUE, Long.MIN_VALUE, 0}) {
             byte[] wire = oldIntegerId(id);
-            var task = EngineRpcService.TaskInfoPB.parseFrom(wire);
-            assertEquals("", task.getRequestId());
-            assertEquals(Long.toString(id), RequestId.parse(task));
             assertEquals(Long.toString(id), RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(wire)));
             assertEquals(Long.toString(id), RequestId.parse(FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(wire)));
             assertEquals(Long.toString(id), RequestId.parse(FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(wire)));
@@ -56,19 +55,18 @@ class RequestIdTest {
 
     @Test
     void rejectsMissingAndBlankIdsWithoutDefaultingToZero() {
-        assertThrows(IllegalArgumentException.class, () -> RequestId.parse(EngineRpcService.TaskInfoPB.getDefaultInstance()));
         assertThrows(IllegalArgumentException.class, () -> RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDefaultInstance()));
-        assertThrows(IllegalArgumentException.class, () -> RequestId.parse(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(" ")));
     }
 
     @Test
     void preservesWorkerStatusFieldsWithoutRemappingTaskLayout() throws Exception {
-        var oldTask = EngineRpcService.TaskInfoPB.parseFrom(oldIntegerId(123)).toBuilder()
+        var oldTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(123)
                 .setBatchId(99).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).setWaitingEnteredTimeMs(1700000000123L).build();
-        var current = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("req-abc").setBatchId(42).build();
+        var current = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(456).setBatchId(42).build();
         var status = EngineRpcService.WorkerStatusPB.parseFrom(EngineRpcService.WorkerStatusPB.newBuilder()
                 .addRunningTaskInfo(oldTask).addFinishedTaskList(current).build().toByteArray());
         assertEquals("123", RequestId.parse(status.getRunningTaskInfo(0)));
+        assertEquals("456", RequestId.parse(status.getFinishedTaskList(0)));
         assertEquals(oldTask, status.getRunningTaskInfo(0));
         assertEquals(current, status.getFinishedTaskList(0));
     }

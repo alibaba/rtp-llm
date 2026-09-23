@@ -69,7 +69,8 @@ class LeakCanaryLongRunE2ETest {
             h.fixedWindowDecision().setMaxRequests(4);
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(INACTIVITY_TIMEOUT_MS);
-            h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
+            h.prefillSelector = ctx -> Math.floorMod(
+                    ctx.getRequestId().hashCode(), 2);
             h.startAutoPump(10);
 
             JavaMockEngineCluster.FastRpcService faultTarget = h.prefillEngines.get(0);

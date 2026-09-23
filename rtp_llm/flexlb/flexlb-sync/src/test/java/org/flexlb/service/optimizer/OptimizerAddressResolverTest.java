@@ -87,7 +87,7 @@ class OptimizerAddressResolverTest {
         assertEquals(List.of("127.0.0.1:8082"), resolver.getAddresses());
         verify(serviceDiscovery, timeout(100).times(1)).getHosts(endpoint);
         verify(serviceDiscovery, never()).validate(endpoint);
-        verify(serviceDiscovery, never()).listen(any(), any());
+        verify(serviceDiscovery, never()).listen(any(Endpoint.class), any());
         resolver.shutdown();
     }
 
@@ -207,7 +207,7 @@ class OptimizerAddressResolverTest {
         resolver.start();
         verify(serviceDiscovery, timeout(1000).atLeast(2)).getHosts(endpoint);
         awaitAddresses(resolver, List.of("2.2.2.2:8082"));
-        verify(serviceDiscovery, never()).listen(any(), any());
+        verify(serviceDiscovery, never()).listen(any(Endpoint.class), any());
         resolver.shutdown();
     }
 

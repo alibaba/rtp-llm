@@ -28,6 +28,18 @@ public record RequestState(
         }
     }
 
+    public RequestState(
+            long requestId,
+            Phase state,
+            DeliveryClaimKind deliveryClaimKind,
+            long batchId,
+            long createdAtMs,
+            long updatedAtMs,
+            String detail) {
+        this(Long.toString(requestId), state, deliveryClaimKind,
+                batchId, createdAtMs, updatedAtMs, detail);
+    }
+
     /** An expected batch ID of zero accepts any batch, including route delivery. */
     public boolean matchesBatch(long expectedBatchId) {
         return expectedBatchId == 0L || batchId == expectedBatchId;

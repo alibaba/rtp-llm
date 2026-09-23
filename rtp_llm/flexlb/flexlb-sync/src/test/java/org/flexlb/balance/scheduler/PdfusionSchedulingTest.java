@@ -35,7 +35,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -128,7 +127,8 @@ class PdfusionSchedulingTest {
                     .map(ServerStatus::getRole).toList());
             assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
             assertEquals(1, lifecycle.liveRequestCount());
-            PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getIpPort());
+            PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(
+                    RoleType.PDFUSION, worker.getLogicalIpPort());
             assertEquals(1, endpoint.observedRequestCount());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
             assertTrue(committedWork.containsRequest(Long.toString(requestId)));

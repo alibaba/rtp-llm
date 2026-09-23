@@ -34,7 +34,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 
@@ -62,7 +62,7 @@ public class RequestRegistry {
     private final BatchSchedulerReporter reporter;
     private final RequestSchedulerReporter requestReporter;
 
-    private final ConcurrentMap<Long, RequestSlot> requestSlots =
+    private final ConcurrentMap<String, RequestSlot> requestSlots =
             new ConcurrentHashMap<>();
     @Autowired
     public RequestRegistry(ConfigService configService,
@@ -88,7 +88,7 @@ public class RequestRegistry {
     /** Transfer queued Decode capacity, then return each victim to its original global queue identity. */
     public boolean replaceQueuedDecodeReservations(
             DecodeEndpoint endpoint, List<DecodeEndpoint.ReservationHandle> victims,
-            long incomingRequestId, long hardKv, long expectedKv, int priority,
+            String incomingRequestId, long hardKv, long expectedKv, int priority,
             DecodeEndpoint.AdmissionCapacity capacity) {
         GlobalQueueCoordinator queue = globalQueue;
         if (queue == null || shuttingDown.get()) { return false; }
@@ -192,8 +192,12 @@ public class RequestRegistry {
         return slot != null && requestSlots.get(slot.requestId()) == slot;
     }
 
-    RequestSlot requestSlot(long requestId) {
+    RequestSlot requestSlot(String requestId) {
         return requestSlots.get(requestId);
+    }
+
+    RequestSlot requestSlot(long requestId) {
+        return requestSlot(Long.toString(requestId));
     }
 
     public boolean isShuttingDown() {
@@ -352,7 +356,7 @@ public class RequestRegistry {
                 ? PlacementResult.Status.CLOSED : slot.commitRoute(item, publication);
     }
 
-    public boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
+    public boolean isAdmissionOpen(String requestId, CompletableFuture<?> future) {
         if (shuttingDown.get()) {
             return false;
         }
@@ -365,8 +369,12 @@ public class RequestRegistry {
         }
     }
 
+    public boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
+        return isAdmissionOpen(Long.toString(requestId), future);
+    }
+
     public AdmissionHandle claimAdmissionHandle(
-            long requestId, CompletableFuture<?> future) {
+            String requestId, CompletableFuture<?> future) {
         if (!enterAdmissionHandleGate()) {
             return null;
         }
@@ -389,6 +397,11 @@ public class RequestRegistry {
                 exitAdmissionHandleGate();
             }
         }
+    }
+
+    public AdmissionHandle claimAdmissionHandle(
+            long requestId, CompletableFuture<?> future) {
+        return claimAdmissionHandle(Long.toString(requestId), future);
     }
 
     private boolean enterAdmissionHandleGate() {
@@ -449,7 +462,7 @@ public class RequestRegistry {
     }
 
     public void finishYieldedReservation(
-            long requestId, long reservationToken, String detail) {
+            String requestId, long reservationToken, String detail) {
         if (reservationToken <= 0L) {
             throw new IllegalArgumentException("reservationToken must be positive");
         }
@@ -480,7 +493,7 @@ public class RequestRegistry {
     }
 
     public Optional<PreemptionRegistration> tryClaim(
-            long requestId, long reservationToken, long attemptToken, String detail) {
+            String requestId, long reservationToken, long attemptToken, String detail) {
         RequestSlot entry = requestSlots.get(requestId);
         if (entry == null) {
             return Optional.empty();
@@ -492,7 +505,7 @@ public class RequestRegistry {
     }
 
     public Optional<CancelTarget> findCancelTarget(
-            long requestId, long reservationToken) {
+            String requestId, long reservationToken) {
         RequestSlot entry = requestSlots.get(requestId);
         if (entry == null) {
             return Optional.empty();
@@ -505,10 +518,14 @@ public class RequestRegistry {
         }
     }
 
-    public RequestState cancelRequest(long requestId, long expectedBatchId, CancelReason reason) {
+    public RequestState cancelRequest(String requestId, long expectedBatchId, CancelReason reason) {
         Objects.requireNonNull(reason, "reason");
         RequestSlot slot = requestSlot(requestId);
         return slot == null ? null : slot.cancelRequest(expectedBatchId, reason);
+    }
+
+    public RequestState cancelRequest(long requestId, long expectedBatchId, CancelReason reason) {
+        return cancelRequest(Long.toString(requestId), expectedBatchId, reason);
     }
 
     private static CancelTarget cancelTarget(
@@ -521,7 +538,7 @@ public class RequestRegistry {
 
     public int liveRequestCount() {
         int live = 0;
-        for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
+        for (Map.Entry<String, RequestSlot> candidate : requestSlots.entrySet()) {
             RequestSlot slot = candidate.getValue();
             synchronized (slot) {
                 if (requestSlots.get(candidate.getKey()) == slot
@@ -536,7 +553,7 @@ public class RequestRegistry {
     public long oldestLiveSlotAgeMs() {
         long oldest = Long.MAX_VALUE;
         long now = System.currentTimeMillis();
-        for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
+        for (Map.Entry<String, RequestSlot> candidate : requestSlots.entrySet()) {
             RequestSlot slot = candidate.getValue();
             synchronized (slot) {
                 if (requestSlots.get(candidate.getKey()) == slot
@@ -551,7 +568,7 @@ public class RequestRegistry {
 
     public List<RequestState> snapshotActiveRequests() {
         List<RequestState> snapshots = new ArrayList<>(requestSlots.size());
-        for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
+        for (Map.Entry<String, RequestSlot> candidate : requestSlots.entrySet()) {
             RequestSlot entry = candidate.getValue();
             synchronized (entry) {
                 if (requestSlots.get(candidate.getKey()) == entry
@@ -563,12 +580,12 @@ public class RequestRegistry {
         snapshots.sort((left, right) -> {
             int createdOrder = Long.compare(left.createdAtMs(), right.createdAtMs());
             return createdOrder != 0
-                    ? createdOrder : Long.compare(left.requestId(), right.requestId());
+                    ? createdOrder : left.requestId().compareTo(right.requestId());
         });
         return List.copyOf(snapshots);
     }
 
-    public RequestState getRequestState(long requestId,
+    public RequestState getRequestState(String requestId,
                                         long expectedBatchId) {
         RequestSlot entry = requestSlots.get(requestId);
         if (entry == null) {
@@ -580,12 +597,16 @@ public class RequestRegistry {
         }
     }
 
+    public RequestState getRequestState(long requestId, long expectedBatchId) {
+        return getRequestState(Long.toString(requestId), expectedBatchId);
+    }
+
     /**
      * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
      * Called under endpoint locks: never acquire a Slot lock here. Read the current
      * directory rather than a snapshot, which could miss a newly registered request.
      */
-    boolean retainForSchedulerCleanup(long requestId) {
+    boolean retainForSchedulerCleanup(String requestId) {
         return requestSlots.containsKey(requestId);
     }
 
@@ -668,7 +689,7 @@ public class RequestRegistry {
         future.complete(buildErrorResponse(errorType, message));
     }
 
-    boolean publishDecisionResponseAsync(long requestId, CompletableFuture<Response> future, Response response) {
+    boolean publishDecisionResponseAsync(String requestId, CompletableFuture<Response> future, Response response) {
         RequestSlot slot = requestSlots.get(requestId);
         return slot != null && slot.ownsFuture(future) && slot.terminateLocallyAndPublishResponse(response);
     }
@@ -690,7 +711,7 @@ public class RequestRegistry {
     }
 
     public void maintainExpiration(
-            BiConsumer<Long, LongPredicate> exactSweeper) {
+            BiConsumer<Long, Predicate<String>> exactSweeper) {
         expirationTimer.maintain(exactSweeper);
     }
 

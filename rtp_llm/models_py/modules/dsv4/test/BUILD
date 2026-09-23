@@ -98,53 +98,6 @@ _PERF_TESTS = [
     for name in _PERF_TESTS
 ]
 
-py_test(
-    name = "test_mtp_hidden_buffer",
-    srcs = ["test_mtp_hidden_buffer.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_dspark_cuda_graph_contract",
-    srcs = ["test_dspark_cuda_graph_contract.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_dspark_runtime_config",
-    srcs = ["test_dspark_runtime_config.py"],
-    deps = [
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_aux_hidden_capture",
-    srcs = ["test_aux_hidden_capture.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_cp_attention_merge",
-    srcs = ["test_cp_attention_merge.py"],
-    deps = _DSV4_TEST_DEPS,
-)
-
-py_test(
-    name = "test_cp_attention_shard",
-    srcs = ["test_cp_attention_shard.py"],
-    deps = _DSV4_TEST_DEPS,
-)
-
 py_library(
     name = "dsv4_test_utils",
     srcs = ["dsv4_test_utils.py"],
@@ -185,41 +138,4 @@ test_suite(
         ":test_layer_profiler_ranges",
         ":test_hc_impl",
     ] + [name + "_x86" for name in _PAIRED_GPU_TESTS],
-)
-
-py_test(
-    name = "test_cp_async",
-    srcs = ["test_cp_async.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_prefill_workspace",
-    srcs = ["test_prefill_workspace.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_prefill_fast_path",
-    srcs = ["test_prefill_fast_path.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-)
-
-py_test(
-    name = "test_hc_impl",
-    srcs = ["test_hc_impl.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm/models_py:tile_kernels_mhc",
-        "//rtp_llm:testlib",
-    ],
 )

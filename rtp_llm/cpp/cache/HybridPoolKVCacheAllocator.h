@@ -48,11 +48,6 @@ public:
         return group_block_pools_;
     }
 
-    // Per-pool access for diagnostics / per-pool metrics reporting.
-    const std::vector<BlockPoolPtr>& groupBlockPools() const {
-        return group_block_pools_;
-    }
-
 private:
     bool   doInit() override;
     size_t reserveBlocksForPoolMetrics(size_t pool_index) const override;
@@ -68,12 +63,6 @@ private:
                                           const std::vector<RequiredPositions>* required_positions) const;
 
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
-    void logMallocFailure(const MallocInfo& malloc_info,
-                          const char*       phase,
-                          int               failed_batch,
-                          int               failed_group,
-                          bool              incremental,
-                          int               failed_need_blocks) const override;
 
 protected:
     MallocStatus evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,

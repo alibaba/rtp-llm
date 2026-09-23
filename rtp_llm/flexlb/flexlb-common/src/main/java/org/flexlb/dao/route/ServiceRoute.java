@@ -22,6 +22,12 @@ public class ServiceRoute {
     @JsonProperty("role_endpoints")
     private List<GroupRoleEndPoint> roleEndpoints = new ArrayList<>();
 
+    @JsonProperty("kvcm")
+    private KvcmConfig kvcm;
+
+    @JsonProperty("optimizer")
+    private OptimizerConfig optimizer;
+
     @JsonProperty("hosts")
     private Map<String, List<String>> hosts = Map.of();
 
@@ -30,6 +36,16 @@ public class ServiceRoute {
 
     @JsonProperty("load_balance")
     private Boolean loadBalance;
+
+    @JsonProperty("role_endpoints")
+    public void setRoleEndpoints(List<GroupRoleEndPoint> roleEndpoints) {
+        this.roleEndpoints = roleEndpoints == null ? new ArrayList<>() : roleEndpoints;
+        for (GroupRoleEndPoint roleEndpoint : this.roleEndpoints) {
+            if (roleEndpoint != null) {
+                roleEndpoint.applyGroupToEndpoints();
+            }
+        }
+    }
 
     public List<Pair<String, Endpoint>> getAllEndpointsWithGroup(RoleType roleType) {
         List<Pair<String, Endpoint>> endpoints = new ArrayList<>();

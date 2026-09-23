@@ -47,7 +47,7 @@ class ConfigSourceSelectionTest {
         String deploymentId = "dash_pd:ea118_RTX_PRO_5000_72GB:master";
         when(client.getConfig(anyString(), eq(DEFAULT_NACOS_GROUP), eq(3000L)))
                 .thenAnswer(invocation -> "legacy-role".equals(invocation.getArgument(0))
-                        ? "{\"schemaVersion\":2,\"enableFallback\":true}" : missingConfig);
+                        ? "{\"schemaVersion\":3,\"enableFallback\":true}" : missingConfig);
 
         try (MockedStatic<NacosFactory> factory = mockStatic(NacosFactory.class)) {
             factory.when(() -> NacosFactory.createConfigService(any(Properties.class))).thenReturn(client);
@@ -58,7 +58,7 @@ class ConfigSourceSelectionTest {
                     "BIZ_NAME", "dash_pd",
                     "DEPLOYMENT_NAME", "ea118_RTX_PRO_5000_72GB",
                     "ZONE_NAME", "master",
-                    "FLEXLB_CONFIG", "{\"schemaVersion\":2,\"enableFallback\":true}")
+                    "FLEXLB_CONFIG", "{\"schemaVersion\":3,\"enableFallback\":true}")
                     .remove(NACOS_DATA_ID)
                     .remove(NACOS_GROUP)
                     .remove(SPECTRUM_WORKSPACE_ID)
@@ -86,7 +86,7 @@ class ConfigSourceSelectionTest {
                 "FLEXLB_UNICONF_ENABLE", "false",
                 "UNICONF_ENABLE", "true",
                 WHALE_BIZ_NAME, "dash_pd", WHALE_DEPLOYMENT_NAME, "flexlb-test", WHALE_ZONE_NAME, "master",
-                "FLEXLB_CONFIG", "{\"schemaVersion\":2,\"enableFallback\":true,"
+                "FLEXLB_CONFIG", "{\"schemaVersion\":3,\"enableFallback\":true,"
                         + "\"fallbackBatchTokenCapacity\":1048576}")
                 .remove(NACOS_SERVER_ADDR)
                 .remove(SPECTRUM_WORKSPACE_ID)
@@ -101,6 +101,28 @@ class ConfigSourceSelectionTest {
                             assertThat(context).hasNotFailed();
                             assertThat(context.getBean(ConfigService.class).loadBalanceConfig().isEnableFallback()).isTrue();
                         }));
+    }
+
+    @Test
+    void environmentSourceDoesNotRequireDeploymentIdentity() throws Exception {
+        new EnvironmentVariables(
+                "FLEXLB_UNICONF_ENABLE", "false",
+                "FLEXLB_CONFIG", "{\"schemaVersion\":3,\"enableFallback\":true}")
+                .remove(NACOS_SERVER_ADDR)
+                .remove(WHALE_BIZ_NAME)
+                .remove(WHALE_DEPLOYMENT_NAME)
+                .remove(WHALE_ZONE_NAME)
+                .remove(SPECTRUM_WORKSPACE_ID)
+                .remove(SPECTRUM_APPLICATION_NAME)
+                .remove(SPECTRUM_DEPLOYMENT_NAME)
+                .remove("MODEL_SERVICE_CONFIG")
+                .execute(() -> new ApplicationContextRunner()
+                        .withUserConfiguration(ConfigService.class, DeploymentIdentity.class,
+                                EnvironmentConfigSource.class, NacosConfigSource.class,
+                                UniConfigConfigSource.class,
+                                StandardConfigDocumentParser.class,
+                                V0ConfigDocumentParser.class)
+                        .run(context -> assertThat(context).hasNotFailed()));
     }
 
     @ParameterizedTest

@@ -123,14 +123,12 @@ cc_library(
         "common/InitEngineOps.cc",
         "multi_gpu_gpt/RtpEmbeddingOp.cc",
         "multi_gpu_gpt/RtpLLMOp.cc",
-        "multi_gpu_gpt/XGrammarBootstrap.cc",
     ],
     hdrs = [
         "common/InitEngineOps.h",
         "common/blockUtil.h",
         "multi_gpu_gpt/RtpEmbeddingOp.h",
         "multi_gpu_gpt/RtpLLMOp.h",
-        "multi_gpu_gpt/XGrammarBootstrap.h",
     ],
     deps = [
         "//rtp_llm/cpp/api_server:http_api_server",

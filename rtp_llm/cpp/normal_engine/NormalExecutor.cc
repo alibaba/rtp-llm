@@ -154,7 +154,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model, false, false, {}, model_inputs_logger_));
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);
@@ -340,7 +340,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         sampler_event->record(cuda_graph::graphGetCurrentStream());
 
         // Metrics and KV release stay on the main thread; dispatch_output_us
-        // measures only async launch/enqueue overhead.
+        // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {

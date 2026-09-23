@@ -111,18 +111,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Context Parallel token layout shared by scheduling and execution.
-cc_library(
-    name = "context_parallel_layout",
-    hdrs = [
-        "context_parallel/ZigzagTokenLayout.h",
-    ],
-    srcs = [
-        "context_parallel/ZigzagTokenLayout.cc",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 # Context Parallel Interface - base interface for context parallel processors
 cc_library(
     name = "context_parallel_interface",

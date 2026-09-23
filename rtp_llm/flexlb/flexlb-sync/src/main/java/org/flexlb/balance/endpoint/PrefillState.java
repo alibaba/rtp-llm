@@ -193,12 +193,12 @@ public final class PrefillState {
 
     public final class RouteReservation extends Reservation {
         private final PrefillState owner = PrefillState.this;
-        private final long requestId;
+        private final String requestId;
         /* guarded by PrefillState.lock until the reservation commits */
         private long predictedWorkMs;
 
         private RouteReservation(RequestEntry originalOwner,
-                                 long requestId,
+                                 String requestId,
                                  long predictedWorkMs) {
             super(originalOwner);
             this.requestId = requestId;
@@ -233,11 +233,11 @@ public final class PrefillState {
     }
 
     public final class BatchReservation extends Reservation {
-        private final long headRequestId;
+        private final String headRequestId;
         private final long batchId;
 
         private BatchReservation(RequestEntry originalOwner,
-                                 long headRequestId,
+                                  String headRequestId,
                                  long batchId,
                                  EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
             super(originalOwner);
@@ -382,7 +382,7 @@ public final class PrefillState {
 
         /** Simulate terminal metrics without mutating canonical batch work. */
         private BatchCompletion projectedCompletion(
-                Map<Long, TerminalObservation> terminals) {
+                Map<String, TerminalObservation> terminals) {
             long maxExecutionTimeMs = batch.maxExecutionTimeMs;
             boolean successfulCompletion = batch.successfulCompletion;
             boolean learningEligible = batch.learningEligible;
@@ -415,7 +415,7 @@ public final class PrefillState {
 
     /** The sole mutable request lifecycle record. Guarded by {@link #lock}. */
     private static final class RequestEntry {
-        private final long requestId;
+        private final String requestId;
         private QueueMembership queueMembership;
         private ScheduledRequest activeItem;
         private Phase individualPhase;
@@ -530,7 +530,7 @@ public final class PrefillState {
             synchronized (this) {
                 if (materialized == null) {
                     List<WorkSnapshot.RequestWork> orderedRequests = requests.stream()
-                            .sorted(Comparator.comparingLong(WorkSnapshot.RequestWork::requestId)).toList();
+                            .sorted(Comparator.comparing(WorkSnapshot.RequestWork::requestId)).toList();
                     List<WorkSnapshot.BatchWork> orderedBatches = batches.stream()
                             .sorted(Comparator.comparingLong(WorkSnapshot.BatchWork::batchId))
                             .map(batch -> new WorkSnapshot.BatchWork(batch.batchId(),
@@ -543,7 +543,7 @@ public final class PrefillState {
         }
     }
 
-    private record TerminalObservation(long requestId,
+    private record TerminalObservation(String requestId,
                                        long batchId,
                                        long executionTimeMs,
                                        long errorCode,
@@ -561,7 +561,7 @@ public final class PrefillState {
                     true);
         }
 
-        private static TerminalObservation external(long requestId) {
+        private static TerminalObservation external(String requestId) {
             return new TerminalObservation(
                     requestId, -1L, -1L, 0L,
                     PriorityPreemptionProgress.NONE, false);
@@ -593,7 +593,7 @@ public final class PrefillState {
     /** Non-owning index containing only ACTIVE ScheduledRequest identities. */
     private final PrefillActiveIndex activeIndex;
     /** Canonical request ownership, changed only under the endpoint lock. */
-    private Map<Long, RequestEntry> requests = new HashMap<>();
+    private Map<String, RequestEntry> requests = new HashMap<>();
     private final LongSupplier clock;
     private final Runnable capacityAvailable;
     /** Monotonic ownership/work revision used by projection snapshots. */
@@ -635,12 +635,12 @@ public final class PrefillState {
                 capacityAvailable, "capacityAvailable");
     }
 
-    private RequestEntry putRequestUnderLock(long requestId, RequestEntry entry) {
+    private RequestEntry putRequestUnderLock(String requestId, RequestEntry entry) {
         requireLock();
         return requests.put(requestId, entry);
     }
 
-    private boolean removeRequestUnderLock(long requestId, RequestEntry entry) {
+    private boolean removeRequestUnderLock(String requestId, RequestEntry entry) {
         requireLock();
         if (!requests.remove(requestId, entry)) {
             return false;
@@ -795,7 +795,7 @@ public final class PrefillState {
                 || requests.containsKey(incoming.requestId())) {
             return null;
         }
-        Set<Long> ids = new HashSet<>();
+        Set<String> ids = new HashSet<>();
         for (int index = 0; index < victims.size(); index++) {
             ScheduledRequest victim = victims.get(index);
             RequestEntry entry = requests.get(victim.requestId());
@@ -1332,7 +1332,7 @@ public final class PrefillState {
      * later published by the endpoint; reduction only binds a callback failure.
      */
     private StatusReconciliation prepareStatusReconciliationUnderLock(
-            Map<Long, TerminalObservation> terminals,
+            Map<String, TerminalObservation> terminals,
             Map<String, WorkerStatus.TaskObservation> activeTasks,
             IdentityHashMap<BatchWork, BatchReduction> reductions) {
         requireLock();
@@ -1384,7 +1384,7 @@ public final class PrefillState {
 
     private void prepareBatchPredictionsUnderLock(
             Set<BatchReduction> changedBatches,
-            Map<Long, TerminalObservation> terminals,
+            Map<String, TerminalObservation> terminals,
             IdentityHashMap<BatchWork, Phase> batchPhases,
             ToLongFunction<List<ScheduledRequest>> repredictor,
             IdentityHashMap<BatchWork, Long> predictions) {
@@ -1411,7 +1411,7 @@ public final class PrefillState {
                 continue;
             }
             survivors.sort(Comparator.comparingLong(ScheduledRequest::enqueueSeq)
-                    .thenComparingLong(ScheduledRequest::requestId));
+                    .thenComparing(ScheduledRequest::requestId));
             long prediction = repredictor.applyAsLong(survivors);
             predictions.put(batch, prediction);
         }
@@ -1419,14 +1419,14 @@ public final class PrefillState {
 
     private long prepareActiveObservationsUnderLock(
             Map<String, WorkerStatus.TaskObservation> activeTasks,
-            Map<Long, TerminalObservation> terminals,
+            Map<String, TerminalObservation> terminals,
             long reportedActive,
             IdentityHashMap<RequestEntry, Phase> individualPhases,
             IdentityHashMap<BatchWork, Phase> batchPhases,
             List<WorkerStatusFact> activeFacts) {
         requireLock();
-        Set<Long> unknownDetailed = new HashSet<>();
-        Set<Long> knownObserved = new HashSet<>();
+        Set<String> unknownDetailed = new HashSet<>();
+        Set<String> knownObserved = new HashSet<>();
         for (WorkerStatus.TaskObservation task : activeTasks.values()) {
             if (terminals.containsKey(task.requestId())) {
                 continue;
@@ -1477,7 +1477,7 @@ public final class PrefillState {
             long nowMs = clock.getAsLong();
             IdentityHashMap<BatchWork, BatchReduction> reductions =
                     batchReductionsUnderLock();
-            Map<Long, TerminalObservation> terminals = terminalObservationsUnderLock(
+            Map<String, TerminalObservation> terminals = terminalObservationsUnderLock(
                     finishedTasks);
             Map<String, WorkerStatus.TaskObservation> activeTasks =
                     engine.runningTaskList();
@@ -1616,7 +1616,7 @@ public final class PrefillState {
         try {
             Set<ScheduledRequest> canonicalActive = java.util.Collections.newSetFromMap(
                     new IdentityHashMap<>());
-            for (Map.Entry<Long, RequestEntry> canonical : requests.entrySet()) {
+            for (Map.Entry<String, RequestEntry> canonical : requests.entrySet()) {
                 RequestEntry entry = canonical.getValue();
                 if (canonical.getKey() != entry.requestId) {
                     invariantFailure = appendRetirementInvariant(
@@ -1705,7 +1705,7 @@ public final class PrefillState {
                 completions.add(batch.retirementCompletion());
             }
             ownedItems.sort(Comparator.comparingLong(ScheduledRequest::enqueueSeq)
-                    .thenComparingLong(ScheduledRequest::requestId));
+                    .thenComparing(ScheduledRequest::requestId));
             completions.sort(Comparator.comparingLong(BatchCompletion::batchId));
             plannedRetirement = new Retirement(
                     ownedItems,
@@ -1764,7 +1764,7 @@ public final class PrefillState {
     }
 
     public int evictExpiredIndividuals(
-            long ttlMs, java.util.function.LongPredicate retainForSchedulerCleanup) {
+            long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
         int evicted = 0;
         boolean capacityReleased = false;
         lock.lock();
@@ -1795,7 +1795,7 @@ public final class PrefillState {
     }
 
     public int evictExpiredBatches(
-            long ttlMs, java.util.function.LongPredicate retainForSchedulerCleanup) {
+            long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
         int evicted = 0;
         boolean capacityReleased = false;
         lock.lock();
@@ -1931,7 +1931,7 @@ public final class PrefillState {
     private WorkCapture captureCurrentWorkUnderLock(long nowMs, Set<RequestEntry> excluded) {
         requireLock();
         List<WorkSnapshot.RequestWork> individual = new ArrayList<>();
-        IdentityHashMap<BatchWork, List<Long>> batchMembers =
+        IdentityHashMap<BatchWork, List<String>> batchMembers =
                 new IdentityHashMap<>();
         for (RequestEntry entry : requests.values()) {
             if (excluded.contains(entry)) {
@@ -1960,7 +1960,7 @@ public final class PrefillState {
         }
         List<WorkSnapshot.BatchWork> batches =
                 new ArrayList<>(batchMembers.size());
-        for (Map.Entry<BatchWork, List<Long>> observed : batchMembers.entrySet()) {
+        for (Map.Entry<BatchWork, List<String>> observed : batchMembers.entrySet()) {
             BatchWork batch = observed.getKey();
             batches.add(new WorkSnapshot.BatchWork(
                     batch.lease.batchId,
@@ -2035,10 +2035,10 @@ public final class PrefillState {
         return true;
     }
 
-    private Map<Long, TerminalObservation> terminalObservationsUnderLock(
+    private Map<String, TerminalObservation> terminalObservationsUnderLock(
             Map<String, WorkerStatus.TaskObservation> finishedTasks) {
         requireLock();
-        Map<Long, TerminalObservation> terminals = new HashMap<>();
+        Map<String, TerminalObservation> terminals = new HashMap<>();
         for (WorkerStatus.TaskObservation task : finishedTasks.values()) {
             RequestEntry entry = requests.get(task.requestId());
             if (entry == null || !matchesObservedBatch(entry, task.batchId())) {

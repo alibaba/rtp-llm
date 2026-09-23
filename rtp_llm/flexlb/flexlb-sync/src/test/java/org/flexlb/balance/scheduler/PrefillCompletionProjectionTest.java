@@ -68,7 +68,7 @@ class PrefillCompletionProjectionTest {
             DecodeEndpoint.ReservationHandle reservation;
             var capacity = new DecodeEndpoint.AdmissionCapacity(10L, 90L);
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, 101L, 16L, 32L, 50, capacity);
+                reservation = decode.reserve(pin, "101", 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquisition = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
@@ -105,7 +105,7 @@ class PrefillCompletionProjectionTest {
             assertEquals(1L, prefill.observedRequestCount());
 
             TaskInfo task = new TaskInfo();
-            task.setRequestId(101L);
+            task.setRequestId("101");
             task.setInputLength(16L);
             task.setPhase(TaskPhase.RUNNING);
             applyStatus(prefill, status(2L, Map.of("101", task), Map.of()));
@@ -128,7 +128,7 @@ class PrefillCompletionProjectionTest {
             assertTrue(capacity.evaluate(decode.routingView().dispatchUsage(), 16L, 32L).fits(),
                     "a suspected lost request must not isolate a worker with available capacity");
             try (var pin = decode.tryPinGeneration()) {
-                var waiting = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);
+                var waiting = decode.reserve(pin, "102", 16L, 32L, 50, capacity);
                 assertNotNull(waiting);
                 var acquisition = decode.acquireDispatchPermit(waiting, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());

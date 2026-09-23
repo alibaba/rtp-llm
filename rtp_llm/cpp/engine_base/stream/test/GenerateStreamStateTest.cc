@@ -516,24 +516,6 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     tracked_abort_count   = 0;
 }
 
-TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext) {
-    auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::PREFILL);
-
-    stream->reportEvent(StreamEvents::CanRun);
-    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
-    ASSERT_TRUE(stream->isContextStream());
-    ASSERT_EQ(stream->curBlocksNum(), 1u);
-
-    // PD fallback can continue decoding in the PREFILL role. The next decode
-    // token is at absolute position 2, which crosses the 2-token test block
-    // boundary and therefore requires a second block-table column.
-    stream->setIsContextStream(false);
-    stream->setSeqLength(3);
-
-    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
-    EXPECT_EQ(stream->curBlocksNum(), 2u);
-}
-
 TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {
     // Create stream with reuse_cache enabled to trigger asyncLoadCache
     auto stream = createStream({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true);

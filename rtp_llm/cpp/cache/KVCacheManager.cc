@@ -199,11 +199,6 @@ void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_r
     metrics_reporter->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(nullptr, &collector);
 }
 
-bool cacheStatusSnapshotEnabled() {
-    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
-    return env != nullptr && std::strcmp(env, "1") == 0;
-}
-
 }  // namespace
 
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,

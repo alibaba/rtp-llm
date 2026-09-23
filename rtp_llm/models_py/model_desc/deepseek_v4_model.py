@@ -146,8 +146,8 @@ class Dsv4SharedRuntimeBufferStore:
 
     @classmethod
     def instance(cls) -> "Dsv4SharedRuntimeBufferStore":
-        instance: Dsv4SharedRuntimeBufferStore = cls._instance  # type: ignore[assignment]
-        return instance
+        assert cls._instance is not None, "Dsv4SharedRuntimeBufferStore is not bound"
+        return cls._instance
 
     @classmethod
     def _reset_for_test(cls) -> None:
@@ -370,6 +370,10 @@ class DeepSeekV4Model(GptModelBase):
             moe_config=moe_config,
         )
         self._max_generate_batch_size = int(max_generate_batch_size)
+        assert self._max_generate_batch_size > 0, (
+            "max_generate_batch_size must be positive, "
+            f"got {self._max_generate_batch_size}"
+        )
         self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
         # Python-only DSpARK config, populated on the target model by the
         # speculative-engine setup. ``getattr`` keeps older ModelConfig
@@ -452,60 +456,6 @@ class DeepSeekV4Model(GptModelBase):
         self._is_speculative = False
         self._is_decode_role = False
         self._shared_runtime_buffers: Optional[Dsv4SharedRuntimeBufferStore] = None
-
-        # S7 scaffold: thread the framework's parallelism config into V4Args.
-        # No behavior change at TP=1; the fields are read by future patches
-        # (see docs/dsv4/parallel_design.md) when sharding lands per-module.
-        pc = parallelism_config
-        if pc is not None:
-            args.tp_size = int(getattr(pc, "tp_size", 1) or 1)
-            args.tp_rank = int(getattr(pc, "tp_rank", 0) or 0)
-            args.ep_size = int(getattr(pc, "ep_size", 1) or 1)
-            args.ep_rank = int(getattr(pc, "ep_rank", 0) or 0)
-            args.dp_size = int(getattr(pc, "dp_size", 1) or 1)
-            args.dp_rank = int(getattr(pc, "dp_rank", 0) or 0)
-            args.world_size = int(getattr(pc, "world_size", 1) or 1)
-            args.world_rank = int(getattr(pc, "world_rank", 0) or 0)
-        if args.world_size > 1:
-            logging.info(
-                "[DeepSeekV4Model] parallelism: world=%d tp=%d/%d ep=%d/%d dp=%d/%d "
-                "(scaffold only — V4 sharding not yet implemented; see "
-                "docs/dsv4/parallel_design.md)",
-                args.world_size, args.tp_rank, args.tp_size,
-                args.ep_rank, args.ep_size, args.dp_rank, args.dp_size,
-            )
-
-        # CP-aware Mega MoE buffer sizing.  When CP is on, each rank only
-        # sees ``max_seq_len / cp_size`` prefill tokens (zigzag split), so
-        # the per-rank symm-mem dispatch buffer can be cp_size× smaller.
-        # Without this, a 64k+CP=4 prefill tries to allocate a per-rank
-        # buffer sized for the full 64k which aborts in
-        # ``CUDASymmetricMemory::~CUDASymmetricMemory`` during V4Transformer
-        # construction (per-rank symm region limit + ~190 GB BF16 footprint
-        # split across 4 ranks leaves no headroom).  RTP-LLM's CP convention
-        # repurposes the TP group as the CP group (cp_size == raw tp_size,
-        # ``get_attn_tp_size()`` returns 1), so use the raw pc.tp_size here.
-        cp_size = 1
-        if pc is not None and getattr(pc, "prefill_cp_config", None) is not None:
-            try:
-                if pc.prefill_cp_config.is_enabled():
-                    cp_size = int(getattr(pc, "tp_size", 1) or 1)
-            except Exception:  # pyi-only stub or non-CP build
-                pass
-        if cp_size > 1:
-            new_bound = max(args.max_seq_len // cp_size, 4096)
-            logging.info(
-                "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d "
-                "(Mega MoE per-rank symm-mem buffer)",
-                cp_size, args.max_tokens_per_rank, new_bound,
-            )
-            args.max_tokens_per_rank = new_bound
-
-        if os.environ.get("ROLE_TYPE", "").upper() == "DECODE":
-            decode_tokens_per_rank = max(int(max_generate_batch_size or 1), 1)
-            args.max_tokens_per_rank = min(
-                args.max_tokens_per_rank, decode_tokens_per_rank
-            )
 
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
@@ -654,7 +604,7 @@ class DeepSeekV4Model(GptModelBase):
         return True
 
     def _bind_runtime_buffers(self, device: torch.device) -> None:
-        v4: V4Transformer = self.v4  # type: ignore[assignment]
+        assert self.v4 is not None
         mtp_hidden = None
         mtp_last_hidden_capacity = None
         if Dsv4SharedRuntimeBufferStore.mtp_hidden_requested():
@@ -690,17 +640,17 @@ class DeepSeekV4Model(GptModelBase):
             full_rows = 0
             main_w = 0
             idx_w = 0
-        v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
+        self.v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
 
         self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
             device=device,
             dtype=torch.bfloat16,
             mtp_hidden=mtp_hidden,
         )
-        self._shared_runtime_buffers.bind(v4)
+        self._shared_runtime_buffers.bind(self.v4)
 
         if mtp_last_hidden_capacity is not None:
-            v4._allocate_mtp_last_hidden_buffer(
+            self.v4._allocate_mtp_last_hidden_buffer(
                 device,
                 mtp_last_hidden_capacity,
             )
@@ -1315,7 +1265,8 @@ class DeepSeekV4Model(GptModelBase):
             not update Python attributes.
         num_tokens < 0: return the last non-graph-written row count. This is only
             for CP prefill, where the C++ global token count has been restored
-            but the buffer intentionally stores rank-local rows.
+            but the buffer intentionally stores rank-local rows; asserts the
+            buffer is non-empty.
         """
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
@@ -1324,7 +1275,15 @@ class DeepSeekV4Model(GptModelBase):
             return None
         requested = int(num_tokens)
         if requested < 0:
+            assert (
+                not self._is_decode_role
+            ), "decode MTP hidden reads must pass row count"
             requested = int(self.v4._mtp_hidden_valid_tokens)
+            assert requested > 0, "MTP hidden buffer has no written rows"
+        assert requested <= buf.size(0), (
+            "DeepSeekV4Model: requested MTP hidden states exceed buffer capacity: "
+            f"requested={requested}, capacity={buf.size(0)}"
+        )
         return buf[:requested]
 
     def has_mtp_hidden_buffer(self) -> bool:
@@ -1335,12 +1294,22 @@ class DeepSeekV4Model(GptModelBase):
     def get_mtp_last_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
+        assert not self._is_decode_role, "decode MTP last-hidden reads are unsupported"
         buf = self.v4._mtp_last_hidden_buffer
         if buf is None:
             return None
         requested = int(num_tokens)
         if requested < 0:
             requested = int(self.v4._mtp_last_hidden_valid_tokens)
+        assert requested <= buf.size(0), (
+            "DeepSeekV4Model: requested MTP last hidden states exceed buffer capacity: "
+            f"requested={requested}, capacity={buf.size(0)}"
+        )
+        assert requested <= int(self.v4._mtp_last_hidden_valid_tokens), (
+            "DeepSeekV4Model: requested MTP last hidden states exceed rows written "
+            f"by the previous forward: requested={requested}, "
+            f"valid={self.v4._mtp_last_hidden_valid_tokens}"
+        )
         return buf[:requested]
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
@@ -1392,6 +1361,10 @@ class DeepSeekV4Model(GptModelBase):
         )
 
         if _is_decode_fmha(fmha_impl) or bool(getattr(attn, "is_target_verify", False)):
+            if bool(getattr(attn, "is_target_verify", False)):
+                assert bool(
+                    getattr(self.v4, "fp8_kv_cache", False)
+                ), "target verify requires fp8 kv cache"
             return forward_decode(
                 self.v4,
                 self.kv_cache,
