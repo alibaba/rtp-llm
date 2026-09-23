@@ -1044,6 +1044,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
 
     auto& model_input            = model_input_status.value();
     model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    model_input.prefix_lengths   = torch::tensor({1, 1}, torch::kInt32);
 
     GptModelOutputs model_output;
     model_output.all_hidden_states =
@@ -1057,6 +1058,10 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {2, 2, 3};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
+    EXPECT_EQ((vector<int>{1, 1}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
+    EXPECT_TRUE(model_input.input_lengths.is_cuda());
+    EXPECT_TRUE(model_input.prefix_lengths.is_cuda());
 }
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsComboPositionIds) {
     ModelConfig                 model_config;
@@ -1080,8 +1085,9 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     stream2->setContextPositionIds(torch::tensor({200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32));
     auto           stream_groups = StreamGroups({stream1, stream2});
     GptModelInputs model_input;
-    model_input.input_lengths = torch::tensor({2, 3}, torch::kInt32);
-    model_input.combo_tokens  = torch::tensor({10, 11, 20, 21, 22}, torch::kInt32);
+    model_input.input_lengths  = torch::tensor({2, 3}, torch::kInt32);
+    model_input.prefix_lengths = torch::tensor({1, 2}, torch::kInt32);
+    model_input.combo_tokens   = torch::tensor({10, 11, 20, 21, 22}, torch::kInt32);
     model_input.combo_position_ids =
         torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32);
     GptModelOutputs model_output;
@@ -1094,6 +1100,10 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     EXPECT_EQ((vector<int>{11, 12, 21, 22, 23}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221, 222, 222, 222, 222}),
               toVec<int>(model_input.combo_position_ids));
+    EXPECT_EQ((vector<int>{1, 2}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
+    EXPECT_TRUE(model_input.input_lengths.is_cuda());
+    EXPECT_TRUE(model_input.prefix_lengths.is_cuda());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDenseLayout) {

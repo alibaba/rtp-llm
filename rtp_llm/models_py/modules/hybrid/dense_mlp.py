@@ -1,5 +1,6 @@
 """Unified dense MLP implementation supporting multiple activation types."""
 
+import logging
 from typing import Dict, Optional, Type
 
 import torch
@@ -97,7 +98,13 @@ class DenseMLP(nn.Module):
         if enable_w4a16_sm120:
             from .w4a16_dense_mlp import W4A16DenseMLP
 
-            self.w4a16 = W4A16DenseMLP.create(self.up_proj, self.down_proj)
+            self.w4a16 = W4A16DenseMLP.create(
+                weights, self.up_proj.bias, self.down_proj.bias, self.is_gated
+            )
+            if self.w4a16 is None:
+                logging.warning(
+                    "W4A16 FFN unavailable, falling back to the default path"
+                )
 
     def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
         if self.w4a16 is not None and 0 < x.shape[0] < 64:
