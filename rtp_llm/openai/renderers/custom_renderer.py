@@ -1046,10 +1046,13 @@ class CustomChatRenderer:
             trunc_string = truncate_response_with_stop_words(
                 pending_output, stop_words_str, is_streaming
             )
+            # Attach the last token's logprob only when pending text is being
+            # flushed; with empty pending text the entry would duplicate the
+            # last one already emitted (empty-delta chunk with a stale logprob).
             output_items.append(
                 OutputDelta(
                     trunc_string,
-                    await self._generate_log_probs(buffer, buffer.output),
+                    await self._generate_log_probs(buffer, buffer.output) if trunc_string else None,
                     aux_info.input_len,
                     aux_info.output_len,
                     aux_info.reuse_len,
@@ -1436,7 +1439,7 @@ class CustomChatRenderer:
             output_items.append(
                 OutputDelta(
                     trunc_string,
-                    self._generate_log_probs_sync(buffer, all_probs, output_ids),
+                    self._generate_log_probs_sync(buffer, all_probs, output_ids) if trunc_string else None,
                     input_len,
                     output_len,
                     reuse_len,
