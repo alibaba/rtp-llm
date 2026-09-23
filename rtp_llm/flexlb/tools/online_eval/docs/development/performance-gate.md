@@ -5,10 +5,12 @@
 
 ## 冻结 Whale Mock 后做回归
 
-2026-09-22 暂停继续追齐真实集群 TPS，保留当前已知差异，不调整门槛来制造通过。
-`config/flash_whale_reference_20260922.json` 固定观察来源、48P/192D、Device/Memory 容量、
-P 公式及 1.23 scale、D step 模型、EOS400 和差异范围。
-`config/experiments/master_performance_frozen.yaml` 用此画像做单请求 / batch 配置 A/B；
+2026-09-22 暂停继续追齐真实集群 TPS，保留当前已知差异（prefill context −9.7%、
+prefill with cache −11.2%、decode generate +10.7%；生产多池以单池近似；轨迹采集早于
+最后一次复制源调整），不调整门槛来制造通过。部署与容量观测见
+`docs/whale/production-alignment.md` 的 Flash 测试部署校准记录。
+`config/experiments/master_performance_frozen.yaml` 固定 48P/192D、Device/Memory 容量、
+P 公式及 1.23 scale、D step 模型、EOS400，用此画像做单请求 / batch 配置 A/B；
 两个 profile 的独立绝对结论不受比较结果影响。
 这里只冻结引擎画像与容量：当前 Master 并非 Whale legacy Master 的相同二进制。两个 profile
 保留当前框架的每 P inflight=2；batch 采用 maxRequests=32、collection wait=10ms、

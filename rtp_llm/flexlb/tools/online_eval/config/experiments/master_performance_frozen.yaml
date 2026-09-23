@@ -7,7 +7,7 @@ environment:
   backend: java_mock
   n_prefill: 48
   n_decode: 192
-  perf_preset: flash_whale_20260922
+  perf_preset: deepseek_v4_flash_l20c
   metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_
   prefill_cache_blocks: 21553
   decode_cache_blocks: 221484

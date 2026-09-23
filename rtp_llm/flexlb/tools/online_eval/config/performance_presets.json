@@ -25,8 +25,8 @@
       "64"
     ]
   },
-  "flash_whale_20260922": {
-    "performance": "data/performance/flash_whale_20260922.json",
+  "deepseek_v4_flash_l20c": {
+    "performance": "data/performance/deepseek_v4_flash_l20c.json",
     "mock_heap": "32g",
     "mock_extra_args": [
       "--prefill-block-size",
