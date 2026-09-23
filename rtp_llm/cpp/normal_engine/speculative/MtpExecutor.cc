@@ -651,6 +651,26 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                         true,
                                         target_cache_layer_layout.layer_to_groups,
                                         model_inputs_logger_));
+        // Use normal decode graphs for T=1 target commits. Clear speculative
+        // config to select one-token geometry; limit capture sizes to bound memory.
+        static const bool kCommitAsDecode = getenv("DSV4_COMMIT_AS_DECODE") != nullptr;
+        if (is_dspark_ && kCommitAsDecode) {
+            const bool kNoCap = false;
+            auto decode_params = model_init_params;
+            decode_params.sp_config.type                              = SP_TYPE_NONE;
+            decode_params.hw_kernel_config.decode_capture_batch_sizes = {1, 2, 4};
+            target_sp_decode_model_.reset(new PyWrappedModel(decode_params,
+                                                             params.py_model,
+                                                             false,
+                                                             false,
+                                                             target_cache_layer_layout.layer_to_groups,
+                                                             model_inputs_logger_,
+                                                             DSparkModelRole::NONE,
+                                                             !kNoCap,
+                                                             false));
+            RTP_LLM_LOG_INFO("[commit-as-decode] target decode wrapper created (capture bsz 1/2/4, nocap=%d)",
+                             (int)kNoCap);
+        }
     }
 
     is_linear_attention_model_ = target_cache_config.linear_group_num > 0;
@@ -793,10 +813,56 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
  * @param streams
  * @return absl::Status
  */
+bool MtpExecutor::useCommitDecodePath(const GptModelInputs& model_input) const {
+    if (target_sp_decode_model_ == nullptr || model_input.skip_run) {
+        return false;
+    }
+    if (!model_input.input_lengths.defined() || !model_input.combo_tokens.defined()) {
+        return false;
+    }
+    const int64_t bsz = model_input.input_lengths.size(0);
+    // Route ONLY all-fake rounds: the idle fake ctx stream is T=1 permanently
+    // (it is NOT a geometry mirror of real streams), and rounds carrying any
+    // REAL stream keep canonical eager semantics end-to-end (zero
+    // scheduler/static-buffer interaction risk). The win — the idle fake
+    // ctx rounds that cost ~200 ms eager each — is exactly the all-fake case.
+    // The prefill gather packs combo_tokens as the concat of per-stream token
+    // runs, so numel == bsz iff every input_lengths[b] == 1 (T=1 per stream;
+    // real prefill chunks have T > 1 and fall through to the eager path).
+    return model_input.is_fake_stream && bsz > 0 && model_input.combo_tokens.numel() == bsz;
+}
+
+void MtpExecutor::convertCommitRoundToDecodeInputs(GptModelInputs&                     model_input,
+                                                   const std::list<GenerateStreamPtr>& streams) {
+    // Decode dispatch at the model boundary is driven purely by tensor sizes
+    // (PyWrappedModel::buildPyAttentionInputs: is_prefill =
+    // !sequence_lengths.size(0), context_batch_size = prefix_lengths.size(0)).
+    // A T=1 commit round is a decode round in disguise: the query token is the
+    // last accepted token at ABSOLUTE position Q = prefix_lengths[b] (the
+    // committed tokens before it), its KV slot is Q (verify already wrote it;
+    // the rewrite is idempotent), and attention reads [0, Q] — exactly the
+    // decode-path convention with sequence_lengths[b] = Q. NOTE:
+    // stream->seqLength() does NOT carry the prefix for these streams (it
+    // reads 1 mid-flight) — the gathered prefix_lengths is the only correct
+    // source. Dispatch is size-driven: fill sequence_lengths (decode count),
+    // empty prefix_lengths (context count).
+    RTP_LLM_CHECK_WITH_INFO(model_input.prefix_lengths.defined()
+                                && model_input.prefix_lengths.size(0)
+                                    == model_input.input_lengths.size(0),
+                            "commit-as-decode: gathered prefix_lengths must cover the batch");
+    model_input.sequence_lengths = model_input.prefix_lengths;
+    model_input.prefix_lengths   = torch::empty(
+        {0},
+        model_input.prefix_lengths.defined() ? model_input.prefix_lengths.options()
+                                             : torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    model_input.is_target_verify = false;
+}
+
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prefill_step(prefill_stream_size=%zu)", streams.size());
+
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
     RtpLLMTokenPSMetricsCollector&  tps_collector      = metrics_collector.tps_collector;
@@ -860,9 +926,85 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-        model_output                        = std::move(model_->forward(model_input));
-        maybeOverrideAllHiddenStatesWithMtpBuffer(
-            model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
+        bool commit_as_decode                = useCommitDecodePath(model_input);
+        // Rank-invariant ROUND decision (the collective-family invariant): the
+        // fake-mirror ctx rounds run T=1 while a real seed/chunk ctx round on
+        // the owner rank runs T=8192 — if they took DIFFERENT MoE collective
+        // families in the same round (routed fixed_ep decode-graph replays vs
+        // eager all_to_all), the ranks deadlock at the first MoE layer
+        // ([MOE] fwd layer=0, GPUs pinned at 100%). One 1-element
+        // all_reduce(MAX) over the world group decides the round: route ONLY
+        // if every rank's ctx round is a captured-shape candidate (bsz <= 4,
+        // T=1 per stream). A real seed round forces everyone onto the eager
+        // all_to_all path for that round — byte-identical to the healthy flow.
+        {
+            const int64_t cad_bsz =
+                model_input.input_lengths.defined() ? (int64_t)model_input.input_lengths.size(0) : -1;
+            const int32_t local_bad =
+                (commit_as_decode && (cad_bsz == 1 || cad_bsz == 2 || cad_bsz == 4)) ? 0 : 1;
+            int32_t round_bad = local_bad;
+            // Single-rank execution needs neither communication nor a Python callback.
+            if (parallelism_config_.tp_size > 1 || parallelism_config_.dp_size > 1) {
+                torch::Tensor route_flag =
+                    torch::tensor({local_bad}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+                execAllReduce({route_flag, ReduceOp::Max, false, ParallelMode::DP_AND_TP});
+                round_bad = route_flag.cpu().item<int32_t>();
+            }
+            if (round_bad != 0) {
+                commit_as_decode = false;
+            }
+        }
+        if (commit_as_decode) {
+            // Snapshot the prefill-shaped length fields: the downstream draft
+            // commit reuses this model_input and expects the ORIGINAL prefill
+            // geometry (validatePrefillDSparkCommitInput + the commit wrapper
+            // bind prefill-shaped prefix/input lengths).
+            torch::Tensor orig_seq    = model_input.sequence_lengths;
+            torch::Tensor orig_prefix = model_input.prefix_lengths;
+            convertCommitRoundToDecodeInputs(model_input, streams);
+            ModelBase& target_ref = *target_sp_decode_model_;
+            try {
+                model_output = target_ref.forward(model_input);
+                // Graph-replay outputs live in the runner's STATIC buffers —
+                // the next replay overwrites them. The dispatch/scheduler may
+                // hold logits/all_hidden_states across steps (the eager path
+                // returns fresh allocations), so clone before handing them on.
+                if (model_output.logits.defined()) {
+                    model_output.logits = model_output.logits.clone();
+                }
+                if (model_output.all_hidden_states.defined()) {
+                    model_output.all_hidden_states = model_output.all_hidden_states.clone();
+                }
+                if (model_output.hidden_states.defined()) {
+                    model_output.hidden_states = model_output.hidden_states.clone();
+                }
+                // The decode path just wrote THIS round's aux rows into the
+                // shared MTP hidden buffer (decode/forward.py capture_ids
+                // branch); the override therefore returns the routed forward's
+                // own fresh rows for the draft commit — same protocol as the
+                // eager path.
+                maybeOverrideAllHiddenStatesWithMtpBuffer(
+                    model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("[commit-as-decode] routed post-forward failed: %s", e.what());
+                throw;
+            }
+            // Restore prefill semantics for the draft-commit pipeline below.
+            model_input.sequence_lengths = orig_seq;
+            model_input.prefix_lengths   = orig_prefix;
+        } else {
+            ModelBase& target_ref = *model_;
+            try {
+                model_output = target_ref.forward(model_input);
+                maybeOverrideAllHiddenStatesWithMtpBuffer(
+                    model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("DSpARK prefill forward failed: rank=%d: %s",
+                                  (int)parallelism_config_.world_rank,
+                                  e.what());
+                throw;
+            }
+        }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -878,10 +1020,24 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (!model_input.is_fake_stream) {
-            CHECK_AND_RETURN_REF(sampler_input,
-                                 batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+            // Preserve the failure reason before returning the sampler status.
+            auto sampler_input_ref =
+                batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output);
+            if (!sampler_input_ref.ok()) {
+                RTP_LLM_LOG_ERROR("DSpARK prefill sampler input failed: rank=%d: %s",
+                                  (int)parallelism_config_.world_rank,
+                                  sampler_input_ref.status().ToString().c_str());
+            }
+            CHECK_AND_RETURN_REF(sampler_input, sampler_input_ref);
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-            sampler_output = std::move(sampler_->forward(sampler_input));
+            try {
+                sampler_output = std::move(sampler_->forward(sampler_input));
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("DSpARK prefill sampler failed: rank=%d: %s",
+                                  (int)parallelism_config_.world_rank,
+                                  e.what());
+                throw;
+            }
         }
         // Restore the full combo_tokens / input_lengths — under CP both were
         // mutated to rank-local by the target forward's handleInputs. The MTP
@@ -929,7 +1085,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // are not persisted in stream or PD state.
             RTP_LLM_CHECK_WITH_INFO(sp_prefill_draft_model_ != nullptr,
                                     "DSpARK prefill requires a draft prefill model");
-            (void)sp_prefill_draft_model_->forward(model_input);
+            try {
+                (void)sp_prefill_draft_model_->forward(model_input);
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("DSpARK draft commit forward failed: %s", e.what());
+                throw;
+            }
             draft_model_output = GptModelOutputs();
         } else {
             draft_model_output = std::move(draft_model_->forward(model_input));
@@ -997,6 +1158,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                      {std::move(model_output), std::move(sampler_output)},
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)},
                                                      draft_last_hidden_states);
+        if (!result.ok()) {
+            RTP_LLM_LOG_ERROR("DSpARK prefill dispatch failed: rank=%d: %s",
+                              (int)parallelism_config_.world_rank,
+                              result.ToString().c_str());
+        }
         RTP_LLM_LOG_DEBUG("dispatch done");
         return result;
     }
@@ -1163,6 +1329,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                      MtpMetricsCollector&                metrics_collector) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
 
+
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
     StreamGroups    stream_groups(streams);
@@ -1256,13 +1423,55 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
-    if (is_dspark_) {
-        dsparkModelDecode(
-            model_input, stream_groups, dspark_round_head, draft_sampler_output, draft_token_ids_t, model_forward_us);
-    } else if (propose_step_ > 1) {
-        RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
-        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
-        RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+    // Convert model exceptions to batch failures before they reach the engine thread.
+    // RTP_LLM_DSPARK_EXCEPTION_ISOLATION=0 restores exception propagation.
+    static const bool exception_isolation = [] {
+        const char* e = getenv("RTP_LLM_DSPARK_EXCEPTION_ISOLATION");
+        return !e || std::string(e) != "0";
+    }();
+    bool        model_round_failed = false;
+    std::string model_round_error;
+    try {
+        if (is_dspark_) {
+            dsparkModelDecode(
+                model_input, stream_groups, dspark_round_head, draft_sampler_output, draft_token_ids_t, model_forward_us);
+        } else if (propose_step_ > 1) {
+            RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
+            draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+            RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+        }
+    } catch (const std::exception& e) {
+        if (!exception_isolation) {
+            throw;
+        }
+        model_round_failed = true;
+        model_round_error  = e.what();
+        RTP_LLM_LOG_ERROR("rank %d decode model round threw: %s",
+                          (int)parallelism_config_.world_rank,
+                          e.what());
+    } catch (...) {
+        if (!exception_isolation) {
+            throw;
+        }
+        model_round_failed = true;
+        model_round_error  = "unknown exception in decode model round";
+        RTP_LLM_LOG_ERROR("rank %d decode model round threw: unknown exception",
+                          (int)parallelism_config_.world_rank);
+    }
+    if (exception_isolation && model_round_failed) {
+        // Do not add a per-step agreement collective: real and fake rounds can
+        // advance at different cadences. This handles local failures only;
+        // peers blocked in a collective still depend on NCCL error handling.
+        for (const auto& stream : streams) {
+            if (stream && !stream->isFakeStream()) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR,
+                                    "DSpark decode round failed: " + model_round_error);
+            }
+        }
+        RTP_LLM_LOG_ERROR("rank %d failing decode batch (%zu streams), engine continues",
+                          (int)parallelism_config_.world_rank,
+                          streams.size());
+        return absl::OkStatus();
     }
 
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
@@ -1982,6 +2191,45 @@ void MtpExecutor::releaseAllModelBuffers() {
     }
 }
 
+// Opt-in initialization makes fresh and steady decode streams use the same device-state path.
+static bool dsparkAdmissionControl() {
+    static const bool enabled = [] {
+        const char* e = getenv("RTP_LLM_DSPARK_ADMISSION_CONTROL");
+        return e && std::string(e) == "1";
+    }();
+    return enabled;
+}
+
+// Match the host-path committed end (seqLength() - 1) and anchor token in
+// device state. Proposal tensors remain unset until the first decode round.
+static void seedDsparkFreshRoundState(const GenerateStreamPtr& stream, int64_t propose_step) {
+    const int seq_length = stream->seqLength();
+    if (seq_length <= 0) {
+        return;
+    }
+    const auto ids        = stream->completeTokenIdsVec(0);
+    int        anchor_idx = seq_length - 1;
+    if (anchor_idx >= static_cast<int>(ids.size())) {
+        anchor_idx = static_cast<int>(ids.size()) - 1;
+    }
+    const int32_t anchor    = anchor_idx >= 0 ? static_cast<int32_t>(ids[anchor_idx]) : 0;
+    const auto    cuda_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    std::vector<int32_t> accept_tokens(static_cast<size_t>(propose_step) + 1, 0);
+    accept_tokens[0] = anchor;
+    stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+        .epoch                  = 0,
+        .accept_len_gpu         = torch::ones({1}, cuda_i32),
+        .accept_tokens_gpu      = torch::tensor(accept_tokens, cuda_i32).reshape({1, propose_step + 1}),
+        .next_seq_len_gpu       = torch::full({1}, seq_length, cuda_i32),
+        .propose_tokens_gpu     = torch::Tensor(),
+        .last_hidden_states_gpu = torch::Tensor(),
+        .draft_all_probs_gpu    = torch::Tensor(),
+        .last_real_seq_len      = seq_length,
+        .next_real_seq_len      = seq_length,
+    });
+}
+
+
 void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                                  std::list<GenerateStreamPtr>&       prefill_streams,
                                  std::list<GenerateStreamPtr>&       decode_streams) {
@@ -1993,6 +2241,15 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             prefill_streams.push_back(stream);
         } else {
             stream->setScoreLen(propose_step_ + 1);
+            // DSpark handoff lacks the tensors_holder used by classic MTP state
+            // initialization. Seed it locally so real and fake streams use the
+            // same device-state path without adding a cross-rank collective.
+            if (dsparkAdmissionControl() && is_dspark_ && !stream->isFakeStream()) {
+                const auto& next_seq_len = stream->getNextSeqLenGpu();
+                if (!next_seq_len.defined() || !next_seq_len.is_cuda()) {
+                    seedDsparkFreshRoundState(stream, propose_step_);
+                }
+            }
             if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
                 auto sp_output_buffer =
                     makeFakeSPOutputBuffer(data_type_, hidden_size_, draft_vocab_size_, propose_step_, is_dspark_);
@@ -2014,6 +2271,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         auto sp_output_buffer          = stream->getSPOutputBuffer();
         sp_output_buffer->propose_step = propose_step_;
     }
+
 }
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {

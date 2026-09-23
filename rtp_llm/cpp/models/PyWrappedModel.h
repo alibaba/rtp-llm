@@ -65,7 +65,8 @@ public:
                    const std::vector<int>&            kv_cache_layer_to_group    = {},
                    std::shared_ptr<ModelInputsLogger> model_inputs_logger        = nullptr,
                    DSparkModelRole                    dspark_model_role          = DSparkModelRole::NONE,
-                   bool                               allow_cuda_graph           = true);
+                   bool                               allow_cuda_graph           = true,
+                   bool                               reinitialize_py_model      = true);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -162,7 +163,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                       const std::vector<int>&            kv_cache_layer_to_group,
                                       std::shared_ptr<ModelInputsLogger> model_inputs_logger,
                                       DSparkModelRole                    dspark_model_role,
-                                      bool                               allow_cuda_graph):
+                                      bool                               allow_cuda_graph,
+                                      bool                               reinitialize_py_model):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -279,7 +281,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     try {
-        py_init_result = py_initialize_method(init_resources);
+        // Reinitializing a shared Python model invalidates state referenced
+        // by the original wrapper's captured graphs.
+        if (reinitialize_py_model) {
+            py_init_result = py_initialize_method(init_resources);
+        }
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
@@ -406,7 +412,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         try {
-            py_init_result = py_initialize_method(init_resources);
+            // Apply the same shared-model lifetime guard before graph capture.
+            if (reinitialize_py_model) {
+                py_init_result = py_initialize_method(init_resources);
+            }
             // Python initialization/JIT can take a different amount of time on
             // each EP/TP rank. Synchronize immediately before capture so every
             // rank enters graph-held collectives in the same order.
@@ -418,7 +427,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         }
     }
 
-    auto py_init_success = py_init_result.cast<bool>();
+    // Skipping initialization leaves py_init_result as None, not a bool.
+    const bool py_init_success = reinitialize_py_model ? py_init_result.cast<bool>() : true;
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
