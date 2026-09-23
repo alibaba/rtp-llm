@@ -36,6 +36,8 @@ claim of zero overhead.
 
 At profiler stop, completion events are recorded on every stream used for
 snapshots. Only the export path waits for these events and reads the arena back.
+Readback uses a separate pooled CUDA stream so export copies do not enter the
+inference/default stream while subsequent requests are running.
 The legacy synchronous `stop()` uses the same export function after collection;
 normal step-window exports use `ProfilerSaveWorker`. These waits are not inserted
 into a model forward. Existing Kineto stop/start behavior is unchanged.

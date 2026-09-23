@@ -107,6 +107,10 @@ void ForwardTraceSession::materialize() {
     if (used_) {
         c10::cuda::CUDAGuard guard(arena_.device());
         for (const auto& event : ready_events_) event->synchronize();  // SAVE WORKER ONLY
+        // Keep export copies off the inference/default stream. The save worker
+        // may run while the engine has already started its next request.
+        c10::cuda::CUDAStreamGuard copy_guard(
+            c10::cuda::getStreamFromPool(false, arena_.get_device()));
         auto host = arena_.narrow(0, 0, used_).cpu();
         const auto* data = host.data_ptr<int32_t>();
         for (auto& record : records) {
