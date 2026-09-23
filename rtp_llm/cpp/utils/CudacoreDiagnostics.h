@@ -28,7 +28,7 @@ struct CudacoreDiagConstants {
     static constexpr int64_t     kTriggerIoBudgetMs      = 1000;
     static constexpr int64_t     kStatusPollIntervalMs   = 100;
     // Upper bound on bounded first-error tile metadata.
-    static constexpr std::size_t kMaxTileMetadata        = 256;
+    static constexpr std::size_t kMaxTileMetadata        = 1024;
     static constexpr std::size_t kMaxMetadataBytes       = 256 * 1024;
     // Caps for driver attribute strings / manifest text fields.
     static constexpr std::size_t kMaxAttributeBytes      = 4096;

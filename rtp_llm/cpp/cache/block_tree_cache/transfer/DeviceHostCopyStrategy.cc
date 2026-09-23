@@ -26,6 +26,12 @@ bool fatalIncidentBlocksTransfers() {
 }
 
 void annotateTransferContext(const DeviceHostCopyPlan& plan) {
+    // A device plan may merge multiple descriptors. Its group and host fields
+    // then describe only the first descriptor, so they must not label the
+    // entire failing batch in the incident manifest.
+    if (plan.mixed_descriptors) {
+        return;
+    }
     annotateFatalCudaTransferContext(plan.group_set_id,
                                      plan.device_to_host,
                                      reinterpret_cast<uintptr_t>(plan.host.base),

@@ -1944,7 +1944,9 @@ void annotateFatalCudaTransferContext(uint64_t  group_set_id,
     try {
         SharedState&                state = sharedState();
         std::lock_guard<std::mutex> lock(state.mutex);
-        if (!state.has_record) {
+        // Multiple copy streams can report the same device fault. Only the
+        // thread that claimed the first error may attach its transfer context.
+        if (!state.has_record || state.record.thread_id != threadIdString()) {
             return;
         }
         if (!state.record.has_group_set_id) {

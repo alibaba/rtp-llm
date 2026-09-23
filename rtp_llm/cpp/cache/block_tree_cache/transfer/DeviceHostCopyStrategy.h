@@ -29,6 +29,8 @@ struct DeviceHostCopyPlan {
     bool                            device_to_host{false};
     size_t                          group_set_id{0};
     HostBufferView                  host;
+    size_t                          first_descriptor_index{0};
+    bool                            mixed_descriptors{false};
     std::vector<DeviceHostCopyTile> copy_tiles;
 };
 

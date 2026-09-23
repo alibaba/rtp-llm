@@ -83,9 +83,12 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
                     }
                     auto& plan = plans_by_device[device_pool.deviceIndex()];
                     if (plan.copy_tiles.empty()) {
-                        plan.device_to_host = device_to_host;
-                        plan.group_set_id   = descriptor.group_set_id;
-                        plan.host           = host;
+                        plan.device_to_host         = device_to_host;
+                        plan.group_set_id           = descriptor.group_set_id;
+                        plan.host                   = host;
+                        plan.first_descriptor_index = descriptor_index;
+                    } else if (plan.first_descriptor_index != descriptor_index) {
+                        plan.mixed_descriptors = true;
                     }
                     plan.copy_tiles.push_back(DeviceHostCopyTile{layer_host_addr + layer_offset,
                                                                  buffers[buffer_index].addr,

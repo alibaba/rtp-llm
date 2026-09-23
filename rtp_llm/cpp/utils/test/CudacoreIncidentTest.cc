@@ -184,7 +184,7 @@ TEST_F(CudacoreIncidentTest, ConcurrentFirstErrorsProduceSingleIncident) {
 
 TEST_F(CudacoreIncidentTest, TileMetadataIsBoundedButKeepsTotals) {
     FatalCudaErrorRecord record = runtimeRecord(719);
-    for (int index = 0; index < 1000; ++index) {
+    for (int index = 0; index < 1500; ++index) {
         FatalCudaTileRecord tile;
         tile.dst   = static_cast<uintptr_t>(0x1000 + index);
         tile.src   = static_cast<uintptr_t>(0x2000 + index);
@@ -196,8 +196,25 @@ TEST_F(CudacoreIncidentTest, TileMetadataIsBoundedButKeepsTotals) {
     FatalCudaErrorRecord stored;
     ASSERT_TRUE(fatalCudacoreErrorRecord(stored));
     EXPECT_EQ(stored.tiles.size(), CudacoreDiagConstants::kMaxTileMetadata);
-    EXPECT_EQ(stored.tile_total, 1000u);
+    EXPECT_EQ(stored.tile_total, 1500u);
     EXPECT_TRUE(stored.tiles_truncated);
+}
+
+TEST_F(CudacoreIncidentTest, RetainsAllTilesFromObservedLargeBatch) {
+    FatalCudaErrorRecord record = runtimeRecord(719);
+    for (int index = 0; index < 310; ++index) {
+        FatalCudaTileRecord tile;
+        tile.dst   = static_cast<uintptr_t>(0x1000 + index * 4096);
+        tile.src   = static_cast<uintptr_t>(0x2000 + index * 4096);
+        tile.bytes = 4096;
+        record.tiles.push_back(tile);
+    }
+    ASSERT_TRUE(recordFirstFatalCudaError(record));
+
+    FatalCudaErrorRecord stored;
+    ASSERT_TRUE(fatalCudacoreErrorRecord(stored));
+    EXPECT_EQ(stored.tiles.size(), 310u);
+    EXPECT_FALSE(stored.tiles_truncated);
 }
 
 TEST_F(CudacoreIncidentTest, TransferAnnotationIsAppliedOnce) {
@@ -212,6 +229,22 @@ TEST_F(CudacoreIncidentTest, TransferAnnotationIsAppliedOnce) {
     EXPECT_TRUE(stored.has_host_span);
     EXPECT_EQ(stored.host_base, 0x1000u);
     EXPECT_STREQ(stored.direction, "D2H");
+}
+
+TEST_F(CudacoreIncidentTest, OtherCopyThreadCannotAnnotateFirstError) {
+    ASSERT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
+    std::thread other(
+        [] { annotateFatalCudaTransferContext(/*group_set_id=*/99, /*device_to_host=*/false, 0x2000, 8192); });
+    other.join();
+
+    FatalCudaErrorRecord stored;
+    ASSERT_TRUE(fatalCudacoreErrorRecord(stored));
+    EXPECT_FALSE(stored.has_group_set_id);
+    EXPECT_FALSE(stored.has_host_span);
+    annotateFatalCudaTransferContext(/*group_set_id=*/42, /*device_to_host=*/true, 0x1000, 4096);
+    ASSERT_TRUE(fatalCudacoreErrorRecord(stored));
+    EXPECT_TRUE(stored.has_group_set_id);
+    EXPECT_EQ(stored.group_set_id, 42u);
 }
 
 TEST_F(CudacoreIncidentTest, FatalClassificationSeparatesOrdinaryErrors) {
