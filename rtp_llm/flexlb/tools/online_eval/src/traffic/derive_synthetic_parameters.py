@@ -11,7 +11,29 @@ from pathlib import Path
 from traffic.codecs import decode, block_events
 from traffic.capture_contract import BLOCK_SIZE as BLOCK
 from traffic.datasets import read_manifest
-from traffic.structure import capture_shape, joint_distribution
+from traffic.structure import joint_distribution
+
+
+def lineage_sizes(events):
+    """Subtree request counts of the empirical prefix-lineage forest, descending.
+
+    The codec stores each request's longest-matching predecessor, so the reuse
+    unit a scheduler observes is a lineage tree; zipf concentration is fitted
+    against that distribution.
+    """
+    n = len(events)
+    children = [[] for _ in range(n)]
+    roots = []
+    for i, event in enumerate(events):
+        parent = event[2]
+        if parent < 0:
+            roots.append(i)
+        else:
+            children[parent].append(i)
+    subtree = [0] * n
+    for i in range(n - 1, -1, -1):
+        subtree[i] = 1 + sum(subtree[c] for c in children[i])
+    return sorted((subtree[r] for r in roots), reverse=True)
 
 
 def derive_parameters(raw, report, report_sha, manifest=None):
@@ -21,7 +43,7 @@ def derive_parameters(raw, report, report_sha, manifest=None):
     # A dense empirical inverse CDF preserves the long tail and mean better than
     # interpolating three percentiles. Deterministic, bounded profile size.
     values=[sizes[int(q*(len(sizes)-1)/1000)] for q in range(1001)]
-    family_counts=capture_shape(events)["families"]
+    family_counts=lineage_sizes(events)
     prefix_depths=[event[3] for event in events if event[3]]
     cold=sum(e[3]==0 for e in events)/len(events)
     families=max(5,len(family_counts))

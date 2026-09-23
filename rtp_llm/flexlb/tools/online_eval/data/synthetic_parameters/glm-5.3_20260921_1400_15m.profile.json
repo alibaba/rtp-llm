@@ -1,11 +1,18 @@
 {
+  "schema_version": 2,
+  "data_kind": "synthetic",
+  "generator": {
+    "kind": "synthetic",
+    "model": "realistic",
+    "version": "1"
+  },
   "parameters": {
     "block_size": 512,
-    "families": 21699,
+    "families": 13811,
     "shared_blocks": 0,
     "prefix_blocks": 115,
     "suffix_blocks": 1,
-    "zipf_alpha": 0.874077668222526,
+    "zipf_alpha": 1.0388298119341925,
     "cold_fraction": 0.09787191824991319,
     "session_requests": 1,
     "session_growth_blocks": 0,
@@ -7170,7 +7177,7 @@
     "targets": {
       "mean_input_tokens": 90490.77978641231,
       "p99_input_tokens": 530432,
-      "family_top5_share": 0.10848043766343285,
+      "family_top5_share": 0.2354496042178963,
       "cold_fraction": 0.09787191824991319
     },
     "limitations": [
@@ -7277,12 +7284,5 @@
       "0.99": 466504
     }
   },
-  "data_kind": "synthetic",
-  "generator": {
-    "kind": "synthetic",
-    "model": "realistic",
-    "version": "1"
-  },
-  "source_capture": "../traffic_trace/glm-5.3_20260921_1400_15m.xz",
-  "schema_version": 2
+  "source_capture": "../traffic_trace/glm-5.3_20260921_1400_15m.xz"
 }

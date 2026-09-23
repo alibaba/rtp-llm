@@ -129,7 +129,7 @@ class TrafficDatasetsTest(unittest.TestCase):
             path = Path(directory) / 'fixed.jsonl'
             semantics = write_trace(path, {'seed': 12345, 'count': 10000,
                                            'output_tokens': 420}, 'fixed')
-            self.assertEqual('3ab3bb294b96acdcf188ff08897a1b8e41537903c4a56d6570a594c42c415d69',
+            self.assertEqual('7c4a5e5ee52c54c525d30e21a43bb441704406b0b3f09a68df8ebd8df7fb21c8',
                              hashlib.sha256(path.read_bytes()).hexdigest())
             self.assertEqual(datasets.read_manifest(datasets.model_path())['provenance'],
                              semantics['calibration']['provenance'])
