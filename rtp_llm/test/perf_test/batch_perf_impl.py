@@ -1,3 +1,4 @@
+import glob
 import json
 import logging
 import os
@@ -20,6 +21,58 @@ def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
     # profiler armed and prevents trace export before the test server exits.
     profile_steps = int(os.environ.get("PERF_PROFILE_NUM_STEPS", "3"))
     return min(decode_test_length, profile_steps) if is_decode else 1
+
+
+def _wait_profile_flush(trace_name: str, expected_ranks: int = 0) -> None:
+    """Poll asynchronous rank exports; PERF_PROFILE_FLUSH_SLEEP is the timeout."""
+    timeout = float(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60"))
+    out_dir = os.environ.get("TORCH_CUDA_PROFILER_DIR") or os.environ.get(
+        "TEST_UNDECLARED_OUTPUTS_DIR", "."
+    )
+    expected = int(
+        os.environ.get("PERF_PROFILE_RANKS")
+        or os.environ.get("WORLD_SIZE")
+        or expected_ranks
+        or "0"
+    )
+    if timeout <= 0:
+        return
+    if expected <= 0 or not trace_name:
+        time.sleep(timeout)
+        return
+
+    pattern = os.path.join(out_dir, f"{trace_name}_wr*.json")
+    started = time.monotonic()
+    deadline = started + timeout
+    last_sig = None
+    stable_hits = 0
+    while time.monotonic() < deadline:
+        files = sorted(glob.glob(pattern))
+        if len(files) >= expected:
+            sig = tuple((path, os.path.getsize(path)) for path in files)
+            if sig == last_sig and all(size > 1024 for _, size in sig):
+                stable_hits += 1
+                if stable_hits >= 3:
+                    logging.info(
+                        "[PERF_PROFILE_FLUSH] ready ranks=%d files=%d "
+                        "waited=%.1fs dir=%s",
+                        expected,
+                        len(files),
+                        time.monotonic() - started,
+                        out_dir,
+                    )
+                    return
+            else:
+                stable_hits = 0
+                last_sig = sig
+        time.sleep(0.2)
+    logging.warning(
+        "[PERF_PROFILE_FLUSH] timeout after %.0fs expected=%d got=%d pattern=%s",
+        timeout,
+        expected,
+        len(glob.glob(pattern)),
+        pattern,
+    )
 
 
 def _curl_server_single_worker(
@@ -165,6 +218,7 @@ class BatchPerfImpl(object):
     # warmup (JIT compile), measure timing, profile (optional, torch profiler affects accuracy)
     def run(self):
         self._set_concurrency()
+        skip_on_fail = os.environ.get("PERF_SKIP_ON_FAIL", "0") == "1"
         for i in range(self.warmup_runs):
             logging.info(
                 "[PERF_WARMUP_RUN] %d/%d trace=%s",
@@ -172,7 +226,14 @@ class BatchPerfImpl(object):
                 self.warmup_runs,
                 self.profile_trace_name,
             )
-            _ = self._curl_server()
+            warmup_metric = self._curl_server()
+            if skip_on_fail and warmup_metric.success_requests == 0:
+                logging.warning(
+                    "[PERF_SKIP_ON_FAIL] warmup success=0 trace=%s, "
+                    "skip measure/profile",
+                    self.profile_trace_name,
+                )
+                return analyze_results([])
 
         all_measure_responses: List[ResponseInfo] = []
         for i in range(self.measure_runs):
@@ -232,7 +293,7 @@ class BatchPerfImpl(object):
                     self.profile_trace_name,
                 )
                 _ = self._curl_server(True)
-            time.sleep(int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")))
+            _wait_profile_flush(self.profile_trace_name, self.dp_size)
         return results
 
     def _set_concurrency(self):

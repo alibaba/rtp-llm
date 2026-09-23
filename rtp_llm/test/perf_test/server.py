@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import shlex
 from typing import Dict, List, Optional
 
 from rtp_llm.test.perf_test.dataset import extract_arg
@@ -27,6 +28,7 @@ class EngineServer:
             ),
             "TORCH_CUDA_PROFILER_DIR": self._args.result_dir,
         }
+        os.environ["TORCH_CUDA_PROFILER_DIR"] = self._args.result_dir
 
         logging.info(f"Starting server with engine CLI: {engine_cli}")
         logging.info(f"remaining_args (raw list): {self._remaining_args}")
@@ -61,7 +63,7 @@ class EngineServer:
         parts.extend(["--dp_size", str(self._args.dp_size)])
         parts.extend(["--max_seq_len", str(max_seq_len)])
         parts.extend(["--concurrency_limit", str(max_concurrency)])
-        return " ".join(parts)
+        return shlex.join(parts)
 
     @staticmethod
     def propagate_engine_env(remaining_args: List[str]) -> None:

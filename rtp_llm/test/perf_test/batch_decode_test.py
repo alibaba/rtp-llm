@@ -118,6 +118,11 @@ def parse_args():
     return args, remaining
 
 
+def _local_concurrency(args: argparse.Namespace, grid_max_bs: int) -> int:
+    # Grid batch sizes and the engine limit are both per rank, not global.
+    return max(1, min(int(args.concurrency_limit), int(grid_max_bs)))
+
+
 def _replace_cli_value(argv: List[str], key: str, new_value: str) -> None:
     flag = f"--{key}"
     prefix = f"--{key}="
@@ -244,7 +249,9 @@ def main() -> str:
         server = EngineServer(args, remaining)
         server.start(
             max_seq_len=effective_max_seq_len,
-            max_concurrency=max(int(k) for k in batch_seq_len_map),
+            max_concurrency=_local_concurrency(
+                args, max(int(k) for k in batch_seq_len_map)
+            ),
         )
 
         input_query_dict = create_query(input_len_list=all_seq_lens)
@@ -268,7 +275,7 @@ def main() -> str:
         server = EngineServer(args, remaining)
         server.start(
             max_seq_len=_effective_grid_max_seq_len(args, input_len_list),
-            max_concurrency=max(batch_size_list),
+            max_concurrency=_local_concurrency(args, max(batch_size_list)),
         )
 
         input_query_dict = create_query(input_len_list=input_len_list)

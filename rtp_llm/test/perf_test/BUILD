@@ -29,6 +29,13 @@ py_test(
 )
 
 py_test(
+    name = "perf_harness_test",
+    srcs = ["perf_harness_test.py"],
+    data = ["BUILD"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
         name = "distribution_perf_test",
         main = "batch_decode_test.py",
         srcs = [
@@ -849,5 +856,236 @@ test_suite(
         ":v4_flash_dp4_decode_bs128_64k_perf",
         ":v4_flash_dp4_decode_64k_mtp_grid_perf",
     ],
+    tags = ["manual"],
+)
+
+# SM120 targets require --test_arg=--checkpoint_path=/path/to/checkpoint.
+# Tokenizer defaults to that checkpoint; override with --test_arg=--tokenizer_path=...
+# The MTP target also requires --test_arg=--sp_checkpoint_path=/path/to/draft.
+py_test(
+    name = "v4_flash_sm120_dp4ep4_decode",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--batch_size", "1",
+        "--input_len", "8192",
+        "--partial", "1",
+        "--decode_test_length", "8",
+        # SM120 fp8_paged_mqa_logits requires block_kv==64; the indexer pool
+        # entries_per_block = kernel_seq_size_per_block / 4, so pin kernel block
+        # to 256 (physical must be >= kernel and divisible -> seq_size 256, bpk=1).
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "256",
+        "--max_seq_len", "16384",
+        "--tp_size", "1",
+        "--dp_size", "4",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--quantization", "FP8_PER_BLOCK",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "32",
+        "--enable_cuda_graph", "1",
+        "--reserver_runtime_mem_mb", "8192",
+        "--max_context_batch_size", "1",
+        "--dsv4_fixed_pool_blocks", "512",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "0",
+    },
+    tags = ["manual"],
+)
+
+# SM120 DP8EP8 decode counterpart of v4_flash_sm120_dp4ep4_decode.
+# Same checkpoint / SM120 block pinning / Mega-MoE-off; topology is
+# tp=1 dp=8 ep=8 on 8 GPUs. max_seq_len covers 128k + decode_test_length.
+py_test(
+    name = "v4_flash_sm120_dp8ep8_decode",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--batch_size", "1",
+        "--input_len", "8192",
+        "--partial", "1",
+        "--decode_test_length", "8",
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "256",
+        "--max_seq_len", "131200",
+        "--tp_size", "1",
+        "--dp_size", "8",
+        "--ep_size", "8",
+        "--world_size", "8",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--quantization", "FP8_PER_BLOCK",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "32",
+        "--enable_cuda_graph", "1",
+        "--reserver_runtime_mem_mb", "8192",
+        "--max_context_batch_size", "1",
+        "--dsv4_fixed_pool_blocks", "512",
+    ],
+    env = {
+        "WORLD_SIZE": "8",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "0",
+    },
+    tags = ["manual"],
+)
+
+# SM120 DP8EP8 decode + DSpark MTP-3 (3 draft models).
+# Same checkpoint / SM120 block pinning / Mega-MoE-off as
+# v4_flash_sm120_dp8ep8_decode. Default grid is seq=32k / bs=1; override
+# with --test_arg. perf_test force-accepts the whole MTP window.
+# A bs=128/rank grid also needs --test_arg=--concurrency_limit=128.
+py_test(
+    name = "v4_flash_sm120_dp8ep8_decode_mtp",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--batch_size", "1",
+        "--input_len", "32768",
+        "--partial", "1",
+        "--decode_test_length", "16",
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "256",
+        "--max_seq_len", "131200",
+        "--tp_size", "1",
+        "--dp_size", "8",
+        "--ep_size", "8",
+        "--world_size", "8",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--quantization", "FP8_PER_BLOCK",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "32",
+        "--enable_cuda_graph", "1",
+        "--reserver_runtime_mem_mb", "8192",
+        "--max_context_batch_size", "1",
+        "--dsv4_fixed_pool_blocks", "512",
+        "--sp_type", "dspark",
+        "--gen_num_per_cycle", "3",
+        "--sp_model_type", "deepseek_v4_dspark",
+        "--sp_act_type", "bf16",
+    ],
+    env = {
+        "WORLD_SIZE": "8",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "0",
+        # Pre-skip cells that cannot fit FULL KV. 25000 is below the
+        # observed non-MTP pool (29136) so MTP draft weights still leave
+        # room; 128x32k and 32x128k stay on, 256x32k / 64x128k skip.
+        "PERF_KV_TOTAL_BLOCKS": "25000",
+        "PERF_KV_SEQ_SIZE_PER_BLOCK": "256",
+        "PERF_KV_GROUP_RESERVE": "1490",
+        "PERF_SKIP_ON_FAIL": "1",
+    },
+    tags = ["manual"],
+)
+
+# SM120 counterpart of v4_flash_sm120_dp4ep4_decode: CP=4 EP=4 prefill
+# timeline. Same checkpoint / SM120 block pinning / Mega-MoE-off as the
+# decode target; topology switches to TP=4 DP=1 + ALL_GATHER CP rotate
+# (the CP4 prefill pattern used by v4_flash_cp4_ep4_prefill_*).
+# Prefill only (--partial 2), no CUDA graph. profile_step is forced to 1
+# by batch_perf_impl because prefill has a single model-forward step.
+py_test(
+    name = "v4_flash_sm120_cp4ep4_prefill",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--batch_size", "1",
+        "--input_len", "32768",
+        "--partial", "2",
+        "--decode_test_length", "2",
+        # SM120 fp8_paged_mqa_logits requires block_kv==64; the indexer pool
+        # entries_per_block = kernel_seq_size_per_block / 4, so pin kernel block
+        # to 256 (physical must be >= kernel and divisible -> seq_size 256, bpk=1).
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "256",
+        "--max_seq_len", "32770",
+        "--tp_size", "4",
+        "--dp_size", "1",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--cp_rotate_method", "ALL_GATHER",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--quantization", "FP8_PER_BLOCK",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "1",
+        "--enable_cuda_graph", "0",
+        "--reserver_runtime_mem_mb", "16384",
+        "--max_context_batch_size", "1",
+        "--frontend_server_count", "1",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "1",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "0",
+    },
     tags = ["manual"],
 )
