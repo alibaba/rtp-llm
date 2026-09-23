@@ -3,6 +3,13 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_kimi_k3_dense_sp",
+    srcs = ["test_kimi_k3_dense_sp.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_kimi_k3_mla_streaming",
     srcs = ["test_kimi_k3_mla_streaming.py"],
     deps = ["//rtp_llm/models_py/standalone:auto_model"],

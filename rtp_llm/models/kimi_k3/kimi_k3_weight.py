@@ -38,12 +38,11 @@ from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     concat_0,
-    ffn_sp_0,
-    ffn_sp_neg1,
     identity,
     mla_pad_t,
     sp_0,
     sp_id,
+    sp_neg1,
     stack_,
     transpose,
     transpose_slice_k,
@@ -653,10 +652,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
         return None
 
     def _dense_weights(self) -> List[WeightModule]:
+        # Dense forward gathers SP tokens and sums TP partials with reduce-scatter.
+        # Use TP shards even when RTP sets ffn_tp_size=1 for sequence parallelism.
         return [
-            self._linear(W.ffn_w1, "mlp.gate_proj.weight", split_func=ffn_sp_neg1),
-            self._linear(W.ffn_w3, "mlp.up_proj.weight", split_func=ffn_sp_neg1),
-            self._linear(W.ffn_w2, "mlp.down_proj.weight", split_func=ffn_sp_0),
+            self._linear(W.ffn_w1, "mlp.gate_proj.weight", split_func=sp_neg1),
+            self._linear(W.ffn_w3, "mlp.up_proj.weight", split_func=sp_neg1),
+            self._linear(W.ffn_w2, "mlp.down_proj.weight", split_func=sp_0),
         ]
 
     def _moe_weights(self) -> List[WeightModule]:
