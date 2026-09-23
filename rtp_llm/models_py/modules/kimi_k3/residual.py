@@ -18,8 +18,12 @@ class KimiK3AttentionResidual(nn.Module):
         eps: float,
     ) -> None:
         super().__init__()
-        self.norm_weight = norm_weight
-        self.projection_weight = projection_weight
+        self.norm_weight = norm_weight.reshape(-1).contiguous()
+        # RTP's linear loader returns [hidden, 1] for this scalar projection.
+        # Flatten at initialization: singleton strides can be non-unit even
+        # when PyTorch considers that matrix contiguous. The native kernel
+        # consumes a dense vector, and graph replay must not repack weights.
+        self.projection_weight = projection_weight.reshape(-1).contiguous()
         self.eps = float(eps)
 
     def forward(

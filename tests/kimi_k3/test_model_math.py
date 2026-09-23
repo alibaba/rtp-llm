@@ -238,3 +238,13 @@ def test_fused_attnres_keeps_mixture_precision():
     assert int((actual != split).sum()) == width // 2
     # The final residual still exposes its BF16 pre-norm input to MTP.
     torch.testing.assert_close(module(prefix, bank), mixture.bfloat16(), rtol=0, atol=0)
+
+
+def test_attnres_accepts_rtp_transposed_scalar_projection():
+    weight = torch.arange(16, dtype=torch.float32).reshape(1, 16).transpose(0, 1)
+    assert weight.shape == (16, 1) and weight.stride() == (1, 16)
+    assert weight.is_contiguous()
+    module = Residual(torch.ones(16), weight, 1e-6)
+    assert module.projection_weight.shape == (16,)
+    assert module.projection_weight.stride() == (1,)
+    torch.testing.assert_close(module.projection_weight, weight[:, 0], rtol=0, atol=0)
