@@ -262,6 +262,8 @@ def environment(value, path, profile):
     for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
+    _, preset_runtime = load_preset(result["perf_preset"])
+    paired_master = preset_runtime.get("master_config_overrides", {})
     overrides = mapping(
         value.get("config_overrides", {}),
         path + ".config_overrides",
@@ -273,8 +275,12 @@ def environment(value, path, profile):
             "preemption",
             "decision_lifetime",
             "prefill_expression",
+            "cache_affinity_max_extra_ttft_ms",
+            "cache_affinity_min_prefix_hit_percent",
         },
     )
+    declared_overrides = dict(overrides)
+    overrides = {**paired_master, **declared_overrides}
     kwargs = {}
     for key, val in overrides.items():
         field = path + ".config_overrides." + key
@@ -286,6 +292,10 @@ def environment(value, path, profile):
             }[key]
             if val not in choices:
                 fail(field, f"expected one of {choices}")
+        elif key == "cache_affinity_max_extra_ttft_ms":
+            number(val, field, minimum=0, integer=True)
+        elif key == "cache_affinity_min_prefix_hit_percent":
+            number(val, field, minimum=0)
         elif key == "prefill_expression":
             if not isinstance(val, str) or not val.strip() or len(val) > 4096:
                 fail(field, "expected a nonempty formula of at most 4096 characters")
@@ -328,8 +338,10 @@ def environment(value, path, profile):
             ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
             ("decode_cache_blocks", "decode_kv_pool_blocks"),
         ) if field in value and value[field] != captured[source_field]]
-        if "prefill_expression" in overrides or "prefill_perf" in value:
+        if ("prefill_expression" in declared_overrides and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")) or "prefill_perf" in value:
             changed.append("prefill model")
+        changed.extend("master." + key for key, val in declared_overrides.items()
+                       if key in paired_master and val != paired_master[key])
         if "prefill_cache_policy" in value:
             performance, _ = load_preset(result["perf_preset"])
             policy = value["prefill_cache_policy"]

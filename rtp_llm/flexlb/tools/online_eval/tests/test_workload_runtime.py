@@ -107,7 +107,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 "master_lifecycle::kill_single",
             },
         )
-        self.assertEqual(len(plans), 91)
+        self.assertEqual(len(plans), 92)
         self.assertIn("cache_scale_in::step::single-nonbatch", w)
 
     def test_core_suite_is_five_stable_contracts_for_every_master_profile(self):

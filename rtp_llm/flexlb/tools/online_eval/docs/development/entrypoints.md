@@ -17,12 +17,12 @@
 | 分析 | `scripts/commands/compare_traffic.py` | 对比合成流量与真实捕获的统计结构 |
 | 离线 | `python3 -m workload.performance_gate` | 从逐请求证据重算单 run 性能结论 |
 | 离线 | `python3 -m workload.performance_compare` | 比较两份性能证据和声明的配置差异 |
-| 离线 | `python3 -m workload.cache_gate_ab` | 按场景分析策略比较缓存门禁的两份运行归档 |
+| 离线 | `python3 -m workload.cache_gate_ab` | 比较缓存实验的两份运行归档，不裁决 A/B 成败 |
 | 探针 | `scripts/probes/check_mock_fidelity.py` | 独立检查 mock 与 real 的分布逼真度 |
 
 压测与 case 共用 `src/runtime/` 的 Java 进程启动和清理组件。压测独有的 Prometheus、JFR、分片负载和归档编排在 `src/runtime/stress.py`。数据输入见[数据目录](../../data/README.md)，手写配置见[配置目录](../../config/README.md)。
 
-模块入口需设置 `PYTHONPATH=tools/online_eval/src:tools/online_eval`。缓存门禁 A/B 的通用形式：
+模块入口需设置 `PYTHONPATH=tools/online_eval/src:tools/online_eval`。缓存实验 A/B 的通用形式：
 
 ```bash
 PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.cache_gate_ab \
@@ -30,4 +30,10 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.cache_gat
   --config /path/to/scenario.yaml --output /path/to/comparison
 ```
 
-按选定 YAML 的 `analysis` 策略核对控制变量；比较结论不改变任一单 run 的判定。
+`analysis` 只声明 `comparison: cache_scale_in` 与可选的 `alignment_event`，不接受
+`mode` 或 `expected_verdicts`。A/B 仅保留各 run 独立 verdict；控制变量缺失和差异
+逐项展示，不推导整场 PASS/FAIL。退出码 0 仅表示报告生成成功，输入错误或写入失败仍报错。
+
+`alignment_event` 指定双方曲线的共同零点；未声明时保留各 run 相对时间。
+任一侧事件缺失、重复或时间无效时，报告提示并保留双方原时间轴，不改变单 run 判定。
+目录、图例与结构化字段统一使用 A/B；实际 JAR 与配置身份分别展示相同、不同或未知。

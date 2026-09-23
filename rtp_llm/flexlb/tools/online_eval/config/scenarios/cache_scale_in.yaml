@@ -2,19 +2,18 @@ schema_version: 2
 case: cache_scale_in
 profiles:
 - single-nonbatch
+- batch-window
 environment:
   backend: java_mock
   discovery: discovery_file
   perf_preset: glm_5_3_l20d
   model_override:
     baseline: glm_5_3_l20d
-    reason: 测试缓存迁移路径，覆盖设备树开关和调度表达式
+    reason: 测试 flat Device 缓存迁移路径，覆盖设备树开关
   prefill_cache_policy:
     device_tree: false
     memory_tree: false
-  config_overrides:
-    max_inflight_per_prefill_worker: 1024
-    prefill_expression: 77.82664607924481 + 112.5170362714666 * batchSize + 10.87594301934867 * sum(computeTokens / 1024.)
+
 execution:
   timeout_s: 1800
   stage_timeout_s: 60
@@ -81,11 +80,7 @@ parameters:
         identity: structural-relabel
 analysis:
   comparison: cache_scale_in
-  mode: strong
   alignment_event: withdraw_start
-  expected_verdicts:
-    old: FAIL
-    new: PASS
 
 test:
   kind: workload

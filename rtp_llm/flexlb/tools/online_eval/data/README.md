@@ -89,6 +89,14 @@ fit 拒绝不完整窗口。增加预算或分成更小的到达窗口重新采�
 
 模型侧真实观测值只在一个 `data/performance/` 采集档案定义。档案须携带部署身份、采集窗口和完整性字段；缺原始记录的现有档标为 `legacy_unverified`，不能宣称已核验。只含局部参数且无消费者的档标为 `orphan`，不得被新 case 当作权威采集。变更性能/容量先改档案；场景中的测试偏离必须声明基线和理由。
 
+性能档案可用 `master.config_overrides` 捆绑配套 Master 参数，使用与场景
+`environment.config_overrides` 相同的字段；`master.provenance` 记录 `status` 和 `source`。
+记录校验和覆盖 Engine 与 Master 整套内容，修改任一侧须更新校验和。
+加载器分别投影 Mock 性能与 Master 配置，不能把 Master 字段传给 Mock Engine。
+场景选中预设即继承配套参数；显式覆盖配套值须在 `model_override` 声明基线和原因。
+Master 运行形态仍由所选 profile 明确指定。未核验的历史实验配置保持
+`legacy_unverified`，不因为与 Engine 数据放在一起而成为已核验的生产采集。
+
 `prefill_kv_pool_blocks`/`decode_kv_pool_blocks` 是 Java mock 的 KV 池块数；`prefill.memory_cache.capacity_blocks` 是内存前缀树容量；性能 JSON 顶层 `block_size` 是引擎时间模型块口径；capture 行契约的 `BLOCK_SIZE` 是流量前缀摘要块口径。这四者不得以裸称“blocks”混用，也不要求数值相等。mock 的 prefill/decode block-size 是档案里的独立运行参数，读取方必须按各自口径传入。
 
 真实快照的内容变换、记录字段和播放边界以 [流量架构契约](../docs/architecture/traffic.md) 为准。合成画像保留历史格式键 `calibration` 与 `held_out_validated`，目录名不改变旧工件格式或 SHA。

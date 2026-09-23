@@ -164,8 +164,14 @@ def configure_program(config, source):
             f"{source}: only data-only schema_version 2 is accepted; move orchestration into Python"
         )
     name = config.get("case")
-    if "analysis" in config and not isinstance(config["analysis"], dict):
-        raise ScenarioError(f"{source}.analysis: expected mapping")
+    if "analysis" in config:
+        from workload.cache_comparison_config import validate_policy
+        try:
+            if name != "cache_scale_in":
+                raise ValueError("analysis policy is only supported for cache_scale_in")
+            validate_policy(config["analysis"])
+        except ValueError as exc:
+            raise ScenarioError(f"{source}.analysis: {exc}") from exc
     if not isinstance(name, str) or name not in PROGRAMS:
         raise ScenarioError(f"{source}: unknown registered Python case {name!r}")
     # The module path is code-owned. Configuration cannot import arbitrary modules.

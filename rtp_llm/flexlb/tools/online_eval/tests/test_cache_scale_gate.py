@@ -185,7 +185,7 @@ class CacheGateTest(unittest.TestCase):
             audit = spec["sections"][0]["rows"]
             self.assertIn(["Master schedule response QPS", "0%", "MISSING", "本次归档没有该监控序列"], audit)
 
-    def test_ab_requires_aligned_controls(self):
+    def test_ab_reports_independent_outcomes_and_control_evidence(self):
         from workload.cache_gate_ab import compare
 
         old, new = self.evidence(0.1), self.evidence(0.8)
@@ -210,27 +210,27 @@ class CacheGateTest(unittest.TestCase):
             a.write_text(json.dumps(old))
             b.write_text(json.dumps(new))
             result = compare(a, b, Path(d) / "report")
-            self.assertTrue(result["expected_control_observed"])
-            self.assertEqual(result["decision"], "CONTROL_OBSERVED")
-            self.assertEqual(result["versions"]["new"]["source_commit"], "1" * 40)
+            self.assertEqual(result["verdicts"], {"A": "FAIL", "B": "PASS"})
+            self.assertNotIn("decision", result)
+            self.assertEqual(result["identity"]["runs"]["B"]["master"]["source_commit"], "1" * 40)
             old_dir, new_dir = Path(d) / "old-run", Path(d) / "new-run"
             old_dir.mkdir()
             new_dir.mkdir()
             (old_dir / "cache-gate-evidence.json").write_text(json.dumps(old))
             (new_dir / "cache-gate-evidence.json").write_text(json.dumps(new))
             from_dirs = compare(old_dir, new_dir, Path(d) / "from-dirs")
-            self.assertEqual(from_dirs["decision"], "CONTROL_OBSERVED")
+            self.assertEqual(from_dirs["verdicts"], result["verdicts"])
             report_spec = json.loads((Path(d) / "from-dirs/reports/comparison/cache-scale-in-ab/report-spec.json").read_text())
             self.assertEqual(report_spec["panels"][0]["id"], "ab-overlay")
             self.assertEqual(len(report_spec["panels"]), 3)
             runs = report_spec["run_meta"]["runs"]
-            self.assertEqual(set(runs), {"old", "new"})
-            self.assertEqual(runs["old"]["implementation"]["master"]["source_commit"], "0" * 40)
-            self.assertEqual(runs["new"]["implementation"]["master"]["source_commit"], "1" * 40)
+            self.assertEqual(set(runs), {"A", "B"})
+            self.assertEqual(runs["A"]["implementation"]["master"]["source_commit"], "0" * 40)
+            self.assertEqual(runs["B"]["implementation"]["master"]["source_commit"], "1" * 40)
             overlay = report_spec["panels"][0]
             expected_core = {
                 f"{side} · {metric}"
-                for side in ("old", "new")
+                for side in ("A", "B")
                 for metric in ("P Waiting / engine", "P engine count", "P cache hit ratio")
             }
             present = {s["name"] for s in overlay["series"]}
@@ -239,18 +239,20 @@ class CacheGateTest(unittest.TestCase):
                 {s["name"] for s in overlay["series"] if not s["hidden"]},
                 expected_core & present,
             )
-            self.assertEqual(compare(a, b, Path(d) / "report-only", mode="none")["decision"], "REPORT_ONLY")
-            self.assertEqual(compare(a, b, Path(d) / "weak", mode="weak")["decision"], "ALIGNED")
+            reversed_result = compare(b, a, Path(d) / "reversed")
+            self.assertEqual(reversed_result["verdicts"], {"A": "PASS", "B": "FAIL"})
+            self.assertTrue(reversed_result["control_comparison"]["aligned"])
+            self.assertEqual(compare(a, a, Path(d) / "same")["identity"]["master_artifact"], "SAME")
             new["provenance"].pop("actual_master_config")
             b.write_text(json.dumps(new))
-            missing = compare(a, b, Path(d) / "missing", mode="weak")
+            missing = compare(a, b, Path(d) / "missing")
             self.assertEqual(missing["control_comparison"]["status"], "UNKNOWN")
             self.assertIn("/actual_master_config", missing["control_comparison"]["missing"])
             new["provenance"]["actual_master_config"] = {"schemaVersion": 1}
             new["provenance"]["trace"]["sha256"] = "other"
             b.write_text(json.dumps(new))
             result = compare(a, b, Path(d) / "unaligned")
-            self.assertFalse(result["expected_control_observed"])
+            self.assertNotIn("decision", result)
             self.assertIn(
                 "/trace_sha256",
                 [d["path"] for d in result["control_comparison"]["differences"]],
@@ -266,11 +268,11 @@ class CacheGateTest(unittest.TestCase):
                 errors=["warmup timeout"],
             )
             b.write_text(json.dumps(new))
-            result = compare(a, b, Path(d) / "no-withdrawal")
-            self.assertEqual(result["new"]["verdict"], "INVALID")
-            self.assertFalse(result["expected_control_observed"])
+            result = compare(a, b, Path(d) / "no-withdrawal", alignment_event="withdraw_start")
+            self.assertEqual(result["runs"]["B"]["verdict"], "INVALID")
+            self.assertNotIn("decision", result)
             self.assertIn(
-                "缩容事件不完整",
+                "对齐事件 withdraw_start 缺失",
                 (
                     Path(d)
                     / "no-withdrawal/reports/comparison/cache-scale-in-ab/report.html"
@@ -299,7 +301,7 @@ class CacheGateTest(unittest.TestCase):
                 load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"),
                 handlers=handlers(),
             )
-        self.assertEqual(len(plans), 1)
+        self.assertEqual(len(plans), 2)
         self.assertEqual(
             plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False
         )
@@ -326,7 +328,7 @@ class CacheGateTest(unittest.TestCase):
                         load_scenarios(path), handlers=handlers()
                     )
 
-            self.assertEqual(len(compile_case(case)), 1)
+            self.assertEqual(len(compile_case(case)), 2)
             for key, value in (
                 ("intermediate_p", 64),
                 ("intermediate_p", 125),

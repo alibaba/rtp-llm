@@ -105,6 +105,14 @@ OMIT = _Omit()
 _OMITTABLE = frozenset({"queue_timeout_ms", "preemption"})
 
 
+def _validate_affinity(extra_ms, percent):
+    import math
+    if extra_ms is not None and (type(extra_ms) is not int or not 0 <= extra_ms <= 9223372036854775807):
+        raise ValueError("cache_affinity_max_extra_ttft_ms must be a nonnegative Java long")
+    if percent is not None and (type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100):
+        raise ValueError("cache_affinity_min_prefix_hit_percent must be finite and in [0, 100]")
+
+
 @dataclass(frozen=True)
 class ConfigOverride:
     """Explicit schema-v3 overrides; removed schema-v3 keys are rejected."""
@@ -126,8 +134,14 @@ class ConfigOverride:
     cleanup_interval_ms: Optional[int] = None
     decode_max_engine_requests: Optional[int] = None
     decode_max_kv_usage_percent: Optional[int] = None
+    cache_affinity_max_extra_ttft_ms: Optional[int] = None
+    cache_affinity_min_prefix_hit_percent: Optional[float] = None
     prefill_expression: Optional[str] = None
     strip_preemption: bool = False
+
+    def __post_init__(self):
+        _validate_affinity(self.cache_affinity_max_extra_ttft_ms,
+                           self.cache_affinity_min_prefix_hit_percent)
 
     def omit_map(self) -> dict:
         return {f.name: getattr(self, f.name) is OMIT for f in fields(self)}
@@ -221,6 +235,8 @@ def build_flexlb_config(
     # Functional-test workload values come from flexlb_profile_data.
     max_inflight_per_prefill_worker: int = FUNCTIONAL_DEFAULTS["max_inflight_per_prefill_worker"],
     prefill_expression: str = FUNCTIONAL_DEFAULTS["prefill_expression"],
+    cache_affinity_max_extra_ttft_ms: int = 20,
+    cache_affinity_min_prefix_hit_percent: float = 20,
     request_timeout_ms: int = FUNCTIONAL_DEFAULTS["request_timeout_ms"],
     decision_lifetime: float = FUNCTIONAL_DEFAULTS["decision_lifetime"],
     status_rpc_ms: int = FUNCTIONAL_DEFAULTS["status_rpc_ms"],
@@ -230,6 +246,7 @@ def build_flexlb_config(
     decode_max_kv_usage_percent: int = FUNCTIONAL_DEFAULTS["decode_max_kv_usage_percent"],
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
+    _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
     if decision not in ("single", "fixed_window") or dispatcher not in (
         "batch",
         "non_batch",
@@ -292,8 +309,8 @@ def build_flexlb_config(
                             "expression": prefill_expression,
                         },
                         "cacheAffinity": {
-                            "maxExtraTtftMs": 20,
-                            "minPrefixHitPercent": 20,
+                            "maxExtraTtftMs": cache_affinity_max_extra_ttft_ms,
+                            "minPrefixHitPercent": cache_affinity_min_prefix_hit_percent,
                         },
                     },
                     "decode": {
@@ -323,6 +340,8 @@ def build_flexlb_config(
 
 # override field -> document path for the stress base (edit-in-place).
 _STRESS_DOC_PATHS = {
+    "cache_affinity_max_extra_ttft_ms": ("router", "roles", "prefill", "cacheAffinity", "maxExtraTtftMs"),
+    "cache_affinity_min_prefix_hit_percent": ("router", "roles", "prefill", "cacheAffinity", "minPrefixHitPercent"),
     "prefill_expression": ("router", "roles", "prefill", "executionTimeEstimator", "expression"),
     "max_requests": ("scheduler", "decision", "maxRequests"),
     "max_collection_wait_ms": ("scheduler", "decision", "maxCollectionWaitMs"),
@@ -565,6 +584,7 @@ def render_process_config(
 
 _INT_FIELDS = frozenset(
     {
+        "cache_affinity_max_extra_ttft_ms",
         "cleanup_interval_ms",
         "status_rpc_ms",
         "max_requests",
@@ -579,7 +599,7 @@ _INT_FIELDS = frozenset(
         "max_inflight_per_prefill_worker",
     }
 )
-_FLOAT_FIELDS = frozenset({"decision_lifetime"})
+_FLOAT_FIELDS = frozenset({"decision_lifetime", "cache_affinity_min_prefix_hit_percent"})
 _STR_FIELDS = frozenset({"ordering", "decision", "dispatcher", "prefill_expression"})
 _BOOL_FIELDS = frozenset({"strip_preemption"})
 

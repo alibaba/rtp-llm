@@ -27,6 +27,7 @@
   "cache_churn::lru_affinity::single-batch",
   "cache_churn::lru_affinity::single-nonbatch",
   "cache_churn::lru_affinity::window-nonbatch",
+  "cache_scale_in::step::batch-window",
   "cache_scale_in::step::single-nonbatch",
   "client_fallback_failback::all_masters_down::batch-window",
   "client_fallback_failback::all_masters_down::single-batch",

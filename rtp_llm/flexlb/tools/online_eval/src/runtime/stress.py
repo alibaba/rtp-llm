@@ -11,7 +11,8 @@ import time
 from pathlib import Path
 
 from artifacts.archive import create_archive
-from flexlb_cfg import parse_overrides, render_env
+from flexlb_cfg import ConfigOverride, parse_overrides, render_env
+from dataclasses import fields
 from mode_profiles import master_mode_for_profile, resolve_mode
 from monitoring.session import write_monitor_report
 from runtime.harness import (API_JAR, FLEXLB_DIR, MOCK_JAR, TOOL_DIR, ClientOps,
@@ -19,7 +20,7 @@ from runtime.harness import (API_JAR, FLEXLB_DIR, MOCK_JAR, TOOL_DIR, ClientOps,
                              http_get_json, http_post_json, port_in_use,
                              resolve_java21, wait_for)
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
-from runtime.perf_presets import load_performance_file
+from runtime.perf_presets import load_performance_file, load_performance_bundle
 from traffic.datasets import DEFAULT_TRACE, model_path, read_manifest, trace_models
 from traffic.traffic_source import materialize
 
@@ -213,7 +214,14 @@ def required_ports(a) -> list[int]:
 
 def _config(a):
     overrides = parse_overrides(a.config_override) if a.config_override.strip() else None
-    doc = json.loads(render_env(a.profile, overrides))
+    _, _, master = load_performance_bundle(a.performance)
+    paired = dict(master.get("config_overrides", {}))
+    if overrides is not None:
+        paired.update({f.name: getattr(overrides, f.name) for f in fields(ConfigOverride)
+                       if getattr(overrides, f.name) is not None and f.name != "strip_preemption"})
+        if overrides.strip_preemption:
+            paired["strip_preemption"] = True
+    doc = json.loads(render_env(a.profile, ConfigOverride(**paired)))
     doc.setdefault("grpcServer", {}).update(executorCoreSize=128, executorMaxSize=128)
     return json.dumps(doc, separators=(",", ":"))
 

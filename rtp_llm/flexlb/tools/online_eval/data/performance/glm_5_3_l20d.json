@@ -43,6 +43,18 @@
     "reuse_cache": false,
     "reserve_block_ratio": 8
   },
+  "master": {
+    "config_overrides": {
+      "max_inflight_per_prefill_worker": 1024,
+      "prefill_expression": "77.82664607924481 + 112.5170362714666 * batchSize + 10.87594301934867 * sum(computeTokens / 1024.)",
+      "cache_affinity_max_extra_ttft_ms": 1000000000,
+      "cache_affinity_min_prefix_hit_percent": 5
+    },
+    "provenance": {
+      "status": "legacy_unverified",
+      "source": "Paired GLM scenario baseline; cache affinity anchored to archived historical Master experiment, not independently verified against production. Execution estimator uses the current calibrated expression."
+    }
+  },
   "capture": {
     "status": "legacy_unverified",
     "identity": {
@@ -51,7 +63,7 @@
       "deployment": null
     },
     "capture_window": null,
-    "record_sha256": "bf557e9fd1ea1f868df07c3445d06a1a39114ed8837e4468104132accb0c080b",
+    "record_sha256": "c45c2ea040801670342f1c9562084440f631d19d80d84908f0956a9500f4179c",
     "n_prefill": 125,
     "n_decode": 536,
     "prefill_kv_pool_blocks": 31218,

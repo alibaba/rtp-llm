@@ -18,8 +18,8 @@ def preset_names():
     return tuple(_registry())
 
 
-def load_performance_file(path):
-    """Read a capture record; return only mock-engine performance fields."""
+def load_performance_bundle(path):
+    """Validate one Engine/Master record, then project its paired components."""
     document = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise ValueError("performance document must be an object")
@@ -36,7 +36,25 @@ def load_performance_file(path):
             not capture.get("identity", {}).get("deployment") or not capture.get("capture_window")
         ):
             raise ValueError("verified capture requires deployment and window")
-    return document, capture
+    master = document.pop("master", {})
+    if not isinstance(master, dict) or set(master) - {"config_overrides", "provenance"}:
+        raise ValueError("invalid paired master settings")
+    if master:
+        from flexlb_cfg import ConfigOverride
+        overrides = master.get("config_overrides")
+        provenance = master.get("provenance")
+        if not isinstance(overrides, dict) or not isinstance(provenance, dict):
+            raise ValueError("paired master requires config_overrides and provenance")
+        if provenance.get("status") not in {"verified", "legacy_unverified"} or not provenance.get("source"):
+            raise ValueError("paired master requires provenance status and source")
+        ConfigOverride(**overrides)
+    return document, capture, master
+
+
+def load_performance_file(path):
+    """Compatibility projection for consumers that only read Engine settings."""
+    performance, capture, _ = load_performance_bundle(path)
+    return performance, capture
 
 
 def capture_defaults(name):
@@ -63,7 +81,7 @@ def load_preset(name):
     path = (ROOT / entry["performance"]).resolve()
     if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
         raise ValueError(f"perf_preset {name!r} has missing performance file: {path}")
-    performance, capture = load_performance_file(path)
+    performance, capture, master = load_performance_bundle(path)
     runtime = {key: value for key, value in entry.items() if key != "performance"}
     if set(runtime) - {"mock_heap", "mock_extra_args"}:
         raise ValueError(f"perf_preset {name!r} has unknown runtime options: {set(runtime)}")
@@ -76,4 +94,7 @@ def load_preset(name):
         if "mock_extra_args" in runtime:
             raise ValueError(f"perf_preset {name!r} duplicates capture mock settings")
         runtime["mock_extra_args"] = capture["mock_extra_args"]
+    if master:
+        runtime["master_config_overrides"] = master["config_overrides"]
+        runtime["master_provenance"] = master["provenance"]
     return performance, runtime

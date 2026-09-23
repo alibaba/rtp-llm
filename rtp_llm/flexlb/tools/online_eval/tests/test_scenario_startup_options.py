@@ -53,6 +53,39 @@ class StartupOptionsTest(unittest.TestCase):
             "test", "single-nonbatch")
         self.assertEqual(declared["n_prefill"], 64)
 
+    def test_paired_master_baseline_is_rendered_and_explicit_deviations_are_audited(self):
+        from flexlb_cfg import render_env, render_process_config, ConfigOverride
+        from runtime import stress
+        for profile in ("single-nonbatch", "batch-window"):
+            plan = environment({"perf_preset": "glm_5_3_l20d"}, "test", profile)
+            override = ConfigOverride(**plan["config_overrides"])
+            config = json.loads(render_env(profile, override))
+            affinity = config["router"]["roles"]["prefill"]["cacheAffinity"]
+            self.assertEqual(affinity, {"maxExtraTtftMs": 1000000000, "minPrefixHitPercent": 5})
+            envelope = json.loads(render_process_config(profile, override))
+            self.assertEqual(json.loads(dict(envelope["zone_process_setting"]["process_info"]["envs"])["FLEXLB_CONFIG"]), config)
+        raw = {"perf_preset": "glm_5_3_l20d", "config_overrides": {"cache_affinity_max_extra_ttft_ms": 20}}
+        with self.assertRaisesRegex(Exception, "model_override"):
+            environment(raw, "test", "single-nonbatch")
+        raw["model_override"] = {"baseline": "glm_5_3_l20d", "reason": "亲和策略对照"}
+        self.assertEqual(environment(raw, "test", "single-nonbatch")["config_overrides"]["cache_affinity_max_extra_ttft_ms"], 20)
+        args = stress.parse_args(["--performance", str(ROOT / "data/performance/glm_5_3_l20d.json"), "--dry-run"])
+        self.assertEqual(json.loads(stress._config(args))["router"]["roles"]["prefill"]["cacheAffinity"], affinity)
+        self.assertNotIn("master", load_preset("glm_5_3_l20d")[0])
+        for bad in (-1, True, 2**63):
+            with self.assertRaises(ValueError):
+                ConfigOverride(cache_affinity_max_extra_ttft_ms=bad)
+        for bad in (-1, 101, float("nan"), True):
+            with self.assertRaises(ValueError):
+                ConfigOverride(cache_affinity_min_prefix_hit_percent=bad)
+        document = json.loads((ROOT / "data/performance/glm_5_3_l20d.json").read_text())
+        document["master"]["config_overrides"]["cache_affinity_min_prefix_hit_percent"] = 20
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "changed.json"
+            path.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                load_performance_file(path)
+
     def test_preset_registry_is_total_and_rejects_typos_before_launch(self):
         self.assertEqual(("default", "fault_env", "glm_5_3_l20d", "flash_capture_diagnostic", "deepseek_v4_flash_l20c"), preset_names())
         for name in preset_names():
