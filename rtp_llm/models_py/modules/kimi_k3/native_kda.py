@@ -25,7 +25,7 @@ class StateSequence:
 
 
 def plan_state_sequences(cu_seqlens, prefix_lengths, block_table, block_size):
-    """Consume CPU metadata; zero block IDs designate virtual requests."""
+    """Zero IDs designate virtual requests; -1 skips a state checkpoint store."""
     if block_size <= 0 or len(cu_seqlens) != len(prefix_lengths) + 1:
         raise ValueError("Invalid KDA sequence geometry")
     if len(block_table) != len(prefix_lengths) or cu_seqlens[0] != 0:
@@ -48,8 +48,8 @@ def plan_state_sequences(cu_seqlens, prefix_lengths, block_table, block_size):
                 raise ValueError("Virtual KDA request cannot have cached history")
             result.append(StateSequence(None, ()))
             continue
-        if any(block <= 0 for block in ids):
-            raise ValueError("Real KDA request contains a null or negative cache block")
+        if any(block == 0 or block < -1 for block in ids):
+            raise ValueError("Real KDA request contains a null or invalid cache block")
         initial = table[(prefix - 1) // block_size] if prefix else None
         if initial is not None and initial <= 0:
             raise ValueError("Missing KDA prefix state")
@@ -166,6 +166,9 @@ def flash_kda_paged_prefill(
                 state,
                 final
             )
-            cache_states[segment.cache_block].copy_(final[0].transpose(-1, -2))
+            # RTP uses -1 for unretained linear-cache checkpoints (for example
+            # reuse_cache=False). Still compute and carry the recurrent state.
+            if segment.cache_block > 0:
+                cache_states[segment.cache_block].copy_(final[0].transpose(-1, -2))
             state = final
     return out

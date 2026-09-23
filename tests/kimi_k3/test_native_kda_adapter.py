@@ -26,11 +26,21 @@ def test_state_sequence_plans():
                 (cu[i] + 128, cu[i + 1]),
             ]
     assert not plan_state_sequences([0, 17], [0], [[0]], 128)[0].segments
+    for blocks in ([-1, 2], [-1, -1]):
+        plan = plan_state_sequences([0, 129], [0], [blocks], 128)[0]
+        assert plan.initial_block is None
+        assert [(s.start, s.end, s.cache_block) for s in plan.segments] == [
+            (0, 128, blocks[0]),
+            (128, 129, blocks[1]),
+        ]
     for args in [
         ([0, 2], [-1], [[1]], 128),
         ([0, 257], [0], [[1]], 128),
         ([0, 129], [0], [[1, 0]], 128),
         ([0, 1], [128], [[0, 2]], 128),
+        ([0, 1], [128], [[-1, 2]], 128),
+        ([0, 129], [0], [[-1, 0]], 128),
+        ([0, 129], [0], [[-2, 2]], 128),
     ]:
         try:
             plan_state_sequences(*args)
@@ -41,7 +51,8 @@ def test_state_sequence_plans():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_flashkda_paged_state_layout():
+@pytest.mark.parametrize("checkpoint_mode", ["full", "final", "none"])
+def test_flashkda_paged_state_layout(checkpoint_mode):
     flash_kda = pytest.importorskip("flash_kda")
     torch.manual_seed(922)
     lengths = [4167, 193, 32]
@@ -61,6 +72,10 @@ def test_flashkda_paged_state_layout():
     cache = storage[:, : heads * dim * dim].view(10, heads, dim, dim)
     before = storage.clone()
     tables = [[1, 2], [5, 6], [0, 0]]
+    if checkpoint_mode != "full":
+        tables[0][0] = -1
+    if checkpoint_mode == "none":
+        tables[0][1] = tables[1][1] = -1
     out = flash_kda_paged_prefill(
         *xs, beta, alog, bias, -5.0, cache, cu, [0, 4096, 0], tables, 4096
     )
@@ -106,11 +121,18 @@ def test_flashkda_paged_state_layout():
         torch.testing.assert_close(
             out[cu[request] : cu[request + 1]], expected, rtol=0, atol=0
         )
-        torch.testing.assert_close(cache[[2, 6][request]], state, rtol=0, atol=0)
+        if checkpoint_mode != "none":
+            torch.testing.assert_close(cache[[2, 6][request]], state, rtol=0, atol=0)
     _, boundary_state = native(0, 4096)
-    torch.testing.assert_close(cache[1], boundary_state, rtol=0, atol=0)
+    if checkpoint_mode == "full":
+        torch.testing.assert_close(cache[1], boundary_state, rtol=0, atol=0)
     assert torch.count_nonzero(out[cu[2] :]).item() == 0
-    for block in (0, 3, 4, 5, 7, 8, 9):
+    written = (
+        {1, 2, 6}
+        if checkpoint_mode == "full"
+        else {2, 6} if checkpoint_mode == "final" else set()
+    )
+    for block in set(range(10)) - written:
         torch.testing.assert_close(storage[block], before[block], rtol=0, atol=0)
     torch.testing.assert_close(
         storage[:, heads * dim * dim :], before[:, heads * dim * dim :], rtol=0, atol=0
