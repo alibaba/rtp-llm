@@ -37,11 +37,9 @@ def support(target, k: int = None) -> bool:
                 "pre-quantized checkpoints are not supported"
             )
         if target.quant_config.get_method() not in {
-            "FP8",
             "FP8_DYNAMIC_PER_TENSOR",
             "FP8_PER_BLOCK",
             "FP8_PER_CHANNEL_COMPRESSED",
-            "FP8_PER_CHANNEL_QUARK",
         }:
             raise ValueError(
                 "SM120 W4A16 dense FFN only supports online FP8 quantization"
