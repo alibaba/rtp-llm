@@ -47,6 +47,11 @@ struct StreamUpdateInfo {
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
     std::optional<ErrorInfo>          error_info;
+    // Set by the PP result path when the round carried a non-final fastgen
+    // chunk. Decided at dispatch, not here: the chunk cursors keep advancing
+    // while the round is in flight, so by result time the stream can no longer
+    // tell which chunk this update belongs to.
+    bool intermediate_chunk = false;
 };
 
 struct StreamSpecUpdateInfo {
@@ -233,7 +238,31 @@ public:
     int64_t prefillRemoteReuseLen() const;
     int64_t prefillMemoryReuseLen() const;
 
-    bool                 isContextStream() const;
+    bool isContextStream() const;
+    bool isChunkStream() const;
+    bool enableFastGen() const {
+        return enable_fast_gen_;
+    }
+    // Outstanding fastgen chunk results (dispatch/consume pairing on the
+    // first-stage root). Gates chunked re-scheduling: the final chunk must
+    // never re-dispatch before its result finishes the stream.
+    int ppOutstandingResults() const {
+        return pp_outstanding_results_.load(std::memory_order_acquire);
+    }
+    void ppChunkDispatched() {
+        ++pp_outstanding_results_;
+    }
+    void ppResultReturned() {
+        const auto previous = pp_outstanding_results_.fetch_sub(1, std::memory_order_acq_rel);
+        if (previous <= 0) {
+            pp_outstanding_results_.fetch_add(1, std::memory_order_release);
+            throw std::logic_error("PP chunk result has no matching dispatch");
+        }
+    }
+    absl::StatusOr<int>  acquireCapacity(int token_capacity);
+    absl::StatusOr<int>  acquireNextChunk();
+    int                  currentChunkLen() const;
+    void                 resetChunkLen(int chunk_len, int max_chunk_len);
     const torch::Tensor& cumLogProbs() const;
 
     torch::Tensor                     completeTokenIds();
@@ -801,15 +830,25 @@ protected:
     int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
-    size_t                                iter_count_           = 0;
-    size_t                                sp_iter_count_        = 0;
-    size_t                                last_output_pos_      = 0;
-    int                                   initial_reuse_length_ = 0;
-    int                                   reuse_length_         = 0;
-    int                                   local_reuse_length_   = 0;
-    int                                   device_reuse_length_  = 0;
-    int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
+    // fastgen three-cursor chunked prefill: [last_chunk_len_, current_chunk_len_)
+    // is the token window of the chunk being computed; max_chunk_len_ is the
+    // full sequence. prefixLength()/contextLength() read these so each
+    // scheduling round presents one chunk as the context.
+    bool             enable_fast_gen_    = false;
+    int              fast_gen_chunk_len_ = 0;
+    int              current_chunk_len_  = 0;
+    int              last_chunk_len_     = 0;
+    int              max_chunk_len_      = 0;
+    std::atomic<int> pp_outstanding_results_{0};
+    size_t           iter_count_           = 0;
+    size_t           sp_iter_count_        = 0;
+    size_t           last_output_pos_      = 0;
+    int              initial_reuse_length_ = 0;
+    int              reuse_length_         = 0;
+    int              local_reuse_length_   = 0;
+    int              device_reuse_length_  = 0;
+    int              remote_reuse_length_  = 0;
+    int              memory_reuse_length_  = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

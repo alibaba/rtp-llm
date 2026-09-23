@@ -398,6 +398,8 @@ class EplbMode:
 class FIFOSchedulerConfig:
     cp_force_single_prefill: bool
     decode_prefill_ratio: str
+    enable_fast_gen: bool
+    fast_gen_max_context_len: int
     max_batch_tokens_size: int
     max_batch_tokens_without_cache: int
     max_context_batch_size: int

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 
+#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
@@ -12,6 +13,19 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+/** Fastgen chunks allowed in flight per context stream. pp_size fills the
+ * pipeline; 1 serializes, one chunk per pipeline round-trip. Overridable so
+ * overlap depth can be bisected without a rebuild.
+ */
+int64_t resolvePPChunkOverlapCap(int64_t pp_size) {
+    const auto override_cap = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_CHUNK_OVERLAP", static_cast<int64_t>(0));
+    return override_cap > 0 ? override_cap : std::max<int64_t>(pp_size, 1);
+}
+
+}  // namespace
 
 PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                          const ModelConfig&                     model_config,
@@ -30,12 +44,17 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                       metrics_reporter),
     max_batch_tokens_without_cache_(
         static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
-    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
+    cp_force_single_prefill_(parallelism_config.local_cp_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
-    prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
+    prefill_cp_size_(parallelism_config.local_cp_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1),
-    sp_config_(sp_config) {}
+    sp_config_(sp_config),
+    pp_overlap_cap_(resolvePPChunkOverlapCap(parallelism_config.pp_size)) {
+    RTP_LLM_LOG_INFO("PPScheduler fastgen chunk overlap cap=%ld (pp_size=%ld)",
+                     static_cast<long>(pp_overlap_cap_),
+                     static_cast<long>(parallelism_config.pp_size));
+}
 
 PPScheduler::~PPScheduler() {
     (void)stop();
@@ -91,6 +110,17 @@ list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
         if (stream->isPPInflight()) {
             ++it;
             continue;
+        }
+        if (sp_config_.type == SP_TYPE_NONE && stream->enableFastGen() && stream->isContextStream()
+            && !stream->isFakeStream()) {
+            // Bound outstanding chunks and never redispatch an already-issued final window.
+            const auto outstanding = stream->ppOutstandingResults();
+            // Cancellation/error must not release KV while earlier chunks still use it.
+            if ((outstanding > 0 && stream->hasError())
+                || (stream->isChunkStream() ? outstanding >= pp_overlap_cap_ : outstanding > 0)) {
+                ++it;
+                continue;
+            }
         }
 
         const auto new_state = stream->moveToNext();
@@ -327,6 +357,22 @@ absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
     running_streams_.splice(running_streams_.end(), new_streams_);
 
     for (const auto& stream : scheduled_streams) {
+        // fastgen: advance the three-cursor window once per scheduled round so
+        // gatherModelInput presents this round's chunk. The final chunk needs
+        // no acquire (cursor already at max; isChunkStream() false).
+        if (sp_config_.type == SP_TYPE_NONE && stream->enableFastGen() && stream->isContextStream()
+            && !stream->isFakeStream()) {
+            if (stream->isChunkStream()) {
+                const auto acquired = stream->acquireNextChunk();
+                if (!acquired.ok()) {
+                    RTP_LLM_LOG_ERROR("stream [%ld] acquireNextChunk failed: %s",
+                                      stream->streamId(),
+                                      acquired.status().ToString().c_str());
+                    stream->reportEvent(StreamEvents::Error, ErrorCode::UNKNOWN_ERROR, "acquireNextChunk failed");
+                }
+            }
+            stream->ppChunkDispatched();
+        }
         stream->setPPInflight();
     }
 

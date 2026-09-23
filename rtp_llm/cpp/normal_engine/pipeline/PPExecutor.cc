@@ -84,8 +84,9 @@ GenerateStreamPtr PPExecutor::createMinFakeDecodeStream(const ModelConfig&      
 }
 
 void PPExecutor::InflightBatch::reset() {
-    skip_run         = true;
-    stream_groups    = StreamGroups();
+    skip_run      = true;
+    stream_groups = StreamGroups();
+    round_snapshot.clear();
     schedule_time_us = 0;
 }
 
@@ -182,7 +183,7 @@ absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return absl::OkStatus();
     }
-    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result);
+    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result, batch.round_snapshot);
 }
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
@@ -480,6 +481,9 @@ void PPExecutor::prepareStreams(std::list<GenerateStreamPtr>& streams) {
             if (!stream->isFakeStream() && !stream->isPerfTest() && stream->generateConfig()->max_new_tokens != 1) {
                 stream->reportError(ErrorCode::INVALID_PARAMS,
                                     "DSV4 PP PREFILL_CP compatibility supports one-token prefill requests only");
+                if (!sp_enabled_ && stream->enableFastGen() && stream->isContextStream() && !stream->isFakeStream()) {
+                    stream->ppResultReturned();
+                }
                 stream->clearPPInflight();
                 it = streams.erase(it);
             } else {
@@ -1035,6 +1039,14 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     if (isFirstStage() && isStageRoot()) {
         inflight.stream_groups    = std::move(scheduled_stream_groups);
         inflight.schedule_time_us = schedule_time_us;
+        // Freeze dispatch geometry before cursors advance past pending chunk results.
+        for (const auto& stream : inflight.stream_groups.allStreams()) {
+            inflight.round_snapshot.push_back(
+                {static_cast<int64_t>(stream->currentBatchSize()),
+                 static_cast<int64_t>(stream->currentExecuteTokenSize()),
+                 stream->isContextStream() && stream->isChunkStream(),
+                 stream->enableFastGen() && stream->isContextStream() && stream->ppOutstandingResults() > 0});
+        }
     }
 
     /** 4. send the plan to next stage  */
@@ -1098,9 +1110,23 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         auto forward_done = cuda_graph::makeGraphEvent();
         forward_done.record(cuda_graph::graphGetCurrentStream());
         forward_done.synchronize();
+        // Complete side-stream state writes before rescheduling the next chunk.
+        cudaDeviceSynchronize();
 
         if (!isLastStage()) {
             asyncSendTensors(output_tensors, inflight.activation_sends);
+            // Chunked prefill: release fastgen context streams as soon as the chunk
+            // has left stage 0 so the pipeline fills. Re-scheduling is gated by
+            // pp_outstanding_results_ in PPScheduler (the final chunk must not
+            // re-dispatch before its result finishes the stream).
+            if (isFirstStage() && isStageRoot()) {
+                for (const auto& stream : inflight.stream_groups.allStreams()) {
+                    if (!sp_enabled_ && stream->enableFastGen() && stream->isContextStream()
+                        && !stream->isFakeStream()) {
+                        stream->clearPPInflight();
+                    }
+                }
+            }
         } else {
             PPExecutionResult execution_result;
             if (isStageRoot()) {

@@ -74,7 +74,9 @@ private:
     const bool                       cp_force_single_prefill_;
     const size_t                     prefill_cp_size_;
     const SpeculativeExecutionConfig sp_config_;
-    std::vector<int64_t>              finished_request_ids_;
+    // Maximum outstanding fastgen prefill chunks per stream.
+    const int64_t        pp_overlap_cap_ = 1;
+    std::vector<int64_t> finished_request_ids_;
 };
 
 }  // namespace rtp_llm

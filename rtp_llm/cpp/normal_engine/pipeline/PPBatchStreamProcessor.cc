@@ -199,11 +199,11 @@ PPOutputConfig PPBatchStreamProcessor::gatherOutputConfig(const StreamGroups& st
 }
 
 void PPBatchStreamProcessor::initSamplingStates(const PPSamplingPlan& sampling_plan,
-                                               SamplingStates&       sampling_states,
-                                               PPExecutionResult&    result) const {
-    const auto  stream_count = sampling_plan.request_ids.size(0);
-    const auto* request_ids  = sampling_plan.request_ids.data_ptr<int64_t>();
-    int64_t sequence_offset = 0;
+                                                SamplingStates&       sampling_states,
+                                                PPExecutionResult&    result) const {
+    const auto  stream_count    = sampling_plan.request_ids.size(0);
+    const auto* request_ids     = sampling_plan.request_ids.data_ptr<int64_t>();
+    int64_t     sequence_offset = 0;
     for (int64_t stream_idx = 0; stream_idx < stream_count; ++stream_idx) {
         const auto stream_sequence_count = std::max<int32_t>(sampling_plan.num_return_sequences[stream_idx], 1);
         if (sampling_states.find(request_ids[stream_idx]) == sampling_states.end()) {
@@ -251,9 +251,8 @@ SamplerInputs PPBatchStreamProcessor::gatherSamplerInputs(const PPSamplingPlan& 
     inputs.vocab_size = logits.size(-1);
     fillSamplerInputs(inputs, sampling_plan, sampling_states, score_batch, propose_step, verify_tokens);
 
-    inputs.logits = score_batch || output_config.return_logits || output_config.return_softmax_probs ?
-                        logits.clone() :
-                        logits;
+    inputs.logits =
+        score_batch || output_config.return_logits || output_config.return_softmax_probs ? logits.clone() : logits;
     if (output_config.return_all_probs != ReturnAllProbsMode::NONE) {
         inputs.all_probs = torch::zeros({total_batch_size, logits.size(1)}, logits.options().dtype(torch::kFloat32));
         inputs.return_original_all_probs = output_config.return_all_probs == ReturnAllProbsMode::ORIGINAL;
@@ -262,9 +261,9 @@ SamplerInputs PPBatchStreamProcessor::gatherSamplerInputs(const PPSamplingPlan& 
 }
 
 SamplerInputs PPBatchStreamProcessor::allocateSamplerInputs(const PPSamplingPlan& sampling_plan,
-                                                           const PPOutputConfig& output_config,
-                                                           size_t                total_batch_size,
-                                                           size_t                propose_step) const {
+                                                            const PPOutputConfig& output_config,
+                                                            size_t                total_batch_size,
+                                                            size_t                propose_step) const {
     RTP_LLM_CHECK(sampling_plan.token_ids.dim() == 2 && sampling_plan.token_ids.size(1) > 0);
 
     static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
@@ -277,7 +276,7 @@ SamplerInputs PPBatchStreamProcessor::allocateSamplerInputs(const PPSamplingPlan
     sampler_inputs.batch_size_out = total_batch_size;
     sampler_inputs.step           = sampling_plan.token_ids.size(1) - 1 + propose_step;
 
-    const auto batch_size = static_cast<int64_t>(total_batch_size);
+    const auto batch_size    = static_cast<int64_t>(total_batch_size);
     sampler_inputs.token_ids = torch::zeros({batch_size, static_cast<int64_t>(sampler_inputs.step + 1)}, pinned_i32);
     sampler_inputs.input_lengths        = torch::empty({batch_size}, pinned_i32);
     sampler_inputs.sequence_lengths     = torch::empty({batch_size}, pinned_i32);
@@ -346,7 +345,7 @@ void PPBatchStreamProcessor::fillSamplerInputs(SamplerInputs&        sampler_inp
     const auto  plan_token_stride         = sampling_plan.token_ids.stride(0);
     const auto  token_stride              = sampler_inputs.token_ids.stride(0);
 
-    auto processor_states = std::make_shared<LogitsProcessorStates>();
+    auto  processor_states = std::make_shared<LogitsProcessorStates>();
     auto* cum_log_probs =
         sampler_inputs.cum_log_probs.defined() ? sampler_inputs.cum_log_probs.data_ptr<float>() : nullptr;
     const auto* request_ids = sampling_plan.request_ids.data_ptr<int64_t>();
@@ -371,11 +370,11 @@ void PPBatchStreamProcessor::fillSamplerInputs(SamplerInputs&        sampler_inp
             RTP_LLM_CHECK(seq_len >= 0 && seq_len <= sampling_plan.token_ids.size(1)
                           && seq_len + (score_batch ? row : 0) <= static_cast<int64_t>(sampler_inputs.step));
 
-            input_lengths[target_row]        = plan_input_lengths[source_row];
-            sequence_lengths[target_row]     = seq_len + (score_batch ? static_cast<int32_t>(row) : 0);
-            num_beams_in[target_row]         = 1;
-            num_beams_out[target_row]        = 1;
-            top_k[target_row]                = plan_top_k[source_row];
+            input_lengths[target_row]    = plan_input_lengths[source_row];
+            sequence_lengths[target_row] = seq_len + (score_batch ? static_cast<int32_t>(row) : 0);
+            num_beams_in[target_row]     = 1;
+            num_beams_out[target_row]    = 1;
+            top_k[target_row]            = plan_top_k[source_row];
             if (top_k[target_row] > 0) {
                 top_k[target_row] = std::min(top_k[target_row], static_cast<int32_t>(sampler_inputs.vocab_size));
             }
@@ -471,17 +470,17 @@ std::optional<ErrorInfo> PPBatchStreamProcessor::initLogitsProcessors(std::vecto
 }
 
 void PPBatchStreamProcessor::fillExecutionResult(const PPExecutionPlan& plan,
-                                                const GptModelOutputs& model_output,
-                                                const SamplerOutput&   sampler_output,
-                                                PPExecutionResult&     result) const {
+                                                 const GptModelOutputs& model_output,
+                                                 const SamplerOutput&   sampler_output,
+                                                 PPExecutionResult&     result) const {
     const auto stream_count     = plan.sampling_plan.request_ids.size(0);
     const auto total_batch_size = plan.sampling_plan.token_ids.size(0);
-    RTP_LLM_CHECK_WITH_INFO(
-        sampler_output.token_ids.defined() && sampler_output.token_ids.dim() == 2
-            && sampler_output.token_ids.size(0) == total_batch_size && sampler_output.token_ids.size(1) > 0
-            && sampler_output.success.defined() && sampler_output.success.dim() == 1
-            && sampler_output.success.size(0) == total_batch_size,
-        "sampler returned invalid tensors for PP execution result");
+    RTP_LLM_CHECK_WITH_INFO(sampler_output.token_ids.defined() && sampler_output.token_ids.dim() == 2
+                                && sampler_output.token_ids.size(0) == total_batch_size
+                                && sampler_output.token_ids.size(1) > 0 && sampler_output.success.defined()
+                                && sampler_output.success.dim() == 1
+                                && sampler_output.success.size(0) == total_batch_size,
+                            "sampler returned invalid tensors for PP execution result");
     if (plan.output_config.return_logits) {
         result.logits = model_output.logits.to(torch::kCPU).contiguous();
     }
@@ -587,21 +586,38 @@ void PPBatchStreamProcessor::fillExecutionResult(const PPExecutionPlan& plan,
     }
 }
 
-absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups& stream_groups,
+absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&      stream_groups,
                                                              const PPExecutionResult& result) const {
+    std::vector<PPStreamRoundSnapshot> snapshot;
+    for (const auto& stream : stream_groups.allStreams()) {
+        snapshot.push_back(
+            {static_cast<int64_t>(stream->currentBatchSize()),
+             static_cast<int64_t>(stream->currentExecuteTokenSize()),
+             stream->isContextStream() && stream->isChunkStream(),
+             stream->enableFastGen() && stream->isContextStream() && stream->ppOutstandingResults() > 0});
+    }
+    return dispatchExecutionResult(stream_groups, result, snapshot);
+}
+
+absl::Status
+PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&                       stream_groups,
+                                                const PPExecutionResult&                  result,
+                                                const std::vector<PPStreamRoundSnapshot>& round_snapshot) const {
+    RTP_LLM_CHECK_WITH_INFO(round_snapshot.size() == stream_groups.size(),
+                            "PP round snapshot count does not match the inflight stream count");
     validateExecutionResult(stream_groups, result);
     if (sp_enabled_) {
         return dispatchSpeculativeExecutionResult(stream_groups, result);
     }
-    return dispatchNormalExecutionResult(stream_groups, result);
+    return dispatchNormalExecutionResult(stream_groups, result, round_snapshot);
 }
 
 void PPBatchStreamProcessor::validateExecutionResult(const StreamGroups&      stream_groups,
                                                      const PPExecutionResult& result) const {
     const auto stream_count = static_cast<int64_t>(stream_groups.size());
     RTP_LLM_CHECK_WITH_INFO(result.request_ids.defined() && result.request_ids.device().is_cpu()
-                                && result.request_ids.scalar_type() == torch::kInt64
-                                && result.request_ids.dim() == 1 && result.request_ids.size(0) == stream_count,
+                                && result.request_ids.scalar_type() == torch::kInt64 && result.request_ids.dim() == 1
+                                && result.request_ids.size(0) == stream_count,
                             "PP execution result request count does not match the inflight stream count");
     RTP_LLM_CHECK_WITH_INFO(result.prompt_logits.size() == static_cast<size_t>(stream_count),
                             "PP prompt-logits result count does not match the inflight stream count");
@@ -610,22 +626,38 @@ void PPBatchStreamProcessor::validateExecutionResult(const StreamGroups&      st
                             "PP request error counts do not match the inflight stream count");
 }
 
-absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamGroups& stream_groups,
-                                                                   const PPExecutionResult& result) const {
+absl::Status
+PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamGroups&                       stream_groups,
+                                                      const PPExecutionResult&                  result,
+                                                      const std::vector<PPStreamRoundSnapshot>& round_snapshot) const {
     const auto all_streams = stream_groups.allStreams();
 
-    const auto* request_ids  = result.request_ids.data_ptr<int64_t>();
-    int64_t     batch_idx    = 0;
-    int64_t     stream_idx   = 0;
-    int64_t     token_offset = 0;
-    int64_t     loss_offset  = 0;
+    const auto* request_ids = result.request_ids.data_ptr<int64_t>();
+    size_t      check_idx   = 0;
+    for (const auto& stream : all_streams) {
+        const auto& round = round_snapshot[check_idx];
+        RTP_LLM_CHECK_WITH_INFO(request_ids[check_idx] == stream->streamId(),
+                                "PP execution result request order does not match the inflight stream order");
+        RTP_LLM_CHECK_WITH_INFO(round.batch_size > 0 && round.execute_token_size >= 0
+                                    && round.execute_token_size % round.batch_size == 0,
+                                "PP round snapshot has invalid batch/token geometry");
+        RTP_LLM_CHECK_WITH_INFO(!round.tracks_chunk_result || stream->ppOutstandingResults() > 0,
+                                "PP result has no matching outstanding chunk");
+        ++check_idx;
+    }
+    int64_t batch_idx    = 0;
+    int64_t stream_idx   = 0;
+    int64_t token_offset = 0;
+    int64_t loss_offset  = 0;
     for (const auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(request_ids[stream_idx] == stream->streamId(),
                                 "PP execution result request order does not match the inflight stream order");
-        const auto stream_batch_size   = static_cast<int64_t>(stream->currentBatchSize());
-        const auto tokens_per_sequence = stream->isContextStream() ? stream->contextLength() : 1;
-        const auto token_size          = tokens_per_sequence * stream_batch_size;
-        const auto loss_size           = std::max<int64_t>(tokens_per_sequence - 1, 0);
+        const auto& round             = round_snapshot[static_cast<size_t>(stream_idx)];
+        const auto  stream_batch_size = round.batch_size;
+        const auto  token_size        = round.execute_token_size;
+        RTP_LLM_CHECK_WITH_INFO(stream_batch_size > 0 && token_size >= 0 && token_size % stream_batch_size == 0,
+                                "PP round snapshot has invalid batch/token geometry");
+        const auto loss_size = std::max<int64_t>(token_size / stream_batch_size - 1, 0);
         dispatchNormalSingleStream(stream,
                                    result,
                                    stream_idx,
@@ -634,7 +666,11 @@ absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamG
                                    token_offset,
                                    token_size,
                                    loss_offset,
-                                   loss_size);
+                                   loss_size,
+                                   round.intermediate_chunk);
+        if (round.tracks_chunk_result) {
+            stream->ppResultReturned();
+        }
         stream->clearPPInflight();
         ++stream_idx;
         batch_idx += stream_batch_size;
@@ -644,15 +680,16 @@ absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamG
     return absl::OkStatus();
 }
 
-void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&  stream,
-                                                        const PPExecutionResult&  result,
-                                                        int64_t                   stream_idx,
-                                                        int64_t                   batch_idx,
-                                                        int64_t                   stream_batch_size,
-                                                        int64_t                   token_offset,
-                                                        int64_t                   token_size,
-                                                        int64_t                   loss_offset,
-                                                        int64_t                   loss_size) const {
+void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr& stream,
+                                                        const PPExecutionResult& result,
+                                                        int64_t                  stream_idx,
+                                                        int64_t                  batch_idx,
+                                                        int64_t                  stream_batch_size,
+                                                        int64_t                  token_offset,
+                                                        int64_t                  token_size,
+                                                        int64_t                  loss_offset,
+                                                        int64_t                  loss_size,
+                                                        bool                     intermediate_chunk) const {
     const auto& error = result.request_errors[stream_idx];
     if (error.hasError()) {
         StreamUpdateInfo update_info{};
@@ -702,20 +739,21 @@ void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&
                           true,
                           false,
                           std::move(prompt_logits),
-                          std::nullopt});
+                          std::nullopt,
+                          intermediate_chunk});
 }
 
 torch::Tensor PPBatchStreamProcessor::gatherDraftNextPositionIds(const StreamGroups&   stream_groups,
-                                                               const GptModelInputs& model_input) const {
+                                                                 const GptModelInputs& model_input) const {
     if (!sp_enabled_ || model_input.is_target_verify || !model_input.combo_position_ids.defined()) {
         return {};
     }
 
     const auto streams         = stream_groups.allStreams();
     const auto position_factor = model_input_gatherer_config_.position_id_len_factor;
-    auto position_ids = torch::empty({static_cast<int64_t>(streams.size() * position_factor)},
+    auto       position_ids    = torch::empty({static_cast<int64_t>(streams.size() * position_factor)},
                                      torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-    size_t row = 0;
+    size_t     row             = 0;
     for (const auto& stream : streams) {
         stream->generateNextPositionId(position_ids.data_ptr<int32_t>() + row * position_factor);
         ++row;
@@ -723,15 +761,16 @@ torch::Tensor PPBatchStreamProcessor::gatherDraftNextPositionIds(const StreamGro
     return position_ids;
 }
 
-absl::StatusOr<GptModelInputs> PPBatchStreamProcessor::gatherTargetVerifyModelInput(
-    const StreamGroups& stream_groups, size_t propose_step, TensorHolder& host_holder) const {
+absl::StatusOr<GptModelInputs> PPBatchStreamProcessor::gatherTargetVerifyModelInput(const StreamGroups& stream_groups,
+                                                                                    size_t              propose_step,
+                                                                                    TensorHolder& host_holder) const {
     auto model_input_status = gatherModelInput(stream_groups, host_holder);
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
-    auto model_input = std::move(model_input_status.value());
-    const auto batch_size = static_cast<int64_t>(stream_groups.size());
-    const auto score_len = static_cast<int64_t>(propose_step + 1);
+    auto       model_input     = std::move(model_input_status.value());
+    const auto batch_size      = static_cast<int64_t>(stream_groups.size());
+    const auto score_len       = static_cast<int64_t>(propose_step + 1);
     const auto position_factor = model_input_gatherer_config_.position_id_len_factor;
-    auto tokens = torch::empty({batch_size, score_len}, torch::kInt32).pin_memory();
+    auto       tokens          = torch::empty({batch_size, score_len}, torch::kInt32).pin_memory();
     tokens.select(1, 0).copy_(model_input.combo_tokens.to(torch::kCPU));
     if (model_input.combo_position_ids.defined()) {
         model_input.combo_position_ids =
@@ -741,8 +780,9 @@ absl::StatusOr<GptModelInputs> PPBatchStreamProcessor::gatherTargetVerifyModelIn
     int64_t row = 0;
     for (const auto& stream : stream_groups.allStreams()) {
         const auto& proposals = stream->getSPOutputBuffer()->tokens;
-        tokens[row].narrow(0, 1, propose_step).copy_(
-            proposals.flatten().narrow(0, proposals.numel() - propose_step, propose_step));
+        tokens[row]
+            .narrow(0, 1, propose_step)
+            .copy_(proposals.flatten().narrow(0, proposals.numel() - propose_step, propose_step));
         if (model_input.combo_position_ids.defined()) {
             auto* positions = model_input.combo_position_ids.data_ptr<int32_t>() + row * score_len * position_factor;
             stream->generateNextPositionId(positions);
@@ -755,28 +795,29 @@ absl::StatusOr<GptModelInputs> PPBatchStreamProcessor::gatherTargetVerifyModelIn
         ++row;
     }
     host_holder.hold_host(tokens);
-    model_input.combo_tokens = tokens.reshape({-1}).to(torch::kCUDA, /*non_blocking=*/true);
-    model_input.prefix_lengths = model_input.sequence_lengths.clone();
-    model_input.sequence_lengths = torch::empty({0}, model_input.sequence_lengths.options());
-    model_input.input_lengths = torch::full({batch_size}, score_len, model_input.input_lengths.options());
+    model_input.combo_tokens      = tokens.reshape({-1}).to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.prefix_lengths    = model_input.sequence_lengths.clone();
+    model_input.sequence_lengths  = torch::empty({0}, model_input.sequence_lengths.options());
+    model_input.input_lengths     = torch::full({batch_size}, score_len, model_input.input_lengths.options());
     model_input.lm_output_indexes = torch::arange(batch_size * score_len, model_input.input_lengths.options());
-    model_input.is_target_verify = true;
+    model_input.is_target_verify  = true;
     return model_input;
 }
 
-absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const StreamGroups& stream_groups,
+absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const StreamGroups&      stream_groups,
                                                                         const PPExecutionResult& result) const {
     const auto all_streams = stream_groups.allStreams();
     const auto batch_size  = static_cast<int64_t>(all_streams.size());
     const bool is_prefill  = all_streams.empty() || all_streams.front()->isContextStream();
     RTP_LLM_CHECK_WITH_INFO(
-        stream_groups.totalModelBatchSize() == all_streams.size() && result.new_token_lengths.device().is_cpu()
-            && result.new_token_lengths.numel() == batch_size,
+        stream_groups.totalModelBatchSize() == all_streams.size() && result.new_token_lengths.defined()
+            && result.new_token_lengths.device().is_cpu() && result.new_token_lengths.scalar_type() == torch::kInt32
+            && result.new_token_lengths.dim() == 1 && result.new_token_lengths.numel() == batch_size,
         "PP speculative execution result requires one new token count per request");
 
     const auto* request_ids       = result.request_ids.data_ptr<int64_t>();
     const auto* new_token_lengths = result.new_token_lengths.data_ptr<int32_t>();
-    int64_t row = 0;
+    int64_t     row               = 0;
     for (const auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(request_ids[row] == stream->streamId(),
                                 "PP execution result request order does not match the inflight stream order");
