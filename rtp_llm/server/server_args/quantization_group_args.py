@@ -30,3 +30,14 @@ def init_quantization_group_args(parser, quantization_config):
         default=False,
         help=("是否开启 sm120 中小 batch 的 w4a16 ffn 量化来加速 gemm"),
     )
+    quantization_group.add_argument(
+        "--enable_qwen3_pro5000_int8_allreduce",
+        env_name="ENABLE_QWEN3_PRO5000_INT8_ALLREDUCE",
+        bind_to=(quantization_config, "enable_qwen3_pro5000_int8_allreduce"),
+        type=str2bool,
+        default=True,
+        help=(
+            "是否开启 Qwen3 在 RTX PRO 5000 上的 BF16/INT8 TP AllReduce；"
+            "关闭后回退到精确 AllReduce，供精度 A/B 使用"
+        ),
+    )

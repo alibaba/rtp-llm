@@ -1,5 +1,7 @@
 import copy
 import functools
+import logging
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -52,6 +54,50 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale_inv"
 APPEND_SUFFIX = "_scale_inv"
+
+logger = logging.getLogger(__name__)
+
+_ENABLE_DIRECT_UE8M0_WEIGHT_QUANT_ENV = "RTP_LLM_ENABLE_DIRECT_UE8M0_WEIGHT_QUANT"
+_TRUE_VALUES = frozenset(("1", "true", "yes", "on"))
+_FALSE_VALUES = frozenset(("0", "false", "no", "off"))
+
+
+def _direct_ue8m0_weight_quant_enabled() -> bool:
+    """Return whether online dense weights use one-step packed UE8M0 quant."""
+    raw_value = os.environ.get(_ENABLE_DIRECT_UE8M0_WEIGHT_QUANT_ENV)
+    if raw_value is None:
+        return True
+    normalized = raw_value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{_ENABLE_DIRECT_UE8M0_WEIGHT_QUANT_ENV} must be a boolean "
+        f"(1/0, true/false, yes/no, on/off), got {raw_value!r}"
+    )
+
+
+@functools.cache
+def _log_direct_ue8m0_weight_quant_switch(enabled: bool) -> None:
+    logger.info(
+        "Direct packed UE8M0 online weight quantization is %s (%s=%d); "
+        "disabled loading uses per-block FP8 followed by UE8M0 requantization",
+        "enabled" if enabled else "disabled",
+        _ENABLE_DIRECT_UE8M0_WEIGHT_QUANT_ENV,
+        int(enabled),
+    )
+
+
+def _should_use_direct_ue8m0_weight_quant(
+    has_scale: bool, is_dense_weight: bool, uses_deepgemm_e8m0: bool
+) -> bool:
+    # Parse this Blackwell-only knob only for an applicable online dense weight.
+    if not (has_scale and is_dense_weight and uses_deepgemm_e8m0):
+        return False
+    enabled = _direct_ue8m0_weight_quant_enabled()
+    _log_direct_ue8m0_weight_quant_switch(enabled)
+    return enabled
 
 
 def dequant_weight_split_k(
@@ -133,9 +179,7 @@ def _pack_ue8m0_scale_bytes(scale: torch.Tensor) -> torch.Tensor:
     # but pad the underlying column-major storage to its required MN stride.
     import deep_gemm
 
-    aligned_mn = deep_gemm.get_tma_aligned_size(
-        packed.shape[0], packed.element_size()
-    )
+    aligned_mn = deep_gemm.get_tma_aligned_size(packed.shape[0], packed.element_size())
     packed_storage = torch.zeros(
         (packed.shape[1], aligned_mn),
         dtype=packed.dtype,
@@ -984,12 +1028,10 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         if self.scale.name == W.attn_qkv_s:
             # The QKV scale splitter addresses heads in 128-row blocks.
             block_scale = expanded_scale[:: self.group_size]
-            local_scale = self.scale._split(block_scale, load_config)[
-                self.scale.name
+            local_scale = self.scale._split(block_scale, load_config)[self.scale.name]
+            local_scale = local_scale.repeat_interleave(self.group_size, dim=-2)[
+                : local_kernel.shape[-2]
             ]
-            local_scale = local_scale.repeat_interleave(
-                self.group_size, dim=-2
-            )[: local_kernel.shape[-2]]
         else:
             local_scale = self.scale._split(expanded_scale, load_config)[
                 self.scale.name
@@ -1015,8 +1057,10 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         )
 
         is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
-        direct_ue8m0 = (
-            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+        direct_ue8m0 = _should_use_direct_ue8m0_weight_quant(
+            self.scale is not None,
+            is_dense_weight,
+            is_deep_gemm_e8m0_used(),
         )
         if direct_ue8m0 and self.group_size != 128:
             raise ValueError(

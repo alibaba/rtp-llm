@@ -58,6 +58,27 @@ class ServerConfigPortLayoutTest(TestCase):
 
 class GenerateConfigTest(TestCase):
 
+    def test_qwen3_pro5000_int8_allreduce_switch(self):
+        cases = (
+            ([], {}, True),
+            (
+                [],
+                {"ENABLE_QWEN3_PRO5000_INT8_ALLREDUCE": "0"},
+                False,
+            ),
+            (
+                ["--enable_qwen3_pro5000_int8_allreduce", "false"],
+                {"ENABLE_QWEN3_PRO5000_INT8_ALLREDUCE": "1"},
+                False,
+            ),
+        )
+        for args, env, expected in cases:
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ):
+                config = setup_args(args).quantization_config
+                self.assertIs(config.enable_qwen3_pro5000_int8_allreduce, expected)
+
     @patch.dict(
         "os.environ",
         {

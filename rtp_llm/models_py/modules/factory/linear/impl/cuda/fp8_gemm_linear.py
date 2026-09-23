@@ -1,5 +1,8 @@
 """CUDA FP8 GEMM wrapper that dispatches between flashinfer and DeepGEMM."""
 
+import logging
+import os
+from functools import cache
 from typing import Optional
 
 import torch
@@ -12,6 +15,38 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear im
     CudaFp8FlashinferLinear,
 )
 from rtp_llm.ops import HWKernelConfig
+
+logger = logging.getLogger(__name__)
+
+_ENABLE_FP8_FLASHINFER_GEMM_ENV = "RTP_LLM_ENABLE_FP8_FLASHINFER_GEMM"
+_TRUE_VALUES = frozenset(("1", "true", "yes", "on"))
+_FALSE_VALUES = frozenset(("0", "false", "no", "off"))
+
+
+def _fp8_flashinfer_gemm_enabled() -> bool:
+    """Return whether the small-M FlashInfer FP8 GEMM optimization is enabled."""
+    raw_value = os.environ.get(_ENABLE_FP8_FLASHINFER_GEMM_ENV)
+    if raw_value is None:
+        return True
+    normalized = raw_value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{_ENABLE_FP8_FLASHINFER_GEMM_ENV} must be a boolean "
+        f"(1/0, true/false, yes/no, on/off), got {raw_value!r}"
+    )
+
+
+@cache
+def _log_fp8_flashinfer_gemm_switch(enabled: bool) -> None:
+    logger.info(
+        "Small-M FlashInfer FP8 GEMM is %s (%s=%d); " "disabled calls use DeepGEMM",
+        "enabled" if enabled else "disabled",
+        _ENABLE_FP8_FLASHINFER_GEMM_ENV,
+        int(enabled),
+    )
 
 
 class CudaFp8GEMMLinear(LinearBase):
@@ -56,13 +91,19 @@ class CudaFp8GEMMLinear(LinearBase):
             quant_config=quant_config,
             weight_scale_2=weight_scale_2,
         )
-        self._flashinfer_linear = self._create_flashinfer_backend(
-            weight=weight,
-            weight_scales=weight_scales,
-            input_scales=input_scales,
-            bias=bias,
-            quant_config=quant_config,
-            weight_scale_2=weight_scale_2,
+        self._enable_flashinfer_gemm = _fp8_flashinfer_gemm_enabled()
+        _log_fp8_flashinfer_gemm_switch(self._enable_flashinfer_gemm)
+        self._flashinfer_linear = (
+            self._create_flashinfer_backend(
+                weight=weight,
+                weight_scales=weight_scales,
+                input_scales=input_scales,
+                bias=bias,
+                quant_config=quant_config,
+                weight_scale_2=weight_scale_2,
+            )
+            if self._enable_flashinfer_gemm
+            else None
         )
 
         self.weight = self._deepgemm_linear.weight
@@ -112,6 +153,8 @@ class CudaFp8GEMMLinear(LinearBase):
         )
 
     def _should_use_flashinfer(self, input: torch.Tensor) -> bool:
+        if not self._enable_flashinfer_gemm:
+            return False
         if self._flashinfer_linear is None:
             return False
         if input.dim() != 2:
