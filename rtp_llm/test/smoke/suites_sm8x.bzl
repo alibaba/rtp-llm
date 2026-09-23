@@ -28,7 +28,7 @@ def sm8x_suites():
             ),
             smoke_test(
                 name="bf16",
-                task_info="data/model/qwen25/q_r_s.json",
+                task_info="data/model/qwen25/q_r_s_bf16.json",
                 smoke_args="--act_type BF16 --warm_up 0",
                 gpu_type=["L20"],
             ),
