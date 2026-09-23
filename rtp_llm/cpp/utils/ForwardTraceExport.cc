@@ -107,6 +107,18 @@ void enrichForwardTrace(const std::string& path, ForwardTraceSession& session) {
         auto& args_any = (*map)["args"];
         if (!AnyCast<JsonMap>(&args_any)) args_any = JsonMap{};
         (*AnyCast<JsonMap>(&args_any))["rtp_forward"] = data->second;
+        // Format only in the save worker, never on the model execution path.
+        // Keep unbounded per-sequence arrays in args instead of a truncated name.
+        auto integer = [&](const char* key) {
+            const auto it = data->second.find(key);
+            const auto* value = it == data->second.end() ? nullptr : AnyCast<int64_t>(&it->second);
+            return value && *value >= 0 ? std::to_string(*value) : std::string("unknown");
+        };
+        std::string label = name->substr(0, name->size() - 1);
+        label += ",requests=" + integer("request_count");
+        label += ",sequences=" + integer("logical_sequences");
+        label += ",tokens=" + integer("total_q_tokens") + ")";
+        (*map)["name"] = std::move(label);
     }
     const int64_t missing_events = by_name.size() - found.size();
     JsonMap envelope;
