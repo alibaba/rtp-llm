@@ -171,6 +171,13 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     if (!new_stream->isContextStream()) {
         return false;
     }
+    // Deterministic batched mode (force_single_prefill): admit at most one
+    // stream per prefill round so the batch-total M always equals the admitted
+    // request's own context length, keeping cuBLASLt heuristics traffic-
+    // independent. Mirrors the cp_force_single_prefill_ gate of the FIFO path.
+    if (force_single_prefill_ && !streams.empty()) {
+        return false;
+    }
     // The peak state is built once per prefill round and updated after every successful admission,
     // so its stream count covers both existing in-flight work and candidates admitted in this round.
     if (!admission_peak_state_) {

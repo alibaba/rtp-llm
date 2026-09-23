@@ -456,6 +456,11 @@ struct FIFOSchedulerConfig {
     //   invalid input falls back to "1".
     std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
+    // Unconditional single-stream prefill rounds: at most one stream per
+    // prefill forward regardless of the context-parallel setup. Used by the
+    // deterministic batched serving mode to pin the prefill batch-total M to
+    // each request's own length.
+    bool        force_single_prefill           = false;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
     std::string to_string() const;

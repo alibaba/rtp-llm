@@ -279,21 +279,27 @@ def apply_deterministic_inference_config(
     decode step runs at one fixed geometry (batch padded to B_det with dummy
     rows).
 
-    level="full" (mechanisms A + F + G): additionally force single-request
+    level="batched" (mechanisms A + C + F): production determinism with batched
+    decode. Every request still prefills alone (one stream per prefill forward,
+    so cuBLASLt heuristics never see a batch-total M that varies with traffic),
+    but decode keeps batching up to B_det streams (extras queue in the
+    scheduler). The ratio scheduler schedules the exclusive prefill rounds
+    promptly instead of starving behind the running decode batch. Reported
+    top-1/top-5 logprobs can carry ~1e-6 batch-composition noise while tokens
+    stay identical to solo.
+
+    level="full" (mechanisms A + C + F): additionally force single-request
     serial serving -- every request prefills alone and decodes as the only real
-    row of the padded batch, which is exactly the solo composition. This
-    removes batch-composition-dependent kernel selection in batched prefill
-    (cuBLASLt heuristics switch algorithms by total M) and decode neighbor-KV
-    effects, so each request reproduces the solo output bitwise regardless of
-    concurrent traffic.
+    row of the padded batch, which is exactly the solo composition, so each
+    request reproduces the solo output bitwise regardless of concurrent traffic.
     """
     if not deterministic_config.enable:
         return
 
     level = deterministic_config.level
-    if level not in ("decode", "full"):
+    if level not in ("decode", "batched", "full"):
         raise ValueError(
-            f"invalid deterministic_level: {level!r} (expected 'decode' or 'full')"
+            f"invalid deterministic_level: {level!r} (expected 'decode', 'batched' or 'full')"
         )
     b_det = int(deterministic_config.decode_batch_size)
     if b_det <= 0:
@@ -309,8 +315,23 @@ def apply_deterministic_inference_config(
     hw_kernel_config.enable_cuda_graph = True
     hw_kernel_config.decode_capture_batch_sizes = [b_det]
 
+    if level == "batched":
+        # Mechanism F: one request per prefill forward (M = its own length)
+        # while decode keeps batching.
+        runtime_config.fifo_scheduler_config.force_single_prefill = True
+        # Cap the running decode batch at the single captured graph size;
+        # extra streams queue in the scheduler (never rejected).
+        runtime_config.max_generate_batch_size = b_det
+        # Ratio scheduler: PREFILL and DECODE run as separate rounds on a fixed
+        # cadence, so exclusive prefill forwards are scheduled promptly instead
+        # of starving behind the running decode batch (decode-first FIFO).
+        # Cadence 0 = prefill-first while streams are waiting; tune with
+        # --decode_prefill_ratio.
+        runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode = "ratio"
+        runtime_config.fifo_scheduler_config.decode_prefill_ratio = "0"
+
     if level == "full":
-        # Mechanisms F + G: single-request serial serving. The scheduler admits
+        # Mechanism F: single-request serial serving. The scheduler admits
         # at most one running stream, so each request prefills alone (M equals
         # its own length) and decodes as the only real row of the B_det batch.
         runtime_config.max_generate_batch_size = 1
@@ -323,10 +344,13 @@ def apply_deterministic_inference_config(
 
     logging.info(
         "deterministic_inference enabled: level=%s, decode graph batch size=%d, "
-        "max_generate_batch_size=%d%s",
+        "max_generate_batch_size=%d, force_single_prefill=%s, pdfusion=%s/%s%s",
         level,
         b_det,
         runtime_config.max_generate_batch_size,
+        runtime_config.fifo_scheduler_config.force_single_prefill,
+        runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+        runtime_config.fifo_scheduler_config.decode_prefill_ratio,
         ", NCCL_ALGO=Ring" if tp_size > 1 else "",
     )
 

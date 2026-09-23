@@ -84,6 +84,10 @@ protected:
     size_t                          max_seq_len_             = 0;
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
+    // Force at most one stream per prefill round. The CP conservative prefill
+    // path and the deterministic batched serving mode both use it to pin the
+    // prefill batch-total M to the admitted request's own length.
+    bool                            force_single_prefill_    = false;
     size_t                          max_inited_kv_cache_streams_ = 0;
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;

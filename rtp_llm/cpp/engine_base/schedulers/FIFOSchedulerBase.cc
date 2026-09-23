@@ -25,6 +25,9 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
+    force_single_prefill_((parallelism_config.prefill_cp_config.is_enabled()
+                           && runtime_config.fifo_scheduler_config.cp_force_single_prefill)
+                          || runtime_config.fifo_scheduler_config.force_single_prefill),
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),

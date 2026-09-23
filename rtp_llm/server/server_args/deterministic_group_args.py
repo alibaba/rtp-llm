@@ -16,9 +16,10 @@ def init_deterministic_group_args(parser, deterministic_config):
         type=str2bool,
         default=False,
         help=(
-            "确定性推理开关（默认关闭）。开启后强制单请求串行服务：每个请求的 prefill 单独执行、"
-            "decode 以 1 real + (B_det-1) dummy 的固定组成运行，使任意凑批/并发组合下的输出与 solo "
-            "bitwise 一致。性能显著下降（decode 不再跨请求合批），仅用于评测对拍等确定性场景。"
+            "确定性推理开关（默认关闭）。开启后按 --deterministic_level 分级：固定 decode 几何"
+            "（单尺寸 CUDA Graph + B_det padding），并按等级施加 prefill 独占/串行服务，使输出"
+            "与 batch 组成无关（token 级一致；上报 logprob 数值存在 ~1e-6 组成噪声）。batched 档"
+            "保留 decode 合批吞吐；full 档吞吐与并发解耦，仅用于评测对拍等场景。"
         ),
     )
 
@@ -27,12 +28,14 @@ def init_deterministic_group_args(parser, deterministic_config):
         env_name="DETERMINISTIC_LEVEL",
         bind_to=(deterministic_config, "level"),
         type=str,
-        choices=["decode", "full"],
+        choices=["decode", "batched", "full"],
         default="full",
         help=(
-            "确定性等级。full（默认）= 固定 decode 几何 + 单请求串行服务（prefill 独占 + "
+            "确定性等级。batched = 生产确定性吞吐档：固定 decode 几何 + prefill 每 forward 单请求 + "
+            "ratio 调度器 + decode 合批（B_det 封顶，超出排队），token 与 solo 一致；"
+            "full（默认）= 固定 decode 几何 + 单请求串行服务（prefill 独占 + "
             "max_generate_batch_size=1，输出与 solo bitwise 一致）；decode = 仅固定 decode 几何"
-            "（单尺寸 CUDA Graph + B_det padding，消除几何类漂移，batch 组成相关的残余漂移仍在）。"
+            "（单尺寸 CUDA Graph + B_det padding，消除几何类漂移，prefill 合批相关的漂移仍在）。"
         ),
     )
 

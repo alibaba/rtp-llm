@@ -63,6 +63,17 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="CP prefill 开启时是否强制每轮只调度一个 prefill 请求。",
     )
     fifo_scheduler_group.add_argument(
+        "--force_single_prefill",
+        env_name="FORCE_SINGLE_PREFILL",
+        bind_to=[(fifo_scheduler_config, "force_single_prefill")],
+        type=str2bool,
+        default=False,
+        help=(
+            "每个 prefill forward 最多只跑一个请求（prefill 独占），批总 token 数 = 请求自身长度。"
+            "确定性 batched 档（--deterministic_level batched）会强制开启。"
+        ),
+    )
+    fifo_scheduler_group.add_argument(
         "--max_inited_kv_cache_streams",
         env_name="MAX_INITED_KV_CACHE_STREAMS",
         bind_to=[(fifo_scheduler_config, "max_inited_kv_cache_streams")],
