@@ -8,7 +8,7 @@
 
 | 目录 | 内容 |
 |---|---|
-| `traffic_trace/` | 真实流量的匿名 prefix DAG 压缩文件及同名 manifest；保留请求顺序、到达间隔和 prefix 结构，不含真实文本或 token。`.templates.json` 是从真实流量截取的 Java 回归夹具。 |
+| `traffic_trace/` | 真实流量的匿名 prefix DAG 压缩文件及同名 manifest；保留请求顺序、到达间隔和 prefix 结构，不含真实文本或 token。Java 回归夹具按需从固定快照派生，不在本目录保存副本。 |
 | `synthetic_parameters/` | 参数化合成流量的统计画像。即使画像来自真实数据，生成的请求也是合成流量，不是原请求回放。 |
 | `performance/` | 引擎计算耗时模型，与流量来源分类独立；预设名称由 `config/performance_presets.json` 解析。 |
 
@@ -55,8 +55,8 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 
 ## 派生数据
 
-`python3 scripts/pipeline/derive_master_templates.py --model /path/to/model.xz --out /path/to/model.templates.json`
-生成 Java 回归夹具。合成画像由 `traffic.derive_synthetic_parameters` 从固定模型与 fit-report 反推参数；
+`python3 scripts/pipeline/derive_master_templates.py --model /path/to/model.xz --out /path/to/run/model.templates.json`
+在运行目录生成 Java 回归夹具。合成画像由 `traffic.derive_synthetic_parameters` 从固定模型与 fit-report 反推参数；
 它描述统计分布，不等同于原请求回放。`sampling: joint` 的用法和限制见
 [合成保真度](../docs/development/synthetic-fidelity.md)。运行命令的工作目录为 `online_eval`，
 模块入口需要 `PYTHONPATH=src:.`。

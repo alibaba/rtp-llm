@@ -153,7 +153,7 @@ python3 -m unittest discover -s tools/online_eval/tests
 
 profile 已内置精确的测试类 includes；不需要手写 `-Dtest`。上游无匹配性能类的模块会正常放行，每个性能类都在不可复用的新 fork 中执行。
 
-E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 8192 条请求。128 个模板来自 `tools/online_eval/data/traffic_trace/glm-5.3_20260921_1400_15m.templates.json`，由匿名 prefix DAG 模型的前 128 个事件派生，每条最多 32768 token。测试校验派生文件记录的模型 SHA 与原模型文件一致；块标签展开为匿名 token，并按共享前缀生成稳定的调度 key。它不包含原始请求或真实 token 内容，也不宣称复现原日志的生成参数或真实推理效果。历史归档下的 `source.sha256` 记录的是旧实验快照，不作为当前输入清单。
+E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 8192 条请求。128 个模板由 `tools/online_eval/scripts/pipeline/derive_master_templates.py` 从固定匿名 prefix DAG 快照的前 128 个事件现算，每条最多 32768 token。测试校验派生结果记录的模型 SHA 与原模型文件一致；块标签展开为匿名 token，并按共享前缀生成稳定的调度 key。它不包含原始请求或真实 token 内容，也不宣称复现原日志的生成参数或真实推理效果。历史归档下的 `source.sha256` 记录的是旧实验快照，不作为当前输入清单。
 
 默认在 20 核及以上机器要求 client/Master QPS 均不低于 5000，Master P99 不高于 250 ms；较小机器的 QPS 门槛按 CPU 数缩放。可覆盖参数：
 

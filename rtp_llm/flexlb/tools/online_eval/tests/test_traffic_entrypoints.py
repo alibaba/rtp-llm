@@ -73,15 +73,24 @@ class TrafficEntrypointTest(unittest.TestCase):
 
         from traffic.datasets import model_path
         model = model_path()
-        stored = json.loads(model.with_suffix(".templates.json").read_text())
         generated = derive(model)
-        transformations = generated.pop("transformations")
-        self.assertEqual(stored, generated)
-        self.assertEqual(transformations["source_sha256"], stored["source_sha256"])
-        self.assertEqual(transformations["selected_requests"], len(stored["templates"]))
+        core = {key: value for key, value in generated.items() if key != "transformations"}
+        legacy_bytes = (json.dumps(core, separators=(",", ":")) + "\n").encode()
+        self.assertEqual(hashlib.sha256(legacy_bytes).hexdigest(),
+                         "8b5a033c707489c598dd6d2d1c77690ebb7251b96e5f65027313221d9969df24")
+        transformations = generated["transformations"]
+        self.assertEqual(transformations["source_sha256"], generated["source_sha256"])
+        self.assertEqual(transformations["selected_requests"], len(generated["templates"]))
         self.assertEqual([item["kind"] for item in transformations["applied"]],
                          ["fixture_shape_clip", "request_limit", "fixed_output_length"])
-        self.assertGreaterEqual(len({row["il"] for row in stored["templates"]}), 32)
+        self.assertGreaterEqual(len({row["il"] for row in generated["templates"]}), 32)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "templates.json"
+            script = ROOT / "scripts/pipeline/derive_master_templates.py"
+            subprocess.run([sys.executable, str(script), "--model", str(model),
+                            "--out", str(output)], check=True)
+            self.assertEqual(generated, json.loads(output.read_text()))
+            self.assertFalse(model.with_suffix(".templates.json").exists())
 
 
 if __name__ == "__main__":

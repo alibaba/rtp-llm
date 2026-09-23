@@ -67,7 +67,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     default_model = model_path()
     parser.add_argument("--model", type=Path, default=default_model)
-    parser.add_argument("--out", type=Path, default=default_model.with_suffix(".templates.json"))
+    parser.add_argument("--out", type=Path, required=True,
+                        help="write the derived fixture to an explicit run directory")
     args = parser.parse_args(argv)
     args.out.write_text(json.dumps(derive(args.model), separators=(",", ":")) + "\n")
 

@@ -9,6 +9,7 @@ from unittest import mock
 
 from traffic import datasets
 from traffic.prefix_lineage import encode
+from scripts.pipeline.derive_master_templates import derive
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,7 +34,7 @@ class TrafficDatasetsTest(unittest.TestCase):
                 self.assertIn('model', manifest['source'])
         path = datasets.model_path()
         digest = datasets.read_manifest(path)['sha256']
-        fixture = json.loads(path.with_suffix('.templates.json').read_text())
+        fixture = derive(path)
         profile = json.loads(datasets.profile_path().read_text())
         self.assertEqual(digest, fixture['source_sha256'])
         self.assertEqual(digest, profile['calibration']['model_sha256'])

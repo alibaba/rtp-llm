@@ -251,11 +251,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         String capture = "traffic_trace/glm-5.3_20260921_1400_15m";
         Path modelPath = dataRoot.resolve(capture + ".xz");
         Path manifestPath = dataRoot.resolve(capture + ".manifest.json");
-        Path fixturePath = dataRoot.resolve(capture + ".templates.json");
-        assertTrue(Files.isRegularFile(modelPath) && Files.isRegularFile(manifestPath)
-                && Files.isRegularFile(fixturePath), "capture companion files are missing");
+        assertTrue(Files.isRegularFile(modelPath) && Files.isRegularFile(manifestPath),
+                "capture companion files are missing");
         JsonNode manifest = mapper.readTree(manifestPath.toFile());
-        JsonNode fixture = mapper.readTree(fixturePath.toFile());
         String pinnedSha = manifest.path("sha256").asText();
         byte[] model = Files.readAllBytes(modelPath);
         try {
@@ -264,8 +262,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         } catch (NoSuchAlgorithmException failure) {
             throw new IOException("SHA-256 unavailable", failure);
         }
+        JsonNode fixture = deriveTemplateFixture(dataRoot, modelPath, mapper);
         assertEquals(pinnedSha, fixture.path("source_sha256").asText(),
-                "regenerate the Java fixture from the pinned model");
+                "derived Java fixture must use the pinned model");
         assertEquals(512, fixture.path("block_size").asInt());
         List<TraceShape> shapes = readTemplateShapes(fixture.path("templates"));
         requestTemplates = buildRequestTemplates(shapes);
@@ -1437,6 +1436,29 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
         throw new IOException("Cannot locate tools/online_eval/data/traffic_trace from "
                 + Path.of("").toAbsolutePath());
+    }
+
+    private static JsonNode deriveTemplateFixture(Path dataRoot, Path modelPath,
+            ObjectMapper mapper) throws IOException {
+        Path script = dataRoot.getParent().resolve("scripts/pipeline/derive_master_templates.py");
+        Path output = Files.createTempFile("master-prefix-templates-", ".json");
+        try {
+            Process process = new ProcessBuilder("python3", script.toString(),
+                    "--model", modelPath.toString(), "--out", output.toString())
+                    .redirectErrorStream(true).start();
+            String log = new String(process.getInputStream().readAllBytes());
+            try {
+                if (process.waitFor() != 0) {
+                    throw new IOException("template derivation failed: " + log);
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("template derivation interrupted", interrupted);
+            }
+            return mapper.readTree(output.toFile());
+        } finally {
+            Files.deleteIfExists(output);
+        }
     }
 
     private static List<TraceShape> readTemplateShapes(JsonNode templates) throws IOException {
