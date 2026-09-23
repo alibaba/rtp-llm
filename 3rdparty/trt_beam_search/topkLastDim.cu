@@ -854,6 +854,9 @@ __global__ void radix_kernel(T const* in, IdxT const* in_idx, T const* in_buf, I
     filter_and_histogram<T, IdxT, BitsPerPass>(in_buf, in_idx_buf, out_buf, out_idx_buf, out, out_idx, previous_len,
         counter, histogram, select_min, pass, early_stop);
     __threadfence();
+    // Every thread must publish its histogram writes before thread 0 marks the
+    // whole block complete; otherwise another block can scan a partial histogram.
+    __syncthreads();
 
     bool isLastBlock = false;
     if (threadIdx.x == 0)

@@ -278,6 +278,75 @@ struct Shape
     int k = 0;  // 0 = use the class default k list
 };
 
+// Check every invocation against an independent host reference. A timing loop
+// that checks only its final result can miss incomplete histogram writes.
+bool checkRepeatedMultiBlock(cudaStream_t stream)
+{
+    struct Case
+    {
+        int batch, len, k, firstAllowed, endAllowed, repeats;
+        bool sorted;
+    };
+    Case const cases[] = {
+        {1, 65537, 512, 1, 32769, 128, false},
+        {512, 65537, 2100, 32769, 65537, 64, false},
+        {1, 1075200, 2100, 0, 1075200, 128, true},
+    };
+    for (auto const& c : cases)
+    {
+        std::vector<float> input;
+        fillInput(input, c.batch, c.len);
+        for (int row = 0; row < c.batch; ++row)
+        {
+            auto begin = input.begin() + static_cast<size_t>(row) * c.len;
+            std::fill(begin, begin + c.firstAllowed, -std::numeric_limits<float>::infinity());
+            std::fill(begin + c.endAllowed, begin + c.len, -std::numeric_limits<float>::infinity());
+        }
+        std::vector<float> refVals;
+        std::vector<int> refIdxs;
+        hostTopk(input, c.batch, c.len, c.k, !c.sorted, refVals, refIdxs);
+        size_t const count = static_cast<size_t>(c.batch) * c.k;
+        float* dIn = toDevice(input);
+        float* dVals = nullptr;
+        int* dIdxs = nullptr;
+        void* workspace = nullptr;
+        BENCH_CHECK(cudaMalloc(&dVals, count * sizeof(float)));
+        BENCH_CHECK(cudaMalloc(&dIdxs, count * sizeof(int)));
+        size_t const wsBytes = invokeComputeTopkLastDimWorkspaceSize<float>(c.batch, c.len, c.k, true, 1);
+        BENCH_CHECK(cudaMalloc(&workspace, wsBytes));
+        std::vector<float> vals(count);
+        std::vector<int> idxs(count);
+        bool ok = true;
+        for (int repeat = 0; repeat < c.repeats; ++repeat)
+        {
+            // Prevent an unwritten slot from reusing a correct result from the previous call.
+            BENCH_CHECK(cudaMemsetAsync(workspace, 0xFF, wsBytes, stream));
+            invokeTopkLastDim<float>(c.batch, c.len, c.k, true, -std::numeric_limits<float>::infinity(),
+                dIn, dVals, dIdxs, workspace, stream, c.sorted, 1);
+            BENCH_CHECK(cudaMemcpyAsync(vals.data(), dVals, count * sizeof(float), cudaMemcpyDeviceToHost, stream));
+            BENCH_CHECK(cudaMemcpyAsync(idxs.data(), dIdxs, count * sizeof(int), cudaMemcpyDeviceToHost, stream));
+            BENCH_CHECK(cudaStreamSynchronize(stream));
+            if (vals != refVals || idxs != refIdxs)
+            {
+                std::fprintf(stderr, "repeated multi-block mismatch: batch=%d len=%d k=%d iteration=%d\n",
+                    c.batch, c.len, c.k, repeat);
+                ok = false;
+                break;
+            }
+        }
+        BENCH_CHECK(cudaFree(workspace));
+        BENCH_CHECK(cudaFree(dIdxs));
+        BENCH_CHECK(cudaFree(dVals));
+        BENCH_CHECK(cudaFree(dIn));
+        if (!ok)
+        {
+            return false;
+        }
+    }
+    std::printf("repeated multi-block: 320 invocations checked against host -> PASS\n");
+    return true;
+}
+
 // Part B: semantic checks vs host reference. Returns the number of failures.
 int runSemanticChecks()
 {
@@ -348,6 +417,7 @@ int runSemanticChecks()
         failures += ok ? 0 : 1;
         BENCH_CHECK(cudaFree(dDual));
     }
+    failures += checkRepeatedMultiBlock(stream) ? 0 : 1;
     BENCH_CHECK(cudaStreamDestroy(stream));
     return failures;
 }
