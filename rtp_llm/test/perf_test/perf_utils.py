@@ -4,6 +4,7 @@ import argparse
 import glob
 import json
 import logging
+import math
 import os
 import shutil
 import time
@@ -65,21 +66,40 @@ def query_engine_status(port: int) -> Dict[str, Any]:
     return result
 
 
-def collect_timeline_files(result_dir: str) -> None:
+def collect_timeline_files(result_dir: str, *, started: float = 0) -> None:
     """Collect profiler timeline JSON files into a timelines/ subdirectory."""
     time.sleep(3)
     timeline_dir = os.path.join(result_dir, "timelines")
+    required = os.environ.get("PERF_REQUIRED_TRACE", "")
+    if required:
+        if os.path.basename(required) != required:
+            raise ValueError("PERF_REQUIRED_TRACE must be a filename")
+        path = os.path.join(result_dir, required)
+        if not os.path.isfile(path) or os.path.getmtime(path) < started:
+            raise RuntimeError("Missing or stale required GPU timeline: " + path)
+        with open(path) as f:
+            trace = json.load(f)
+        events = trace.get("traceEvents", []) if isinstance(trace, dict) else trace
+        kernels = [e for e in events if e.get("cat") == "kernel" and e.get("ph") == "X"]
+        if not kernels or any(
+            type(e.get(k)) not in (int, float) or not math.isfinite(e[k]) or e[k] <= 0
+            for e in kernels
+            for k in ("ts", "dur")
+        ):
+            raise RuntimeError("Required timeline has no valid timestamped GPU kernels")
     pattern = os.path.join(result_dir, "*.json")
     timeline_files = [
         f
         for f in glob.glob(pattern)
-        if os.path.basename(f).startswith(("profiler_ts", "profiler_"))
+        if os.path.basename(f).startswith(("profiler_ts", "profiler_", "fwd_rank"))
         or "_wr" in os.path.basename(f)
     ]
     if timeline_files:
         os.makedirs(timeline_dir, exist_ok=True)
         for f in timeline_files:
             dst = os.path.join(timeline_dir, os.path.basename(f))
+            if required and os.path.exists(dst):
+                raise RuntimeError("Refusing to overwrite required timeline: " + dst)
             shutil.move(f, dst)
             logging.debug(f"Collected timeline: {dst}")
     else:
@@ -96,6 +116,12 @@ def write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> None
         "tokenizer_path": os.environ.get("TOKENIZER_PATH"),
         "tp_size": extract_arg(remaining_args, "tp_size", "1"),
         "dp_size": args.dp_size,
+        "pp_size": extract_arg(remaining_args, "pp_size", "1"),
+        "timing_scope": (
+            "diagnostic_profiled"
+            if os.environ.get("DSV4_FWD_PROFILE") == "1"
+            else "measurement"
+        ),
         "max_seq_len": args.max_seq_len,
         "concurrency_limit": args.concurrency_limit,
         "decode_test_length": args.decode_test_length,

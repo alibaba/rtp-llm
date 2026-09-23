@@ -109,6 +109,7 @@ def _curl_server_batch_worker(
 
 
 class BatchPerfImpl(object):
+
     def __init__(
         self,
         base_port: int,
@@ -124,7 +125,9 @@ class BatchPerfImpl(object):
         warmup_runs: Optional[int] = None,
         measure_runs: Optional[int] = None,
         profile_runs: Optional[int] = None,
+        use_batch_decode_scheduler: bool = True,
     ):
+        self.use_batch_decode_scheduler = use_batch_decode_scheduler
         self.base_port = base_port
         self.dp_size = dp_size
         self.batch_size = batch_size
@@ -191,7 +194,9 @@ class BatchPerfImpl(object):
                 self.warmup_runs,
                 self.profile_trace_name,
             )
-            _ = self._curl_server()
+            metric = self._curl_server()
+            if not getattr(self, "use_batch_decode_scheduler", True):
+                require_complete_measurement(metric, context="PP warmup")
 
         measure_runs = self._effective_measure_runs(num_measures)
         key = "avg_decode_time" if self.is_decode else "avg_prefill_time"
@@ -200,6 +205,8 @@ class BatchPerfImpl(object):
         for i in range(measure_runs):
             responses = self._curl_server_responses()
             metric = analyze_results(responses)
+            if not getattr(self, "use_batch_decode_scheduler", True):
+                require_complete_measurement(metric, context="PP request")
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
                 "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f",
@@ -277,6 +284,12 @@ class BatchPerfImpl(object):
         return results
 
     def _set_concurrency(self):
+        if not self.use_batch_decode_scheduler:
+            check_with_info(
+                not self.is_decode and self.batch_size == self.dp_size == 1,
+                "Native-scheduler perf supports only single-client prefill",
+            )
+            return  # PP scheduler has no /update_scheduler_info API.
         check_with_info(
             self.batch_size % self.dp_size == 0,
             f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
