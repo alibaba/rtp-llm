@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -987,6 +988,98 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
                                 old_batch_idx,
                                 old_batch_size);
         ++batch_fork_count[old_batch_idx];
+    }
+
+    // A sole FULL group can transfer request references and reserve forked
+    // tails in one pool transaction. Multi-group updates retain their existing
+    // all-group reservation path below.
+    const auto* sole_group          = group_nums == 1 ? &config_.topology().groups().front() : nullptr;
+    const bool  atomic_single_group = sole_group && sole_group->policy.group_type == CacheGroupType::FULL
+                                     && sole_group->spec
+                                     && (sole_group->spec->type == KVCacheSpecType::MultiHeadAttention
+                                         || sole_group->spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+    if (atomic_single_group) {
+        const auto&                                          tag  = config_.groupTags().front();
+        const auto&                                          pool = group_block_pools_.front();
+        std::vector<DeviceBlockPool::RequestReferenceUpdate> reference_updates;
+        size_t                                               replacement_count = 0;
+        for (int i = 0; i < old_batch_size; ++i) {
+            const auto& blocks = batch_kv_cache_resource->blocks(i, tag);
+            if (batch_fork_count[i] == 0 && !blocks.empty()) {
+                reference_updates.push_back({blocks.back(), 1, 0});
+            }
+        }
+        for (int i = 0; i < old_batch_size; ++i) {
+            const auto& blocks = batch_kv_cache_resource->blocks(i, tag);
+            const int   forks  = batch_fork_count[i];
+            if (forks == 1 || blocks.empty()) {
+                continue;
+            }
+            for (size_t j = 0; j + 1 < blocks.size(); ++j) {
+                reference_updates.push_back({blocks[j], 1, forks});
+            }
+            if (forks > 1) {
+                if (copy_last_block) {
+                    replacement_count += static_cast<size_t>(forks - 1);
+                } else {
+                    reference_updates.push_back({blocks.back(), 1, forks});
+                }
+            }
+        }
+
+        BatchKVCacheResource staged_resource;
+        staged_resource.resetBatchSize(new_batch_size);
+        std::vector<TaggedBlockIdPair>            staged_mapping;
+        std::vector<std::pair<BlockIds*, size_t>> replacement_slots;
+        std::vector<std::pair<int, int>>          retained_slots;
+        staged_mapping.reserve(replacement_count);
+        replacement_slots.reserve(replacement_count);
+        retained_slots.reserve(old_batch_size);
+        for (int i = 0; i < new_batch_size; ++i) {
+            const int   old_idx      = block_src_batch[i];
+            auto&       forks        = batch_fork_count[old_idx];
+            const auto& old_resource = batch_kv_cache_resource->cacheResource(old_idx);
+            if (forks == 1) {
+                retained_slots.emplace_back(i, old_idx);
+            } else {
+                auto& fork = staged_resource.cacheResource(i);
+                fork.initGroups(config_.topologyPtr());
+                fork.setCacheKeys(old_resource.cacheKeys());
+                auto& block_ids = fork.mutableBlockIds(tag);
+                block_ids.assign(old_resource.blocks(tag));
+                if (copy_last_block && !block_ids.blocks().empty()) {
+                    const auto& blocks = block_ids.blocks();
+                    staged_mapping.push_back({tag, blocks.back(), NULL_BLOCK_IDX});
+                    replacement_slots.emplace_back(&block_ids, blocks.size() - 1);
+                    block_ids.setAt(blocks.size() - 1, NULL_BLOCK_IDX);
+                }
+            }
+            --forks;
+        }
+
+        BlockIndicesType replacements;
+        int              required_free_blocks = 0;
+        if (!pool->tryReplaceRequestReferences(
+                reference_updates, static_cast<int>(replacement_count), replacements, required_free_blocks)) {
+            // Eviction takes the tree lock and must run outside the pool transaction.
+            kv_cache_groups_.front()->ensureFreeBlocks(required_free_blocks);
+            if (!pool->tryReplaceRequestReferences(
+                    reference_updates, static_cast<int>(replacement_count), replacements, required_free_blocks)) {
+                RTP_LLM_LOG_WARNING("atomic kv cache update failed, need %zu replacement blocks", replacement_count);
+                return false;
+            }
+        }
+        for (size_t i = 0; i < replacements.size(); ++i) {
+            replacement_slots[i].first->setAt(replacement_slots[i].second, replacements[i]);
+            staged_mapping[i].dst = replacements[i];
+        }
+        static_assert(std::is_nothrow_move_assignable_v<KVCacheResource>);
+        for (const auto& [new_idx, old_idx] : retained_slots) {
+            staged_resource.moveBatchResource(new_idx, std::move(batch_kv_cache_resource->cacheResource(old_idx)));
+        }
+        batch_kv_cache_resource->swap(staged_resource);
+        block_update_mapping.swap(staged_mapping);
+        return true;
     }
 
     std::vector<int> new_blocks_num(static_cast<size_t>(group_nums), 0);

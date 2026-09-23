@@ -402,14 +402,14 @@ cc_test(
 )
 
 cc_test(
-    name = "single_type_kv_cache_allocator_update_test",
-    srcs = ["SingleTypeKVCacheAllocatorUpdateTest.cc"],
+    name = "coordinator_cache_manager_atomic_update_test",
+    srcs = ["CoordinatorCacheManagerAtomicUpdateTest.cc"],
     copts = copts(),
     deps = [
         ":cache_config_test_utils",
         ":block_tree_cache_allocator_test_helper",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
-        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + select({
         "@//:using_rocm": [
