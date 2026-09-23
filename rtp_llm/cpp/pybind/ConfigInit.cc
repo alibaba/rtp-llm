@@ -2054,6 +2054,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<ModelConfig>(m, "ModelConfig")
         .def(py::init<>())
         .def_readwrite("num_layers", &ModelConfig::num_layers)
+        .def_readwrite("physical_mtp_module_num", &ModelConfig::physical_mtp_module_num)
         .def_readwrite("max_seq_len", &ModelConfig::max_seq_len)
         .def_readwrite("gen_num_per_cycle", &ModelConfig::gen_num_per_cycle)
         .def_readwrite("vocab_size", &ModelConfig::vocab_size)
