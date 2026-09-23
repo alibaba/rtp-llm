@@ -225,10 +225,19 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         layer = self._make_qkv_layer(seq)
         common = _make_common(cp_on=True, device=torch.device("cuda"))
 
+        def fake_kv_gather(t, ctx, *, kind, profile_name):
+            self.assertIs(ctx, common.cp_ctx)
+            self.assertEqual(kind, "kv")
+            self.assertEqual(profile_name, "dsv4.cp.all_gather.L03.swa_kv_full.varlen")
+            return t
+
         with (
-            patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": "1"}),
+            patch.dict(
+                os.environ,
+                {"DSV4_PREFILL_CP_OVERLAP": "1", "DSV4_CP_SWA_KV_ASYNC": "0"},
+            ),
             patch.object(
-                attention_mod, "cp_all_gather_full_varlen", lambda t, *a, **k: t
+                attention_mod, "cp_all_gather_full_varlen_fp8", fake_kv_gather
             ),
             patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t),
         ):
@@ -469,8 +478,31 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
                     lambda **kwargs: dequant_calls.append(kwargs),
                 )
             )
+            q_gather_calls = []
+
+            def fake_q_gather(t, ctx, *, kind):
+                self.assertIs(t, qkv.q)
+                self.assertIs(ctx, common.cp_ctx)
+                self.assertEqual(kind, "q")
+                q_gather_calls.append(kind)
+                return t
+
+            # The Q path now calls the optional FP8 gather wrapper directly.
+            # Stub that actual boundary; do not fall through into a real CP
+            # collective with this intentionally minimal fake context.
             stack.enter_context(
-                patch.object(attention_mod, "cp_all_gather_full_varlen", lambda t, c: t)
+                patch.object(
+                    attention_mod, "cp_all_gather_full_varlen_fp8", fake_q_gather
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention_mod,
+                    "cp_all_gather_full_varlen",
+                    side_effect=AssertionError(
+                        "cold dense-index path needs no generic gather"
+                    ),
+                )
             )
             stack.enter_context(
                 patch.object(collective_torch, "all_gather", lambda t, group=None: t)
@@ -487,6 +519,7 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
 
         self.assertEqual(tuple(out.shape), (1, 3, 1, 2))
         self.assertEqual(dequant_calls, [])
+        self.assertEqual(q_gather_calls, ["q"])
 
 
 class AttentionCacheOwnershipProbeTest(unittest.TestCase):

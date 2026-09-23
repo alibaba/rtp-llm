@@ -200,6 +200,23 @@ def v4_indexer_score(
     if S == 0 or T == 0:
         return out
 
+    # Optional shape probe: record at most three distinct shapes.
+    if os.environ.get("DSV4_P2_SHAPE_PROBE"):
+        key = (B, S, H, D, T)
+        _seen = getattr(v4_indexer_score, "_p2_seen", None)
+        if _seen is None:
+            _seen = v4_indexer_score._p2_seen = set()
+        if len(_seen) < 3 and key not in _seen:
+            _seen.add(key)
+            import sys as _sys
+
+            print(
+                f"[P2-SHAPE] indexer B={B} S={S} H={H} D={D} T={T} mask={apply_mask} "
+                f"compress={compress_ratio} q.dtype={q.dtype} kv.dtype={kv.dtype}",
+                file=_sys.stderr,
+                flush=True,
+            )
+
     # Keep shipped SM100 defaults unless DSV4_INDEXER_TILE is explicitly set.
     # MMA tiles require dimensions >=16; masks discard short-input padding.
     BLOCK_S = 16

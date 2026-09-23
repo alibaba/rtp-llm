@@ -423,6 +423,7 @@ py_test(
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
+
 _PREFILL_POLICY_SOURCE_DATA = [
     "//rtp_llm/cpp/normal_engine:prefill_pipeline_source_data",
     "//rtp_llm/cpp/models:prefill_wire_source_data",
@@ -448,6 +449,13 @@ py_test(
     name = "test_forward_ep_plan_cpu",
     srcs = ["test_forward_ep_plan_cpu.py"],
     deps = ["//rtp_llm:torch"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_prefill_diagnostics_cpu",
+    srcs = ["test_prefill_diagnostics_cpu.py"],
     data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
