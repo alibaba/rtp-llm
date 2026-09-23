@@ -35,22 +35,44 @@ struct LinearReplayLease: LinearReplayGpuHold {
 struct LinearReplayBlockHold: LinearReplayGpuHold {};
 
 // Reuse is delayed by an event query; request completion never waits for the GPU.
-class LinearReplayRetirementQueue {
+//
+// A decode batch records the same completion event on many per-request holds. Keep
+// those releases together so polling cost scales with the number of distinct GPU
+// events rather than the number of requests. EventT is a template parameter only
+// to make the batching policy testable without a CUDA device.
+template<typename EventT>
+class LinearReplayRetirementQueueT {
 public:
-    ~LinearReplayRetirementQueue() {
+    ~LinearReplayRetirementQueueT() {
         // Only engine teardown drains outstanding GPU ownership synchronously.
         for (auto& item : retired_) {
             if (item.event) {
                 item.event->synchronize();
             }
-            item.release();
+            releaseAll(item);
         }
     }
 
-    void retire(std::shared_ptr<torch::Event> event, std::function<void()> release) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        retired_.push_back({std::move(event), std::move(release)});
-        reapLocked();
+    void retire(std::shared_ptr<EventT> event, std::function<void()> release) {
+        if (!event) {
+            release();
+            return;
+        }
+
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (auto& item : retired_) {
+            if (item.event == event) {
+                item.releases.push_back(std::move(release));
+                return;
+            }
+        }
+
+        if (event->query()) {
+            lock.unlock();
+            release();
+            return;
+        }
+        retired_.push_back({std::move(event), {std::move(release)}});
     }
 
     void reap() {
@@ -60,14 +82,20 @@ public:
 
 private:
     struct Retired {
-        std::shared_ptr<torch::Event> event;
-        std::function<void()>         release;
+        std::shared_ptr<EventT>            event;
+        std::vector<std::function<void()>> releases;
     };
+
+    static void releaseAll(Retired& item) {
+        for (auto& release : item.releases) {
+            release();
+        }
+    }
 
     void reapLocked() {
         for (auto it = retired_.begin(); it != retired_.end();) {
             if (!it->event || it->event->query()) {
-                it->release();
+                releaseAll(*it);
                 it = retired_.erase(it);
             } else {
                 ++it;
@@ -78,6 +106,8 @@ private:
     std::mutex           mutex_;
     std::vector<Retired> retired_;
 };
+
+using LinearReplayRetirementQueue = LinearReplayRetirementQueueT<torch::Event>;
 
 class LinearReplaySlotPool: public std::enable_shared_from_this<LinearReplaySlotPool> {
 public:

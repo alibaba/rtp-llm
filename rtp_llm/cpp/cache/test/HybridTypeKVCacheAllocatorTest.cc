@@ -791,6 +791,47 @@ TEST(LinearReplayCacheTest, SlotOwnershipAndGeneration) {
     EXPECT_EQ(second->generation, 2);
 }
 
+namespace {
+
+class FakeLinearReplayEvent {
+public:
+    bool query() {
+        ++query_count;
+        return ready;
+    }
+
+    void synchronize() {
+        ++synchronize_count;
+        ready = true;
+    }
+
+    bool ready             = false;
+    int  query_count       = 0;
+    int  synchronize_count = 0;
+};
+
+}  // namespace
+
+TEST(LinearReplayCacheTest, RetirementBatchesReleasesSharingOneEvent) {
+    LinearReplayRetirementQueueT<FakeLinearReplayEvent> queue;
+    auto                                                event         = std::make_shared<FakeLinearReplayEvent>();
+    int                                                 release_count = 0;
+
+    for (int i = 0; i < 128; ++i) {
+        queue.retire(event, [&release_count] { ++release_count; });
+    }
+
+    EXPECT_EQ(event->query_count, 1);
+    queue.reap();
+    EXPECT_EQ(event->query_count, 2);
+    EXPECT_EQ(release_count, 0);
+
+    event->ready = true;
+    queue.reap();
+    EXPECT_EQ(event->query_count, 3);
+    EXPECT_EQ(release_count, 128);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, ReplayReuseKeepsPrefillSnapshotsWithoutAccumulatingDecodeStates) {
     auto config                    = makeTinyHybridConfig();
     config.block_num               = 48;
