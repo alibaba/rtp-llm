@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <memory>
 #include <chrono>
 #include <limits>
@@ -153,6 +154,9 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         checkInputs(inputs);
+        if (forward_callback_) {
+            forward_callback_();
+        }
         return output_holder.get();
     }
 
@@ -204,6 +208,10 @@ public:
         prepare_input_holder.push(inputs);
     }
 
+    void setForwardCallback(std::function<void()> callback) {
+        forward_callback_ = std::move(callback);
+    }
+
     void expectTargetVerify(bool expected) {
         expected_is_target_verify_ = expected;
     }
@@ -233,6 +241,7 @@ private:
     TestDataHolder<GptModelOutputs> output_holder;
     torch::Tensor                   mtp_target_hidden_rows_;
     std::optional<bool>             expected_is_target_verify_;
+    std::function<void()>           forward_callback_;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -1115,6 +1124,16 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
     stream->logits_processor_list_.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
+    bool target_forward_observed = false;
+    components.fake_target_model->setForwardCallback(
+        [executor = components.executor.get(), processor, &target_forward_observed] {
+            target_forward_observed = true;
+            auto& runner = executor->spec_logits_verify_async_runner_;
+            std::lock_guard<std::mutex> lock(runner.mutex_);
+            // Check both pending work and a worker that already completed.
+            EXPECT_TRUE(runner.task_done_);
+            EXPECT_EQ(std::thread::id(), processor->invocationThreadId());
+        });
 
     GptModelInputs target_input;
     target_input.combo_tokens      = torch::tensor({2, 2, 1, 3}, torch::kInt32);
@@ -1191,6 +1210,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_TRUE(target_forward_observed);
     EXPECT_NE(std::thread::id(), processor->invocationThreadId());
     EXPECT_NE(main_thread_id, processor->invocationThreadId());
     EXPECT_EQ((std::vector<int32_t>{2, 1, 3}), processor->observedDraftTokens());

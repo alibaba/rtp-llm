@@ -1338,11 +1338,24 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
 
+    // Keep the copy-stream dependency at proposal completion even when the
+    // spec-logits worker is launched after target verification is enqueued.
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
     auto launch_spec_logits_verify_async = [&](torch::Tensor                 draft_tokens,
                                                std::shared_ptr<torch::Event> tokens_ready_event) {
+        if (!spec_logits_processor_present || propose_step_ <= 1 || !draft_tokens.defined()) {
+            return;
+        }
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
+        const int64_t expected_verify_tokens =
+            static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
+        const int64_t actual_verify_tokens = draft_tokens.numel();
+        RTP_LLM_CHECK_WITH_INFO(actual_verify_tokens == expected_verify_tokens,
+                                "spec logits verify tokens mismatch: got %ld, expected %ld",
+                                actual_verify_tokens,
+                                expected_verify_tokens);
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
@@ -1372,17 +1385,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         spec_logits_async_launched = true;
     };
 
-    // Both proposal implementations have now produced the same target-verify
-    // rows. Launch once here so spec-logits D2H/CPU work overlaps target verify.
-    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
-        const int64_t expected_verify_tokens =
-            static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
-        const int64_t actual_verify_tokens = draft_token_ids_t.numel();
-        RTP_LLM_CHECK_WITH_INFO(actual_verify_tokens == expected_verify_tokens,
-                                "spec logits verify tokens mismatch: got %ld, expected %ld",
-                                actual_verify_tokens,
-                                expected_verify_tokens);
+    // Linear attention refreshes block tables from host StreamGroups during
+    // target verification, so preserve its earlier bookkeeping join/rebuild.
+    if (is_linear_attention_model_) {
         launch_spec_logits_verify_async(draft_token_ids_t, draft_tokens_ready_event);
     }
 
@@ -1399,6 +1404,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_output          = runTargetVerifyForward(model_input, stream_groups);
         maybeOverrideAllHiddenStatesWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    // Enqueue target verification before waiting for previous CPU bookkeeping.
+    // The worker still waits only for draft tokens, so its D2H/CPU work can
+    // overlap the queued target GPU work. Sampling joins it below.
+    if (!is_linear_attention_model_) {
+        launch_spec_logits_verify_async(draft_token_ids_t, draft_tokens_ready_event);
     }
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
