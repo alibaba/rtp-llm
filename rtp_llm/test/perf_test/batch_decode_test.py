@@ -11,7 +11,8 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Mapping, Optional
+import time
+from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
 from rtp_llm.test.perf_test.dataset import extract_arg
@@ -95,6 +96,14 @@ def _ensure_default_role_type(
         engine_args.extend(["--role_type", "PDFUSION"])
 
 
+def _unset_tpsync_for_timing(
+    environ: MutableMapping[str, str] = os.environ,
+) -> None:
+    """Unset presence-based TPSYNC logging only when the timing profile explicitly requests it."""
+    if environ.pop("RTP_LLM_PERF_UNSET_TPSYNC", "0") == "1":
+        environ.pop("RTP_LLM_LOG_TPSYNC", None)
+
+
 def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
     """--batch_size as given on the command line, or None when it was defaulted."""
     if not any(a.startswith("--batch_size") for a in sys.argv[1:]):
@@ -108,6 +117,45 @@ def _engine_tp_size(
     """Resolve the TP topology used by the engine for result metadata."""
     value = extract_arg(engine_args, "tp_size") or environ.get("TP_SIZE", "1")
     return int(value)
+
+
+def _configure_scheduler(args, engine_args, generate_config, environ=os.environ):
+    """Keep the grid runner, but use the engine's PP scheduler for PP prefill."""
+    pp_size = int(extract_arg(engine_args, "pp_size") or environ.get("PP_SIZE", "1"))
+    requested = extract_arg(engine_args, "use_batch_decode_scheduler")
+    if pp_size > 1:
+        if (
+            args.partial != 2
+            or args.dp_size != 1
+            or args.batch_size != "1"
+            or args.target_tpot
+            or args.dataset
+            or args.dataset_name
+            or args.dataset_path
+            or args.test_json
+        ):
+            raise ValueError(
+                "PP perf supports only single-client prefill grid (partial=2, BS=DP=1)"
+            )
+        if requested not in (None, "0"):
+            raise ValueError("PP does not support BatchDecodeScheduler")
+        # A chunked request has multiple forwards: request-level CUPTI can rearm
+        # inside overlapped rounds. Native single-rank profiling is configured in BUILD.
+        if (
+            int(environ.get("PERF_PROFILE_RUNS", "1")) != 0
+            or environ.get("PERF_PREARM_PROFILE", "0") != "0"
+            or generate_config.get("gen_timeline")
+            or generate_config.get("profile_step")
+        ):
+            raise ValueError(
+                "PP perf requires PERF_PROFILE_RUNS=0 and no request/prearm profiler"
+            )
+        if requested is None:
+            engine_args.extend(["--use_batch_decode_scheduler", "0"])
+        return False
+    if requested is None:
+        engine_args.extend(["--use_batch_decode_scheduler", "1"])
+    return requested != "0"
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +268,7 @@ def _run_decode(
 def main() -> str:
     from rtp_llm.config.log_config import setup_logging
 
+    _unset_tpsync_for_timing()
     setup_logging()
 
     args, remaining = parse_args()
@@ -229,10 +278,9 @@ def main() -> str:
     # standalone DECODE RPC role intentionally does not implement the
     # GenerateStreamCall path used by this perf client.
     _ensure_default_role_type(remaining)
-    # batch_decode_test always needs BatchDecodeScheduler
-    if extract_arg(remaining, "use_batch_decode_scheduler") is None:
-        remaining.extend(["--use_batch_decode_scheduler", "1"])
     generate_config = json.loads(args.generate_config)
+    use_batch_decode_scheduler = _configure_scheduler(args, remaining, generate_config)
+    started = time.time()
     os.makedirs(args.result_dir, exist_ok=True)
     EngineServer.propagate_engine_env(remaining)
 
@@ -250,7 +298,7 @@ def main() -> str:
         server.start(
             max_seq_len=config.max_seq_len,
             max_concurrency=config.max_concurrency,
-            use_batch_decode_scheduler=True,
+            use_batch_decode_scheduler=use_batch_decode_scheduler,
         )
         engine_status = query_engine_status(server.port)
         print_config_table(args, config, engine_status, remaining)
@@ -272,6 +320,7 @@ def main() -> str:
                 config,
                 input_query_dict,
                 batch_size_list=_explicit_batch_size_list(args),
+                use_batch_decode_scheduler=use_batch_decode_scheduler,
                 **runner_kwargs,
             )
 
@@ -287,7 +336,7 @@ def main() -> str:
             )
 
         # Persist runtime artifacts only after the measured work completed.
-        collect_timeline_files(args.result_dir)
+        collect_timeline_files(args.result_dir, started=started)
 
         if args.partial != 2:
             from rtp_llm.test.perf_test.visualization import plot_decode_results

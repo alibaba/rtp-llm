@@ -146,6 +146,7 @@ class TestRunPrefill(unittest.TestCase):
             [128, 256],
             query_dict,
             is_decode=False,
+            tp_size=1,
             dump_json_path="/tmp",
         )
         mock_runner.run.assert_called_once()
@@ -413,9 +414,7 @@ class TestOfflineBenchConfig(unittest.TestCase):
     def test_validate_num_return_sequences(self):
         from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig
 
-        with self.assertRaisesRegex(
-            ValueError, "num_return_sequences must be >= 1"
-        ):
+        with self.assertRaisesRegex(ValueError, "num_return_sequences must be >= 1"):
             OfflineBenchConfig(num_return_sequences=0).validate()
 
 
@@ -429,9 +428,7 @@ class TestOfflineFailurePolicy(unittest.TestCase):
     def test_rejects_zero_successful_requests(self):
         from rtp_llm.test.perf_test.offline_runner import OfflineMetrics
 
-        metrics = OfflineMetrics(
-            total_submitted=2, success_requests=0, fail_requests=2
-        )
+        metrics = OfflineMetrics(total_submitted=2, success_requests=0, fail_requests=2)
         with self.assertRaisesRegex(RuntimeError, "no requests succeeded"):
             metrics.raise_if_all_requests_failed()
 
@@ -1506,10 +1503,7 @@ class TestOfflineBenchMain(unittest.TestCase):
     def test_all_failed_requests_raise_from_entry_point_and_stop_server(self):
         import rtp_llm.test.perf_test.offline_bench_test as offline_bench
         import rtp_llm.test.perf_test.offline_runner as offline_runner_module
-        from rtp_llm.test.perf_test.offline_runner import (
-            OfflineMetrics,
-            OfflineRunner,
-        )
+        from rtp_llm.test.perf_test.offline_runner import OfflineMetrics, OfflineRunner
 
         server = MagicMock(port=12345)
         failed_metrics = OfflineMetrics(
