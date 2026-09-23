@@ -413,6 +413,24 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     bool is_non_root = parallelism_config.tp_rank != 0;
     if (is_non_root) {
+        // Optional multimodal fields may disappear on the next batch. Clear
+        // old storage before conditional allocation, otherwise a text-only
+        // batch can inherit stale MM metadata and enter the MM CP path.
+        if (!combo_position_ids_size) {
+            inputs.combo_position_ids = torch::Tensor();
+        }
+        if (!text_tokens_mask_size) {
+            inputs.text_tokens_mask = torch::Tensor();
+        }
+        if (!mm_features_locs_size) {
+            inputs.mm_features_locs = torch::Tensor();
+        }
+        if (!mm_features_num) {
+            inputs.multimodal_features.reset();
+        }
+        if (!mm_extra_input_num) {
+            inputs.mm_extra_input.reset();
+        }
         const auto context_batch_size = checkedHint(GptModelInputIndex::prefixLengths, "prefixLengths");
 
         // Respect the root-side device bitmap so all ranks classify tensors the
@@ -423,16 +441,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         };
 
         inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                       {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
+                                           {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
         inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                        {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
+                                           {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
         inputs.sequence_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {checkedHint(GptModelInputIndex::sequenceLengths, "sequenceLengths")},
                                            pickAlloc(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
         inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                         {context_batch_size},
+                                           {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
@@ -485,7 +503,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                 {request_length},
                                                 pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestPdSeparation));
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                            {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
+                                                {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
