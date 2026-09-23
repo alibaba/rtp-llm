@@ -127,7 +127,7 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         env_name="DS_LLM_GRAMMAR_SANDBOX_PROCESS_MEMORY_LIMIT_MB",
         bind_to=(grammar_admission_config, "sandbox_process_memory_limit_mb"),
         type=int,
-        default=1024,
+        default=8192,
         help="Per-worker address-space headroom in MiB; <=0 disables the cap.",
     )
     grammar_group.add_argument(
