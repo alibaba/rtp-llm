@@ -13,6 +13,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import MoeConfig
 from .attention import linear
+from .router import KimiK3RouterProjection
 
 
 def situ(gate, up, beta, linear_beta, *, inplace=False):
@@ -54,7 +55,7 @@ class KimiK3LatentMoE(nn.Module):
             config.has_moe_norm,
             config.routed_scaling_factor,
         )
-        self.router_weight = weights[K3W.MOE_GATE].float()
+        self.router = KimiK3RouterProjection(weights[K3W.MOE_GATE])
         self.correction = weights[K3W.MOE_CORRECTION_BIAS].float()
         self.down = linear(weights, K3W.MOE_ROUTED_DOWN, hardware)
         self.up = linear(weights, K3W.MOE_ROUTED_UP, hardware)
@@ -99,7 +100,7 @@ class KimiK3LatentMoE(nn.Module):
         self.experts = FusedMoeFactory().create_fused_moe(cfg, packed)
 
     def forward(self, hidden, valid_mask=None):
-        scores = (hidden.float() @ self.router_weight).sigmoid()
+        scores = self.router(hidden).sigmoid()
         choice = scores + self.correction
         if self.groups > self.top_groups:
             grouped = choice.reshape(hidden.shape[0], self.groups, -1)
