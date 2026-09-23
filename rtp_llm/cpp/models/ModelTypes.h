@@ -133,6 +133,7 @@ enum GptModelInputIndex : size_t {
     engramTokenWindowRows,
     engramTokenWindowWidth,
     kvCacheCopyTokenLengths,
+    recordExecutionId,
     gptModelInputLength,
 };
 

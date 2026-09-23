@@ -75,6 +75,7 @@ cc_test(
         "//rtp_llm/cpp/engine_base/schedulers",
         "//rtp_llm/cpp/models",
         "//rtp_llm/cpp/normal_engine",
+        "//rtp_llm/cpp/observability:execution_recorder",
         "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -96,6 +97,16 @@ cc_test(
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/engine_base/schedulers",
     ] + torch_deps() + cuda13_torch_link_deps,
+    env = device_test_envs(),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "recording_engine_test",
+    srcs = ["RecordingEngineTest.cc"],
+    copts = test_copts,
+    deps = [":mock_engine", "//rtp_llm/cpp/observability:execution_recorder"] + cuda13_torch_link_deps,
     env = device_test_envs(),
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
