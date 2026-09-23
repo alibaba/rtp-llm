@@ -51,6 +51,6 @@ cc_test_wrapper(
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ],
+    ] + cuda13_torch_link_deps,
     copts = copts(),
 )

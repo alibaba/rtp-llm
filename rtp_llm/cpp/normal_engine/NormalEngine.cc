@@ -504,11 +504,39 @@ void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     cudaPreRun(getDeviceId());
+    // Back off and rate-limit logs on repeated failures; a successful step resets the counter.
+    int64_t consecutive_failures = 0;
     while (running_) {
-        auto status = step();
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
-            THROW_IF_STATUS_ERROR(trySaveStepError());
+        // Exceptions escaping this thread would call std::terminate.
+        try {
+            auto status = step();
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+                THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+            consecutive_failures = 0;
+        } catch (const std::exception& e) {
+            ++consecutive_failures;
+            if (consecutive_failures <= 20 || consecutive_failures % 1000 == 0) {
+                RTP_LLM_LOG_ERROR("engine loop survived a step exception (%ld consecutive): %s",
+                                  (long)consecutive_failures, e.what());
+            }
+            if (consecutive_failures >= 5) {
+                int64_t backoff_ms = 20 * consecutive_failures;
+                if (backoff_ms > 1000) { backoff_ms = 1000; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+            }
+        } catch (...) {
+            ++consecutive_failures;
+            if (consecutive_failures <= 20 || consecutive_failures % 1000 == 0) {
+                RTP_LLM_LOG_ERROR("engine loop survived an unknown step exception (%ld consecutive)",
+                                  (long)consecutive_failures);
+            }
+            if (consecutive_failures >= 5) {
+                int64_t backoff_ms = 20 * consecutive_failures;
+                if (backoff_ms > 1000) { backoff_ms = 1000; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+            }
         }
     }
 }
@@ -638,6 +666,15 @@ bool NormalEngine::isDSpark() {
     return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
 }
 
+// A fixed decode batch keeps graph keys rank-uniform. Zero disables padding.
+static int decodeFixedBs() {
+    static const int value = [] {
+        const char* e = getenv("RTP_LLM_DECODE_FIXED_BS");
+        return (e && *e) ? atoi(e) : 0;
+    }();
+    return value;
+}
+
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
@@ -650,12 +687,39 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                         MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
                 }
                 break;
-            case RoleType::DECODE:
+            case RoleType::DECODE: {
+                // Every rank must use the same graph key and collective sizes,
+                // including idle ranks. Fixed padding avoids a per-step collective.
+                // Admission must stay within fixed_bs, which must be captured;
+                // do not increase padding independently on an overloaded rank.
+                const int fixed_bs = decodeFixedBs();
+                if (fixed_bs > 0) {
+                    const int n = static_cast<int>(streams.size());
+                    if (n <= fixed_bs) {
+                        for (int i = n; i < fixed_bs; ++i) {
+                            streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
+                                propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
+                        }
+                    } else {
+                        static int over_log_budget = 50;
+                        if (over_log_budget-- > 0) {
+                            RTP_LLM_LOG_ERROR(
+                                "rank %d decode bs %d exceeds RTP_LLM_DECODE_FIXED_BS %d: not "
+                                "padding (a rank-local bs would diverge the graph keys and deadlock the EP "
+                                "collectives). Raise RTP_LLM_DECODE_FIXED_BS or cap decode concurrency.",
+                                (int)parallelism_config.world_rank,
+                                n,
+                                fixed_bs);
+                        }
+                    }
+                    break;
+                }
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
                         propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
                 }
                 break;
+            }
             case RoleType::PDFUSION: {
                 bool has_prefill = false;
                 bool has_decode  = false;
