@@ -22,6 +22,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -91,6 +94,54 @@ class EngineSyncRunnerTest {
                 false,
                 STATUS_STALE_AFTER_US
         );
+    }
+
+    @Test
+    void withdrawsAllMissingGatesAndPollsSurvivorsBeforeAwaitingCleanup() throws Exception {
+        WorkerStatus first = Mockito.spy(RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site"));
+        WorkerStatus second = Mockito.spy(RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.2", 8080, 8081, "test-site"));
+        CountDownLatch awaiting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        for (WorkerStatus status : List.of(first, second)) {
+            when(status.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
+                    System.nanoTime() / 1000 - 2 * STATUS_STALE_AFTER_US, 20_000, 0, true));
+            discover(workerDirectory, status);
+            WorkerEndpoint endpoint = Mockito.mock(WorkerEndpoint.class);
+            EndpointRegistry.DetachedGeneration detached =
+                    Mockito.mock(EndpointRegistry.DetachedGeneration.class);
+            when(endpointRegistry.get(roleType, status.getIpPort(), status)).thenReturn(endpoint);
+            when(detached.ownsEndpoint(endpoint)).thenReturn(true);
+            when(endpointRegistry.detachAndBeginRetirement(roleType, status.getIpPort(), status))
+                    .thenAnswer(invocation -> {
+                        status.beginRetirementAfterEndpointGateClosed();
+                        return detached;
+                    });
+            Mockito.doAnswer(invocation -> {
+                awaiting.countDown();
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+                return null;
+            }).when(detached).retireAndAwait();
+        }
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.3", 8080)));
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            var syncing = executor.submit(engineSyncRunner);
+            assertTrue(awaiting.await(2, TimeUnit.SECONDS));
+            assertFalse(first.isActiveGeneration());
+            assertFalse(second.isActiveGeneration(), "one cleanup must not delay another routing withdrawal");
+            verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+            release.countDown();
+            syncing.get(5, TimeUnit.SECONDS);
+            assertEquals(1, workerDirectory.statusSnapshot(roleType).size());
+            verify(localKvCacheAwareManager).removeEngineBlockCache(first.getIpPort());
+            verify(localKvCacheAwareManager).removeEngineBlockCache(second.getIpPort());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test

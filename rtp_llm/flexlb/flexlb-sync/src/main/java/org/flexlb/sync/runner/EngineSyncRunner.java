@@ -16,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -95,6 +96,7 @@ public class EngineSyncRunner implements Runnable {
     @Override
     public void run() {
         logger.debug("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
+        List<PendingRetirement> retirements = new ArrayList<>();
         try {
             long startTimeInUs = System.nanoTime() / 1000;
             List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(modelName, roleType);
@@ -120,8 +122,11 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = entry.getValue();
                 String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
-                    retireMissingGenerationIfExpired(
+                    PendingRetirement retirement = beginMissingRetirementIfExpired(
                             ipPort, workerStatus);
+                    if (retirement != null) {
+                        retirements.add(retirement);
+                    }
                 }
             }
             if (latestEngineWorkerList.isEmpty()) {
@@ -204,6 +209,17 @@ public class EngineSyncRunner implements Runnable {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
+            // Withdraw every missing routing gate and submit survivor polls
+            // before awaiting any one generation's potentially slow cleanup.
+            for (PendingRetirement retirement : retirements) {
+                workerDirectory.completeRetirement(
+                        retirement.role(), retirement.address(), retirement.status(),
+                        retirement.detached(), cacheAwareService, logger);
+                logger.info(
+                        "[remove] retiring missing worker, model={}, role={}, ipPort={}, generation={}",
+                        modelName, retirement.role(), retirement.address(),
+                        retirement.status().getGenerationId());
+            }
             logger.debug("Entering finally block for model: {}", modelName);
             Map<String, WorkerStatus> currentStatuses =
                     workerDirectory.statusSnapshot(roleType);
@@ -367,7 +383,7 @@ public class EngineSyncRunner implements Runnable {
         return discovered;
     }
 
-    private void retireMissingGenerationIfExpired(
+    private PendingRetirement beginMissingRetirementIfExpired(
             String workerIpPort,
             WorkerStatus workerStatus) {
         EndpointRegistry.DetachedGeneration endpointToRetire = null;
@@ -377,16 +393,16 @@ public class EngineSyncRunner implements Runnable {
         try {
             if (!workerDirectory.isCurrentStatus(
                     roleType, workerIpPort, workerStatus)) {
-                return;
+                return null;
             }
             if (!workerStatus.isActiveGeneration()) {
-                return;
+                return null;
             }
             WorkerStatus.PollHealth health = workerStatus.pollHealth();
             if (System.nanoTime() / 1000
                     - health.lastSuccessfulPollUs()
                     <= statusStaleAfterUs) {
-                return;
+                return null;
             }
 
             generationRole = workerStatus.getRole();
@@ -398,16 +414,13 @@ public class EngineSyncRunner implements Runnable {
         }
 
         if (retirementStarted) {
-            workerDirectory.completeRetirement(
-                    generationRole, workerIpPort, workerStatus,
-                    endpointToRetire, cacheAwareService, logger);
-            logger.info(
-                    "[remove] retiring missing worker, model={}, role={}, ipPort={}, generation={}",
-                    modelName,
-                    roleType,
-                    workerIpPort,
-                    workerStatus.getGenerationId());
+            return new PendingRetirement(
+                    generationRole, workerIpPort, workerStatus, endpointToRetire);
         }
+        return null;
     }
 
+    private record PendingRetirement(RoleType role, String address,
+                                     WorkerStatus status,
+                                     EndpointRegistry.DetachedGeneration detached) {}
 }
