@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "queueTimeoutMs": 60000,
+    "ordering": {
+      "type": "FIFO"
+    },
+    "capacity": {
+      "maxOutstandingRequestsGlobal": 10000
+    },
+    "lifecycle": {
+      "staleInflightTimeoutMs": 300000,
+      "deliveredNotAcceptedTimeoutMs": 30000,
+      "maxDeliveredNotAcceptedRequestsGlobal": 500000
+    }
+  },
+  "dispatcher": {
+    "type": "BATCH",
+    "maxRequests": 64,
+    "maxCollectionWaitMs": 350,
+    "maxWaitingRequestsPerPrefillWorker": 512,
+    "earlyDispatchPredictedExecutionMs": 350,
+    "maxInflightBatchesPerPrefillWorker": 2,
+    "enqueueRpcTimeoutMs": 100000
+  },
+  "router": {
+    "availabilityHysteresisPercent": 30,
+    "roles": {
+      "prefill": {
+        "availability": {
+          "maxPendingRequests": 100000
+        },
+        "executionTimeEstimator": {
+          "type": "FORMULA",
+          "expression": "max(1, sum(computeTokens))"
+        },
+        "selector": {
+          "type": "ESTIMATED_TTFT",
+          "candidateChoice": {
+            "type": "RANDOM_WITHIN_TOLERANCE",
+            "relativeTolerance": 0,
+            "minimumToleranceMs": 0,
+            "outlierRejection": {
+              "maxPendingVsAverageMultiplier": 3,
+              "maxWaitVsAverageMultiplier": 3
+            }
+          }
+        },
+        "cacheAffinity": {
+          "maxExtraTtftMs": 100000000,
+          "minPrefixHitPercent": 5
+        }
+      },
+      "decode": {
+        "availability": {
+          "maxKvUsagePercent": 98,
+          "maxEngineRequests": 128
+        },
+        "kvReservation": {
+          "maxOutputTokensForEstimate": 1000
+        },
+        "selector": {
+          "type": "KV_USAGE_WEIGHTED_RANDOM",
+          "decayPerToken": 0.001,
+          "outlierRejection": {
+            "maxEngineLoadVsAverageMultiplier": 3,
+            "maxKvUsedVsAverageMultiplier": 3
+          }
+        }
+      },
+      "vit": {
+        "selector": {
+          "type": "RANDOM"
+        }
+      }
+    }
+  },
+  "workerRegistry": {
+    "health": {
+      "statusPollIntervalMs": 20,
+      "statusRpcTimeoutMs": 5000,
+      "statusStaleAfterMs": 10000
+    },
+    "cacheStatus": {
+      "targetDiffSize": 30,
+      "minRefreshIntervalMs": 50,
+      "maxRefreshIntervalMs": 3000,
+      "fullSnapshotDebugMode": false
+    }
+  },
+  "observability": {
+    "cacheHit": {
+      "recentKeyWindow": {
+        "writeEnabled": true,
+        "durationMs": 1800000,
+        "maxKeyOccurrences": 80000000
+      },
+      "metricsEnabled": true,
+      "requestTraceLogEnabled": false
+    }
+  }
+}
