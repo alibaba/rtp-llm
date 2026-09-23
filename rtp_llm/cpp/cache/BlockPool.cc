@@ -246,7 +246,10 @@ private:
     std::vector<std::thread> workers_;
 };
 
-torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, size_t prefault_threads) {
+torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes,
+                                          bool interleave_numa_nodes,
+                                          size_t prefault_threads,
+                                          std::shared_ptr<bool> registered = nullptr) {
 #if USING_CUDA
     void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) {
@@ -291,9 +294,14 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_num
         (void)munmap(ptr, size_bytes);
         throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(err));
     }
-    auto deleter = [size_bytes](void* registered_ptr) {
+    if (registered) {
+        *registered = true;
+    }
+    auto deleter = [size_bytes, registered](void* registered_ptr) {
         if (registered_ptr != nullptr) {
-            (void)cudaHostUnregister(registered_ptr);
+            if (!registered || *registered) {
+                (void)cudaHostUnregister(registered_ptr);
+            }
             (void)munmap(registered_ptr, size_bytes);
         }
     };
@@ -433,8 +441,11 @@ void BlockPool::initializeCacheBuffer() {
     } else if (config_.mla_tiered_cache) {
         // The caching pinned allocator rounds large arenas up to a power of two.
         // Register the exact budget instead, using the existing NUMA policy.
+        mla_host_registered_ = std::make_shared<bool>(false);
+        mla_host_discarded_  = false;
         cache_aligned_buffer_ = allocateRegisteredCpuTensor(
-            config_.total_size_bytes, shouldInterleaveRegisteredHostBlockPool(), hostBlockPoolPrefaultThreads());
+            config_.total_size_bytes, shouldInterleaveRegisteredHostBlockPool(), hostBlockPoolPrefaultThreads(),
+            mla_host_registered_);
         cache_buffer_registered_host_ = true;
         markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else if (use_pinned_cpu_backing_) {
@@ -700,6 +711,74 @@ bool BlockPool::init() {
 
 BlockCachePtr BlockPool::blockCache() {
     return block_cache_;
+}
+
+void BlockPool::releaseMlaHostCacheForCheckpoint() {
+#if USING_CUDA
+    if (!config_.mla_tiered_cache || !mla_host_registered_ || !*mla_host_registered_) {
+        return;
+    }
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    RTP_LLM_CHECK_WITH_INFO(free_block_ids_.size() + 1 == config_.block_num && !kvcache_reg_mr_,
+                           "MLA host KV release requires an empty pool before cache registration");
+    // The template engine loop is not started; include the MLA transfer stream.
+    RTP_LLM_CHECK_WITH_INFO(cudaDeviceSynchronize() == cudaSuccess, "synchronize MLA host KV before checkpoint");
+    void* device_ptr = nullptr;
+    RTP_LLM_CHECK_WITH_INFO(cudaHostGetDevicePointer(&device_ptr, cache_base_ptr_, 0) == cudaSuccess
+                               && device_ptr == cache_base_ptr_,
+                           "MLA host KV must use the captured CPU/GPU VA");
+    RTP_LLM_CHECK_WITH_INFO(cudaHostUnregister(cache_base_ptr_) == cudaSuccess, "unregister MLA host KV");
+    *mla_host_registered_ = false;
+    try {
+        RTP_LLM_CHECK_WITH_INFO(madvise(cache_base_ptr_, config_.total_size_bytes, MADV_DONTNEED) == 0,
+                               "discard MLA host KV pages: %s",
+                               std::strerror(errno));
+        mla_host_discarded_ = true;
+        RTP_LLM_CHECK_WITH_INFO(mprotect(cache_base_ptr_, config_.total_size_bytes, PROT_NONE) == 0,
+                               "protect discarded MLA host KV: %s",
+                               std::strerror(errno));
+    } catch (...) {
+        restoreMlaHostCacheAfterCheckpoint();
+        throw;
+    }
+    RTP_LLM_LOG_INFO("SCR MLA host KV released, VA retained: ptr=%p bytes=%zu", cache_base_ptr_, config_.total_size_bytes);
+#endif
+}
+
+void BlockPool::restoreMlaHostCacheAfterCheckpoint() {
+#if USING_CUDA
+    if (!mla_host_registered_ || *mla_host_registered_) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(mprotect(cache_base_ptr_, config_.total_size_bytes, PROT_READ | PROT_WRITE) == 0,
+                           "unprotect MLA host KV: %s",
+                           std::strerror(errno));
+    if (shouldInterleaveRegisteredHostBlockPool()) {
+        const auto policy = applyAllowedNumaInterleavePolicy(cache_base_ptr_, config_.total_size_bytes);
+        RTP_LLM_CHECK_WITH_INFO(policy.success, "restore MLA host KV NUMA policy: %s", policy.error_message.c_str());
+    }
+    {
+        HostArenaPrefaulter prefaulter(cache_base_ptr_, config_.total_size_bytes, hostBlockPoolPrefaultThreads());
+        RTP_LLM_CHECK_WITH_INFO(cudaHostRegister(cache_base_ptr_, config_.total_size_bytes, cudaHostRegisterDefault)
+                                   == cudaSuccess,
+                               "restore MLA host KV registration");
+    }
+    *mla_host_registered_ = true;
+    void* device_ptr = nullptr;
+    RTP_LLM_CHECK_WITH_INFO(cudaHostGetDevicePointer(&device_ptr, cache_base_ptr_, 0) == cudaSuccess
+                               && device_ptr == cache_base_ptr_,
+                           "restored MLA host KV GPU VA changed");
+    if (mla_host_discarded_) {
+        // Invalidate captured working-set entries in place; snapshot mode also
+        // copies these generations on every replay. Tensor/view VAs stay fixed.
+        auto* generations = block_generations_.data_ptr<int64_t>();
+        for (int64_t i = 0; i < block_generations_.numel(); ++i) {
+            ++generations[i];
+        }
+        mla_host_discarded_ = false;
+    }
+    RTP_LLM_LOG_INFO("SCR MLA host KV restored at captured VA: ptr=%p bytes=%zu", cache_base_ptr_, config_.total_size_bytes);
+#endif
 }
 
 void BlockPool::initFreeBlocks() {

@@ -74,6 +74,10 @@ public:
         int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
 
     CacheLayerLayout allLayerCacheBase() const;
+    // The optional GLM host-KV optimization uses the existing single MLA pool.
+    BlockPoolPtr mlaHostCachePool() const {
+        return config_.dsa_mla_resident_tokens && allocator_ ? allocator_->getBlockPool() : nullptr;
+    }
     std::vector<torch::Tensor> gpuCacheTensors() const {
         return allocator_ ? allocator_->gpuCacheTensors() : std::vector<torch::Tensor>{};
     }

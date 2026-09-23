@@ -730,6 +730,26 @@ void RtpLLMOp::pause() {
     engine->pause();
 }
 
+void RtpLLMOp::releaseMlaHostCacheForCheckpoint() {
+    RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && model_rpc_service_ != nullptr,
+                           "host KV release is only allowed before deferred service startup");
+    auto manager = model_rpc_service_->getEngine()->getCacheManager();
+    RTP_LLM_CHECK_WITH_INFO(manager != nullptr, "engine has no KV cache manager");
+    if (auto pool = manager->mlaHostCachePool()) {
+        pool->releaseMlaHostCacheForCheckpoint();
+    }
+}
+
+void RtpLLMOp::restoreMlaHostCacheAfterCheckpoint() {
+    RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && model_rpc_service_ != nullptr,
+                           "host KV restore is only allowed before deferred service startup");
+    auto manager = model_rpc_service_->getEngine()->getCacheManager();
+    RTP_LLM_CHECK_WITH_INFO(manager != nullptr, "engine has no KV cache manager");
+    if (auto pool = manager->mlaHostCachePool()) {
+        pool->restoreMlaHostCacheAfterCheckpoint();
+    }
+}
+
 void RtpLLMOp::restart() {
     auto engine = model_rpc_service_->getEngine();
     engine->restart();
@@ -748,6 +768,8 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("token_processor"),
              py::arg("defer_service_start") = false)
         .def("gpu_cache_tensors", &RtpLLMOp::gpuCacheTensors)
+        .def("release_mla_host_cache_for_checkpoint", &RtpLLMOp::releaseMlaHostCacheForCheckpoint)
+        .def("restore_mla_host_cache_after_checkpoint", &RtpLLMOp::restoreMlaHostCacheAfterCheckpoint)
         .def("start_rpc_server", &RtpLLMOp::startRPCServer)
         .def("update_runtime_endpoints", &RtpLLMOp::updateRuntimeEndpoints)
         .def("start_http_server",

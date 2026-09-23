@@ -39,6 +39,8 @@ public:
     MemoryType                 where() const;
     // Whole owning allocations, independent of model/layer views. CPU backing is excluded.
     const std::vector<torch::Tensor>& gpuCacheTensors() const { return gpu_cache_tensors_; }
+    void releaseMlaHostCacheForCheckpoint();
+    void restoreMlaHostCacheAfterCheckpoint();
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
 
@@ -160,6 +162,9 @@ private:
     std::vector<torch::Tensor>   global_layer_hbm_tensors_;
     void*                       cache_base_ptr_               = nullptr;
     bool                        cache_buffer_registered_host_ = false;
+    // Shared with the MLA tensor deleter; its views can outlive this pool.
+    std::shared_ptr<bool>        mla_host_registered_;
+    bool                        mla_host_discarded_ = false;
     bool                        kvcache_reg_mr_               = false;
     int64_t                     mr_cost_time_ms_              = 0;
     std::shared_ptr<CacheStore> cache_store_;
