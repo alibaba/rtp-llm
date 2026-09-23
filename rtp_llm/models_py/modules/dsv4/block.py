@@ -359,7 +359,10 @@ class Block(nn.Module):
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
         attn_fn=None,
-    ) -> torch.Tensor:
+        *,
+        _prepared_attn=None,
+        _defer_ffn_post: bool = False,
+    ):
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Both paths share
         the optional intra-layer delayed mHC/RMSNorm fusion.
@@ -373,16 +376,26 @@ class Block(nn.Module):
 
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
-        x = self._inject_engram(x)
-        residual = x
-        x_pre, post, comb = self.attn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
-        )
-        # Framework RMSNorm wants 2D — collapse [B, q_len, dim] → [B*q_len, dim]
-        # and view back; attention.forward_decode wants the original 3D shape.
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        if _prepared_attn is None:
+            x = self._inject_engram(x)
+            residual = x
+            x_pre, post, comb = self.attn_hc.pre(
+                x,
+                dbg_tag=(
+                    f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None
+                ),
+            )
+            # Framework RMSNorm wants 2D; attention consumes [B, q_len, dim].
+            bsz, q_len, dim_ = x_pre.shape
+            x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
+                bsz, q_len, dim_
+            )
+        else:
+            if self.engram is not None or _dbg_layer:
+                raise RuntimeError(
+                    "Prepared decode mHC cannot bypass Engram or tracing"
+                )
+            residual, x_pre, post, comb = _prepared_attn
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
         if attn_fn is not None:
@@ -422,6 +435,12 @@ class Block(nn.Module):
         ffn_out = self.ffn(x_pre, input_ids)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
+        if _defer_ffn_post:
+            from rtp_llm.models_py.modules.dsv4.hc.decode_transition import (
+                PendingDecodePost,
+            )
+
+            return PendingDecodePost(ffn_out, residual, post, comb, self.ffn_hc)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
 

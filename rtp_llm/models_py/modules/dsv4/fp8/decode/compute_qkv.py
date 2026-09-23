@@ -38,6 +38,8 @@ class DecodeQKV(NamedTuple):
     q: torch.Tensor
     kv: torch.Tensor
     freqs_cis: torch.Tensor
+    qr_quantized: tuple[torch.Tensor, torch.Tensor] | None = None
+    swa_written: bool = False
 
 
 def _fused_v41_q_rope_supported(q, freqs_cis, rope_dim: int) -> bool:
@@ -69,6 +71,10 @@ def decode_compute_qkv(
     attn: "AttentionFP8",
     x: torch.Tensor,  # [B, S, dim] bf16
     position_ids: torch.Tensor,  # [T] int32 absolute position per token
+    freqs_cis: torch.Tensor | None = None,
+    *,
+    swa_pool: torch.Tensor | None = None,
+    swa_slots: torch.Tensor | None = None,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -76,20 +82,55 @@ def decode_compute_qkv(
     normal decode ``S == 1``; target verify passes the full verify span.
     """
     rd = attn.rope_head_dim
-    position_ids = position_ids.reshape(-1).to(
-        device=attn.freqs_cis.device, dtype=torch.long
-    )
-    freqs_cis = attn.freqs_cis.index_select(0, position_ids).contiguous()
+    if freqs_cis is None:
+        position_ids = position_ids.reshape(-1).to(
+            device=attn.freqs_cis.device, dtype=torch.long
+        )
+        freqs_cis = attn.freqs_cis.index_select(0, position_ids).contiguous()
 
-    fused_qkv = attn._try_fused_qr_kv(x)
+    from rtp_llm.models_py.modules.dsv4._v41_query_quant import (
+        try_project_quantized_qkv,
+    )
+
+    quantized_qkv = try_project_quantized_qkv(attn, x)
+    qr_quantized = None if quantized_qkv is None else quantized_qkv[2]
+    fused_qkv = attn._try_fused_qr_kv(x) if quantized_qkv is None else quantized_qkv[:2]
     # Q path; fused KV remains a view until its strided RMSNorm/RoPE below.
     if fused_qkv is None:
         qr = attn._rmsnorm_weighted(attn._lin(attn.wq_a, x), attn.q_norm)
     else:
         qr = fused_qkv[0]
-    q = attn._lin(attn.wq_b, qr).unflatten(
+    q = (
+        attn._lin(attn.wq_b, qr)
+        if qr_quantized is None
+        else attn.wq_b.forward_quantized(*qr_quantized)
+    ).unflatten(
         -1, (attn.n_heads, attn.head_dim)
     )  # [B, S, H, D]
+    raw_kv = attn._lin(attn.wkv, x) if fused_qkv is None else fused_qkv[1]
+    if (
+        getattr(attn, "skip_post_q_norm", False)
+        and rd == 64
+        and swa_pool is not None
+        and swa_slots is not None
+    ):
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_qkv_rope_cache_triton import (
+            try_fused_qkv_rope_cache,
+        )
+
+        fused = try_fused_qkv_rope_cache(
+            q,
+            raw_kv,
+            attn.kv_norm,
+            position_ids,
+            attn.freqs_cis,
+            swa_pool,
+            swa_slots,
+            eps=attn.eps,
+            freqs_cis=freqs_cis,
+        )
+        if fused is not None:
+            return DecodeQKV(qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True)
     if getattr(attn, "skip_post_q_norm", False):
         _apply_v41_q_rope(q, freqs_cis, rd)
     else:
@@ -97,11 +138,11 @@ def decode_compute_qkv(
 
     # KV path (single MQA head) — per-token RoPE using the same table lookup.
     kv = fused_rmsnorm_rope(
-        attn._lin(attn.wkv, x) if fused_qkv is None else fused_qkv[1],
+        raw_kv,
         attn.kv_norm,
         freqs_cis,
         rd,
         eps=attn.eps,
     )
 
-    return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis=freqs_cis)
+    return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis=freqs_cis, qr_quantized=qr_quantized)

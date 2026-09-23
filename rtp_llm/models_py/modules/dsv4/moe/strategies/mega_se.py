@@ -4,6 +4,10 @@ The installed DeepGEMM API uses the ordinary ``fp8_fp4_mega_moe`` symbol with
 optional shared weights.  This strategy is enabled by default and can be
 disabled via ``DSV4_USE_MEGA_MOE_SE=0``.  It owns independent
 buffer/packer/warmup state from the routed-only Mega path.
+
+Native V4.1 group-32 weights additionally require the decode-only opt-in
+``DSV41_MEGA_SHARED_EXPERT=1``. The fused activation/combine rounding differs
+from the standalone BF16 shared expert, so this opt-in defaults to off.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from .mega import (
     MegaMoEStrategy,
     _activate_mega_moe_rank_nvcc_tmpdir,
     _gate_pack_input_packer_env_allows,
+    _mega_intermediate_size,
     _mega_output_capacity,
     _restore_tmpdir,
 )
@@ -51,7 +56,7 @@ _MEGA_MOE_SE_JIT_WARMED_KEYS: set[tuple] = set()
 _MEGA_SE_GATE_PACK_KERNELS = None
 _MEGA_SE_GATE_PACK_KERNELS_UNAVAILABLE = False
 _ROUTED_RECIPE = (1, 1, FP4_BLOCK)
-_SHARED_RECIPE = (1, 128, 128)
+_SHARED_RECIPES = {32: (1, 1, 32), 128: (1, 128, 128)}
 _MMA_TYPE = "fp8xfp4"
 
 
@@ -89,9 +94,24 @@ class MegaMoEStrategySE(MegaMoEStrategy):
     name = "mega_se"
     routed_includes_shared = True
 
+    @property
+    def _shared_recipe(self):
+        return _SHARED_RECIPES[self.cfg.shared_fp8_block_size]
+
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        return cfg.ep_size > 1 and _mega_moe_se_enabled()
+        return (
+            cfg.ep_size > 1
+            and cfg.shared_fp8_block_size in _SHARED_RECIPES
+            and (
+                cfg.shared_fp8_block_size != 32
+                or (
+                    cfg.is_decode_role
+                    and os.environ.get("DSV41_MEGA_SHARED_EXPERT", "0") == "1"
+                )
+            )
+            and _mega_moe_se_enabled()
+        )
 
     def setup_weights(self, layer_weights: Dict) -> None:
         import deep_gemm
@@ -101,6 +121,12 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         cfg = self.cfg
         D = cfg.dim
         inter = cfg.moe_inter_dim
+        if cfg.shared_fp8_block_size == 32 and _mega_intermediate_size(cfg) != inter:
+            raise RuntimeError(
+                "Native MegaMoE-SE requires DeepGEMM support for the checkpoint "
+                "intermediate size; set DSV41_MEGA_SHARED_EXPERT=0 to use "
+                "the routed padding fallback with a standalone shared expert"
+            )
 
         # The routed layout and its level-2 reload path are shared with the
         # ordinary Mega strategy.  In particular, _apply_routed_weight_transform
@@ -178,8 +204,13 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 f"got w13={w13_fp8.dtype}, w2={w2_fp8.dtype}"
             )
 
-        w13_sf_int = self._shared_expert_sf_to_int(deep_gemm, w13_scale, 2 * inter, D)
-        w2_sf_int = self._shared_expert_sf_to_int(deep_gemm, w2_scale, D, inter)
+        block_size = self.cfg.shared_fp8_block_size
+        w13_sf_int = self._shared_expert_sf_to_int(
+            deep_gemm, w13_scale, 2 * inter, D, block_size
+        )
+        w2_sf_int = self._shared_expert_sf_to_int(
+            deep_gemm, w2_scale, D, inter, block_size
+        )
         w13_contiguous = w13_fp8.contiguous()
         del w13_scale, w2_scale
         # ``transform_weights_for_mega_moe`` aliases its L2 weight output to the
@@ -243,15 +274,43 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             )
 
     @staticmethod
-    def _shared_expert_sf_to_int(deep_gemm, scale, mn, k):
+    def _shared_expert_sf_to_int(deep_gemm, scale, mn, k, block_size=128):
+        if block_size not in _SHARED_RECIPES:
+            raise ValueError(f"Unsupported MegaMoE-SE shared block size {block_size}")
         if scale.dtype == torch.int32:
+            if block_size == 32 and (
+                tuple(scale.shape) != (mn, (k + 127) // 128) or scale.stride(0) != 1
+            ):
+                raise ValueError(
+                    "MegaMoE-SE K32 packed scales must use MN-major layout"
+                )
             return scale
         if scale.dtype != torch.float8_e8m0fnu:
             raise TypeError(
                 "MegaMoE-SE expected shared UE8M0 scale, " f"got {scale.dtype}"
             )
+        expected_shape = (
+            (mn + block_size - 1) // block_size,
+            (k + block_size - 1) // block_size,
+        )
+        if tuple(scale.shape) != expected_shape:
+            raise ValueError(
+                f"MegaMoE-SE shared scale shape {tuple(scale.shape)} "
+                f"does not match {expected_shape} for block size {block_size}"
+            )
+        if block_size == 32:
+            if k % 32:
+                raise ValueError(
+                    "MegaMoE-SE K32 shared weights require K divisible by 32"
+                )
+            # Repeat each checkpoint row scale without changing its UE8M0
+            # value. The singleton grouped API selects MN-major TMA strides.
+            scale_1x32 = scale.float().repeat_interleave(32, dim=0)[:mn].contiguous()
+            return deep_gemm.transform_sf_into_required_layout(
+                scale_1x32.unsqueeze(0), mn, k, (1, 32), 1
+            ).squeeze(0)
         return deep_gemm.transform_sf_into_required_layout(
-            scale.float(), mn, k, _SHARED_RECIPE[1:], num_groups=None
+            scale.float(), mn, k, _SHARED_RECIPES[block_size][1:], num_groups=None
         )
 
     def _block_m(self, tokens: int) -> int:
@@ -313,7 +372,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             int(cfg.max_tokens_per_rank),
             cfg.swiglu_limit,
             num_sms,
-            _SHARED_RECIPE,
+            self._shared_recipe,
             tuple(token_counts),
             bool(getattr(self, "_gate_pack_warmup_enabled", False)),
             (
@@ -340,7 +399,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 cfg.dim,
                 cfg.moe_inter_dim,
                 num_sms,
-                _SHARED_RECIPE,
+                self._shared_recipe,
             )
         tmpdir, previous_tmpdir = _activate_mega_moe_rank_nvcc_tmpdir(rank)
         try:
@@ -463,7 +522,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
-            shared_recipe=_SHARED_RECIPE,
+            shared_recipe=self._shared_recipe,
         )
 
     def forward(self, x, weights, indices):

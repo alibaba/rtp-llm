@@ -285,6 +285,7 @@ class SleepComputedWeightsTest(unittest.TestCase):
         dg = SimpleNamespace(transform_weights_for_mega_moe=transform)
         obj = MegaMoEStrategySE.__new__(MegaMoEStrategySE)
         torch.nn.Module.__init__(obj)
+        obj.cfg = SimpleNamespace(shared_fp8_block_size=128)
         weights = {
             W.v4_shared_w13_w: torch.arange(64).reshape(8, 8).to(torch.float8_e4m3fn),
             W.v4_shared_w13_s: torch.arange(8, dtype=torch.int32).reshape(8, 1),

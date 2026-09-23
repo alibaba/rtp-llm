@@ -82,6 +82,7 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
 torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
+torch::Tensor    execDSparkSoftmax(const torch::Tensor& logits);
 torch::Tensor    execPrepareDSparkLogits(const torch::Tensor& base_logits,
                                          const torch::Tensor& markov_bias,
                                          const torch::Tensor& temperature);

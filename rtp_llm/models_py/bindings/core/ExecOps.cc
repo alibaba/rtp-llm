@@ -38,6 +38,7 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 namespace rtp_llm {
 GreedyOutput     sampleGreedy(const GreedyParams& params);
 torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
+torch::Tensor    dsparkSoftmax(const torch::Tensor& logits);
 torch::Tensor    prepareDSparkLogits(const torch::Tensor& base_logits,
                                      const torch::Tensor& markov_bias,
                                      const torch::Tensor& temperature);
@@ -550,6 +551,10 @@ GreedyOutput execSampleGreedy(const GreedyParams& params) {
 
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
     return sampleFromProbs(probabilities);
+}
+
+torch::Tensor execDSparkSoftmax(const torch::Tensor& logits) {
+    return dsparkSoftmax(logits);
 }
 
 torch::Tensor execPrepareDSparkLogits(const torch::Tensor& base_logits,

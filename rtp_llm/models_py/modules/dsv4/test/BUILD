@@ -81,6 +81,56 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_cross_layer_mhc",
+    srcs = ["test_v41_cross_layer_mhc.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
+    name = "test_v41_decode_rope_metadata",
+    srcs = ["test_v41_decode_rope_metadata.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_dspark_softmax",
+    srcs = ["test_dspark_softmax.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
+    name = "test_v41_mega_shared",
+    srcs = ["test_v41_mega_shared.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_v41_mega_shared_cuda",
+    srcs = ["test_v41_mega_shared_cuda.py", "test_mega_v41_compat.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
+    name = "test_v41_query_quant",
+    srcs = ["test_v41_query_quant.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
     name = "test_v41_fused_qkv",
     srcs = ["test_v41_fused_qkv.py"],
     deps = _DSV4_TEST_DEPS,

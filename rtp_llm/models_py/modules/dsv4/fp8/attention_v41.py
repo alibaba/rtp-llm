@@ -716,6 +716,7 @@ class AttentionV41FP8(AttentionFP8):
             # per-forward shared state so a later forward can never observe a
             # stale entry.
             self._shared_attention.pop("prefill_meta_common", None)
+            self._shared_attention.pop("decode_rope_metadata", None)
 
     def _owner(self):
         return self._shared_attention["layers"][self.kv_source_layer_id]
@@ -1823,7 +1824,7 @@ class AttentionV41FP8(AttentionFP8):
         )
         self._shared_attention["global"] = {self.layer_id: keys}
 
-    def _select_indices_decode(self, x, qr, positions):
+    def _select_indices_decode(self, x, qr, positions, qr_quantized=None):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
         if not self.is_index_source:
@@ -1839,9 +1840,13 @@ class AttentionV41FP8(AttentionFP8):
         paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
         capacity = keys.capacity if paged else keys.shape[1]
         flat = x.reshape(T, -1)
-        q = self._lin(self.index_wq, qr.reshape(T, -1)).view(
-            T, self.index_n_heads, self.index_head_dim
-        )
+        from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
+
+        q = (
+            self.index_wq.forward_quantized(*qr_quantized)
+            if qr_quantized is not None and isinstance(self.index_wq, V41MXFP8Linear)
+            else self._lin(self.index_wq, qr.reshape(T, -1))
+        ).view(T, self.index_n_heads, self.index_head_dim)
         weights = F.linear(flat, self.index_weights)
         visible_per_token = (positions + 1) // self.compress_ratio
         if paged:
@@ -2026,21 +2031,48 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
             decode_compute_qkv,
         )
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.rope_metadata import (
+            decode_rope_metadata,
+        )
 
         self._begin_forward()
         B, S, _ = x.shape
         T = B * S
-        positions = metadata.position_ids[:T].long()
-        qkv = decode_compute_qkv(self, x, positions)
-        self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
+        positions, freqs = decode_rope_metadata(
+            self._shared_attention, self.freqs_cis, metadata.position_ids[:T]
+        )
+        swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
+        global_work = None
+        if self.compress_ratio and self.is_kv_source:
+            from rtp_llm.models_py.modules.dsv4.fp8.decode.global_overlap import (
+                start_global_decode,
+            )
+
+            req = metadata.req_id_per_token[:T].long()
+            starts = metadata.start_pos[:B].long()
+            global_work = start_global_decode(self, x, positions, req, starts)
+        try:
+            qkv = decode_compute_qkv(
+                self,
+                x,
+                positions,
+                freqs_cis=freqs,
+                swa_pool=self._pool_view_3d_fp8(SWA_KV),
+                swa_slots=None if swa_slots is None else swa_slots[:T],
+            )
+            if not qkv.swa_written:
+                self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
+        finally:
+            if global_work is not None:
+                global_work.finish()
         if not self.compress_ratio:
             o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
         else:
-            if self.is_kv_source:
-                req = metadata.req_id_per_token[:T].long()
-                starts = metadata.start_pos[:B].long()
+            if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
-            selected = self._select_indices_decode(x, qkv.qr, positions)
+            selected = self._select_indices_decode(
+                x, qkv.qr, positions, qkv.qr_quantized
+            )
             from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,
             )

@@ -802,12 +802,22 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # only the attention call is substituted with the non-causal
         # fixed-block variant.
         layer_forward_range = _profiler.make_layer_forward_range()
+        from rtp_llm.models_py.modules.dsv4.hc.decode_transition import (
+            forward_decode_layer,
+        )
+
         for layer_idx, layer in enumerate(self.v4.layers):
             with layer_forward_range(layer_idx):
-                hidden = layer.forward_decode(
+                hidden = forward_decode_layer(
+                    layer,
                     hidden,
                     attn_metadata=None,
                     input_ids=query_ids,
+                    next_layer=(
+                        self.v4.layers[layer_idx + 1]
+                        if layer_idx + 1 < len(self.v4.layers)
+                        else None
+                    ),
                     attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
                         layer_idx,
                         x_pre,

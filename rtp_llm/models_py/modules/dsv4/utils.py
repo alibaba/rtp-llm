@@ -36,16 +36,11 @@ class V41MXFP8Linear(torch.nn.Module):
             scales.float().index_select(0, rows)
         )
 
-    def forward(self, x: torch.Tensor, out=None):
-        import deep_gemm
-
+    def _quantize_input(self, x: torch.Tensor):
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )
 
-        shape = (*x.shape[:-1], self.N)
-        if x.numel() == 0:
-            return out if out is not None else x.new_empty(shape)
         flat = x.reshape(-1, self.K).contiguous()
         quantized, scales = sgl_per_token_group_quant_fp8(
             flat,
@@ -55,18 +50,33 @@ class V41MXFP8Linear(torch.nn.Module):
             scale_tma_aligned=True,
             scale_ue8m0=True,
         )
+        return quantized.view(x.shape), scales
+
+    def forward_quantized(
+        self, quantized: torch.Tensor, scales: torch.Tensor, out=None
+    ):
+        import deep_gemm
+
+        shape = (*quantized.shape[:-1], self.N)
         output = (
             out
             if out is not None
-            else torch.empty(shape, device=x.device, dtype=torch.bfloat16)
+            else torch.empty(shape, device=quantized.device, dtype=torch.bfloat16)
         )
+        if quantized.numel() == 0:
+            return output
         deep_gemm.fp8_fp4_gemm_nt(
-            (quantized, scales),
+            (quantized.reshape(-1, self.K), scales),
             (self.weight, self.weight_scales),
             output.reshape(-1, self.N),
             recipe=(1, 1, 32),
         )
         return output
+
+    def forward(self, x: torch.Tensor, out=None):
+        if x.numel() == 0:
+            return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        return self.forward_quantized(*self._quantize_input(x), out=out)
 
 
 def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:

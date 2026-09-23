@@ -87,11 +87,26 @@ _DSV4_FP8_CPU_TESTS = [
     )
     for t in [
         "test_v41_deepselect",
+        "test_v41_decode_qkv_integration",
         "test_v41_prefill_global",
         "test_v41_prefill_metadata",
         "test_v41_prefill_q_memory",
+        "test_v41_qkv_rope_cache",
     ]
 ]
+
+py_test(
+    name = "test_v41_global_overlap",
+    srcs = [
+        "test_v41_global_overlap.py",
+        "test_v41_decode_global.py",
+        "test_v41_qkv_rope_cache.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
 
 py_test(
     name = "test_v41_sparse_prefill_indexer",

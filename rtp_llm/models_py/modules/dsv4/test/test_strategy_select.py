@@ -78,6 +78,7 @@ class StrategySelectTest(unittest.TestCase):
             "DSV4_USE_MEGA_MOE_SE",
             "DSV4_USE_MEGA_MOE_FUSED",
             "DSV4_USE_GROUPED_FP4",
+            "DSV41_MEGA_SHARED_EXPERT",
         ):
             os.environ.pop(k, None)
         # Most selection-matrix tests exercise the routed-only baseline.
@@ -154,8 +155,55 @@ class StrategySelectTest(unittest.TestCase):
             MegaMoEStrategy, "can_handle", return_value=True
         ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
             self.assertIs(select_strategy(cfg), MegaMoEStrategy)
-            with self.assertRaisesRegex(ValueError, "block-128"):
+            with self.assertRaisesRegex(ValueError, "decode role"):
                 select_strategy(cfg, forced="mega_se")
+
+    def test_v41_shared_decode_opt_in_upgrades_explicit_mega(self):
+        cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=True)
+        with _env(
+            DSV4_MOE_STRATEGY="mega",
+            DSV4_USE_MEGA_MOE_SE=None,
+            DSV41_MEGA_SHARED_EXPERT="1",
+        ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
+            forced, strict = _resolve_forced(None)
+            self.assertIs(select_strategy(cfg, forced, strict), MegaMoEStrategySE)
+
+    def test_v41_shared_prefill_and_fallback_switch_keep_routed_mega(self):
+        for decode, native_switch, legacy_switch in (
+            (False, "1", None),
+            (True, None, None),
+            (True, "0", None),
+            (True, "1", "0"),
+        ):
+            cfg = replace(
+                _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
+            )
+            with self.subTest(
+                decode=decode, native=native_switch, legacy=legacy_switch
+            ), _env(
+                DSV4_MOE_STRATEGY="mega",
+                DSV4_USE_MEGA_MOE_SE=legacy_switch,
+                DSV41_MEGA_SHARED_EXPERT=native_switch,
+            ), mock.patch.object(
+                MegaMoEStrategy, "can_handle", return_value=True
+            ):
+                self.assertIs(select_strategy(cfg, forced="mega"), MegaMoEStrategy)
+
+    def test_v41_shared_rejects_old_fused_recipe_even_when_opted_in(self):
+        cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=True)
+        with _env(DSV41_MEGA_SHARED_EXPERT="1", DSV4_USE_MEGA_MOE_SE=None):
+            with self.assertRaisesRegex(ValueError, "block-128"):
+                select_strategy(cfg, forced="mega_fused")
+
+    def test_v41_shared_rejects_conflicting_fused_toggle(self):
+        cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=True)
+        with _env(
+            DSV41_MEGA_SHARED_EXPERT="1",
+            DSV4_USE_MEGA_MOE_SE=None,
+            DSV4_USE_MEGA_MOE_FUSED="1",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "conflicts"):
+                select_strategy(cfg, forced="mega")
 
     def test_ep_gt1_explicit_se_zero_picks_non_fused_mega(self):
         with _env(DSV4_USE_MEGA_MOE_SE="0"), mock.patch.object(
