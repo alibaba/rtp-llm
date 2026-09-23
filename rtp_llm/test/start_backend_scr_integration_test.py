@@ -16,6 +16,44 @@ from rtp_llm.ops import RoleType, VitSeparation
 
 
 class BackendScrIntegrationTest(unittest.TestCase):
+    def test_mla_host_cache_restores_before_release_and_on_abort(self):
+        from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
+        from rtp_llm.utils.scr_template_lifecycle import TemplateLifecycle
+
+        for outcome in ("restore", "abort", "restore-error", "normal-start"):
+            with self.subTest(outcome=outcome):
+                lifecycle = TemplateLifecycle()
+                native = mock.Mock()
+                engine = LanguageCppEngine.__new__(LanguageCppEngine)
+                engine.rtp_llm_op_ = native
+                engine.defer_service_start = outcome != "normal-start"
+                engine.config = SimpleNamespace(task_type=None)
+                with mock.patch(
+                    "rtp_llm.utils.scr_template_lifecycle.get_template_lifecycle",
+                    return_value=lifecycle,
+                ):
+                    engine._start()
+                lifecycle.prepare_for_template("test", "checkpoint")
+                if outcome == "normal-start":
+                    native.release_mla_host_cache_for_checkpoint.assert_not_called()
+                    lifecycle.abort_template("test")
+                    native.restore_mla_host_cache_after_checkpoint.assert_not_called()
+                    continue
+                native.release_mla_host_cache_for_checkpoint.assert_called_once_with()
+                native.restore_mla_host_cache_after_checkpoint.assert_not_called()
+                if outcome == "abort":
+                    lifecycle.abort_template("test")
+                elif outcome == "restore-error":
+                    native.restore_mla_host_cache_after_checkpoint.side_effect = RuntimeError("register failed")
+                    with self.assertRaisesRegex(RuntimeError, "register failed"):
+                        lifecycle.restore_fixup(SimpleNamespace(generation="test"))
+                    with self.assertRaisesRegex(RuntimeError, "before successful fixup"):
+                        lifecycle.release_template("test")
+                else:
+                    lifecycle.restore_fixup(SimpleNamespace(generation="test"))
+                    lifecycle.release_template("test")
+                native.restore_mla_host_cache_after_checkpoint.assert_called_once_with()
+
     def test_parent_arrival_runs_template_lifecycle_hooks(self):
         from rtp_llm.utils import scr_template_utils as scr
         from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
