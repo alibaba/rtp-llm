@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
+#include "rtp_llm/cpp/utils/CudacoreFlightRecorder.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -297,6 +298,11 @@ void execNoBlockCopy(const MultiCopyParams& params) {
 }
 
 BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
+    static const bool terminate_guard_installed = [] {
+        installCudacoreTerminateGuard();
+        return true;
+    }();
+    (void)terminate_guard_installed;
     if (params.tiles.empty()) {
         return BatchedMemoryCopyStatus::SUCCESS;
     }
@@ -358,6 +364,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     dsts.reserve(tile_num);
     srcs.reserve(tile_num);
     sizes.reserve(tile_num);
+    uint64_t total_bytes = 0;
     for (const auto& tile : params.tiles) {
         if (tile.dst == nullptr || tile.src == nullptr || tile.bytes == 0) {
             continue;
@@ -365,11 +372,24 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
         dsts.push_back(tile.dst);
         srcs.push_back(tile.src);
         sizes.push_back(tile.bytes);
+        total_bytes += tile.bytes;
     }
     if (dsts.empty()) {
         return BatchedMemoryCopyStatus::SUCCESS;
     }
 
+    CudacoreFlightEvent flight;
+    flight.kind         = CudacoreFlightKind::BatchSubmit;
+    flight.device_index = params.device_index;
+    flight.stream       = reinterpret_cast<uintptr_t>(stream);
+    flight.tile_count   = dsts.size();
+    flight.total_bytes  = total_bytes;
+    flight.first_dst    = reinterpret_cast<uintptr_t>(dsts.front());
+    flight.first_src    = reinterpret_cast<uintptr_t>(srcs.front());
+    flight.first_bytes  = sizes.front();
+    flight.last_dst     = reinterpret_cast<uintptr_t>(dsts.back());
+    flight.last_src     = reinterpret_cast<uintptr_t>(srcs.back());
+    flight.last_bytes   = sizes.back();
     RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=submit device=%d stream=%p tiles=%zu",
                       params.device_index,
                       static_cast<void*>(stream),
@@ -382,6 +402,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     // concurrent host submissions. Protect only the runtime API entry; each
     // call keeps its own stream and completion wait, so transfers may overlap.
     std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(params.device_index));
+    const uint64_t               submit_sequence = recordCudacoreFlightEvent(flight);
 #if CUDART_VERSION >= 13000
     const auto submit_error =
         cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
@@ -397,6 +418,10 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
 #endif
     submit_lock.unlock();
     if (submit_error != cudaSuccess) {
+        flight.kind             = CudacoreFlightKind::BatchSubmitResult;
+        flight.related_sequence = submit_sequence;
+        flight.cuda_error       = static_cast<int>(submit_error);
+        (void)recordCudacoreFlightEvent(flight);
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed phase=submit device=%d stream=%p tiles=%zu error_code=%d "
                             "error=%s",
                             params.device_index,
@@ -423,6 +448,10 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
                       dsts.size());
 
     const auto completion_error = cudaStreamSynchronize(stream);
+    flight.kind                 = CudacoreFlightKind::BatchCompletion;
+    flight.related_sequence     = submit_sequence;
+    flight.cuda_error           = static_cast<int>(completion_error);
+    (void)recordCudacoreFlightEvent(flight);
     if (completion_error != cudaSuccess) {
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed phase=completion device=%d stream=%p tiles=%zu "
                             "error_code=%d error=%s",
@@ -603,6 +632,8 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
 }
 
 void warmupNoBlockCopy() {
+    installCudacoreTerminateGuard();
+    prepareCudacoreFlightRecorder();
     if (!warmupSplitKvCopyKernels(at::cuda::getCurrentCUDAStream().stream())) {
         RTP_LLM_LOG_WARNING("warmupSplitKvCopyKernels failed; split-KV copy may JIT on first use");
     }

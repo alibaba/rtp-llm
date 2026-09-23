@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -67,7 +68,15 @@ HostBlockPool::HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config):
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::HOST);
 }
 
-HostBlockPool::~HostBlockPool() = default;
+HostBlockPool::~HostBlockPool() {
+    if (backing_) {
+        recordCudacorePoolLifetime(config().pool_name.c_str(),
+                                   reinterpret_cast<uintptr_t>(backing_->data()),
+                                   config().physical_block_count * config().stride_bytes,
+                                   -1,
+                                   false);
+    }
+}
 
 const HostBlockPoolConfig& HostBlockPool::config() const {
     return configAs<HostBlockPoolConfig>(BlockPoolType::HOST);
@@ -93,6 +102,8 @@ bool HostBlockPool::init() {
     const size_t total_bytes = cfg.physical_block_count * cfg.stride_bytes;
     backing_.emplace(total_bytes, cfg.alignment, cfg.pool_name);
     markHostBlockPoolDontDump(cfg.pool_name.c_str(), backing_->data(), total_bytes);
+    recordCudacorePoolLifetime(
+        cfg.pool_name.c_str(), reinterpret_cast<uintptr_t>(backing_->data()), total_bytes, -1, true);
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("backing selected: pool_name=%s payload_bytes=%zu stride_bytes=%zu "
                      "physical_block_count=%zu total_size=%zu bytes total_size_mb=%.2f ptr=%p",

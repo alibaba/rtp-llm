@@ -115,6 +115,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:cudacore_diagnostics",
+        "//rtp_llm/cpp/utils:cudacore_flight_recorder",
         ":split_kv_cache_copy",
         ":cuda_host_utils",
     ] + torch_deps(),

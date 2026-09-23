@@ -66,6 +66,14 @@ cc_library(
 )
 
 cc_library(
+    name = "cudacore_flight_recorder",
+    srcs = ["CudacoreFlightRecorder.cc"],
+    hdrs = ["CudacoreFlightRecorder.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cudacore_diagnostics",
     srcs = ["CudacoreDiagnostics.cc"],
     hdrs = ["CudacoreDiagnostics.h"],
@@ -73,6 +81,7 @@ cc_library(
     linkopts = ["-ldl"],
     deps = [
         ":core_utils",
+        ":cudacore_flight_recorder",
     ],
     visibility = ["//visibility:public"],
 )

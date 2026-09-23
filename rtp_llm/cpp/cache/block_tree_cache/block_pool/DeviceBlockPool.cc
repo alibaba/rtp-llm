@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
@@ -124,6 +125,11 @@ bool DeviceBlockPool::hasExternalRefNoLock(BlockIdxType block) const {
 }
 
 DeviceBlockPool::~DeviceBlockPool() {
+    recordCudacorePoolLifetime(config().pool_name.c_str(),
+                               reinterpret_cast<uintptr_t>(cache_base_ptr_),
+                               config().total_size_bytes,
+                               deviceIndex(),
+                               false);
     cache_aligned_buffer_ = torch::Tensor();
 }
 
@@ -438,6 +444,8 @@ bool DeviceBlockPool::init() {
     const auto& cfg = config();
 
     initializeCacheBuffer();
+    recordCudacorePoolLifetime(
+        cfg.pool_name.c_str(), reinterpret_cast<uintptr_t>(cache_base_ptr_), cfg.total_size_bytes, deviceIndex(), true);
     initializeLayerMappings();
     initializeLayoutStrategies();
 

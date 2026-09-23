@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
+#include "rtp_llm/cpp/utils/CudacoreFlightRecorder.h"
 
 #include <algorithm>
 #include <atomic>
@@ -628,6 +629,7 @@ struct SharedState {
     // path must not pay for a mutex on every call.
     std::atomic<bool>        incident_flag{false};
     std::atomic<bool>        terminal_flag{false};
+    std::atomic<int64_t>     deadline_mono_atomic{0};
 
     bool                   has_record{false};
     FatalCudaErrorRecord   record;
@@ -651,6 +653,30 @@ SharedState& sharedState() {
     // Leaked on purpose: a fault may abort the process while other threads use it.
     static SharedState* state = new SharedState();
     return *state;
+}
+
+std::atomic<std::terminate_handler> previous_terminate_handler{nullptr};
+
+void cudacoreTerminateHandler() noexcept {
+    // The watchdog and destructor paths can terminate outside the engine catch.
+    // This handler only reads atomics and sleeps; the collector does the I/O.
+    SharedState& state = sharedState();
+    if (state.incident_flag.load(std::memory_order_acquire)) {
+        static constexpr char waiting[] = "[CudacoreDiag] terminate guard waiting for collection\n";
+        (void)::write(STDERR_FILENO, waiting, sizeof(waiting) - 1);
+        const int64_t deadline = state.deadline_mono_atomic.load(std::memory_order_acquire);
+        while (!state.terminal_flag.load(std::memory_order_acquire) && nowMonoMs() < deadline) {
+            const struct timespec pause = {0, 20 * 1000 * 1000};
+            (void)::nanosleep(&pause, nullptr);
+        }
+        static constexpr char done[] = "[CudacoreDiag] terminate guard collection window closed\n";
+        (void)::write(STDERR_FILENO, done, sizeof(done) - 1);
+    }
+    const auto previous = previous_terminate_handler.load(std::memory_order_acquire);
+    if (previous != nullptr && previous != &cudacoreTerminateHandler) {
+        previous();
+    }
+    std::abort();
 }
 
 // Caller holds state.mutex (or is the only writer) when reading the override.
@@ -868,6 +894,7 @@ std::string buildManifest(const ManifestInputs&            inputs,
         json += ",\"attribute_query_status\":null";
     }
     json += ",\"first_error\":" + firstErrorJson(record);
+    json += ",\"recent_cuda_submissions\":" + snapshotCudacoreFlightRecorderJson();
     json += ",\"window_ms\":" + std::to_string(inputs.window_ms);
     json += ",\"deadline_epoch_ms\":" + std::to_string(inputs.deadline_epoch_ms);
     json += ",\"lease_path\":" + jsonString(outcome.lease_path);
@@ -1849,6 +1876,7 @@ FatalCudaErrorRecord buildCudaExceptionRecord(const std::exception& exception,
 }
 
 bool recordFirstFatalCudaError(FatalCudaErrorRecord record) noexcept {
+    installCudacoreTerminateGuard();
     try {
         SharedState&                state = sharedState();
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -1879,8 +1907,10 @@ bool recordFirstFatalCudaError(FatalCudaErrorRecord record) noexcept {
         state.incident_wall_ms  = state.record.wall_ms;
         state.incident_mono_ms  = state.record.mono_ms;
         state.deadline_mono_ms  = state.record.mono_ms + effectiveWindowMs(state);
+        state.deadline_mono_atomic.store(state.deadline_mono_ms, std::memory_order_release);
         state.deadline_wall_ms  = state.record.wall_ms + effectiveWindowMs(state);
         state.incident_flag.store(true, std::memory_order_release);
+        freezeCudacoreFlightRecorder();
         const std::string base  = manifestBaseName(state);
         state.incident_id       = base + "." + std::to_string(state.record.mono_ms);
         const FatalCudaErrorRecord& stored = state.record;
@@ -1947,6 +1977,49 @@ bool fatalCudacoreCollectionInProgress() noexcept {
     } catch (...) {
         return false;
     }
+}
+
+void installCudacoreTerminateGuard() noexcept {
+    try {
+        static std::mutex           install_mutex;
+        std::lock_guard<std::mutex> lock(install_mutex);
+        (void)sharedState();
+        // PyTorch or another library may have replaced the handler since warmup.
+        // Reinstall only on a fatal error or the first copy entry point.
+        if (std::get_terminate() != &cudacoreTerminateHandler) {
+            const auto previous = std::set_terminate(&cudacoreTerminateHandler);
+            previous_terminate_handler.store(previous, std::memory_order_release);
+        }
+    } catch (...) {}
+}
+
+void recordCudacorePoolLifetime(
+    const char* pool_name, uintptr_t base, uint64_t bytes, int device_index, bool initialized) noexcept {
+    try {
+        if (base == 0 || bytes == 0) {
+            return;
+        }
+        const std::string dir = resolveDiagnosticsDir();
+        if (!ensureDirectory(dir)) {
+            return;
+        }
+        const std::string path = dir + "/cudacore_allocations." + sanitizeComponent(hostnameCached()) + "."
+                                 + std::to_string(static_cast<long>(::getpid())) + "."
+                                 + sanitizeComponent(processStartId()) + ".jsonl";
+        std::string entry = "{\"event\":" + jsonString(initialized ? "pool_initialized" : "pool_destroyed");
+        entry += ",\"time_mono_ms\":" + std::to_string(nowMonoMs());
+        entry += ",\"pool\":" + jsonString(pool_name == nullptr ? "" : pool_name);
+        entry += ",\"base\":" + std::to_string(base);
+        entry += ",\"bytes\":" + std::to_string(bytes);
+        entry += ",\"device_index\":" + std::to_string(device_index);
+        entry += "}\n";
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            return;
+        }
+        (void)::write(fd, entry.data(), entry.size());
+        (void)::close(fd);
+    } catch (...) {}
 }
 
 bool fatalCudacoreErrorRecord(FatalCudaErrorRecord& out) noexcept {
@@ -2125,6 +2198,7 @@ void resetIncidentState() noexcept {
         state.has_record      = false;
         state.record          = FatalCudaErrorRecord{};
         state.deadline_mono_ms = 0;
+        state.deadline_mono_atomic.store(0, std::memory_order_release);
         state.deadline_wall_ms = 0;
         state.incident_wall_ms = 0;
         state.incident_mono_ms = 0;
@@ -2133,6 +2207,7 @@ void resetIncidentState() noexcept {
         state.terminal        = false;
         state.outcome         = CudacoreCollectionOutcome{};
         state.incident_flag.store(false, std::memory_order_release);
+        cudacore_test::resetFlightRecorder();
         state.terminal_flag.store(false, std::memory_order_release);
     } catch (...) {
     }

@@ -13,10 +13,10 @@
 // P1: structured first fatal error record, at most one bounded user-trigger
 //     attempt, a process-wide bounded collection window and an on-disk manifest.
 //
-// Every entry point is noexcept: the module never throws, never aborts, never
-// creates a CUDA context and never calls a coredump setter. All numbers below
-// are constants on purpose - the patch is rolled out per instance through the
-// image version, not through new RTP options.
+// Diagnostic API entry points are noexcept and do not create a CUDA context or
+// call a coredump setter. The terminate guard delegates to the previous handler
+// after its bounded wait, or aborts if none is installed. All numbers below are
+// constants on purpose; rollout is controlled by the image version.
 
 namespace rtp_llm {
 
@@ -248,6 +248,16 @@ bool fatalCudacoreCollectionInProgress() noexcept;
 
 // Snapshot of the stored record, for logging/manifest/tests.
 bool fatalCudacoreErrorRecord(FatalCudaErrorRecord& out) noexcept;
+
+// Install once in the CUDA copy module before faults occur. On an uncaught
+// exception after a fatal CUDA error, give the collector its remaining bounded
+// window, then delegate to the original terminate handler. No CUDA or locks.
+void installCudacoreTerminateGuard() noexcept;
+
+// Cold-path allocation provenance for checking first-error pointers against
+// pool ranges without querying a poisoned CUDA context.
+void recordCudacorePoolLifetime(
+    const char* pool_name, uintptr_t base, uint64_t bytes, int device_index, bool initialized) noexcept;
 
 enum class CudacoreTriggerStatus {
     NotAttempted,

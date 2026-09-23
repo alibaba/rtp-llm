@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/utils/CudacoreDiagnostics.h"
+#include "rtp_llm/cpp/utils/CudacoreFlightRecorder.h"
 
 #include <atomic>
 #include <chrono>
@@ -27,11 +28,15 @@ bool readFile(const std::string& path, std::string& content) {
     if (file == nullptr) {
         return false;
     }
-    char   buffer[4096] = {};
-    size_t read         = ::fread(buffer, 1, sizeof(buffer) - 1, file);
-    content.assign(buffer, read);
+    content.clear();
+    char   buffer[4096];
+    size_t read = 0;
+    while ((read = ::fread(buffer, 1, sizeof(buffer), file)) != 0) {
+        content.append(buffer, read);
+    }
+    const bool success = ::ferror(file) == 0;
     ::fclose(file);
-    return true;
+    return success;
 }
 
 std::string findIncidentManifest(const std::string& dir) {
@@ -101,6 +106,44 @@ protected:
 
     std::string dir_;
 };
+
+TEST_F(CudacoreIncidentTest, ManifestIncludesRecentCopyAndPoolProvenance) {
+    CudacoreFlightEvent event;
+    event.kind              = CudacoreFlightKind::BatchSubmit;
+    event.device_index      = 2;
+    event.stream            = 0x1234;
+    event.tile_count        = 88;
+    const uint64_t sequence = recordCudacoreFlightEvent(event);
+    ASSERT_NE(sequence, 0);
+    recordCudacorePoolLifetime("kv_pool", 0x100000, 0x200000, 2, true);
+    recordCudacorePoolLifetime("kv_pool", 0x100000, 0x200000, 2, false);
+
+    cudacore_test::setCollectionWindowMsForTest(100);
+    ASSERT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
+    EXPECT_EQ(recordCudacoreFlightEvent(event), 0);
+    (void)waitForCudacoreCollection();
+
+    std::string manifest;
+    ASSERT_TRUE(readFile(findIncidentManifest(dir_), manifest));
+    EXPECT_NE(manifest.find("\"recent_cuda_submissions\":"), std::string::npos);
+    EXPECT_NE(manifest.find("\"kind\":\"batch_submit\""), std::string::npos);
+
+    DIR* directory = ::opendir(dir_.c_str());
+    ASSERT_NE(directory, nullptr);
+    std::string allocation_path;
+    while (struct dirent* entry = ::readdir(directory)) {
+        const std::string name = entry->d_name;
+        if (name.rfind("cudacore_allocations.", 0) == 0) {
+            allocation_path = dir_ + "/" + name;
+            break;
+        }
+    }
+    ::closedir(directory);
+    std::string allocations;
+    ASSERT_TRUE(readFile(allocation_path, allocations));
+    EXPECT_NE(allocations.find("\"event\":\"pool_initialized\""), std::string::npos);
+    EXPECT_NE(allocations.find("\"event\":\"pool_destroyed\""), std::string::npos);
+}
 
 TEST_F(CudacoreIncidentTest, FirstFatalErrorWinsAndIsNeverOverwritten) {
     EXPECT_TRUE(recordFirstFatalCudaError(runtimeRecord(719)));
