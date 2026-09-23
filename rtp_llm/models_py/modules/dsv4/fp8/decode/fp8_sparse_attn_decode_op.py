@@ -142,9 +142,11 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_idxs: Optional[torch.Tensor] = None,
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+            pack_slots_to_paged,
+        )
         from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
             canonical_topk,
-            pack_logical_workspace,
             run,
             token_lens,
         )
@@ -159,15 +161,22 @@ class SparseAttnV4DecodeFp8Op:
         extra_indices = extra_topk_idxs
         if extra_indices is not None and extra_indices.dim() == 4:
             extra_indices = extra_indices.squeeze(2)
+        extra_lens = None
         if extra_indices is not None:
             extra_indices = extra_indices.reshape(rows, -1).to(torch.int32).contiguous()
-        swa_decode_cache, swa_indices = pack_logical_workspace(
-            kv_cache, swa_indices, page_size=64
+            extra_lens = token_lens(
+                extra_topk_length, rows, extra_indices.shape[-1], q.device
+            )
+        swa_decode_cache, swa_indices = pack_slots_to_paged(
+            kv_cache, swa_indices, page_size=64, row_lens=swa_topk_lens
         )
         if extra_k_cache is not None and extra_indices is not None:
             extra_page_size = 2 if int(extra_k_cache.shape[1]) <= 2 else 64
-            extra_decode_cache, extra_indices = pack_logical_workspace(
-                extra_k_cache, extra_indices, page_size=extra_page_size
+            extra_decode_cache, extra_indices = pack_slots_to_paged(
+                extra_k_cache,
+                extra_indices,
+                page_size=extra_page_size,
+                row_lens=extra_lens,
             )
         else:
             extra_decode_cache = None
@@ -180,11 +189,7 @@ class SparseAttnV4DecodeFp8Op:
             swa_lens=swa_topk_lens,
             extra_cache=extra_decode_cache,
             extra_indices=extra_indices,
-            extra_lens=(
-                token_lens(extra_topk_length, rows, extra_indices.shape[-1], q.device)
-                if extra_indices is not None
-                else None
-            ),
+            extra_lens=extra_lens,
             out=flat_out,
             scale=self.softmax_scale,
             sinks=attn_sink.float(),

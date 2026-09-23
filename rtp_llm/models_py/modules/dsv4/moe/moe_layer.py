@@ -338,11 +338,16 @@ class MoE(nn.Module):
             out.copy_(routed)
             return
 
+        # Preserve the prepared-dispatch ordering used by forward().
+        prepared = self._strategy.prepare_dispatch(x, weights, indices)
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                routed = self._strategy(x, weights, indices)
+                if prepared is not None:
+                    routed = self._strategy.run_dispatch_prepared(prepared)
+                else:
+                    routed = self._strategy(x, weights, indices)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -362,31 +367,46 @@ class MoE(nn.Module):
         shape: torch.Size,
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
-        T = x.size(0)
-        chunk_tokens = int(self.max_tokens_per_rank)
-        assert (
-            chunk_tokens > 0
-        ), f"max_tokens_per_rank must be positive, got {chunk_tokens}"
+        T = int(x.size(0))
         if not _CHUNKED_MOE_LOGGED:
             _CHUNKED_MOE_LOGGED = True
             logging.info(
-                "[DSV4 MoE] chunked forward enabled: layer=%d tokens=%d "
-                "chunk_tokens=%d chunks=%d dim=%d device=%s",
+                "[DSV4 MoE] single-round EP forward: layer=%d tokens=%d "
+                "dim=%d device=%s (one count-AG + dispatch/combine a2a per "
+                "layer on every rank; per-rank GEMM tiled at %d)",
                 self.layer_id,
                 T,
-                chunk_tokens,
-                (T + chunk_tokens - 1) // chunk_tokens,
                 self.dim,
                 x.device,
+                self.max_tokens_per_rank,
             )
         out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
-        for token_start in range(0, T, chunk_tokens):
-            token_end = min(token_start + chunk_tokens, T)
-            self._run_chunk(
-                x[token_start:token_end],
-                input_ids_flat[token_start:token_end],
-                out[token_start:token_end],
-            )
+        # Use one collective round per layer regardless of local token count.
+        # The strategy tiles GEMM internally without changing collective order.
+        if (
+            T > 8192
+            and self._shared_executor is not None
+            and not self._routed_includes_shared
+        ):
+            # Serialize large routed/shared outputs to reduce peak memory.
+            _free_b, _ = torch.cuda.mem_get_info()
+            if _free_b < 1_500_000_000 and os.environ.get("DSV4_EMPTY_CACHE_MODE", "all") == "all":
+                # Release cached fragments before allocating contiguous all-to-all buffers.
+                torch.cuda.empty_cache()
+            if self._gate_pack_static:
+                routed = self._strategy.forward_with_gate_pack(
+                    x, self.gate, input_ids_flat
+                )
+            else:
+                _w, _idx = self.gate(x, input_ids_flat)
+                routed = self._strategy(x, _w, _idx)
+            self._shared_executor.start(self.shared_experts, x)
+            shared = self._shared_executor.finish()
+            combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+            if combined.data_ptr() != out.data_ptr():
+                out.copy_(combined)
+            return out.view(shape)
+        self._run_chunk(x, input_ids_flat, out)
         return out.view(shape)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
@@ -513,11 +533,17 @@ class MoE(nn.Module):
                 out[:T].copy_(y)
                 return out[:T].view(shape)
 
+        # Finish host-synchronized preparation before starting the shared expert
+        # so dispatch can overlap its compute. None preserves normal ordering.
+        prepared = self._strategy.prepare_dispatch(x, weights, indices)
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                y = self._strategy(x, weights, indices)
+                if prepared is not None:
+                    y = self._strategy.run_dispatch_prepared(prepared)
+                else:
+                    y = self._strategy(x, weights, indices)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()

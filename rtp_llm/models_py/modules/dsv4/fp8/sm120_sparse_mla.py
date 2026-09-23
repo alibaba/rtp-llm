@@ -2,7 +2,12 @@ from __future__ import annotations
 from typing import Optional, Sequence
 import torch
 _WORKSPACES: dict[torch.device, torch.Tensor] = {}
+
+
 def workspace(device: torch.device) -> torch.Tensor:
+    # Graph-private workspaces must not enter or reuse the cross-call cache.
+    if torch.cuda.is_current_stream_capturing():
+        return torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
     result = _WORKSPACES.get(device)
     if result is None:
         result = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
@@ -39,27 +44,6 @@ def canonical_topk(
         padded[:, :width] = indices
         indices = padded
     return indices, token_lens(lengths, rows, width, indices.device)
-def pack_logical_workspace(
-    pool: torch.Tensor, indices: torch.Tensor, page_size: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
-        gather_k_cache_slots_packed,
-    )
-    from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
-        insert_packed_k_cache_flat,
-    )
-    flat_indices = indices.reshape(-1)
-    packed_rows = gather_k_cache_slots_packed(pool, flat_indices)
-    slot_count = int(flat_indices.numel())
-    packed = torch.zeros(
-        (max((slot_count + page_size - 1) // page_size, 1), page_size, pool.shape[-1]),
-        dtype=pool.dtype,
-        device=pool.device,
-    )
-    local_slots = torch.arange(slot_count, dtype=torch.int64, device=pool.device)
-    insert_packed_k_cache_flat(packed_rows, packed, local_slots)
-    remapped = local_slots.to(torch.int32).masked_fill(flat_indices < 0, 0)
-    return packed, remapped.view_as(indices)
 def run(
     *,
     query: torch.Tensor,

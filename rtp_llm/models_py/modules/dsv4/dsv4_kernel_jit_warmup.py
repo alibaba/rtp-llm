@@ -810,11 +810,6 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
             scale = getattr(module, "weight_scales", None)
             if weight is None or scale is None:
                 continue
-            if (
-                weight.is_cuda
-                and torch.cuda.get_device_capability(weight.device)[0] == 12
-            ):
-                continue
             key = _shape_key("fp8", int(module.N), int(module.K))
             _maybe_add_shape(
                 shapes,
@@ -1429,7 +1424,7 @@ def _generate_dense_gemm_warmup_m_grid(
 def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     if requested in ("", "auto"):
-        return torch.cuda.get_device_capability()[0] < 12
+        return True
     if requested in ("deepgemm", "dg"):
         return True
     if requested in ("tilelang", "single", "tilelang_single", "tilelang_splitk"):
@@ -1440,11 +1435,7 @@ def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
 def _mhc_prenorm_deepgemm_backend_name() -> str:
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     if requested in ("", "auto"):
-        return (
-            "tilelang_single"
-            if torch.cuda.get_device_capability()[0] >= 12
-            else "deepgemm"
-        )
+        return "deepgemm"
     if requested in ("deepgemm", "dg"):
         return "deepgemm"
     if requested in ("tilelang", "single"):
@@ -1606,8 +1597,6 @@ def warmup_batched_fp8_einsum_jit(
         return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
-        return
-    if torch.cuda.get_device_capability(device)[0] == 12:
         return
     _assert_not_capturing()
 
@@ -1873,8 +1862,6 @@ def warmup_fp8_mqa_logits_jit(
         return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
-        return
-    if torch.cuda.get_device_capability(device)[0] == 12:
         return
     if not _fp8_mqa_logits_available():
         return

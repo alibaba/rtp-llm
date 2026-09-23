@@ -329,6 +329,13 @@ def forward_layers(
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
     # module to compute its own per-token positions. Without CP we pass
     # None to clear any stale context from a prior forward (warmup).
+    _ec_mode = os.environ.get("DSV4_EMPTY_CACHE_MODE", "all")  # off | entry | all
+    if int(input_ids.size(0)) > 8192 and _ec_mode in ("entry", "all"):
+        # Big prefills start from a clean arena: the previous request's freed
+        # transients sit in the allocator cache as fragmented blocks and made
+        # even 128 MiB contiguous allocations fail at layer-0 attention while
+        # 600+ MiB sat reserved-but-unallocated. One unmap pass, ~ms cost.
+        torch.cuda.empty_cache()
     cp_info = getattr(v4, "_cp_info", None)
     cp_size = getattr(v4, "_cp_size", 1)
     cp_rank = getattr(v4, "_cp_rank", 0)
@@ -675,6 +682,21 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if int(h.size(0)) > 8192 and _ec_mode == "all":
+        # ...but "borrowed" only covers PyTorch-allocator consumers. The DSpark
+        # verify CUDA-graph replay that follows the draft needs device memory
+        # the caching allocator will not release on its own — big eager
+        # prefills left it failing with cudaErrorMemoryAllocation. Unmap the
+        # freed segments so the follow-on phases start from a clean arena.
+        import logging
+        _free_b, _total_b = torch.cuda.mem_get_info()
+        logging.info(
+            "[DSV4 prefill] big prefill done: T=%d free_before=%.0f MiB; "
+            "releasing cached segments",
+            int(h.size(0)),
+            _free_b / 2**20,
+        )
+        torch.cuda.empty_cache()
     return h  # [T, dim]
 
 

@@ -49,6 +49,7 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
+from rtp_llm.models_py.modules.dsv4.const_cache import cached_arange, cached_zeroed
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
@@ -240,7 +241,12 @@ def _build_suffix_pool_slot_mapping(
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
     assert int(gather_lens_l.numel()) == B
-    max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
+    # P1b: host-side sources take the max on the host (free) instead of
+    # syncing the just-uploaded device copy (a deep-queue D2H drain).
+    if gather_lens.device.type == "cpu" and gather_lens.numel():
+        max_gather = int(gather_lens.reshape(-1).max().item())
+    else:
+        max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
     if max_gather <= 0:
         return torch.empty((B, 0), dtype=torch.long, device=device)
 
@@ -303,7 +309,12 @@ def _build_suffix_cp_sliced_slot_mapping(
 
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
-    max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
+    # P1b: host-side sources take the max on the host (free) — see the
+    # sibling builder above.
+    if gather_lens.device.type == "cpu" and gather_lens.numel():
+        max_gather = int(gather_lens.reshape(-1).max().item())
+    else:
+        max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
     if max_gather <= 0:
         return torch.empty((B, 0), dtype=torch.long, device=device)
 
@@ -372,6 +383,7 @@ _FLASH_MLA_SPARSE_Q_CHUNK = dsv4_chunk_tokens_from_env(
     "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
     min_value=0,
 )
+
 if _FLASH_MLA_SPARSE_Q_CHUNK <= 0:
     raise ValueError(
         "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for streaming "
@@ -437,16 +449,12 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     # weight_key, scale_key) triple — feed it a one-shot dict so the
     # factory plumbing is unchanged.
     local = {"_w": w, "_s": s}
-    linear = LinearFactory.create_linear_from_weights(
+    return LinearFactory.create_linear_from_weights(
         local,
         "_w",
         "_s",
         quant_config=_V4_FP8_BLOCK_CFG,
     )
-    from rtp_llm.models_py.modules.dsv4.utils import (
-        _enable_sm120_cached_weight_scale,
-    )
-    return _enable_sm120_cached_weight_scale(linear)
 
 
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
@@ -1654,6 +1662,22 @@ class AttentionFP8(nn.Module):
         if seq_t.numel() == 1 and bsz > 1:
             seq_t = seq_t.expand(bsz)
 
+        # P1b: host mirrors for the per-row overlay loop below — free when
+        # the sources are host-side; avoids 2×bsz D2H scalar syncs per call.
+        if isinstance(sp, torch.Tensor):
+            sp_host = sp.reshape(-1).tolist() if sp.device.type == "cpu" else None
+        else:
+            sp_host = [int(sp)] * bsz
+        seq_host = (
+            row_seqlens.reshape(-1).tolist()
+            if row_seqlens.device.type == "cpu"
+            else None
+        )
+        if sp_host is not None and len(sp_host) == 1 and bsz > 1:
+            sp_host = sp_host * bsz
+        if seq_host is not None and len(seq_host) == 1 and bsz > 1:
+            seq_host = seq_host * bsz
+
         pos = torch.arange(dense_len, device=device, dtype=torch.long)
         block_in_seq = pos // int(swa_tokens_per_block)
         in_block = pos % eb
@@ -1678,8 +1702,8 @@ class AttentionFP8(nn.Module):
         out = torch.where(valid.reshape(-1).unsqueeze(-1), gathered, zero_row)
         out = out.view(bsz, dense_len, self.head_dim).contiguous()
         for b in range(bsz):
-            sp_b = int(sp_t[b].item())
-            seq_b = int(seq_t[b].item())
+            sp_b = sp_host[b] if sp_host is not None else int(sp_t[b].item())
+            seq_b = seq_host[b] if seq_host is not None else int(seq_t[b].item())
             if current_kv_full is not None and seq_b > 0 and sp_b < dense_len:
                 dst_end = min(sp_b + seq_b, dense_len)
                 copy_len = dst_end - sp_b
@@ -2066,40 +2090,10 @@ class AttentionFP8(nn.Module):
         [M, G, K/512])`` in the exact layout ``deep_gemm.fp8_einsum``
         consumes, so the wo_a projection is a single einsum launch.
         Matches vLLM ``deepseek_v4_attention.py:325`` (same
-        ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
-        M, G, _K = o_fp8.shape
+        ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)``) on SM100 and SM12x.
+        """
+        M, G, _ = o_fp8.shape
         R = self.o_lora_rank
-        if torch.cuda.get_device_capability(o_fp8.device)[0] == 12:
-            from flashinfer.gemm import gemm_fp8_nt_groupwise
-            def _ue8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
-                scale_bytes = scale.contiguous().view(torch.uint8).reshape(
-                    *scale.shape[:-1], -1
-                )
-                return (scale_bytes.to(torch.int32) - 127).float().exp2()
-            padded_m = (M + 3) & ~3
-            a = torch.zeros((G, padded_m, _K), dtype=o_fp8.dtype, device=o_fp8.device)
-            a[:, :M].copy_(o_fp8.transpose(0, 1))
-            a_scale = torch.ones(
-                (G, padded_m, _K // 128), dtype=torch.float32, device=o_fp8.device
-            )
-            a_scale[:, :M].copy_(_ue8m0_to_fp32(o_scale).transpose(0, 1))
-            w_scale = self.wo_a_s.float().view(G, R // 128, _K // 128).contiguous()
-            projected = torch.stack(
-                [
-                    gemm_fp8_nt_groupwise(
-                        a[g],
-                        self._wo_a_stk_w[g],
-                        a_scale[g],
-                        w_scale[g],
-                        scale_granularity_mnk=(1, 128, 128),
-                        scale_major_mode="K",
-                        out_dtype=torch.bfloat16,
-                    )
-                    for g in range(G)
-                ],
-                dim=0,
-            )
-            return projected[:, :M].transpose(0, 1).contiguous().view(B, S, G, R)
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",
@@ -3523,8 +3517,9 @@ class AttentionFP8(nn.Module):
                 sm120_extra_lens = is_extra.sum(dim=1, dtype=torch.int32)
                 sm120_swa_lens = combined_lens.to(torch.int32) - sm120_extra_lens
                 extra_width = max(int(cmp_topk.shape[-1]), 1)
-                extra_cols = torch.arange(extra_width, device=qkv.q.device,
-                                          dtype=torch.int64).unsqueeze(0)
+                extra_cols = cached_arange(
+                    extra_width, dtype=torch.int64, device=qkv.q.device
+                ).unsqueeze(0)
                 extra_src = combined_2d[:, :extra_width]
                 extra_req = request_ids[:, :extra_width]
                 extra_local = local_slots[:, :extra_width]
@@ -3534,13 +3529,16 @@ class AttentionFP8(nn.Module):
                 sm120_extra_indices.masked_fill_(extra_src < 0, 0)
                 aligned_extra_width = (extra_width + 63) // 64 * 64
                 if aligned_extra_width != extra_width:
-                    padded_extra = torch.zeros(
+                    # P1a: only the pad tail needs zeroing, not the full buffer.
+                    padded_extra = torch.empty(
                         (combined_2d.shape[0], aligned_extra_width),
                         dtype=torch.int32, device=qkv.q.device)
                     padded_extra[:, :extra_width] = sm120_extra_indices
+                    padded_extra[:, extra_width:].zero_()
                     sm120_extra_indices = padded_extra
-                swa_cols = torch.arange(self.window_size, device=qkv.q.device,
-                                        dtype=torch.int64).unsqueeze(0)
+                swa_cols = cached_arange(
+                    self.window_size, dtype=torch.int64, device=qkv.q.device
+                ).unsqueeze(0)
                 swa_src_cols = sm120_extra_lens.to(torch.int64).unsqueeze(1) + swa_cols
                 safe_cols = swa_src_cols.clamp_max(int(combined_2d.shape[1]) - 1)
                 swa_src = combined_2d.gather(1, safe_cols)
@@ -5401,23 +5399,27 @@ class AttentionFP8(nn.Module):
             logical_kv = (sm120_swa_kv if sm120_swa_kv is not None else
                           kv.reshape(-1, self.head_dim)).to(torch.bfloat16).contiguous()
             token_count = int(logical_kv.shape[0])
-            sm120_cache = torch.zeros((max((token_count + 63) // 64, 1), 64,
-                _DSV4_FP8_KV_ENTRY_BYTES), dtype=torch.uint8, device=q.device)
+            # The kernel overwrites each entry; only the unused page tail needs
+            # zeros. Cached-buffer reuse relies on single-stream FIFO ordering.
+            sm120_cache = cached_zeroed(
+                (max((token_count + 63) // 64, 1), 64, _DSV4_FP8_KV_ENTRY_BYTES),
+                dtype=torch.uint8, device=q.device)
             quantize_and_insert_k_cache(logical_kv, sm120_cache,
-                torch.arange(token_count, dtype=torch.int64, device=q.device))
+                cached_arange(token_count, dtype=torch.int64, device=q.device))
             if sm120_extra_kv is not None:
                 assert sm120_extra_page_size in (2, 64)
                 extra_page_size = int(sm120_extra_page_size)
                 extra_kv = sm120_extra_kv.to(torch.bfloat16).contiguous()
                 extra_tokens = int(extra_kv.shape[0])
-                sm120_extra_cache = torch.zeros((max(
+                sm120_extra_cache = cached_zeroed((max(
                     (extra_tokens + extra_page_size - 1) // extra_page_size, 1),
                     extra_page_size, _DSV4_FP8_KV_ENTRY_BYTES),
                     dtype=torch.uint8, device=q.device)
                 quantize_and_insert_k_cache(extra_kv, sm120_extra_cache,
-                    torch.arange(extra_tokens, dtype=torch.int64, device=q.device))
+                    cached_arange(extra_tokens, dtype=torch.int64, device=q.device))
         else:
             from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         if out is None:
@@ -5473,13 +5475,17 @@ class AttentionFP8(nn.Module):
                     )
                     chunk_indices.clamp_min_(0)
                     o_part = torch.empty_like(q[start:end])
+                    if not hasattr(self, "_attn_sink_f32"):
+                        # P1b: static parameter — cast once, reuse (was per
+                        # chunk per layer per forward).
+                        self._attn_sink_f32 = self.attn_sink.float()
                     run_sm120_sparse_mla(
                         query=q[start:end].contiguous(),
                         swa_cache=sm120_cache,
                         swa_indices=chunk_indices,
                         out=o_part,
                         scale=self.softmax_scale,
-                        sinks=self.attn_sink.float(),
+                        sinks=self._attn_sink_f32,
                         swa_lens=chunk_lens,
                         extra_cache=sm120_extra_cache if dual_cache else None,
                         extra_indices=(
@@ -5563,15 +5569,36 @@ class AttentionFP8(nn.Module):
             ti = ti.squeeze(0)
         indices = ti.unsqueeze(1).to(torch.int32)
 
-        out = self._flash_mla_sparse_fwd_chunked_projected(
-            q=qkv.q,
-            kv=qkv.kv_full.unsqueeze(1),
-            indices=indices,
-            topk_length=meta.topk_length_kv_full,
-            freqs_cis=common.freqs_cis,
-            prefill_workspace=common.workspace,
-            profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
-        )
+        try:
+            out = self._flash_mla_sparse_fwd_chunked_projected(
+                q=qkv.q,
+                kv=qkv.kv_full.unsqueeze(1),
+                indices=indices,
+                topk_length=meta.topk_length_kv_full,
+                freqs_cis=common.freqs_cis,
+                prefill_workspace=common.workspace,
+                profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
+            )
+        except torch.OutOfMemoryError:
+            if os.environ.get("DSV4_EMPTY_CACHE_MODE", "all") != "all":
+                raise
+            # Big-T prefills interleave large transients (q/kv_full, per-chunk
+            # o_part) with the MoE stage's; freed blocks sit in the allocator
+            # cache too fragmented for the next 128+ MiB request while the
+            # device itself is out of memory. This path is collective-free at
+            # tp_size <= 1, so flushing the cache and re-running attention
+            # cannot desynchronize the DP ranks (peers simply wait at the
+            # next MoE count-AllGather). One retry only.
+            torch.cuda.empty_cache()
+            out = self._flash_mla_sparse_fwd_chunked_projected(
+                q=qkv.q,
+                kv=qkv.kv_full.unsqueeze(1),
+                indices=indices,
+                topk_length=meta.topk_length_kv_full,
+                freqs_cis=common.freqs_cis,
+                prefill_workspace=common.workspace,
+                profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
+            )
         # kv_full has no remaining consumer after all attention chunks drain.
         dispose_tensor(qkv.kv_full)
         return out

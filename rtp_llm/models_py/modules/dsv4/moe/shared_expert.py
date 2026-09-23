@@ -29,8 +29,6 @@ def _mode() -> str:
 
 def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
-def _requires_sm120_linear(x: torch.Tensor) -> bool:
-    return x.is_cuda and torch.cuda.get_device_capability(x.device)[0] == 12
 
 
 def _normalize_cuda_device(device: torch.device) -> torch.device | None:
@@ -190,8 +188,6 @@ class FusedSharedExpertFastPath:
     @staticmethod
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
-            return False
-        if _requires_sm120_linear(x):
             return False
         return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
 
@@ -514,11 +510,26 @@ def _run_shared_expert(
         except Exception:
             if strict_fused_moe_enabled():
                 raise
-    if strict_fused_moe_enabled() and not _requires_sm120_linear(x):
+    if strict_fused_moe_enabled():
         raise RuntimeError(
             "DSV4_MOE_STRICT_FUSED=1 forbids generic Expert.forward shared path"
         )
-    return shared_experts(x).float()
+    try:
+        out = shared_experts(x)
+        # Small/decode paths keep the fp32 upcast (captured-graph consistency);
+        # at big T return the module dtype — the combine epilogue upcasts, and
+        # halving the held shared buffer (256 -> 128 MiB @16K) matters when the
+        # routed a2a transients run alongside it.
+        return out.float() if int(x.size(0)) <= 8192 else out
+    except torch.OutOfMemoryError:
+        if os.environ.get("DSV4_EMPTY_CACHE_MODE", "all") != "all":
+            raise
+        # At big T the routed path's freed a2a transients sit in the cache
+        # too fragmented for this layer's [T, dim] output. The shared expert
+        # is collective-free at tp_size <= 1 — flush and re-run once; the DP
+        # peers simply wait at the next MoE count-AllGather.
+        torch.cuda.empty_cache()
+        return shared_experts(x).float()
 
 
 def get_shared_expert_executor(
