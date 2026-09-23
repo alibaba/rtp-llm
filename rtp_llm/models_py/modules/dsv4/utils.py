@@ -1,4 +1,5 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
+
 import os
 from types import MethodType
 
@@ -10,11 +11,17 @@ from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.arch import is_sm120
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
+
+
 def _decode_ue8m0(scale: torch.Tensor, groups: int) -> torch.Tensor:
     if scale.dtype != torch.int32:
         return scale.float().contiguous()
-    raw = scale.contiguous().view(torch.uint8).reshape(*scale.shape[:-1], -1)
+    raw = (
+        scale.contiguous().reshape(-1).view(torch.uint8).reshape(*scale.shape[:-1], -1)
+    )
     return (raw[..., :groups].to(torch.int32) - 127).float().exp2()
+
+
 def _sm120_forward_quantized(
     self,
     input_fp8: torch.Tensor,
@@ -22,6 +29,7 @@ def _sm120_forward_quantized(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from flashinfer.gemm import gemm_fp8_nt_groupwise
+
     rows, _ = self._validate_input(input_fp8)
     output = self._prepare_output(input_fp8, rows, out)
     if rows == 0:
@@ -32,9 +40,13 @@ def _sm120_forward_quantized(
     if padded == rows:
         a, gemm_out = input_fp8.contiguous(), output
     else:
-        a = torch.zeros((padded, self.K), dtype=input_fp8.dtype, device=input_fp8.device)
+        a = torch.zeros(
+            (padded, self.K), dtype=input_fp8.dtype, device=input_fp8.device
+        )
         a[:rows].copy_(input_fp8)
-        padded_scale = torch.ones((padded, groups), dtype=torch.float32, device=input_fp8.device)
+        padded_scale = torch.ones(
+            (padded, groups), dtype=torch.float32, device=input_fp8.device
+        )
         padded_scale[:rows].copy_(a_scale)
         a_scale, gemm_out = padded_scale, None
     result = gemm_fp8_nt_groupwise(
@@ -52,6 +64,8 @@ def _sm120_forward_quantized(
     if self.bias is not None:
         output.add_(self.bias.to(output.dtype))
     return output
+
+
 def _enable_sm120_cached_weight_scale(linear):
     weight = getattr(linear, "weight", None)
     if (

@@ -435,3 +435,11 @@ py_test(
     srcs = ["test_prefill_integration_policy.py"],
     data = _PREFILL_POLICY_SOURCE_DATA,
 )
+
+py_test(
+    name = "test_prefill_scale_cpu",
+    srcs = ["test_prefill_scale_cpu.py", "test_prefill_integration_policy.py"],
+    main = "test_prefill_scale_cpu.py",
+    data = _PREFILL_POLICY_SOURCE_DATA,
+    deps = ["//rtp_llm:torch"],
+)
