@@ -11,7 +11,7 @@
 - `docs/`：当前 runbook 与稳定的口径说明。
 - `tests/`：代码回归测试与小型 fixture。
 
-各组件直接作为 `src` 下的 Python 包导入；从项目根目录运行测试时使用 `PYTHONPATH=src:.`。旧的三个根层转发入口已经退役；使用 `scripts/commands/` 中的命令。Whale 镜像沿用根目录的 `flexlb_cfg.py`、`mode_profiles.py` 和 `mode_profiles.yaml` 固定拷贝路径，`config/mode_profiles.yaml` 链接到同一份模式表。
+各组件直接作为 `src` 下的 Python 包导入；从项目根目录运行测试时使用 `PYTHONPATH=src:.`。旧的三个根层转发入口已经退役；使用 `scripts/commands/` 中的命令。FLEXLB_CONFIG 的 schema 校验与渲染入口在 `flexlb_cfg.py`；profile 定义、功能测试默认值、`stress-na130` 文档和 DSv4 公式的唯一运行时定义在 `flexlb_profile_data.py`。Whale 镜像沿用根目录的 `flexlb_cfg.py`、`flexlb_profile_data.py`、`mode_profiles.py` 和 `mode_profiles.yaml` 固定拷贝路径，`config/mode_profiles.yaml` 链接到同一份模式表。
 
 目录内容分别见 [config](config/README.md) 和 [data](data/README.md)。更多说明见[文档导航](docs/README.md)。
 

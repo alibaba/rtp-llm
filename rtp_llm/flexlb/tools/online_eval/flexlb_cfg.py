@@ -1,13 +1,14 @@
-"""flexlb_cfg — the single source of truth (SSOT) for FLEXLB_CONFIG.
+"""flexlb_cfg — the shared schema validator and renderer for FLEXLB_CONFIG.
 
-One module renders every FLEXLB_CONFIG document this repo produces:
+Profile-specific values live in flexlb_profile_data; this module renders
+every FLEXLB_CONFIG document this repo produces:
 
   * ``render_env(profile, overrides)`` — the master-process env string;
   * ``render_process_config(profile, overrides, jvm_heap)`` — the
     zone_process_setting envelope (FLEXLB_CONFIG + FLEXLB_JVM_HEAP_SIZE
     envs) consumed by the Java mock engine's ``--master-config`` and by
     run_stress.py.  The env string inside the envelope is derived
-    from the SAME render call, so the file and the env can never drift
+    from the same render call, so the file and the env cannot drift
     apart (single render, two projections).
 
 Profiles:
@@ -46,111 +47,21 @@ import json
 from dataclasses import dataclass, fields
 from typing import Optional, Union
 
-# ===========================================================================
-# Production DSv4 prefill execution-time fit (single authoritative copy)
-# ===========================================================================
-# The intake3 test-line value formerly carried by the master-side
-# RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION constant, which
-# the codex schema migration removed — the Java default is now the inline
-# upstream legacy expression. Every generated FLEXLB_CONFIG injects it
-# EXPLICITLY instead of relying on the Java code default: the production
-# default is the upstream legacy "1 ms/token" sum, which overpredicts a
-# 32k all-miss prefill by ~96x (32.8 s vs the fitted ~342 ms) and would
-# poison every ledger-driven routing decision in these suites.
-DSV4_PREFILL_EXPRESSION = (
-    "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 *"
-    " batchSize + 0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 *"
-    " sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens / 1024. * computeTokens /"
-    " 1024.) + 0.0395308136993267 * sum(hitCacheTokens / 1024. * computeTokens / 1024.) +"
-    " 0.0104363634681015 * sum(hitCacheTokens / 1024. * hitCacheTokens / 1024.) + 0.575522710053703 *"
-    " max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 * max(sum(computeTokens / 1024.) -"
-    " 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) + 2.15779213792494 *"
-    " max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * max(sum(hitCacheTokens / 1024.) -"
-    " 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) - 0.427317020061895 *"
-    " max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * max(sum(hitCacheTokens / 1024.)"
-    " - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, 0) + 2.30134977837751 *"
-    " max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - 11.3438560779984 *"
-    " max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) +"
-    " 0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 *"
-    " sum(max(computeTokens / 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. -"
-    " 2, 0)) + 0.305819761192588 * sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 *"
-    " sum(max(hitCacheTokens / 1024. - 8, 0)) + 0.191310200712013 * sum(max(hitCacheTokens / 1024. -"
-    " 12, 0)) + 0.0130251644478961 * max(batchSize - 8, 0) * sum(hitCacheTokens / 1024.) +"
-    " 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / 1024.) - 0.0299132587297009"
-    " * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 * max(batchSize -"
-    " 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) *"
-    " sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens /"
-    " 1024.))))"
+from flexlb_profile_data import (
+    DSV4_PREFILL_EXPRESSION,
+    FUNCTIONAL_DEFAULTS,
+    STRESS_BASE,
+    PROFILES,
+    PROFILE_SPECS,
+    PROFILE_CAPS,
+    STRESS_PROFILE,
+    FUNCTIONAL_PROFILE_KWARGS,
+    STRESS_DECISION_RETYPE_DEFAULTS,
 )
 
 # scheduler.ordering.preemption.allowedVictimStages enum values
 # (flexlb-common VictimStage.java; see _build_preemption_cfg).
 VICTIM_STAGES = ("PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED")
-
-# ===========================================================================
-# Profiles
-# ===========================================================================
-#
-# Functional case-test profiles: schema-v3 decision x dispatcher axes
-# (scheduler QUEUE + FIFO ordering) — the four legacy combos, values
-# unchanged.  The stress baseline is NOT in PROFILES (the case runner's
-# profile set stays the functional four); it is a render_env profile of
-# its own.
-
-PROFILES = (
-    "batch-window",
-    "single-nonbatch",
-    "single-batch",
-    "window-nonbatch",
-)
-
-# decision x dispatcher axes per profile (scheduler is QUEUE, ordering FIFO).
-PROFILE_SPECS = {
-    "batch-window": {"decision": "fixed_window", "dispatcher": "batch"},
-    "single-nonbatch": {"decision": "single", "dispatcher": "non_batch"},
-    "single-batch": {"decision": "single", "dispatcher": "batch"},
-    "window-nonbatch": {"decision": "fixed_window", "dispatcher": "non_batch"},
-}
-
-# Semantic capabilities per profile, used by CaseDef.requires filtering.
-PROFILE_CAPS = {
-    "batch-window": {
-        "queue",
-        "fifo",
-        "fixed_window",
-        "batch_dispatch",
-        "enqueue_batch",
-        "fetch_response",
-    },
-    "single-nonbatch": {
-        "queue",
-        "fifo",
-        "single",
-        "non_batch_dispatch",
-        "frontend_send",
-        "generate_stream",
-    },
-    "single-batch": {
-        "queue",
-        "fifo",
-        "single",
-        "batch_dispatch",
-        "enqueue_batch",
-        "fetch_response",
-    },
-    "window-nonbatch": {
-        "queue",
-        "fifo",
-        "fixed_window",
-        "non_batch_dispatch",
-        "frontend_send",
-        "generate_stream",
-    },
-}
-
-# The stress-line baseline profile (formerly data/config/
-# master_fixed_window.json).  Render-only: not part of PROFILES.
-STRESS_PROFILE = "stress-na130"
 
 _RENDER_PROFILES = PROFILES + (STRESS_PROFILE,)
 
@@ -159,7 +70,7 @@ def profile_dispatches_batch(profile: str) -> bool:
     """True when *profile*'s dispatcher axis is BATCH (master sends via
     EnqueueBatch; clients consume FetchResponse)."""
     if profile == STRESS_PROFILE:
-        return True
+        return STRESS_BASE["dispatcher"]["type"] == "BATCH"
     return PROFILE_SPECS[profile]["dispatcher"] == "batch"
 
 
@@ -293,30 +204,30 @@ def _build_ordering_cfg(
 # (formerly harness.build_flexlb_config, extended with the
 # decode_max_engine_requests knob so the JSON-splice call sites could
 # migrate onto generator parameters).  The router always gets the FORMULA
-# estimator with the production DSv4 fit injected explicitly.
+# estimator with the profile data fit injected explicitly.
 
 
 def build_flexlb_config(
     *,
-    ordering: str = "fifo",
-    decision: str = "fixed_window",
-    dispatcher: str = "batch",
-    default_priority: Optional[int] = None,
-    preemption: Optional[dict] = None,
-    max_requests: int = 32,
-    max_collection_wait_ms: int = 10,
-    max_predicted_execution_ms: int = 550,
-    queue_timeout_ms: Optional[int] = None,
-    # Explicit functional-test workload values; these are not Java defaults.
-    max_inflight_per_prefill_worker: int = 2,
-    prefill_expression: str = DSV4_PREFILL_EXPRESSION,
-    request_timeout_ms: int = 60_000,
-    decision_lifetime: float = 2.0,
-    status_rpc_ms: int = 1_000,
-    status_stale_after_ms: Optional[int] = None,
-    cleanup_interval_ms: int = 3_000,
-    decode_max_engine_requests: int = 132,
-    decode_max_kv_usage_percent: int = 90,
+    ordering: str = FUNCTIONAL_DEFAULTS["ordering"],
+    decision: str = FUNCTIONAL_DEFAULTS["decision"],
+    dispatcher: str = FUNCTIONAL_DEFAULTS["dispatcher"],
+    default_priority: Optional[int] = FUNCTIONAL_DEFAULTS["default_priority"],
+    preemption: Optional[dict] = FUNCTIONAL_DEFAULTS["preemption"],
+    max_requests: int = FUNCTIONAL_DEFAULTS["max_requests"],
+    max_collection_wait_ms: int = FUNCTIONAL_DEFAULTS["max_collection_wait_ms"],
+    max_predicted_execution_ms: int = FUNCTIONAL_DEFAULTS["max_predicted_execution_ms"],
+    queue_timeout_ms: Optional[int] = FUNCTIONAL_DEFAULTS["queue_timeout_ms"],
+    # Functional-test workload values come from flexlb_profile_data.
+    max_inflight_per_prefill_worker: int = FUNCTIONAL_DEFAULTS["max_inflight_per_prefill_worker"],
+    prefill_expression: str = FUNCTIONAL_DEFAULTS["prefill_expression"],
+    request_timeout_ms: int = FUNCTIONAL_DEFAULTS["request_timeout_ms"],
+    decision_lifetime: float = FUNCTIONAL_DEFAULTS["decision_lifetime"],
+    status_rpc_ms: int = FUNCTIONAL_DEFAULTS["status_rpc_ms"],
+    status_stale_after_ms: Optional[int] = FUNCTIONAL_DEFAULTS["status_stale_after_ms"],
+    cleanup_interval_ms: int = FUNCTIONAL_DEFAULTS["cleanup_interval_ms"],
+    decode_max_engine_requests: int = FUNCTIONAL_DEFAULTS["decode_max_engine_requests"],
+    decode_max_kv_usage_percent: int = FUNCTIONAL_DEFAULTS["decode_max_kv_usage_percent"],
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
     if decision not in ("single", "fixed_window") or dispatcher not in (
@@ -409,191 +320,6 @@ def build_flexlb_config(
         separators=(",", ":"),
     )
 
-
-# Profile-layer defaults for the functional generator: the axes plus the
-# queue deadline (tight enough that queue-timeout gate cases observe
-# expiry without waiting for the Java default of 1h).
-_FUNCTIONAL_PROFILE_KWARGS = {
-    profile: {
-        "ordering": "fifo",
-        "decision": spec["decision"],
-        "dispatcher": spec["dispatcher"],
-        "queue_timeout_ms": 60_000,
-    }
-    for profile, spec in PROFILE_SPECS.items()
-}
-
-
-# ===========================================================================
-# stress-na130 base document (field-for-field the former
-# data/config/master_fixed_window.json FLEXLB_CONFIG)
-# ===========================================================================
-
-_STRESS_BASE: dict = {
-    "schemaVersion": 3,
-    "scheduler": {
-        "type": "QUEUE",
-        "ordering": {
-            "type": "PRIORITY",
-            "defaultPriority": 50,
-            "preemption": {
-                "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"]
-            },
-        },
-        "queueTimeoutMs": 60000,
-        "decision": {
-            "type": "FIXED_WINDOW",
-            "maxRequests": 32,
-            "maxCollectionWaitMs": 400,
-            "maxPredictedExecutionMs": 550,
-        },
-    },
-    "dispatcher": {"type": "BATCH", "maxInflightPerPrefillWorker": 2},
-    "router": {
-        "roles": {
-            "prefill": {
-                "executionTimeEstimator": {
-                    "type": "FORMULA",
-                    "expression": "max(196, "
-                    "-68.612174288157 + "
-                    "0.993068319341 * "
-                    "(max(0, 287.3980926717 "
-                    "+ 2.30134977837751 * "
-                    "batchSize + "
-                    "0.158123254797307 * "
-                    "sum(hitCacheTokens / "
-                    "1024.) + "
-                    "0.575522710053703 * "
-                    "sum(computeTokens / "
-                    "1024.) + "
-                    "0.0517623430739831 * "
-                    "sum(computeTokens / "
-                    "1024. * computeTokens "
-                    "/ 1024.) + "
-                    "0.0395308136993267 * "
-                    "sum(hitCacheTokens / "
-                    "1024. * computeTokens "
-                    "/ 1024.) + "
-                    "0.0104363634681015 * "
-                    "sum(hitCacheTokens / "
-                    "1024. * hitCacheTokens "
-                    "/ 1024.) + "
-                    "0.575522710053703 * "
-                    "max(sum(computeTokens "
-                    "/ 1024.) - 16, 0) + "
-                    "2.82077211814514 * "
-                    "max(sum(computeTokens "
-                    "/ 1024.) - 32, 0) - "
-                    "0.0254671429192862 * "
-                    "max(sum(computeTokens "
-                    "/ 1024.) - 64, 0) + "
-                    "2.15779213792494 * "
-                    "max(sum(computeTokens "
-                    "/ 1024.) - 96, 0) + "
-                    "0.247806025472364 * "
-                    "max(sum(hitCacheTokens "
-                    "/ 1024.) - 32, 0) - "
-                    "0.444522654549492 * "
-                    "max(sum(hitCacheTokens "
-                    "/ 1024.) - 64, 0) - "
-                    "0.427317020061895 * "
-                    "max(sum(hitCacheTokens "
-                    "/ 1024.) - 128, 0) + "
-                    "0.347029077528455 * "
-                    "max(sum(hitCacheTokens "
-                    "/ 1024.) - 256, 0) - "
-                    "0.298742307762735 * "
-                    "max(sum(hitCacheTokens "
-                    "/ 1024.) - 384, 0) + "
-                    "2.30134977837751 * "
-                    "max(batchSize - 8, 0) "
-                    "- 3.54884859699154 * "
-                    "max(batchSize - 16, 0) "
-                    "- 11.3438560779984 * "
-                    "max(batchSize - 24, 0) "
-                    "+ 0.879751992138183 * "
-                    "sum(max(computeTokens "
-                    "/ 1024. - 2, 0)) + "
-                    "0.636364578079591 * "
-                    "sum(max(computeTokens "
-                    "/ 1024. - 4, 0)) - "
-                    "0.0513345988517118 * "
-                    "sum(max(computeTokens "
-                    "/ 1024. - 8, 0)) - "
-                    "0.332584389129357 * "
-                    "sum(max(hitCacheTokens "
-                    "/ 1024. - 2, 0)) + "
-                    "0.305819761192588 * "
-                    "sum(max(hitCacheTokens "
-                    "/ 1024. - 4, 0)) - "
-                    "0.287610979974721 * "
-                    "sum(max(hitCacheTokens "
-                    "/ 1024. - 8, 0)) + "
-                    "0.191310200712013 * "
-                    "sum(max(hitCacheTokens "
-                    "/ 1024. - 12, 0)) + "
-                    "0.0130251644478961 * "
-                    "max(batchSize - 8, 0) "
-                    "* sum(hitCacheTokens / "
-                    "1024.) + "
-                    "0.00981382840761646 * "
-                    "max(batchSize - 16, 0) "
-                    "* sum(hitCacheTokens / "
-                    "1024.) - "
-                    "0.0299132587297009 * "
-                    "max(batchSize - 24, 0) "
-                    "* sum(hitCacheTokens / "
-                    "1024.) + "
-                    "0.0447455122487382 * "
-                    "max(batchSize - 8, 0) "
-                    "* sum(computeTokens / "
-                    "1024.) + "
-                    "0.0104635312001851 * "
-                    "max(batchSize - 16, 0) "
-                    "* sum(computeTokens / "
-                    "1024.) + "
-                    "0.0542737877321807 * "
-                    "max(batchSize - 24, 0) "
-                    "* sum(computeTokens / "
-                    "1024.))))",
-                },
-                "cacheAffinity": {"maxExtraTtftMs": 20, "minPrefixHitPercent": 20},
-            },
-            "decode": {
-                "availability": {"maxKvUsagePercent": 95, "maxEngineRequests": 384}
-            },
-        }
-    },
-    "workerRegistry": {
-        "health": {
-            "statusPollIntervalMs": 20,
-            "statusRpcTimeoutMs": 5000,
-            "statusStaleAfterMs": 10000,
-            "cleanupIntervalMs": 3000,
-        },
-        "cacheStatus": {
-            "targetDiffSize": 30,
-            "minRefreshIntervalMs": 50,
-            "maxRefreshIntervalMs": 3000,
-            "fullSnapshotDebugMode": False,
-        },
-    },
-    "observability": {
-        "cacheHit": {
-            "recentKeyWindow": {
-                "writeEnabled": True,
-                "durationMs": 1800000,
-                "maxKeyOccurrences": 80000000,
-            },
-            "metricsEnabled": True,
-            "requestTraceLogEnabled": False,
-        }
-    },
-    "requestLifecycle": {
-        "request": {"timeoutMs": 300000},
-        "decision": {"lifetime": 2.0},
-    },
-}
 
 # override field -> document path for the stress base (edit-in-place).
 _STRESS_DOC_PATHS = {
@@ -696,9 +422,9 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
         elif new_type == "fixed_window":
             doc["scheduler"]["decision"] = {
                 "type": "FIXED_WINDOW",
-                "maxRequests": decision.get("maxRequests", 32),
-                "maxCollectionWaitMs": decision.get("maxCollectionWaitMs", 10),
-                "maxPredictedExecutionMs": decision.get("maxPredictedExecutionMs", 550),
+                "maxRequests": decision.get("maxRequests", STRESS_DECISION_RETYPE_DEFAULTS["maxRequests"]),
+                "maxCollectionWaitMs": decision.get("maxCollectionWaitMs", STRESS_DECISION_RETYPE_DEFAULTS["maxCollectionWaitMs"]),
+                "maxPredictedExecutionMs": decision.get("maxPredictedExecutionMs", STRESS_DECISION_RETYPE_DEFAULTS["maxPredictedExecutionMs"]),
             }
         else:
             raise ValueError(
@@ -715,7 +441,7 @@ def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
 
 
 def _render_stress(overrides: Optional[ConfigOverride]) -> str:
-    doc = json.loads(json.dumps(_STRESS_BASE, separators=(",", ":")))
+    doc = json.loads(json.dumps(STRESS_BASE, separators=(",", ":")))
     if overrides is None:
         return json.dumps(doc, separators=(",", ":"))
     _apply_omits(doc, overrides)
@@ -749,7 +475,7 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
         )
     if profile == STRESS_PROFILE:
         return _render_stress(overrides)
-    kwargs = dict(_FUNCTIONAL_PROFILE_KWARGS[profile])
+    kwargs = dict(FUNCTIONAL_PROFILE_KWARGS[profile])
     if overrides is not None:
         for f in fields(ConfigOverride):
             value = getattr(overrides, f.name)

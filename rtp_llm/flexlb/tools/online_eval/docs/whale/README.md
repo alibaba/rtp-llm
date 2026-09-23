@@ -16,7 +16,7 @@ CI 定义位于外层仓库 `.aoneci/image.yaml`。`mock-bundle` 使用 Maven pr
 ### 寄生 bundle
 
 1. 构建 `flexlb-api` 与 `flexlb-mock-engine`，执行 Whale、RemoteDecode、缓存、扩缩容和取消相关测试，并执行 `tools/whale_mock` Python 测试。
-2. 复制 `master.jar`、`mock.jar`、`tools/whale_mock`、`flexlb_cfg.py`、模式表和性能文件到镜像上下文。
+2. 复制 `master.jar`、`mock.jar`、`tools/whale_mock`、`flexlb_cfg.py`、`flexlb_profile_data.py`、模式表和性能文件到镜像上下文。
 3. 按 pin 构建 `legacy-master.jar`，并生成 `tools/whale_mock/bundle-manifest.sha256` 记录完整上下文文件摘要。
 4. 直接使用固定版本的 CPU `rtp_llm_root_base`，仅安装运行时依赖 PyYAML，生成 `rtp_llm_mock_bundle:<source-version>`。
 
