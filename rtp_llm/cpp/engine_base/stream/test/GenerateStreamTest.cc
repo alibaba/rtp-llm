@@ -1318,4 +1318,181 @@ TEST_F(GenerateStreamTest, timeInfoSnapshotIsCoherentDuringLifecyclePublication)
     EXPECT_TRUE(final_info.generation_done);
 }
 
+namespace {
+ModelConfig codebookModelConfig() {
+    ModelConfig model;
+    model.max_seq_len                 = 32;
+    model.vocab_size                  = 100;
+    model.special_tokens.eos_token_id = 0;
+    model.output_vocab_ids            = {0, 10, 11, 12, 20, 21, 22};
+    model.output_vocab_padded_size    = 8;
+    model.output_vocab_groups         = {{1, 2, 3}, {4, 5, 6}};
+    return model;
+}
+
+std::shared_ptr<NormalGenerateStream> codebookStream(const ModelConfig& model, const GenerateConfig& config) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::tensor({8, 9}, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>(config);
+    input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
+    return std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+}
+
+GenerateConfig codebookGenerateConfig() {
+    GenerateConfig config;
+    config.max_new_tokens = 2;
+    return config;
+}
+}  // namespace
+
+TEST_F(GenerateStreamTest, codebookRequiresMatchingLength) {
+    const auto model = codebookModelConfig();
+    for (const int length : {1, 3, 8192}) {
+        auto config           = codebookGenerateConfig();
+        config.max_new_tokens = length;
+        auto stream           = codebookStream(model, config);
+        EXPECT_TRUE(stream->hasError()) << length;
+    }
+    EXPECT_TRUE(codebookStream(model, GenerateConfig{})->hasError());
+    auto valid = codebookStream(model, codebookGenerateConfig());
+    ASSERT_FALSE(valid->hasError());
+    EXPECT_EQ(valid->generateConfig()->max_new_tokens, 2);
+    EXPECT_EQ(valid->generateConfig()->min_new_tokens, 0);
+    auto config           = codebookGenerateConfig();
+    config.min_new_tokens = 1;
+    EXPECT_EQ(codebookStream(model, config)->generateConfig()->min_new_tokens, 1);
+}
+
+TEST_F(GenerateStreamTest, codebookChecksCandidatesAndVariableBeamSchedule) {
+    const auto model          = codebookModelConfig();
+    auto       config         = codebookGenerateConfig();
+    config.variable_num_beams = {2, 4};
+    EXPECT_FALSE(codebookStream(model, config)->hasError());
+    config.variable_num_beams = {4, 4};  // only three legal first tokens
+    EXPECT_TRUE(codebookStream(model, config)->hasError());
+    config.variable_num_beams = {1, 4};  // three legal second-step children
+    EXPECT_TRUE(codebookStream(model, config)->hasError());
+    config.variable_num_beams = {2};  // existing behavior repeats the final beam width
+    EXPECT_FALSE(codebookStream(model, config)->hasError());
+    config.variable_num_beams = {2, 2, 2};
+    EXPECT_FALSE(codebookStream(model, config)->hasError());
+    auto small_union                = model;
+    small_union.output_vocab_ids    = {0, 10, 11};
+    small_union.output_vocab_groups = {{1, 2}, {1, 2}};
+    config.variable_num_beams       = {2, 2};
+    EXPECT_TRUE(codebookStream(small_union, config)->hasError());
+}
+
+TEST_F(GenerateStreamTest, codebookRejectsMalformedGroups) {
+    const auto config = codebookGenerateConfig();
+    for (const std::vector<std::vector<int64_t>>& groups : std::vector<std::vector<std::vector<int64_t>>>{
+             {{}, {4}}, {{0}, {4}}, {{1, 1}, {4}}, {{2, 1}, {4}}, {{-1}, {4}}, {{7}, {4}}}) {
+        auto model                = codebookModelConfig();
+        model.output_vocab_groups = groups;
+        EXPECT_TRUE(codebookStream(model, config)->hasError());
+    }
+    auto model = codebookModelConfig();
+    model.output_vocab_ids.clear();
+    EXPECT_TRUE(codebookStream(model, config)->hasError());
+}
+
+TEST_F(GenerateStreamTest, codebookPreservesStopWordsAndMinNewTokens) {
+    for (const int min_tokens : {0, 2}) {
+        auto config            = codebookGenerateConfig();
+        config.min_new_tokens  = min_tokens;
+        config.stop_words_list = {{10}};
+        auto stream            = codebookStream(codebookModelConfig(), config);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->generateConfig()->min_new_tokens, min_tokens);
+        stream->generate_status_->status = StreamState::RUNNING;
+        updateOneToken(stream, 10);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->hasEvent(StreamEvents::GenerateDone), min_tokens == 0);
+        EXPECT_EQ(stream->outputTokenLen(), 1);
+        if (min_tokens == 2) {
+            updateOneToken(stream, 20);
+            EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+            EXPECT_EQ(stream->outputTokenLen(), 2);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, codebookRetainsSequenceCapacityLimit) {
+    auto model        = codebookModelConfig();
+    model.max_seq_len = 3;  // existing sequence limit permits one output token
+    auto stream       = codebookStream(model, codebookGenerateConfig());
+    ASSERT_FALSE(stream->hasError());
+    stream->generate_status_->status = StreamState::RUNNING;
+    updateOneToken(stream, 10);
+    EXPECT_EQ(stream->outputTokenLen(), 1);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(GenerateStreamTest, codebookDoesNotOverrideFinishedSequenceEosMask) {
+    auto config                 = codebookGenerateConfig();
+    config.num_return_sequences = 2;
+    auto stream                 = codebookStream(codebookModelConfig(), config);
+    ASSERT_FALSE(stream->hasError());
+    ASSERT_EQ(stream->logits_processor_list_.size(), 2);
+    // A return sequence can finish on a stop word while its peer continues.
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({2, 7}, torch::TensorOptions().device(torch::kCUDA));
+    inputs.finished_mask = torch::tensor({true, false}, torch::kBool);
+    for (const auto& processor : stream->logits_processor_list_) {
+        ASSERT_FALSE(processor->updateStatus(torch::tensor({{10}, {11}}, torch::kInt32), 1).has_value());
+        ASSERT_FALSE(processor->process(inputs, 0, 2).has_value());
+    }
+    auto logits = inputs.logits.cpu();
+    EXPECT_EQ(logits[0].argmax().item<int64_t>(), 0);  // finished row keeps compact EOS
+    EXPECT_TRUE(torch::isfinite(logits[0][0]).item<bool>());
+    auto probs = torch::softmax(logits, -1);
+    EXPECT_TRUE(torch::isfinite(probs).all().item<bool>());
+    EXPECT_FLOAT_EQ(probs[0][0].item<float>(), 1.0f);
+    EXPECT_TRUE(torch::isneginf(logits[1][0]).item<bool>());
+    EXPECT_TRUE(torch::isneginf(logits[1][1]).item<bool>());
+    EXPECT_EQ(logits[1][4].item<float>(), 0.0f);  // active row is at level two
+}
+
+TEST_F(GenerateStreamTest, codebookMasksCompactIdsAndFinishesAtLastLevel) {
+    auto stream = codebookStream(codebookModelConfig(), codebookGenerateConfig());
+    ASSERT_FALSE(stream->hasError());
+    ASSERT_EQ(stream->logits_processor_list_.size(), 1);
+    auto          processor = stream->logits_processor_list_.front();
+    SamplerInputs inputs;
+    inputs.logits = torch::zeros({1, 7}, torch::kFloat32);
+    ASSERT_FALSE(processor->process(inputs, 0, 1).has_value());
+    EXPECT_TRUE(torch::isneginf(inputs.logits[0][0]).item<bool>());  // EOS masked
+    EXPECT_EQ(inputs.logits[0][1].item<float>(), 0);
+    EXPECT_TRUE(torch::isneginf(inputs.logits[0][4]).item<bool>());
+    // This unit fixture has no KV cache; the engine test covers scheduler admission.
+    stream->generate_status_->status = StreamState::RUNNING;
+    updateOneToken(stream, 10);  // dispatcher passes canonical IDs into history
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+    inputs.logits.zero_();
+    ASSERT_FALSE(processor->process(inputs, 0, 1).has_value());
+    EXPECT_TRUE(torch::isneginf(inputs.logits[0][1]).item<bool>());
+    EXPECT_EQ(inputs.logits[0][4].item<float>(), 0);
+    updateOneToken(stream, 20);
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->outputTokenLen(), 2);
+    EXPECT_EQ(processor->committedOutputLen().value(), 2);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(GenerateStreamTest, flatPruningKeepsVariableOutputLength) {
+    auto model = codebookModelConfig();
+    model.output_vocab_groups.clear();
+    auto config           = codebookGenerateConfig();
+    config.max_new_tokens = 5;
+    auto stream           = codebookStream(model, config);
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->generateConfig()->max_new_tokens, 5);
+    EXPECT_TRUE(stream->logits_processor_list_.empty());
+    stream->generate_status_->status = StreamState::RUNNING;
+    updateOneToken(stream, 0);  // static pruning retains ordinary EOS termination
+    EXPECT_EQ(stream->outputTokenLen(), 1);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
 }  // namespace rtp_llm

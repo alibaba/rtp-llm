@@ -19,7 +19,7 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.output_vocab_config import load_output_vocab_ids
+from rtp_llm.config.output_vocab_config import load_output_vocab_config
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
@@ -471,15 +471,17 @@ class BaseModel(object):
         return ids
 
     def _finalize_output_vocab_config(self) -> None:
+        self.model_config.output_vocab_ids = []
+        self.model_config.output_vocab_groups = []
+        self.model_config.output_vocab_padded_size = 0
         if not self.model_config.enable_output_vocab_pruning:
-            self.model_config.output_vocab_ids = []
-            self.model_config.output_vocab_padded_size = 0
             return
+
         if not self.model_config.has_lm_head:
             raise ValueError("output vocabulary pruning requires a model LM head")
 
         eos_token_id = self.model_config.special_tokens.eos_token_id
-        output_vocab_ids = load_output_vocab_ids(
+        output_vocab_ids, output_vocab_groups = load_output_vocab_config(
             self.model_config.ckpt_path,
             self.model_config.vocab_size,
             self.model_config.input_vocab_size,
@@ -487,6 +489,7 @@ class BaseModel(object):
             extra_token_ids=(eos_token_id,),
         )
         self.model_config.output_vocab_ids = output_vocab_ids
+        self.model_config.output_vocab_groups = output_vocab_groups
 
         is_distributed = (
             self.parallelism_config.tp_size > 1

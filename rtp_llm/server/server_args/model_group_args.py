@@ -95,6 +95,8 @@ def init_model_group_args(parser, model_args):
         default=False,
         help=(
             "Use output_tokens.json from the checkpoint directory to prune the "
-            "LM head. Flat or grouped token strings/IDs form one static set."
+            "LM head. Flat or single-group manifests use a static union; multiple "
+            "groups restrict successive output tokens and require max_new_tokens "
+            "to equal the number of groups."
         ),
     )

@@ -178,6 +178,7 @@ class ModelConfig(CppModelConfig):
         "prefix_projection",
         "reverse_e_h_norm",
         "output_vocab_ids",
+        "output_vocab_groups",
         "output_vocab_padded_size",
     }
 
@@ -981,6 +982,7 @@ def build_model_config(
         model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
     model_config.output_vocab_ids = []
+    model_config.output_vocab_groups = []
     model_config.output_vocab_padded_size = 0
     model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
 

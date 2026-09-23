@@ -17,6 +17,7 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.tensor_source import TensorCollector
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -703,6 +704,14 @@ class GetWeightInfoOutputVocabPipelineTest(unittest.TestCase):
 class FinalizeOutputVocabConfigTest(unittest.TestCase):
     """Coverage for BaseModel._finalize_output_vocab_config P derivation."""
 
+    def test_cpp_output_vocab_groups_round_trip(self):
+        config = CppModelConfig()
+        self.assertEqual(config.output_vocab_groups, [])
+        config.output_vocab_groups = [[1, 3], [2, 3]]
+        self.assertEqual(config.output_vocab_groups, [[1, 3], [2, 3]])
+        config.output_vocab_groups = []
+        self.assertEqual(config.output_vocab_groups, [])
+
     class _FakeRealTokenizer:
         def get_vocab(self):
             return {}
@@ -719,6 +728,7 @@ class FinalizeOutputVocabConfigTest(unittest.TestCase):
             input_vocab_size=0,
             ckpt_path="",
             output_vocab_ids=[99],  # dirty value that must be overwritten or reset
+            output_vocab_groups=[[99]],
             output_vocab_padded_size=999,
             special_tokens=SimpleNamespace(eos_token_id=0),
         )
@@ -742,6 +752,7 @@ class FinalizeOutputVocabConfigTest(unittest.TestCase):
         self._finalize_with_manifest(fake, [1, 3, 5])
         # eos 0 is merged automatically: K = {0, 1, 3, 5}; single device -> P == K.
         self.assertEqual(fake.model_config.output_vocab_ids, [0, 1, 3, 5])
+        self.assertEqual(fake.model_config.output_vocab_groups, [])
         self.assertEqual(fake.model_config.output_vocab_padded_size, 4)
 
     def test_tp_gt1_pads_to_multiple_of_tp_times_8(self):
@@ -766,7 +777,31 @@ class FinalizeOutputVocabConfigTest(unittest.TestCase):
         fake = self._make_fake(tp=1, dp=1, ep=1, pruning=False)
         BaseModel._finalize_output_vocab_config(fake)
         self.assertEqual(fake.model_config.output_vocab_ids, [])
+        self.assertEqual(fake.model_config.output_vocab_groups, [])
         self.assertEqual(fake.model_config.output_vocab_padded_size, 0)
+
+    def test_nested_manifest_sets_compact_groups(self):
+        fake = self._make_fake(tp=1, dp=1, ep=1)
+        with tempfile.TemporaryDirectory() as ckpt_path:
+            manifest_path = os.path.join(ckpt_path, OUTPUT_TOKENS_FILENAME)
+            with open(manifest_path, "w", encoding="utf-8") as writer:
+                json.dump([[5, 1, 5], [3, 1]], writer)
+            fake.model_config.ckpt_path = ckpt_path
+            BaseModel._finalize_output_vocab_config(fake)
+
+        self.assertEqual(fake.model_config.output_vocab_ids, [0, 1, 3, 5])
+        self.assertEqual(fake.model_config.output_vocab_groups, [[1, 3], [1, 2]])
+
+    def test_single_group_manifest_keeps_static_pruning(self):
+        fake = self._make_fake(tp=1, dp=1, ep=1)
+        with tempfile.TemporaryDirectory() as ckpt_path:
+            manifest_path = os.path.join(ckpt_path, OUTPUT_TOKENS_FILENAME)
+            with open(manifest_path, "w", encoding="utf-8") as writer:
+                json.dump([[0, 1, 3, 5]], writer)
+            fake.model_config.ckpt_path = ckpt_path
+            BaseModel._finalize_output_vocab_config(fake)
+        self.assertEqual(fake.model_config.output_vocab_ids, [0, 1, 3, 5])
+        self.assertEqual(fake.model_config.output_vocab_groups, [])
 
     def test_missing_lm_head_raises(self):
         fake = self._make_fake(tp=1, dp=1, ep=1, has_lm_head=False)

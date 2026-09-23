@@ -9,6 +9,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/CodebookLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
@@ -530,6 +531,107 @@ TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     config.speculative_enabled = true;
     config.warm_up_with_loss   = true;
     EXPECT_NO_THROW(createMockEngine(config));
+}
+
+TEST_F(NormalEngineTest, testCodebookRejectsInvalidModelAtInitialization) {
+    CustomConfig config;
+    config.output_vocab_ids = {0, 10, 11, 20, 21};
+    for (const auto& groups : std::vector<std::vector<std::vector<int64_t>>>{
+             {{2, 1}, {3, 4}}, {{1, 1}, {3, 4}}, {{1, 2}, {5}}, {{}, {3, 4}}, {{0, 1}, {3, 4}}}) {
+        config.output_vocab_groups = groups;
+        try {
+            createMockEngine(config);
+            FAIL() << "invalid codebook configuration was accepted";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find("codebook"), std::string::npos);
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testCodebookDynamicBeamEndToEndAndFakeStream) {
+    CustomConfig config;
+    config.output_vocab_ids    = {0, 10, 11, 12, 20, 21, 22};
+    config.output_vocab_groups = {{1, 2, 3}, {4, 5, 6}};
+    auto engine                = createMockEngine(config);
+    ASSERT_NE(engine, nullptr);
+    ASSERT_TRUE(engine->resource_context_.codebook_masks.is_cuda());
+    auto initial_masks = engine->resource_context_.codebook_masks.clone();
+
+    // Scheduler padding streams are internal work, not user codebook sequences.
+    auto fake = engine->createMinFakeStream(1);
+    ASSERT_FALSE(fake->hasError());
+
+    auto query                                 = std::make_shared<GenerateInput>();
+    query->input_ids                           = torch::tensor({8, 9}, torch::kInt32);
+    query->begin_time_us                       = autil::TimeUtility::currentTimeInMicroSeconds();
+    query->generate_config                     = std::make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens     = 2;
+    query->generate_config->variable_num_beams = {2, 4};
+    query->generate_config->is_streaming       = false;
+    auto stream                                = engine->enqueue(query);
+    ASSERT_FALSE(stream->hasError());
+    auto result = stream->nextOutput();
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    ASSERT_EQ(result.value().generate_outputs.size(), 4);
+    for (const auto& output : result.value().generate_outputs) {
+        auto ids = output.output_ids.reshape({-1});
+        ASSERT_EQ(ids.numel(), 2);
+        EXPECT_GE(ids[0].item<int>(), 10);
+        EXPECT_LE(ids[0].item<int>(), 12);
+        EXPECT_GE(ids[1].item<int>(), 20);
+        EXPECT_LE(ids[1].item<int>(), 22);
+    }
+    EXPECT_TRUE(stream->isFinished());
+    auto sibling = engine->makeStream(query);
+    ASSERT_FALSE(sibling->hasError());
+    for (const auto& request : {stream, sibling}) {
+        auto processor = std::dynamic_pointer_cast<CodebookLogitsProcessor>(request->getAllLogitsProcessorPtr().back());
+        ASSERT_NE(processor, nullptr);
+        EXPECT_EQ(processor->masks_.data_ptr(), engine->resource_context_.codebook_masks.data_ptr());
+    }
+    EXPECT_TRUE(torch::equal(initial_masks, engine->resource_context_.codebook_masks));
+}
+
+TEST_F(NormalEngineTest, testCodebookKeepsBeamWidthAfterEarlyStop) {
+    CustomConfig config;
+    config.output_vocab_ids                            = {0, 10, 11, 20, 21};
+    config.output_vocab_groups                         = {{1, 2}, {3, 4}};
+    auto engine                                        = createMockEngine(config);
+    auto query                                         = std::make_shared<GenerateInput>();
+    query->input_ids                                   = torch::tensor({8, 9}, torch::kInt32);
+    query->begin_time_us                               = autil::TimeUtility::currentTimeInMicroSeconds();
+    query->generate_config                             = std::make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens             = 2;
+    query->generate_config->variable_num_beams         = {2, 4};
+    query->generate_config->stop_words_list            = {{10}};
+    query->generate_config->is_streaming               = false;
+    auto healthy_query                                 = std::make_shared<GenerateInput>(*query);
+    healthy_query->generate_config                     = std::make_shared<GenerateConfig>(*query->generate_config);
+    healthy_query->generate_config->variable_num_beams = {2, 3};
+    auto [accepted, streams]                           = engine->enqueueMultiple({query, healthy_query});
+    ASSERT_EQ(accepted, std::vector<bool>({true, true}));
+    ASSERT_EQ(streams.size(), 2);
+    auto result = streams[0]->nextOutput();
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    ASSERT_EQ(result.value().generate_outputs.size(), 4);
+    EXPECT_FALSE(streams[0]->hasError());
+    EXPECT_EQ(streams[0]->outputTokenLen(), 2);
+    // Only three candidates are legal. Keep the requested beam width and do not
+    // constrain the extra top-k entry, which may come from a masked position.
+
+    auto healthy_result = streams[1]->nextOutput();
+    ASSERT_TRUE(healthy_result.ok()) << healthy_result.status().ToString();
+    ASSERT_EQ(healthy_result.value().generate_outputs.size(), 3);
+    for (const auto& output : healthy_result.value().generate_outputs) {
+        auto ids = output.output_ids.reshape({-1});
+        ASSERT_EQ(ids.numel(), 2);
+        if (ids[0].item<int>() == 10) {
+            EXPECT_EQ(ids[1].item<int>(), 0);  // Finished beam keeps its EOS continuation.
+        } else {
+            EXPECT_EQ(ids[0].item<int>(), 11);
+            EXPECT_TRUE(ids[1].item<int>() == 20 || ids[1].item<int>() == 21);
+        }
+    }
 }
 
 }  // namespace rtp_llm

@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/CodebookLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
@@ -51,6 +52,42 @@ std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, si
             && output_vocab_size <= 2 * max_num_beams) {
             return "output vocabulary size must be greater than twice the maximum beam width for small-beam search";
         }
+    }
+    return std::nullopt;
+}
+
+// Group IDs address the compact union vocabulary, never the input embedding table.
+std::optional<std::string>
+validateCodebookRequest(const GenerateConfig& config, const ModelConfig& model_config, bool model_validated) {
+    const auto& groups = model_config.output_vocab_groups;
+    if (groups.empty()) {
+        return std::nullopt;
+    }
+    const auto& ids = model_config.output_vocab_ids;
+    if (!model_validated) {
+        if (auto error =
+                CodebookLogitsProcessor::validateGroups(groups, ids, model_config.special_tokens.eos_token_id)) {
+            return error;
+        }
+    }
+    const int levels = static_cast<int>(groups.size());
+    if (config.max_new_tokens != levels) {
+        return "max_new_tokens must equal the number of codebook levels";
+    }
+    size_t input_beams = 1;
+    for (size_t level = 0; level < groups.size(); ++level) {
+        const auto& group        = groups[level];
+        const int   output_beams = config.variable_num_beams.empty() ?
+                                       config.num_beams :
+                                       config.variable_num_beams[std::min(level, config.variable_num_beams.size() - 1)];
+        if (output_beams <= 0 || static_cast<size_t>(output_beams - 1) / input_beams >= group.size()) {
+            return "codebook level has fewer legal candidates than the requested output beams";
+        }
+        if (output_beams > 1 && input_beams == static_cast<size_t>(output_beams)
+            && input_beams <= kSmallBeamSearchV1MaxBeamWidth && ids.size() <= 2 * input_beams) {
+            return "codebook small-beam transition requires union vocabulary greater than twice the beam width";
+        }
+        input_beams = static_cast<size_t>(output_beams);
     }
     return std::nullopt;
 }
@@ -129,6 +166,14 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
+    if (!model_config.output_vocab_groups.empty()) {
+        if (auto error =
+                validateCodebookRequest(*generateConfig(), model_config, resource_context.codebook_masks.defined())) {
+            reportError(ErrorCode::INVALID_PARAMS, *error);
+            return;
+        }
+    }
+
     int64_t processor_eos_token_id = special_tokens_.eos_token_id;
     if (output_vocab_size_ > 0) {
         const auto& output_vocab_ids = model_config.output_vocab_ids;
@@ -157,6 +202,15 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                 "output vocabulary pruning only supports the MultiSeq logits processor");
                     return;
                 }
+            }
+        }
+        if (!model_config.output_vocab_groups.empty()) {
+            if (resource_context.codebook_masks.defined()) {
+                processors.push_back(std::make_shared<CodebookLogitsProcessor>(resource_context.codebook_masks,
+                                                                               logits_processor_init_batch_size));
+            } else {
+                processors.push_back(std::make_shared<CodebookLogitsProcessor>(
+                    model_config.output_vocab_groups, output_vocab_size_, logits_processor_init_batch_size));
             }
         }
         logits_processor_list_ = std::move(processors);

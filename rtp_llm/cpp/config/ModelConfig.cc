@@ -233,6 +233,7 @@ std::string ModelConfig::to_string() const {
         << "max_seq_len: " << max_seq_len << "\n"
         << "vocab_size: " << vocab_size << "\n"
         << "output_vocab_size: " << output_vocab_ids.size() << "\n"
+        << "output_vocab_group_count: " << output_vocab_groups.size() << "\n"
         << "output_vocab_padded_size: " << output_vocab_padded_size << "\n"
         << "input_vocab_size: " << input_vocab_size << "\n"
         << "type_vocab_size: " << type_vocab_size << "\n"

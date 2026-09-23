@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/logits_processor/CodebookLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -218,6 +219,18 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO("ROCm NormalEngine ctor: set device to %d", parallelism_config.local_rank);
 #endif
 
+    if (!model_config_.output_vocab_groups.empty()) {
+        const auto error = CodebookLogitsProcessor::validateGroups(model_config_.output_vocab_groups,
+                                                                   model_config_.output_vocab_ids,
+                                                                   model_config_.special_tokens.eos_token_id);
+        RTP_LLM_CHECK_WITH_INFO(!error.has_value(), "%s", error.value_or("").c_str());
+        const auto device_id = parallelism_config.world_rank % parallelism_config.local_world_size;
+        resource_context_.codebook_masks =
+            CodebookLogitsProcessor::createMasks(model_config_.output_vocab_groups,
+                                                 model_config_.output_vocab_ids.size())
+                .to(torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(device_id)));
+    }
+
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
     if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
@@ -345,8 +358,12 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
 
+    // Warmup and system-prompt cache construction execute synthetic model work,
+    // not a user codebook sequence. Keep the same union head without per-level state.
+    auto pre_run_model_config = model_config_;
+    pre_run_model_config.output_vocab_groups.clear();
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
-                                                         model_config_,
+                                                         pre_run_model_config,
                                                          runtime_config,
                                                          resource_context_,
                                                          nullptr,
@@ -574,7 +591,18 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
     fake_input->fake_query                      = true;
-    auto stream                                 = makeStream(fake_input);
+    // Padding streams may execute arbitrarily many scheduler rounds and do not
+    // represent a fixed-length user codebook sequence.
+    GenerateStreamPtr stream;
+    if (model_config_.output_vocab_groups.empty()) {
+        stream = makeStream(fake_input);
+    } else {
+        auto fake_model_config = model_config_;
+        fake_model_config.output_vocab_groups.clear();
+        stream = std::make_shared<NormalGenerateStream>(
+            fake_input, fake_model_config, runtime_config, resource_context_, metrics_reporter_);
+        stream->setReserveStep(reserve_step_);
+    }
     stream->setIsFakeStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
