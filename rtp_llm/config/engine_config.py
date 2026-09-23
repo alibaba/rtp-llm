@@ -34,6 +34,7 @@ from rtp_llm.ops import (
     RoleType,
     RuntimeConfig,
     SpeculativeExecutionConfig,
+    SpeculativeType,
     VitSeparation,
 )
 
@@ -208,6 +209,15 @@ class EngineConfig:
         # Mirrors the vit_separation override above so VIT rank also surfaces
         # as RoleType::VIT to model code.
         parallelism_config.role_type = pd_sep_config.role_type
+        # Resolve once before model construction and weight partitioning. Do not
+        # infer local execution later from the remote producer's CP method.
+        parallelism_config.resolve_local_cp(
+            py_env_configs.model_args.model_type or "",
+            sp_config.type != SpeculativeType.NONE,
+            hw_kernel_config.enable_cuda_graph
+            or hw_kernel_config.enable_native_cuda_graph,
+            device_resource_config.enable_layer_micro_batch != 0,
+        )
 
         if nccl_comm_config is None:
             nccl_comm_config = NcclCommConfig(

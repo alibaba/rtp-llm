@@ -272,8 +272,7 @@ def set_cp_info(
     """
     cp_enabled = (
         parallelism_config is not None
-        and getattr(parallelism_config, "prefill_cp_config", None) is not None
-        and parallelism_config.prefill_cp_config.is_enabled()
+        and parallelism_config.local_cp_enabled()
         and is_prefill
         and attn is not None
         and getattr(attn, "context_parallel_info", None) is not None
@@ -301,33 +300,9 @@ def forward_layers(
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
-    """Flat per-layer loop — vLLM-aligned layout.
+    """Run stage-local layers over flat tokens with per-request cu_seqlens.
 
-    Shapes:
-      * ``input_ids``   ``[T_total]``    — flat tokens across the forward's requests
-      * ``positions``   ``[T_total]``    — per-token global absolute position (RoPE)
-      * ``cu_seqlens``  ``[B+1]``        — per-request cumulative-token prefix sum
-      * ``hidden``      ``[T_total, hc, dim]`` — internal, flat in the token axis
-      * returns         ``[T_total, dim]`` — pre-lm-head, engine applies lm_head
-
-    The ``B`` axis is collapsed out of ``input_ids`` / ``hidden`` entirely,
-    matching vLLM's ``DeepseekV4`` (``deepseek_v4.py:1310-1317``). Per-request
-    bookkeeping that still needs request boundaries (block-table lookups,
-    compressor/indexer per-row state) is carried by ``cu_seqlens``.
-
-    **Stage-2 compat shim**: ``Block.forward`` is now flat-native (accepts
-    ``[T, hc, dim]`` + 1D ``input_ids`` / ``positions`` / ``cu_seqlens``)
-    so the layer call site has no unsqueeze/squeeze. ``attention.py`` /
-    ``compressor.py`` / ``indexer.py`` still consume ``[B=1, T, hc, dim]``
-    internally — ``Block.forward`` re-wraps them. ``_hc_head_reduce`` +
-    ``norm`` also still assume a 4D input (``dim=2`` for the hc reduction),
-    so the reduce + norm pair here is still wrapped until ``transformer.py``
-    is flattened.
-
-    When ``attn_inputs`` is provided AND cache_store is active, each layer's
-    owned KV regions are registered with the PD-disagg cache_store immediately
-    after that layer's forward.
-    """
+    Non-last stages return [T, hc, dim]; the last stage reduces to [T, dim]."""
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
@@ -534,11 +509,17 @@ def forward_layers(
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                 )  # [T, hc, dim]
-                if layer_idx in capture_ids:
-                    v4.capture_aux_hidden(layer_idx, h)
+                # ``capture_ids`` are GLOBAL layer ids while ``layer_idx`` is
+                # this stage's local position, so translate before matching.
+                if capture_aux:
+                    global_layer_id = v4.pp_global_layer_ids[layer_idx]
+                    if global_layer_id in capture_ids:
+                        v4.capture_aux_hidden(global_layer_id, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                 if write_cache_store_impl is not None:
+                    # Cache surfaces stay LOCAL on purpose: the C++ layout is
+                    # projected to this stage and numbered 0..len(layers)-1.
                     write_cache_store_impl(kv_cache.get_layer_cache_groups(layer_idx))
                 if _rt_on:
                     _rt.record(f"layer{layer_idx:02d}_out", h)
@@ -594,6 +575,11 @@ def forward_layers(
             if v4._mtp_last_hidden_buffer is not None:
                 _last_pre_hc = _last_hidden_by_request(_pre_hc_flat, cu_seqlens, cp_ctx)
                 v4._write_mtp_last_hidden_buffer(_last_pre_hc)
+
+    # Only the last PP stage owns head reduction and norm.
+    # Forward unreduced hyper-connection lanes to downstream stages.
+    if v4.norm is None:
+        return h  # [T, hc, dim]
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
@@ -689,27 +675,9 @@ def forward_prefill(
     inputs: PyModelInputs,
     prepare_hidden_fn: Optional[Any] = None,
 ) -> PyModelOutputs:
-    """Prefill dispatcher — single :func:`forward_layers` call on the full
-    flat ``[T_total]`` batch (vLLM-aligned).
+    """Dispatch flat prefill metadata and per-tag block tables to stage-local layers.
 
-    Pulls flat metadata off :attr:`PyModelInputs.attention_inputs`. For the
-    multi-group DSV4 cache that attribute is a ``{tag: PyAttentionInputs}``
-    mapping, so group-invariant fields are read off the primary entry while
-    block tables are collected per tag:
-
-    * ``positions``  = ``attn.combo_position_ids`` — ``[T_total]`` global pos
-    * ``cu_seqlens`` = ``attn.cu_seqlens``         — ``[B+1]`` int32 prefix sum
-    * ``block_tables_by_type`` = Dict[cache tag, [B, max_blocks]] — full-batch
-      block tables (B axis = request axis), built via
-      :func:`build_block_tables_batched`.
-
-    Downstream (``block.py`` / ``attention.py`` / ``compressor.py`` /
-    ``indexer.py``) consumes the cu_seqlens-aware metadata directly; under CP
-    the per-layer setup swaps in CPContext's request-absolute positions and
-    full-length write-side view.
-
-    Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.
-    """
+    Non-last stages publish unreduced hidden tensors through pp_intermediates."""
     attn_inputs = inputs.attention_inputs
     attn = primary_attention_inputs(attn_inputs, kv_cache)
     if attn is None:
@@ -773,6 +741,25 @@ def forward_prefill(
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn_inputs)
 
+    # Non-first stages resume [T, hc, dim] activations instead of embedding.
+    # PP preserves CP rank, so each stage already owns the matching token slice.
+    if v4.embed is None:
+        upstream_hidden = (
+            inputs.pp_intermediates.get("hidden_states")
+            if inputs.pp_intermediates
+            else None
+        )
+        if upstream_hidden is None:
+            raise RuntimeError(
+                "DSV4 prefill on a non-first PP stage received no upstream "
+                "hidden_states in pp_intermediates"
+            )
+
+        def _resume_upstream_hidden(input_ids, positions):
+            return upstream_hidden
+
+        prepare_hidden_fn = _resume_upstream_hidden
+
     hidden = forward_layers(
         v4,
         kv_cache,
@@ -782,5 +769,10 @@ def forward_prefill(
         block_tables_by_type,
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
-    )  # [T_total, dim]
-    return PyModelOutputs(hidden)
+    )  # [T_total, dim], or [T_total, hc, dim] on a non-last PP stage
+    outputs = PyModelOutputs(hidden)
+    if v4.norm is None:
+        # Non-last stage: hand the pre-reduce mHC lanes downstream.  Dropping
+        # back to [T, dim] here would corrupt the hyper-connection stream.
+        outputs.pp_intermediates = {"hidden_states": hidden}
+    return outputs

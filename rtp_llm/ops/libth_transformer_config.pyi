@@ -1268,6 +1268,10 @@ class PDSepConfig:
     def to_string(self) -> str:
         ...
 class ParallelismConfig:
+    dsv4_prefill_cp_compat: bool
+    def local_cp_enabled(self) -> bool: ...
+    def resolve_local_cp(self, model_type: str, speculative: bool, cuda_graph: bool, layer_micro_batch: bool) -> None: ...
+
     dp_rank: int
     dp_size: int
     enable_sp: bool

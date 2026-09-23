@@ -32,6 +32,7 @@ from typing import List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.pp_layout import even_split_counts, register_pp_partitioner
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
@@ -523,6 +524,13 @@ class DeepSeekV4(DeepSeekV2):
     `_create_python_model` until M2 lands the HCA-only forward path.
     """
 
+    def support_pp(self) -> bool:
+        """The model is stage-local: it builds only the layers this stage owns,
+        keeps the embedding on the first stage and the final norm / mHC head /
+        lm_head on the last, and exchanges the pre-reduce ``[T, hc, dim]``
+        boundary tensor through ``pp_intermediates``."""
+        return True
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
@@ -879,6 +887,12 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
 
 
 class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
+
+    def support_pp(self) -> bool:
+        # Generic PP supports speculative models, but the DSV4 MTP boundary
+        # and cache contracts have not been qualified for stage-local PP.
+        return False
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
@@ -1031,6 +1045,11 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
 class DeepSeekV4DSpark(DeepSeekV4):
     """Runtime-fixed-width DeepSeek-V4 DSpARK proposal model."""
 
+    def support_pp(self) -> bool:
+        # DSV4 DSpARK under PP remains unqualified; do not infer support from
+        # the generic upstream speculative executor.
+        return False
+
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
         """Borrow the two full-vocabulary matrices from the target owner."""
@@ -1110,6 +1129,31 @@ class DeepSeekV4DSpark(DeepSeekV4):
     def get_weight_cls():
         return DeepSeekV4DSparkWeight
 
+
+def _dsv4_pp_partition(num_layers: int, pp_size: int, model_config) -> List[int]:
+    """Return explicit per-stage layer counts, or use the default even partition."""
+    override = os.environ.get("DSV4_PP_STAGE_LAYER_COUNTS", "").strip()
+    if not override:
+        return even_split_counts(num_layers, pp_size)
+    counts = [int(part) for part in override.split(",") if part.strip()]
+    if len(counts) != pp_size:
+        raise ValueError(
+            f"DSV4_PP_STAGE_LAYER_COUNTS={override!r} gives {len(counts)} stages "
+            f"but pp_size={pp_size}"
+        )
+    if sum(counts) != num_layers:
+        raise ValueError(
+            f"DSV4_PP_STAGE_LAYER_COUNTS={override!r} sums to {sum(counts)} "
+            f"but num_layers={num_layers}"
+        )
+    logging.info(
+        "[DeepSeekV4] PP layer partition from DSV4_PP_STAGE_LAYER_COUNTS: %s",
+        counts,
+    )
+    return counts
+
+
+register_pp_partitioner("deepseek_v4", _dsv4_pp_partition)
 
 register_model("deepseek_v4", DeepSeekV4, ["DeepseekV4ForCausalLM"])
 register_model("deepseek_v4_mtp", DeepSeekV4Mtp, ["DeepseekV4ForCausalLMNextN"])

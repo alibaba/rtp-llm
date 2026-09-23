@@ -17,3 +17,13 @@ cc_test(
     ],
     env = {},
 )
+
+cc_test(
+    name = "local_cp_policy_test",
+    srcs = ["LocalCPPolicyTest.cc"],
+    copts = test_copts,
+    # The standalone config test links alog without GTest's pthread dependency.
+    linkopts = ["-pthread"],
+    deps = ["//rtp_llm/cpp/config:config_modules"],
+    env = {},
+)

@@ -188,7 +188,8 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     return snapshot;
 }
 
-PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& stages, double capacity_skew_threshold) {
+PPValidationResult
+validatePPTopology(const std::vector<StageCacheSnapshot>& stages, double capacity_skew_threshold, bool allow_dsv4_swa) {
     PPValidationResult result;
 
     if (stages.size() <= 1) {
@@ -231,10 +232,10 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         const bool has_swa = std::any_of(stages[s].group_types.begin(),
                                          stages[s].group_types.end(),
                                          [](CacheGroupType t) { return t == CacheGroupType::SWA; });
-        if (has_swa) {
-            return fail("stage " + std::to_string(s)
-                        + " holds an SWA cache group; sliding-window pools do not support pipeline parallelism yet");
+        if (has_swa && !allow_dsv4_swa) {
+            return fail("stage " + std::to_string(s) + " holds an SWA group without the DSV4 PP cache capability");
         }
+        // Opting in does not skip tag ownership, policy, capacity or skew checks.
     }
 
     const auto& ref            = stages[0];
@@ -379,8 +380,9 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
     return result;
 }
 
-PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector, double capacity_skew_threshold) {
-    return validatePPTopology(collector.collect(), capacity_skew_threshold);
+PPValidationResult
+initPPCacheGeometry(StageSnapshotCollector& collector, double capacity_skew_threshold, bool allow_dsv4_swa) {
+    return validatePPTopology(collector.collect(), capacity_skew_threshold, allow_dsv4_swa);
 }
 
 std::vector<StageCacheSnapshot> PPSnapshotCollector::collect() {
@@ -431,7 +433,7 @@ PPValidationResult PPCacheCapacityNegotiator::negotiate(const CacheConfig&   top
     sized.mtp_sub_configs.clear();
     sized.finalizeBlockNums(local_block_num, runtime_config);
     PPSnapshotCollector collector(StageCacheSnapshot::fromConfig(sized));
-    auto                validation = initPPCacheGeometry(collector, capacity_skew_threshold_);
+    auto                validation = initPPCacheGeometry(collector, capacity_skew_threshold_, allow_dsv4_swa_);
     if (!validation.ok) {
         RTP_LLM_FAIL("PP cache topology validation failed: %s", validation.error.c_str());
     }

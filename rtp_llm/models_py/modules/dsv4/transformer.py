@@ -87,6 +87,13 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # Weights and block types use global IDs; constructed layers and projected
+    # KV caches use stage-local indices.
+    pp_size: int = 1
+    pp_rank: int = 0
+    pp_layer_ids: Optional[List[int]] = None
+    pp_has_embedding: bool = True
+    pp_has_lm_head: bool = True
     # Physical topology used by the routed MoE.  Under prefill CP the
     # attention-facing ``tp_size`` above is deliberately set to 1, while the
     # MoE still needs to address the physical TP/CP group.
@@ -94,6 +101,10 @@ class V4Args:
     moe_tp_rank: int = 0
     moe_cp_size: int = 1
     moe_cp_enabled: bool = False
+    # Stage-local EP context (CP4EP4PP2). Set only when the resolved
+    # DSV4_PP_EP_* opt-in validated; None on every other launch, which keeps
+    # the pre-existing behaviour byte-identical.
+    moe_stage_context: Optional[object] = None
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers execute only the commit side: target
     # features are projected into the draft SWA pools and no query/FFN/mHC
@@ -115,14 +126,12 @@ def _block_kwargs(
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]],
     commit_only: bool = False,
+    cache_layer_id: Optional[int] = None,
 ) -> Dict:
-    """Kwargs common to Block construction.
-
-    ``compress_ratios`` is sized ``n_layers + n_mtp_layers`` (44 for
-    V4-Flash default) so ``compress_ratios[layer_id]`` works directly.
-    """
+    """Keep global layer IDs for weights/types and stage-local IDs for KV cache lookup."""
     return dict(
         layer_id=layer_id,
+        cache_layer_id=cache_layer_id,
         dim=args.dim,
         n_heads=args.n_heads,
         q_lora_rank=args.q_lora_rank,
@@ -167,6 +176,7 @@ def _block_kwargs(
         moe_tp_rank=args.moe_tp_rank,
         cp_size=args.moe_cp_size,
         cp_enabled=args.moe_cp_enabled,
+        stage_context=getattr(args, "moe_stage_context", None),
         fp8_kv_cache=args.fp8_kv_cache,
         commit_only=commit_only,
     )
@@ -177,8 +187,17 @@ def _build_block(
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     commit_only: bool = False,
+    cache_layer_id: Optional[int] = None,
 ) -> Block:
-    return Block(**_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only))
+    return Block(
+        **_block_kwargs(
+            layer_id,
+            args,
+            layer_weights,
+            commit_only=commit_only,
+            cache_layer_id=cache_layer_id,
+        )
+    )
 
 
 class V4Transformer(nn.Module):
@@ -203,31 +222,44 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
+        # Pass both global weight/type IDs and stage-local cache IDs to each block.
+        self.pp_global_layer_ids: List[int] = (
+            [int(i) for i in args.pp_layer_ids]
+            if args.pp_layer_ids
+            else list(range(args.n_layers))
+        )
         self.layers = nn.ModuleList(
             [
                 _build_block(
-                    i,
+                    global_id,
                     args,
-                    layer_weights=mw.weights[i],
+                    layer_weights=mw.weights[global_id],
                     commit_only=self.commit_only,
+                    cache_layer_id=local_id,
                 )
-                for i in range(args.n_layers)
+                for local_id, global_id in enumerate(self.pp_global_layer_ids)
             ]
         )
 
-        if self.commit_only:
-            # A commit worker never embeds tokens, reduces mHC lanes, or
-            # applies the target LM head.  Deliberately leave these members as
-            # ``None`` rather than materializing dummy tensors: accidental use
-            # of the ordinary V4 forward then fails loudly at the call site.
+        self.pp_has_embedding = bool(getattr(args, "pp_has_embedding", True))
+        self.pp_has_lm_head = bool(getattr(args, "pp_has_lm_head", True))
+        self._owns_embedding = (not self.commit_only) and self.pp_has_embedding
+        self._owns_lm_head = (not self.commit_only) and self.pp_has_lm_head
+
+        if not self._owns_embedding:
+            # Non-first stages and commit workers own no embedding; leave it None.
             self.embed = None
-            self.norm = None
-            self.head_weight = None
-            self.head_hc = None
         else:
             # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
             # ``nn.Parameter``); the framework dict supplies the real tensor.
             self.embed = EmbeddingTorch(gw[W.embedding])
+        if not self._owns_lm_head:
+            # Same reasoning: the mHC head reduce, final norm and LM head belong
+            # to the last stage only, and only that stage loads their weights.
+            self.norm = None
+            self.head_weight = None
+            self.head_hc = None
+        else:
             self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
         # MTP draft is a separate model (``DeepSeekV4MtpModel``) that
@@ -247,7 +279,7 @@ class V4Transformer(nn.Module):
         # path and the standalone ``forward`` (B==1) path below call
         # ``F.linear`` / ``torch.mm`` with the input cast to
         # ``self.head_weight.dtype`` so both dtypes work there too.
-        if not self.commit_only:
+        if self._owns_lm_head:
             self.head_weight = gw[W.lm_head]
             if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
                 raise TypeError(
@@ -296,6 +328,7 @@ class V4Transformer(nn.Module):
             )
         shard_count = self.args.dim // h.size(-1)
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
         leading = h.shape[:-1]
         local_dim = h.size(-1)
         flat = h.reshape(-1, local_dim).contiguous()
@@ -306,6 +339,7 @@ class V4Transformer(nn.Module):
             .contiguous()
             .view(*leading, self.args.dim)
         )
+
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
 
@@ -322,12 +356,12 @@ class V4Transformer(nn.Module):
         invalid_ids = [
             layer_id
             for layer_id in capture_ids
-            if layer_id < 0 or layer_id >= len(self.layers)
+            if layer_id < 0 or layer_id >= self.args.n_layers
         ]
         if invalid_ids:
             raise ValueError(
                 "DSpARK auxiliary hidden capture layer ids are out of range: "
-                f"invalid={invalid_ids}, num_layers={len(self.layers)}"
+                f"invalid={invalid_ids}, num_layers={self.args.n_layers}"
             )
         self.capture_aux_hidden_layer_ids = capture_ids
 
@@ -342,6 +376,7 @@ class V4Transformer(nn.Module):
         )
         grown[: buf.size(0)].copy_(buf)
         self.register_buffer("_mtp_hidden_buffer", grown, persistent=False)
+
     def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
         """Write one selected layer's mean-pooled hidden into the shared
         runtime buffer.

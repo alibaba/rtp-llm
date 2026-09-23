@@ -117,7 +117,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         // forwardPostLayersLastHidden (prefill CP) is a second lm_head exit that does not
         // narrow P-wide logits down to the output vocabulary width, so padded zero columns
         // would reach sampling. Reject the combination until that path narrows as well.
-        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.is_enabled(),
+        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.local_cp_enabled(),
                                 "output vocabulary pruning does not support prefill context parallelism");
         // publishNormalDeviceState stores sampler token ids as the next step's device
         // input without restoration; under pruning those are compact ids, which would
@@ -470,7 +470,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
     if (parallelism_config.pp_size > 1) {
-        pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
+        pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>(1.5, model_config_.model_type == "deepseek_v4");
     }
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,

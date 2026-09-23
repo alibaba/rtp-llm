@@ -87,7 +87,8 @@ def _make_dispatch_layer(compress_ratio: int, seq: list) -> AttentionFP8:
         side_effect=lambda x, p: seq.append("common") or None
     )
     layer._prefill_compute_qkv = MagicMock(  # type: ignore[assignment]
-        side_effect=lambda x, c: seq.append("qkv") or _make_qkv()
+        side_effect=lambda x, c, shared_input_quant=None: seq.append("qkv")
+        or _make_qkv()
     )
     layer._ensure_prefill_kv_full = MagicMock(  # type: ignore[assignment]
         side_effect=lambda qkv, c: seq.append("ensure") or qkv
@@ -129,6 +130,7 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
         compress_ratio: int,
         common: PrefillMeta,
         env_value: str,
+        shared_input_quant=None,
     ) -> list:
         seq: list = []
         layer = _make_dispatch_layer(compress_ratio, seq)
@@ -136,7 +138,15 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
             lambda x, p: seq.append("common") or common
         )
         with patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": env_value}):
-            out = layer._forward_prefill(self.x, self.positions)
+            out = layer._forward_prefill(
+                self.x, self.positions, shared_input_quant=shared_input_quant
+            )
+        layer._prefill_compute_qkv.assert_called_once()  # type: ignore[attr-defined]
+        call = layer._prefill_compute_qkv.call_args  # type: ignore[attr-defined]
+        self.assertIs(call.args[0], self.x)
+        self.assertIs(call.args[1], common)
+        self.assertEqual(set(call.kwargs), {"shared_input_quant"})
+        self.assertIs(call.kwargs["shared_input_quant"], shared_input_quant)
         self.assertEqual(tuple(out.shape), (3, 8))
         return seq
 
@@ -195,6 +205,19 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
 
         self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "hca_path"])
 
+    def test_dispatch_forwards_shared_input_quant_without_repacking(self) -> None:
+        shared = (torch.zeros(3, 4, dtype=torch.uint8), torch.ones(3, 1))
+        common = _make_common(cp_on=True, device=torch.device("cuda"))
+        for ratio in (0, 4, 128):
+            for overlap in ("0", "1"):
+                with self.subTest(compress_ratio=ratio, overlap=overlap):
+                    self._run_dispatch(
+                        compress_ratio=ratio,
+                        common=common,
+                        env_value=overlap,
+                        shared_input_quant=shared,
+                    )
+
 
 class AttentionSwaAsyncGatherTest(unittest.TestCase):
     def test_prefill_compute_qkv_uses_sync_current_swa_kv_full(self) -> None:
@@ -243,23 +266,33 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         layer.wq_a = FakeQuantLinear("wq_a", 6)
         layer.wkv = FakeQuantLinear("wkv", 6)
 
-        with patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t):
-            qkv = layer._prefill_compute_qkv(
-                torch.zeros(3, 4, dtype=torch.bfloat16),
-                common,
-            )
-
-        self.assertEqual(
-            seq,
-            [
-                "quant_wq_a",
-                "gemm_wq_a_fp8_scale",
-                "gemm_wkv_fp8_scale",
-            ],
-        )
-        self.assertIsNone(qkv.q)
-        self.assertEqual(tuple(qkv.qr.shape), (3, 6))
-        self.assertEqual(tuple(qkv.kv_full.shape), (3, 6))
+        # Exercise both architecture branches explicitly; the host GPU must not
+        # decide whether this mocked DeepGEMM contract is tested.
+        for sm12x in (False, True):
+            with (
+                self.subTest(sm12x=sm12x),
+                patch.object(torch.cuda, "is_available", return_value=True),
+                patch.object(attention_mod, "is_sm12x", return_value=sm12x),
+                patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t),
+            ):
+                seq.clear()
+                qkv = layer._prefill_compute_qkv(
+                    torch.zeros(3, 4, dtype=torch.bfloat16),
+                    common,
+                )
+                self.assertEqual(
+                    seq,
+                    (
+                        ["lin_wq_a", "lin_wkv"]
+                        if sm12x
+                        else ["quant_wq_a", "gemm_wq_a_fp8_scale", "gemm_wkv_fp8_scale"]
+                    ),
+                )
+                self.assertIsNone(qkv.q)
+                self.assertEqual(tuple(qkv.qr.shape), (3, 6))
+                self.assertEqual(
+                    tuple(qkv.kv_full.shape), (3, 2, 3) if sm12x else (3, 6)
+                )
 
     def test_materialize_prefill_q_reuses_wq_b_output_for_rope(self) -> None:
         # The deferred q_lora_b + RoPE now live in _materialize_prefill_q, which
@@ -454,6 +487,66 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
 
         self.assertEqual(tuple(out.shape), (1, 3, 1, 2))
         self.assertEqual(dequant_calls, [])
+
+
+class AttentionCacheOwnershipProbeTest(unittest.TestCase):
+    def _layer(self, cache):
+        layer = AttentionFP8.__new__(AttentionFP8)
+        torch.nn.Module.__init__(layer)
+        layer.layer_id = 22
+        layer.cache_layer_id = 3
+        layer._kv_cache = cache
+        return layer
+
+    def test_owned_group_uses_model_local_enumeration(self):
+        group = SimpleNamespace(tag="swa_kv")
+        enum = MagicMock(return_value=[group])
+        layer = self._layer(SimpleNamespace(get_layer_cache_groups=enum))
+        self.assertIs(layer._probe_layer_cache("swa_kv"), group)
+        enum.assert_called_once_with(3)
+
+    def test_absent_tag_does_not_call_asserting_lookup(self):
+        direct = MagicMock(side_effect=AssertionError("must not probe an unowned tag"))
+        layer = self._layer(
+            SimpleNamespace(
+                get_layer_cache_groups=lambda local: [SimpleNamespace(tag="swa_kv")],
+                get_layer_cache=direct,
+            )
+        )
+        self.assertIsNone(layer._probe_layer_cache("hca_kv"))
+        direct.assert_not_called()
+
+    def test_invalid_local_layer_keeps_contextual_error(self):
+        layer = self._layer(
+            SimpleNamespace(
+                layer_count=2,
+                get_layer_cache_groups=MagicMock(
+                    side_effect=RuntimeError("Invalid layer index: 3")
+                ),
+            )
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "global layer_id=22.*cache_layer_id=3.*model-local"
+        ):
+            layer._probe_layer_cache("swa_kv")
+
+    def test_enumeration_backend_failure_is_not_missing_pool(self):
+        layer = self._layer(
+            SimpleNamespace(
+                get_layer_cache_groups=MagicMock(
+                    side_effect=RuntimeError("corrupt backing storage")
+                ),
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "corrupt backing storage"):
+            layer._probe_layer_cache("swa_kv")
+
+    def test_legacy_lookup_remains_supported(self):
+        group = object()
+        getter = MagicMock(return_value=group)
+        layer = self._layer(SimpleNamespace(get_layer_cache=getter))
+        self.assertIs(layer._probe_layer_cache("swa_kv"), group)
+        getter.assert_called_once_with(3, "swa_kv")
 
 
 if __name__ == "__main__":

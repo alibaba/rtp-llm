@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -289,6 +290,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 rtp_llm::DataType::TYPE_INT32,
                 {kv_cache_group_num, checkedHint(GptModelInputIndex::inputLengths, "inputLengths"), max_kernel_blocks},
                 pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
+        }
+        // Gate on the mapping's own hint, not on max_kernel_blocks: the producer's
+        // collect set carries the mapping whenever it is defined, and the packed
+        // broadcast size must match root's exactly or the UDS stream shifts.
+        if (checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum") > 0) {
             inputs.kv_cache_update_mapping =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3});
@@ -379,17 +385,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
-    if (max_kernel_blocks || max_blocks) {
-        collect(inputs.kv_cache_kernel_block_id);
-        collect(inputs.kv_cache_block_id);
-        if (group_types_len) {
-            collect(inputs.kv_cache_group_types);
-        }
-        if (inputs.pd_separation) {
-            collect(inputs.cache_keys);
-        }
-        collect(inputs.kv_cache_update_mapping);
+    // Definedness-driven only: any gate here that diverges from the receiver's
+    // alloc gates shifts the packed broadcast size and misaligns the UDS stream.
+    collect(inputs.kv_cache_kernel_block_id);
+    collect(inputs.kv_cache_block_id);
+    if (group_types_len) {
+        collect(inputs.kv_cache_group_types);
     }
+    if (inputs.pd_separation) {
+        collect(inputs.cache_keys);
+    }
+    collect(inputs.kv_cache_update_mapping);
     collect(inputs.kv_cache_blocks_to_zero);
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
@@ -453,6 +459,26 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                     "tpSyncModelInputs CPU packed-buffer size overflow");
             cpu_total_bytes += aligned;
         }
+    }
+
+    static const bool kLogTpsync = std::getenv("RTP_LLM_LOG_TPSYNC") != nullptr;
+    if (kLogTpsync) {
+        RTP_LLM_LOG_INFO("[TPSYNC] rank=%lld skip=%d pd_sep=%d tensors=%ld cpu_bytes=%lld gpu_bytes=%lld "
+                         "kernel_blocks=%lld max_blocks=%lld group_types=%ld combo_pos=%lld req_len=%lld "
+                         "update_copies=%lld zero_blocks=%lld",
+                         static_cast<long long>(parallelism_config.tp_rank),
+                         inputs.skip_run ? 1 : 0,
+                         inputs.pd_separation ? 1 : 0,
+                         static_cast<long>(tensor_ptrs.size()),
+                         static_cast<long long>(cpu_total_bytes),
+                         static_cast<long long>(gpu_total_bytes),
+                         static_cast<long long>(max_kernel_blocks),
+                         static_cast<long long>(max_blocks),
+                         static_cast<long>(group_types_len),
+                         static_cast<long long>(combo_position_ids_size),
+                         static_cast<long long>(request_length),
+                         static_cast<long long>(shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum]),
+                         static_cast<long long>(shape_hints_ptr[GptModelInputIndex::kvCacheZeroBlockNum]));
     }
 
     bool is_root = parallelism_config.tp_rank == 0;

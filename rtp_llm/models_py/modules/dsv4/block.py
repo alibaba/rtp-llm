@@ -83,14 +83,17 @@ class Block(nn.Module):
         cp_enabled: bool = False,
         stage_context: Optional[object] = None,
         commit_only: bool = False,
+        cache_layer_id: Optional[int] = None,
     ):
         super().__init__()
         self.layer_id = layer_id
+        self.cache_layer_id = layer_id if cache_layer_id is None else cache_layer_id
         self.fp8_kv_cache = fp8_kv_cache
 
         attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
         self.attn = attn_cls(
             layer_id=layer_id,
+            cache_layer_id=self.cache_layer_id,
             dim=dim,
             n_heads=n_heads,
             q_lora_rank=q_lora_rank,

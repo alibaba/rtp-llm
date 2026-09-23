@@ -3,7 +3,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 
 
 def _capture_harness(
@@ -13,6 +13,10 @@ def _capture_harness(
 ) -> V4Transformer:
     transformer = V4Transformer.__new__(V4Transformer)
     nn.Module.__init__(transformer)
+    # set_aux_hidden_capture_layer_ids bounds ids by the GLOBAL layer count
+    # (args.n_layers), not len(layers): under PP the ModuleList is stage-local
+    # while the capture ids stay global.
+    transformer.args = V4Args(n_layers=num_layers)
     transformer.layers = nn.ModuleList([nn.Identity() for _ in range(num_layers)])
     transformer.capture_aux_hidden_layer_ids = ()
     if row_width > 0:

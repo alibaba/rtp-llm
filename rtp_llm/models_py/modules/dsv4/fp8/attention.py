@@ -128,6 +128,12 @@ def _use_read_from_pool() -> bool:
     return os.environ.get("DSV4_READ_FROM_POOL", "1") != "0"
 
 
+# SM120 paged prefill stays opt-in: its 1-D gather input conflicts with the
+# 2-D index layout. Do not enable without validating that indexing path.
+def _sm120_paged_cache_prefill_enabled() -> bool:
+    return os.environ.get("DSV4_SM120_PAGED_CACHE_PREFILL", "0") == "1"
+
+
 def _use_cp_cache_hit_raw_q_merge() -> bool:
     # The raw-Q/O/LSE merge implementation is still an experimental validation
     # path: it avoids KV gather communication, but its current index planning is
@@ -894,6 +900,7 @@ class PrefillQKV(NamedTuple):
 
 
 class AttentionFP8(nn.Module):
+
     def __init__(
         self,
         layer_id: int,
@@ -922,14 +929,12 @@ class AttentionFP8(nn.Module):
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
+        cache_layer_id: Optional[int] = None,
     ):
-        """``layer_weights`` is the framework's per-layer dict
-        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
-        Reads ``W.v4_attn_*`` for dense attention weights, ``W.v4_compressor_*``
-        for the outer compressor, ``W.v4_indexer_*`` (forwarded) for the
-        indexer."""
+        """Load weights by global layer_id and KV cache by stage-local cache_layer_id."""
         super().__init__()
         self.layer_id = layer_id
+        self.cache_layer_id = layer_id if cache_layer_id is None else cache_layer_id
         self.dim = dim
         self.q_lora_rank = q_lora_rank
         self.o_lora_rank = o_lora_rank
@@ -1239,24 +1244,37 @@ class AttentionFP8(nn.Module):
         work then all-gathers across ranks and strips padding."""
         self._cp_ctx = cp_ctx
 
+    def _probe_layer_cache(self, attn_type: str):
+        """Find a stage-owned cache tag; propagate invalid indices and backend failures."""
+        enumerate_groups = getattr(self._kv_cache, "get_layer_cache_groups", None)
+        try:
+            if enumerate_groups is not None:
+                for group in enumerate_groups(self.cache_layer_id):
+                    if group.tag == attn_type:
+                        return group
+                return None
+            return self._kv_cache.get_layer_cache(self.cache_layer_id, attn_type)
+        except RuntimeError as exc:
+            if "Invalid layer index" in str(exc):
+                raise RuntimeError(
+                    f"DSV4 attention global layer_id={self.layer_id} probed the KV "
+                    f"cache with cache_layer_id={self.cache_layer_id}, which is out "
+                    f"of range for this stage's {self._kv_cache.layer_count}-layer "
+                    f"model-local layout. KV cache indices must be model-local."
+                ) from exc
+            if enumerate_groups is not None:
+                raise
+            return None
+
     def _pool_view(self, attn_type: str) -> Optional[torch.Tensor]:
-        """Return a flat ``[total_slots, vec_dim]`` typed view of the
-        framework BlockPool for this layer + cache tag, or ``None`` if
-        the pool isn't allocated (e.g. SWA-only layer has no CSA/HCA
-        pool).  Delegates to ``KVCache.get_layer_cache(layer_id, tag)`` —
-        no Python-side descriptor cache."""
+        """Return the framework's typed cache view, or None when the tag is absent."""
         if self._kv_cache is None:
             return None
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
-        # Polymorphic probe: build_paged_pool_specs sweeps every cache tag
-        # across every layer.  C++ raises "layer=X does not own tag=Y" for
-        # layers that don't own this group — catching it tells the caller to
-        # skip.  Not defensive bloat.
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        layer_kv = self._probe_layer_cache(attn_type)
+        if layer_kv is None:
             return None
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
@@ -1295,9 +1313,8 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        layer_kv = self._probe_layer_cache(attn_type)
+        if layer_kv is None:
             return None
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
@@ -1322,9 +1339,8 @@ class AttentionFP8(nn.Module):
     def _pool_raw_u8(self, attn_type: str) -> Optional[torch.Tensor]:
         if self._kv_cache is None:
             return None
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        layer_kv = self._probe_layer_cache(attn_type)
+        if layer_kv is None:
             return None
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
@@ -1395,10 +1411,8 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return 0
-        # Polymorphic probe — see _pool_view for rationale.
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        layer_kv = self._probe_layer_cache(attn_type)
+        if layer_kv is None:
             return 0
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
@@ -4903,6 +4917,7 @@ class AttentionFP8(nn.Module):
         cmp_pool_slot_mapping = None
         if (
             is_sm120(device)
+            and _sm120_paged_cache_prefill_enabled()
             and not swa_byte_sliced
             and isinstance(cmp_reader, LocalPoolReader)
             and swa_slot_mapping is not None
@@ -6062,6 +6077,7 @@ class CommitOnlyAttentionFP8(AttentionFP8):
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
+        cache_layer_id: Optional[int] = None,
     ):
         del max_batch_size, index_topk  # no proposal/compressor state here
         if layer_weights is None:
@@ -6077,6 +6093,11 @@ class CommitOnlyAttentionFP8(AttentionFP8):
         # device ownership semantics.
         nn.Module.__init__(self)
         self.layer_id = int(layer_id)
+        # AttentionFP8.__init__ is bypassed above, so the model-local cache
+        # index read by the inherited _probe_layer_cache must be set here.
+        self.cache_layer_id = (
+            self.layer_id if cache_layer_id is None else int(cache_layer_id)
+        )
         self.dim = int(dim)
         self.q_lora_rank = int(q_lora_rank)
         self.o_lora_rank = int(o_lora_rank)

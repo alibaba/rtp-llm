@@ -1243,7 +1243,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def_readwrite("pp_stage_layer_counts", &ParallelismConfig::pp_stage_layer_counts)
+        .def_readwrite("pp_ep_enabled", &ParallelismConfig::pp_ep_enabled)
+        .def_readwrite("pp_ep_backend", &ParallelismConfig::pp_ep_backend)
         .def("to_string", &ParallelismConfig::to_string)
+        .def_readonly("dsv4_prefill_cp_compat", &ParallelismConfig::dsv4_prefill_cp_compat)
+        .def("local_cp_enabled", &ParallelismConfig::local_cp_enabled)
+        .def("resolve_local_cp", &ParallelismConfig::resolve_local_cp)
         .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
         .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
         .def("get_ffn_tp_size", &ParallelismConfig::get_ffn_tp_size)
@@ -1269,10 +1274,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_ub_comm,
                                       self.role_type,
                                       self.pp_rank,
-                                      self.pp_stage_layer_counts);
+                                      self.pp_stage_layer_counts,
+                                      self.pp_ep_enabled,
+                                      self.pp_ep_backend,
+                                      self.dsv4_prefill_cp_compat);
             },
             [](py::tuple t) {
-                if (t.size() != 17 && t.size() != 18 && t.size() != 19 && t.size() != 20)
+                if (t.size() != 17 && t.size() != 18 && t.size() != 19 && t.size() != 20 && t.size() != 21
+                    && t.size() != 22 && t.size() != 23)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -1301,6 +1310,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 20) {
                         c.pp_stage_layer_counts = t[19].cast<std::vector<int64_t>>();
+                    }
+                    if (t.size() >= 21) {
+                        c.pp_ep_enabled = t[20].cast<bool>();
+                    }
+                    if (t.size() >= 22) {
+                        c.pp_ep_backend = t[21].cast<std::string>();
+                    }
+                    if (t.size() >= 23) {
+                        c.dsv4_prefill_cp_compat = t[22].cast<bool>();
+                        if (c.dsv4_prefill_cp_compat && !c.dsv4_prefill_cp_profile_valid()) {
+                            throw std::invalid_argument("invalid DSV4 local CP compatibility profile");
+                        }
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());

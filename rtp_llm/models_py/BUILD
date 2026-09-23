@@ -175,3 +175,13 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+# Source-level policy tests deliberately do not import GPU modules.
+filegroup(
+    name = "prefill_policy_source_data",
+    srcs = [
+        "modules/dsv4/dsv4_kernel_jit_warmup.py",
+        "modules/dsv4/fp8/attention.py",
+        "modules/dsv4/utils.py",
+    ],
+    visibility = ["//visibility:public"],
+)

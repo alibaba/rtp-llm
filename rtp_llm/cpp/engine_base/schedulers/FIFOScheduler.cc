@@ -27,11 +27,11 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       model_specific_config,
                       cache_manager,
                       metrics_reporter),
-    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
+    cp_force_single_prefill_(parallelism_config.local_cp_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     max_batch_tokens_without_cache_(
         static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
-    prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
+    prefill_cp_size_(parallelism_config.local_cp_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "

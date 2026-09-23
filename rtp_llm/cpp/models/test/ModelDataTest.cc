@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 
 #include <type_traits>
 
@@ -85,13 +86,38 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
 }
 
 TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
-    ParallelismConfig prefill_config;
-    prefill_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    EXPECT_TRUE(buildExecProperties(prefill_config, DeviceResourceConfig{}).enable_prefill_cp);
+    for (const auto method : {CPRotateMethod::ALL_GATHER, CPRotateMethod::PREFILL_CP}) {
+        for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+            for (const auto tp_size : {1, 2, 4}) {
+                ParallelismConfig config;
+                config.role_type                          = role;
+                config.tp_size                            = tp_size;
+                config.prefill_cp_config.method           = method;
+                config.prefill_cp_config.kv_cache_sharded = true;
+                config.prefill_cp_config.prefill_cp_size  = 4;
+                const auto props                          = buildExecProperties(config, DeviceResourceConfig{});
+                const bool local_cp                       = role != RoleType::DECODE && tp_size > 1;
+                EXPECT_EQ(props.enable_prefill_cp, local_cp);
+                EXPECT_EQ(props.prefill_cp_kv_cache_sharded, local_cp);
+                // The receiving role must retain remote CP geometry for PD.
+                EXPECT_EQ(config.prefill_cp_config.method, method);
+                EXPECT_EQ(config.prefill_cp_config.prefill_cp_size, 4);
+                EXPECT_TRUE(config.prefill_cp_config.kv_cache_sharded);
+            }
+        }
+    }
+}
 
-    ParallelismConfig decode_config;
-    decode_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
-    EXPECT_FALSE(buildExecProperties(decode_config, DeviceResourceConfig{}).enable_prefill_cp);
+TEST_F(ModelDataTest, testDisabledCPDoesNotActivateFromRemoteGeometry) {
+    ParallelismConfig config;
+    config.role_type                          = RoleType::PREFILL;
+    config.tp_size                            = 4;
+    config.prefill_cp_config.method           = CPRotateMethod::DISABLED;
+    config.prefill_cp_config.kv_cache_sharded = true;
+    config.prefill_cp_config.prefill_cp_size  = 4;
+    const auto props                          = buildExecProperties(config, DeviceResourceConfig{});
+    EXPECT_FALSE(props.enable_prefill_cp);
+    EXPECT_FALSE(props.prefill_cp_kv_cache_sharded);
 }
 
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
@@ -141,4 +167,32 @@ TEST_F(ModelDataTest, testComboPositionIdsDeviceIsEncodedInTpShapeHints) {
     EXPECT_EQ(device_bits & GptModelInputDeviceBit::kDeviceBitComboPositionIds, 0u);
 }
 
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+TEST_F(ModelDataTest, testPrefillCPSnapshotOwnsInputStorage) {
+    for (const bool cuda_input : {false, true}) {
+        TensorHolder holder;
+        auto         input = torch::full({1}, 11, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        if (cuda_input) {
+            input = input.to(torch::kCUDA);
+        }
+        auto snapshot = MtpExecutor::snapshotPrefillInputToCuda(input, holder);
+        ASSERT_TRUE(snapshot.is_cuda());
+        ASSERT_NE(snapshot.data_ptr(), input.data_ptr());
+        input.fill_(4);  // target CP's local padded length for global 11 / CP4
+        EXPECT_EQ(snapshot.cpu().item<int32_t>(), 11);
+        EXPECT_EQ(input.cpu().item<int32_t>(), 4);
+    }
+}
+
+TEST_F(ModelDataTest, testPrefillCPSnapshotPreservesAbsentAndEmptyInputs) {
+    TensorHolder holder;
+    EXPECT_FALSE(MtpExecutor::snapshotPrefillInputToCuda(torch::Tensor(), holder).defined());
+    const auto input    = torch::empty({0, 2}, torch::kInt32);
+    const auto snapshot = MtpExecutor::snapshotPrefillInputToCuda(input, holder);
+    EXPECT_TRUE(snapshot.is_cuda());
+    EXPECT_EQ(snapshot.sizes(), input.sizes());
+    EXPECT_EQ(snapshot.scalar_type(), input.scalar_type());
+}
 }  // namespace rtp_llm

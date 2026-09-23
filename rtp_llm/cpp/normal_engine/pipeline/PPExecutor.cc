@@ -248,7 +248,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                             "PP DSpARK requires sp_dspark_mask_token_id, got %d",
                             dspark_mask_token_id_);
     // forwardMicroBatched bypasses the CP input/output processing in forward().
-    RTP_LLM_CHECK_WITH_INFO((!is_dspark_ && !parallelism_config_.prefill_cp_config.is_enabled())
+    RTP_LLM_CHECK_WITH_INFO((!is_dspark_ && !parallelism_config_.local_cp_enabled())
                                 || params.device_resource_config.enable_layer_micro_batch == 0,
                             "PP CP and DSpARK do not support layer micro-batching");
 
@@ -457,8 +457,7 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
     PPIntermediateTensors input_tensors;
     PPIntermediateTensors output_tensors;
     if (!isFirstStage()) {
-        input_tensors =
-            model_->makePPWarmUpInputTensors(model_input, parallelism_config_.prefill_cp_config.is_enabled());
+        input_tensors = model_->makePPWarmUpInputTensors(model_input, parallelism_config_.local_cp_enabled());
     }
 
     (void)model_->forwardPP(
@@ -475,6 +474,19 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
 }
 
 void PPExecutor::prepareStreams(std::list<GenerateStreamPtr>& streams) {
+    if (parallelism_config_.dsv4_prefill_cp_compat) {
+        for (auto it = streams.begin(); it != streams.end();) {
+            const auto& stream = *it;
+            if (!stream->isFakeStream() && !stream->isPerfTest() && stream->generateConfig()->max_new_tokens != 1) {
+                stream->reportError(ErrorCode::INVALID_PARAMS,
+                                    "DSV4 PP PREFILL_CP compatibility supports one-token prefill requests only");
+                stream->clearPPInflight();
+                it = streams.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     if (!sp_enabled_) {
         return;
     }
@@ -562,7 +574,7 @@ void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPEx
         auto& state = sampling_states_.at(request_ids[stream_idx]);
 
         std::optional<ErrorInfo> error;
-        const auto num_new_tokens =
+        const auto               num_new_tokens =
             result.new_token_lengths.defined() ? result.new_token_lengths.data_ptr<int32_t>()[batch_idx] : 1;
         const auto new_tokens =
             result.new_token_ids.narrow(0, batch_idx, stream_batch_size).narrow(1, 0, num_new_tokens);
@@ -740,7 +752,7 @@ GptModelOutputs PPExecutor::forwardDraftModel(GptModelInputs& draft_input) {
 void PPExecutor::prepareDSparkCommitInput(GptModelInputs& commit_input, const torch::Tensor& target_features) {
     RTP_LLM_PROFILE_SCOPE("executor.pp.dspark_commit_prepare");
 
-    const bool cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    const bool cp_enabled = parallelism_config_.local_cp_enabled();
     RTP_LLM_CHECK_WITH_INFO(target_features.defined() && target_features.dim() == 2,
                             "PP DSpARK commit requires 2-D target features");
     /** CP checks feature rows against the padded local token count in handleInputs. */
@@ -786,7 +798,7 @@ GptModelInputs PPExecutor::prepareDSparkProposeInput(const GptModelInputs& targe
                                                      bool                  is_decode,
                                                      const torch::Tensor&  new_token_ids,
                                                      const torch::Tensor&  new_token_lengths) {
-    auto draft_input = target_input;
+    auto       draft_input    = target_input;
     const auto batch_size     = new_token_ids.size(0);
     auto       prefix_lengths = target_input.prefix_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
     RTP_LLM_CHECK_WITH_INFO(prefix_lengths.numel() == batch_size,
@@ -841,7 +853,7 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
                                        const torch::Tensor&  new_token_ids,
                                        const torch::Tensor&  new_token_lengths,
                                        bool                  is_decode) {
-    const bool cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    const bool cp_enabled = parallelism_config_.local_cp_enabled();
 
     GptModelInputs draft_input = target_input;
     torch::Tensor  proposed_token_ids;
@@ -1064,7 +1076,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             model_inputs_logger_->log(local_model_input, ModelInputsModelRole::NORMAL, model_->model_id_);
         }
 
-        const bool    cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+        const bool    cp_enabled = parallelism_config_.local_cp_enabled();
         torch::Tensor saved_input_lengths;
         if (cp_enabled && !plan.is_decode && isLastStage() && isStageRoot()) {
             /** CP mutates CPU lengths; preserve the last stage root's global input. */

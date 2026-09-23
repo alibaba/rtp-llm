@@ -27,10 +27,10 @@ class ModelInputsLogger;
 class NormalGenerateStream;
 
 std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
-                                                  size_t                 reserved_blocks,
-                                                  const ModelConfig&     model_config,
-                                                  const RuntimeConfig&   runtime_config,
-                                                  const ResourceContext& resource_context);
+                                                     size_t                 reserved_blocks,
+                                                     const ModelConfig&     model_config,
+                                                     const RuntimeConfig&   runtime_config,
+                                                     const ResourceContext& resource_context);
 
 struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;
@@ -97,6 +97,10 @@ protected:
         bool create_propose_graph = false;
         bool create_commit_graph  = false;
     };
+
+    // Freeze storage before asynchronous H2D: CP mutates the input geometry
+    // in place, while TensorHolder alone only guarantees the source lifetime.
+    static torch::Tensor snapshotPrefillInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
 
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static DraftPrefillGraphPolicy draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, RoleType role_type);

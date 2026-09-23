@@ -192,12 +192,16 @@ void checkPpIndependentPools(const ModelConfig& model_config, const ParallelismC
 }
 
 void validateStageScopedDescsForPP(const ModelConfig& stage_config) {
+    // DSV4 explicitly owns its opaque PP cache contract; do not relax the
+    // upstream capability gate for unrelated opaque/sliding-window models.
+    const bool allow_dsv4_opaque = stage_config.model_type == "deepseek_v4";
     for (size_t layer_id = 0; layer_id < stage_config.kv_cache_spec_descs.size(); ++layer_id) {
         for (const auto& desc : stage_config.kv_cache_spec_descs[layer_id]) {
-            RTP_LLM_CHECK_WITH_INFO(desc.cache_type != KVCacheSpecType::OpaqueKV
-                                        && desc.cache_type != KVCacheSpecType::OpaqueState,
-                                    "pipeline parallelism does not support opaque kv cache pools (layer %zu, "
-                                    "cache_type=%d) yet",
+            RTP_LLM_CHECK_WITH_INFO(allow_dsv4_opaque
+                                        || (desc.cache_type != KVCacheSpecType::OpaqueKV
+                                            && desc.cache_type != KVCacheSpecType::OpaqueState),
+                                    "pipeline parallelism does not support this model's opaque kv pools "
+                                    "(layer %zu, cache_type=%d)",
                                     layer_id,
                                     static_cast<int>(desc.cache_type));
         }
@@ -249,6 +253,7 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
                                 model_config.num_layers);
         types.assign(types.begin() + begin, types.begin() + end);
     }
+
     validateStageScopedDescsForPP(stage_config);
 
     RTP_LLM_LOG_INFO("PP cache stage %ld/%ld owns global layers [%ld, %ld) of %ld",

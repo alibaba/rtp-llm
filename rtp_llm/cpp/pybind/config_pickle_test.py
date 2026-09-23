@@ -125,5 +125,39 @@ class KVCacheConfigPickleTest(unittest.TestCase):
         self.assertFalse(restored.dsv4_hca_state_pool_clear)
 
 
+class LocalCPPolicyPickleTest(unittest.TestCase):
+    def test_resolved_profile_round_trip_and_remote_decode(self):
+        from rtp_llm.ops import CPRotateMethod, ParallelismConfig, RoleType
+
+        config = ParallelismConfig()
+        config.pp_size = 2
+        config.tp_size = config.ep_size = config.ffn_tp_size = 4
+        config.world_size = 8
+        config.pp_ep_enabled = True
+        config.pp_ep_backend = "fork_nccl_mxfp8"
+        config.prefill_cp_config.method = CPRotateMethod.PREFILL_CP
+        config.resolve_local_cp("deepseek_v4", False, False, False)
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored.dsv4_prefill_cp_compat)
+        self.assertTrue(restored.local_cp_enabled())
+        self.assertEqual(restored.get_attn_tp_size(), 1)
+        restored.role_type = RoleType.DECODE
+        restored.resolve_local_cp("deepseek_v4", False, False, False)
+        self.assertFalse(restored.local_cp_enabled())
+        self.assertEqual(restored.get_attn_tp_size(), 4)
+        self.assertEqual(restored.prefill_cp_config.method, CPRotateMethod.PREFILL_CP)
+
+    def test_legacy_state_cannot_invent_compatibility(self):
+        from rtp_llm.ops import CPRotateMethod, ParallelismConfig
+
+        config = ParallelismConfig()
+        config.tp_size = 4
+        config.prefill_cp_config.method = CPRotateMethod.PREFILL_CP
+        restored = ParallelismConfig.__new__(ParallelismConfig)
+        restored.__setstate__(config.__getstate__()[:22])
+        self.assertFalse(restored.dsv4_prefill_cp_compat)
+        self.assertFalse(restored.local_cp_enabled())
+
+
 if __name__ == "__main__":
     unittest.main()

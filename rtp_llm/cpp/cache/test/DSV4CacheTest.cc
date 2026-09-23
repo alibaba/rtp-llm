@@ -235,6 +235,7 @@ static std::vector<int> makeProLayerCompressRatios() {
 
 static ModelConfig makeProModelConfig() {
     ModelConfig mc;
+    mc.model_type                                                = "deepseek_v4";
     mc.num_layers                                                = 61;
     mc.hidden_size                                               = 7168;
     mc.attn_config.head_num                                      = 128;
@@ -253,6 +254,7 @@ static ModelConfig makeProModelConfig() {
 
 static ModelConfig makeFlashModelConfig() {
     ModelConfig mc;
+    mc.model_type                   = "deepseek_v4";
     mc.num_layers                   = 43;
     mc.hidden_size                  = 4096;
     mc.attn_config.head_num         = 64;

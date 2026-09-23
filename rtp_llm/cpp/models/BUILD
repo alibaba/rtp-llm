@@ -239,3 +239,9 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "prefill_wire_source_data",
+    srcs = ["ModelTypes.h", "ModelTypes.cc"],
+    visibility = ["//visibility:public"],
+)

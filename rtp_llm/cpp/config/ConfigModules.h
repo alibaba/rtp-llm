@@ -91,18 +91,74 @@ struct ParallelismConfig {
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
 
+    // Resolved compatibility for the DSV4 prefill-only PREFILL_CP profile.
+    // The raw method also describes remote KV on DECODE and is not a capability.
+    // Set only by resolve_local_cp(), before weight partitioning.
+    bool dsv4_prefill_cp_compat = false;
+
+    bool dsv4_prefill_cp_profile_valid() const {
+        const bool cp2pp4  = pp_size == 4 && tp_size == 2 && ep_size == 1 && !pp_ep_enabled;
+        const bool cep4pp2 = pp_ep_experimental_ok();
+        return dp_size == 1 && world_size == 8 && role_type == RoleType::PDFUSION
+               && prefill_cp_config.is_prefill_enabled() && !prefill_cp_config.kv_cache_sharded
+               && (prefill_cp_config.prefill_cp_size == 0 || prefill_cp_config.prefill_cp_size == tp_size)
+               && (cp2pp4 || cep4pp2);
+    }
+
+    // Shared by C++ execution, Python model setup and effective TP weight loading.
+    // Native modes keep their existing meaning. Compatibility never follows from
+    // PREFILL_CP alone, and stale DECODE/one-rank metadata cannot activate it.
+    bool local_cp_enabled() const {
+        return tp_size > 1 && (role_type == RoleType::PREFILL || role_type == RoleType::PDFUSION)
+               && (prefill_cp_config.is_enabled() || (dsv4_prefill_cp_compat && dsv4_prefill_cp_profile_valid()));
+    }
+
+    void resolve_local_cp(const std::string& model_type, bool speculative, bool cuda_graph, bool layer_micro_batch) {
+        dsv4_prefill_cp_compat = false;
+        if (pp_size > 1 && prefill_cp_config.is_enabled() && role_type != RoleType::PREFILL) {
+            throw std::invalid_argument("native PP context parallelism requires PREFILL role");
+        }
+        if (!prefill_cp_config.is_prefill_enabled() || role_type == RoleType::DECODE || tp_size <= 1) {
+            return;
+        }
+        if (model_type != "deepseek_v4" || !dsv4_prefill_cp_profile_valid() || speculative || cuda_graph
+            || layer_micro_batch || enable_sp || use_ub_comm || ffn_disaggregate_config.enable_ffn_disaggregate) {
+            throw std::invalid_argument("local PREFILL_CP requires the DSV4 PDFUSION CP2PP4 or opted-in CEP4PP2 "
+                                        "prefill-only profile, with unsharded cache and no speculative, graph, "
+                                        "micro-batch, SP, UB or FFN-disaggregation execution");
+        }
+        dsv4_prefill_cp_compat = true;
+    }
     int64_t get_attn_tp_size() const {
-        return prefill_cp_config.is_enabled() ? 1 : tp_size;
+        return local_cp_enabled() ? 1 : tp_size;
     }
     int64_t get_attn_tp_rank() const {
-        return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+        return local_cp_enabled() ? 0 : tp_rank;
     }
     int64_t get_ffn_tp_size() const {
-        return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
+        return local_cp_enabled() ? 1 : ffn_tp_size;
     }
     int64_t get_ffn_tp_rank() const {
-        return prefill_cp_config.is_enabled() ? 0 : ffn_tp_rank;
+        return local_cp_enabled() ? 0 : ffn_tp_rank;
     }
+
+    // Resolved PP+EP capability: Python validates topology and backend before setting it.
+    // An empty backend disables it; raw environment flags alone grant no capability.
+    bool        pp_ep_enabled = false;
+    std::string pp_ep_backend;  // "purecp_bf16" | "fork_nccl_mxfp8"
+
+    // The only shape accepted by our experimental NCCL adapter: pp2 x dp1 x tp4(=>cp4) x ep4 on
+    // 8 ranks, with an explicitly resolved and named expert backend. Deliberately
+    // exact rather than range-based — a PP+EP guard widened by one working test
+    // would silently admit unvalidated dp>1 / tp!=4 / ep!=tp combinations.
+    static bool pp_ep_backend_valid(const std::string& backend) {
+        return backend == "purecp_bf16" || backend == "fork_nccl_mxfp8";
+    }
+    bool pp_ep_experimental_ok() const {
+        return pp_ep_enabled && pp_ep_backend_valid(pp_ep_backend) && pp_size == 2 && dp_size == 1 && tp_size == 4
+               && ep_size == 4 && world_size == 8 && role_type == RoleType::PDFUSION;
+    }
+
     std::string to_string() const;
 };
 

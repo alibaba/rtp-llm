@@ -60,7 +60,8 @@ struct PPValidationResult {
    logical_block_num is the min over owners; capacity skew is bounded by
    capacity_skew_threshold. stages.size() <= 1 is trivially ok. */
 PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& stages,
-                                      double                                 capacity_skew_threshold = 1.5);
+                                      double                                 capacity_skew_threshold = 1.5,
+                                      bool                                   allow_dsv4_swa          = false);
 
 class StageSnapshotCollector {
 public:
@@ -93,7 +94,9 @@ private:
 
 // Collect + validate; PPSnapshotCollector performs a collective exchange before validation.
 // On failure the caller must abort startup.
-PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector, double capacity_skew_threshold = 1.5);
+PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector,
+                                       double                  capacity_skew_threshold = 1.5,
+                                       bool                    allow_dsv4_swa          = false);
 
 // Fuse over the composed config: every local group must carry exactly its
 // agreed count. A mismatch means a tag fell back to the derivation rule, or
@@ -105,8 +108,8 @@ void validatePPComposedBlockNums(const CacheConfig& composed, const NegotiatedCa
 // Both hooks abort startup on failure.
 class PPCacheCapacityNegotiator: public CacheCapacityNegotiator {
 public:
-    explicit PPCacheCapacityNegotiator(double capacity_skew_threshold = 1.5):
-        capacity_skew_threshold_(capacity_skew_threshold) {}
+    explicit PPCacheCapacityNegotiator(double capacity_skew_threshold = 1.5, bool allow_dsv4_swa = false):
+        capacity_skew_threshold_(capacity_skew_threshold), allow_dsv4_swa_(allow_dsv4_swa) {}
 
     PPValidationResult
     negotiate(const CacheConfig& topology, uint32_t local_block_num, const RuntimeConfig& runtime_config) override;
@@ -115,6 +118,7 @@ public:
 
 private:
     double capacity_skew_threshold_;
+    bool   allow_dsv4_swa_;
 };
 
 // Fills each local group's canonical_idx by tag pairing, including MTP sub-configs;

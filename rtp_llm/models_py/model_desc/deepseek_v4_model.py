@@ -38,6 +38,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.distributed.ep_stage_context import resolve_pp_ep_opt_in
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
@@ -408,16 +409,11 @@ class DeepSeekV4Model(GptModelBase):
         # sequence bound, then chunked MoE caps the per-forward routed/shared
         # expert workspace to a scheduler-style token chunk: allocate by max
         # batched/chunked tokens, not by the full 1M context length.
-        cp_size = 1
-        if (
-            parallelism_config is not None
-            and getattr(parallelism_config, "prefill_cp_config", None) is not None
-        ):
-            try:
-                if parallelism_config.prefill_cp_config.is_enabled():
-                    cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
-            except Exception:  # pyi-only stub or non-CP build
-                pass
+        cp_size = (
+            int(parallelism_config.tp_size)
+            if parallelism_config is not None and parallelism_config.local_cp_enabled()
+            else 1
+        )
         if cp_size > 1:
             cp_tokens_per_rank_bound = min(
                 args.max_tokens_per_rank,
@@ -440,10 +436,19 @@ class DeepSeekV4Model(GptModelBase):
         self._is_decode_role = False
         self._shared_runtime_buffers: Optional[Dsv4SharedRuntimeBufferStore] = None
 
+        # Keep global IDs for weights/types; construct only this stage's layer slice.
+        # Embedding and final norm/head belong to the first and last stages.
+        args.pp_size = self.pp_size
+        args.pp_rank = self.pp_rank
+        args.pp_layer_ids = self.pp_layer_ids() if self.pp_size > 1 else None
+        args.pp_has_embedding = self.pp_has_embedding
+        args.pp_has_lm_head = self.pp_has_lm_head
+
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
             "o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d "
-            "compress_ratios[:8]=%s score=%s route_scale=%g swiglu_limit=%g",
+            "compress_ratios[:8]=%s score=%s route_scale=%g swiglu_limit=%g "
+            "pp=%d/%d pp_layer_ids=%s embed=%s lm_head=%s",
             args.n_layers,
             args.n_heads,
             args.head_dim,
@@ -458,6 +463,11 @@ class DeepSeekV4Model(GptModelBase):
             args.score_func,
             args.route_scale,
             args.swiglu_limit,
+            args.pp_size,
+            args.pp_rank,
+            "all" if args.pp_layer_ids is None else args.pp_layer_ids,
+            args.pp_has_embedding,
+            args.pp_has_lm_head,
         )
         self._v4_args = args
         # Surface FP8 KV-cache flag at the Model level so
@@ -673,7 +683,11 @@ class DeepSeekV4Model(GptModelBase):
         device = (
             next(iter(self.weight.global_weights.values())).device
             if self.weight.global_weights
-            else "cuda:0"
+            # PP: a middle stage loads neither the embedding (first stage only)
+            # nor lm_head / final layernorm (last stage only), so this dict can
+            # legitimately be empty.  Fall back to this rank's own device —
+            # a bare "cuda:0" would be wrong for every non-zero local_rank.
+            else f"cuda:{int(getattr(self.parallelism_config, 'local_rank', 0) or 0)}"
         )
         device_str = str(device)
 
@@ -688,16 +702,51 @@ class DeepSeekV4Model(GptModelBase):
         # topology separately to the routed-MoE strategy.
         physical_tp_size = int(self.parallelism_config.tp_size)
         physical_tp_rank = int(self.parallelism_config.tp_rank)
-        cp_config = self.parallelism_config.prefill_cp_config
-        cp_enabled = bool(
-            cp_config is not None
-            and cp_config.is_enabled()
-            and not self._is_decode_role
+        cp_enabled = (
+            self.parallelism_config.local_cp_enabled() and not self._is_decode_role
         )
         self._v4_args.moe_tp_size = physical_tp_size
         self._v4_args.moe_tp_rank = physical_tp_rank
         self._v4_args.moe_cp_enabled = cp_enabled
         self._v4_args.moe_cp_size = physical_tp_size if cp_enabled else 1
+
+        # Validate and build one stage-local EP context before constructing MoE layers.
+        self._v4_args.moe_stage_context = None
+        _pcfg = self.parallelism_config
+        pp_ep_enabled, _pp_ep_backend = (
+            resolve_pp_ep_opt_in(_pcfg) if _pcfg is not None else (False, "")
+        )
+        if pp_ep_enabled:
+            from rtp_llm.models_py.distributed.ep_stage_context import (
+                EpStageContext,
+                validate_pp_ep_shape,
+                validate_pp_ep_target,
+            )
+            from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4 import (
+                _has_fp8_fp4_grouped_kernel,
+            )
+            from rtp_llm.models_py.modules.dsv4.moe.strategies.nccl_ep_mxfp8 import (
+                _is_sm120_runtime,
+            )
+
+            validate_pp_ep_shape(_pcfg)
+            is_sm120 = _is_sm120_runtime()
+            has_grouped_fp4 = is_sm120 and _has_fp8_fp4_grouped_kernel()
+            validate_pp_ep_target(
+                _pcfg,
+                hw_kernel_config=self.py_hw_kernel_config,
+                is_sm120=is_sm120,
+                has_grouped_fp4=has_grouped_fp4,
+                is_speculative=self._is_speculative,
+            )
+            self._v4_args.moe_stage_context = EpStageContext.build(
+                _pcfg, backend=_pp_ep_backend
+            )
+            logging.info(
+                "[DeepSeekV4Model] stage-local EP enabled: %s",
+                self._v4_args.moe_stage_context,
+            )
+
         logging.info(
             "[DeepSeekV4Model] MoE physical topology: tp=%d rank=%d cp_enabled=%s cp_size=%d",
             self._v4_args.moe_tp_size,
@@ -1028,12 +1077,7 @@ class DeepSeekV4Model(GptModelBase):
                 _prefill_cp_config = getattr(
                     self.parallelism_config, "prefill_cp_config", None
                 )
-                _prefill_cp_enabled = False
-                if _prefill_cp_config is not None:
-                    try:
-                        _prefill_cp_enabled = bool(_prefill_cp_config.is_enabled())
-                    except Exception:
-                        _prefill_cp_enabled = False
+                _prefill_cp_enabled = self.parallelism_config.local_cp_enabled()
                 _prefill_kv_cache_sharded = bool(
                     getattr(_prefill_cp_config, "kv_cache_sharded", False)
                 )
@@ -1139,6 +1183,30 @@ class DeepSeekV4Model(GptModelBase):
         e_proj/h_proj from the MTP-only globals."""
         return None
 
+    def _weight_device(self) -> torch.device:
+        """Return a stage-owned weight device; non-first stages have no embedding."""
+        embed = getattr(self.v4, "embed", None)
+        if embed is not None:
+            return embed.weight.device
+        for layer in self.v4.layers:
+            param = next(iter(layer.parameters()), None)
+            if param is not None:
+                return param.device
+        raise RuntimeError("DeepSeekV4Model owns no weights to derive a device from")
+
+    def make_empty_intermediate_tensors(self, hidden_template: Any) -> dict:
+        """Build [T, hc_mult, dim] PP warmup tensors from the reduced-width template."""
+        token_num = int(hidden_template.shape[0])
+        return {
+            "hidden_states": torch.zeros(
+                token_num,
+                int(self._v4_args.hc_mult),
+                int(self._v4_args.dim),
+                dtype=hidden_template.dtype,
+                device=hidden_template.device,
+            )
+        }
+
     def _prepare_decode_hidden(
         self,
         input_ids: torch.Tensor,
@@ -1231,7 +1299,7 @@ class DeepSeekV4Model(GptModelBase):
         #     ``input_lengths=[1]`` or ``[gen+1]`` respectively
         # The C++ CudaGraphRunner captures one graph per (batch, q_len).
         q_len = int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
-        device = self.v4.embed.weight.device
+        device = self._weight_device()
 
         paged_pool_specs = build_paged_pool_specs(
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
@@ -1342,11 +1410,21 @@ class DeepSeekV4Model(GptModelBase):
                 "[DeepSeekV4Model] forward() with kv_cache=None — warmup only"
             )
             T = max(inputs.input_ids.numel(), 1)
-            device = self.v4.embed.weight.device
-            hidden = torch.zeros(
-                T, self._v4_args.dim, dtype=torch.bfloat16, device=device
+            device = self._weight_device()
+            owns_lm_head = self.v4.norm is not None
+            # A non-last PP stage's boundary tensor carries the unreduced mHC
+            # lanes, so the warmup dummy has to match that width — otherwise
+            # the downstream stage would resume a mis-shaped activation.
+            shape = (
+                (T, self._v4_args.dim)
+                if owns_lm_head
+                else (T, self._v4_args.hc_mult, self._v4_args.dim)
             )
-            return PyModelOutputs(hidden)
+            hidden = torch.zeros(*shape, dtype=torch.bfloat16, device=device)
+            outputs = PyModelOutputs(hidden)
+            if not owns_lm_head:
+                outputs.pp_intermediates = {"hidden_states": hidden}
+            return outputs
         # Group-invariant view of ``PyModelInputs.attention_inputs``; the
         # per-tag block tables are resolved inside forward_prefill /
         # forward_decode.

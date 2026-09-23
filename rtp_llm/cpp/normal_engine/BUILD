@@ -83,3 +83,9 @@ cc_library(
     }) + torch_deps(),
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "prefill_pipeline_source_data",
+    srcs = ["pipeline/PPExecutor.cc"],
+    visibility = ["//visibility:public"],
+)

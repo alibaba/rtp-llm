@@ -143,11 +143,11 @@ torch::Tensor toCudaInt32WithHostHold(const torch::Tensor& tensor, TensorHolder&
 
 speculative::SpeculativeSamplingParams gatherSpeculativeSamplingParams(const std::list<GenerateStreamPtr>& streams) {
     speculative::SpeculativeSamplingParams params;
-    params.do_sample = torch::empty({(int64_t)streams.size()},
-                                    torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    params.do_sample =
+        torch::empty({(int64_t)streams.size()}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
     params.force_accept = torch::empty({(int64_t)streams.size()}, torch::kBool);
     for (const auto& stream : streams) {
-        const auto row = params.generators.size();
+        const auto row                            = params.generators.size();
         params.do_sample.data_ptr<bool>()[row]    = !stream->generateConfig()->top1();
         params.force_accept.data_ptr<bool>()[row] = stream->forceSpAccept();
         params.generators.push_back(stream->getGenerator());
@@ -330,10 +330,10 @@ static void applyCacheStrideToModelInput(GptModelInputs& model_input, const Cach
 }
 
 std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
-                                                            size_t                 reserved_blocks,
-                                                            const ModelConfig&     model_config,
-                                                            const RuntimeConfig&   runtime_config,
-                                                            const ResourceContext& resource_context) {
+                                                     size_t                 reserved_blocks,
+                                                     const ModelConfig&     model_config,
+                                                     const RuntimeConfig&   runtime_config,
+                                                     const ResourceContext& resource_context) {
     std::shared_ptr<GenerateInput> fake_input   = std::make_shared<GenerateInput>();
     fake_input->input_ids                       = torch::zeros({1}, torch::kInt32);
     fake_input->generate_config                 = std::make_shared<GenerateConfig>();
@@ -711,6 +711,16 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
  * @param streams
  * @return absl::Status
  */
+torch::Tensor MtpExecutor::snapshotPrefillInputToCuda(const torch::Tensor& tensor, TensorHolder& holder) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    // A non-blocking H2D from the original pinned tensor is not a snapshot:
+    // handleInputs can rewrite its lengths before the queued DMA reads them.
+    // clone() also prevents aliasing when the input is already on CUDA.
+    return toCudaWithHostHold(tensor.clone(), holder);
+}
+
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
@@ -726,7 +736,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
     torch::Tensor   draft_last_hidden_states;
-    const bool      cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    const bool      cp_enabled = buildExecProperties(parallelism_config_, DeviceResourceConfig{}).enable_prefill_cp;
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -776,10 +786,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // Only rank 0 restores; non-root ranks get the restored view from the
     // second tpSync, so skip the snapshot copies there.
     if (cp_enabled && isTpRank0()) {
-        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
-        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_tokens  = snapshotPrefillInputToCuda(model_input.combo_tokens, buffer_holder_);
+        saved_input_lengths = snapshotPrefillInputToCuda(model_input.input_lengths, buffer_holder_);
         if (model_input.combo_position_ids.defined()) {
-            saved_combo_position_ids = toCudaWithHostHold(model_input.combo_position_ids, buffer_holder_);
+            saved_combo_position_ids = snapshotPrefillInputToCuda(model_input.combo_position_ids, buffer_holder_);
         }
     }
 
@@ -1183,12 +1193,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         cache_manager_->zeroBlocks(propose_input.kv_cache_blocks_to_zero);
         propose_input.kv_cache_blocks_to_zero = torch::Tensor();
-        model_input.kv_cache_blocks_to_zero = torch::Tensor();
-        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        propose_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-        propose_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
-        propose_input.dspark_call_phase     = DSparkCallPhase::PROPOSE;
-        auto propose_output                 = runDSparkProposeForward(propose_input);
+        model_input.kv_cache_blocks_to_zero   = torch::Tensor();
+        const auto& mtp_cache_cfg             = cache_manager_->getMTPModuleCacheConfig(0);
+        propose_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
+        propose_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
+        propose_input.dspark_call_phase       = DSparkCallPhase::PROPOSE;
+        auto propose_output                   = runDSparkProposeForward(propose_input);
         RTP_LLM_CHECK_WITH_INFO(propose_output.draft_tokens.defined(),
                                 "dspark round-head propose did not emit draft_tokens");
         if (isTpRank0()) {
@@ -1389,11 +1399,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // rejection sampling
             auto params = gatherSpeculativeSamplingParams(streams);
             mtp::runRejectionSampling(*speculative_sampler_,
-                                     params,
-                                     draft_sampler_output,
-                                     sampler_output,
-                                     *spec_logits_result,
-                                     speculative_sampler_output);
+                                      params,
+                                      draft_sampler_output,
+                                      sampler_output,
+                                      *spec_logits_result,
+                                      speculative_sampler_output);
         }
         if (is_dspark_) {
             // Target verify wrote its aux features into the shared MTP hidden
@@ -2166,8 +2176,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%zu)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu/%zu start, batch_size %zu", i, decode_steps, batch_size);
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto draft_decode_model_output = forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
+        int64_t start_time_us             = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto    draft_decode_model_output = forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu forward done", i);
