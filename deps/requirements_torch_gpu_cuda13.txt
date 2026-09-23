@@ -20,6 +20,7 @@ triton==3.6.0
 # Use the same RTP FlashInfer fork as CUDA 12.9; upstream 0.6.9 copies
 # an unpinned CPU scale during FMHA v2 CUDA graph capture.
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_python-0.6.9-py3-none-any.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_cubin-0.6.9-py3-none-any.whl
 
 # The HC regression target imports the vendored TileKernels implementation.
 tilelang==0.1.9
