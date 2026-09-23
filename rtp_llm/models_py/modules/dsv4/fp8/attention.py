@@ -2076,7 +2076,10 @@ class AttentionFP8(nn.Module):
         ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
-        if is_sm120(o_fp8.device):
+        if (
+            is_sm120(o_fp8.device)
+            and os.environ.get("DSV4_SM120_WOA_EINSUM", "0") != "1"
+        ):
             from flashinfer.gemm import gemm_fp8_nt_groupwise
 
             def _ue8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
