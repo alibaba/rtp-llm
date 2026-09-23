@@ -632,8 +632,12 @@ py_package(
     }),
 )
 
-# Keep admission and native XGrammar on the same revision for CUDA 13 ARM.
+# Keep admission and native XGrammar on the same revision for CUDA 13.
 xgrammar_whl_reqs = select({
+    "@//:using_cuda13_x86": [
+        "xgrammar @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp_llm/x86_pkg/xgrammar/38b97c02062dea5e27bd3d0f456c5ca66676d923/f5fe22c1ef7e7cc076fe02a054da80be790094259e24caeca0fba0bec0dc94cd/xgrammar-0.2.8.dev0%2Bg38b97c0-cp310-cp310-linux_x86_64.whl#sha256=f5fe22c1ef7e7cc076fe02a054da80be790094259e24caeca0fba0bec0dc94cd",
+        "apache-tvm-ffi==0.1.11",
+    ],
     "@//:using_cuda13_arm": [
         "xgrammar @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp_llm/arm_pkg/xgrammar/38b97c02062dea5e27bd3d0f456c5ca66676d923/01e12e11d7b0aa3e64ae8525516b0e1b65803b54f702675fe062bd0cfc906554/xgrammar-0.2.8.dev0%2Bg38b97c0-cp310-cp310-linux_aarch64.whl#sha256=01e12e11d7b0aa3e64ae8525516b0e1b65803b54f702675fe062bd0cfc906554",
         "apache-tvm-ffi==0.1.11",
@@ -676,7 +680,7 @@ whl_reqs = [
     "sentence-transformers==2.7.0",
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
-    "grpcio==1.62.0",
+    "grpcio==1.62.1",
     #"decord==0.6.0",
     "oss2",
     "orjson",
@@ -737,7 +741,7 @@ py_package(
 )
 
 whl_reqs_dash_sc_grpc = [
-    "grpcio>=1.57.0",
+    "grpcio==1.62.1",
     "jsonschema==4.26.0",
     "protobuf>=4.25",
 ] + xgrammar_whl_reqs
