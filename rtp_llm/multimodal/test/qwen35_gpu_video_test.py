@@ -810,5 +810,80 @@ class GpuVideoTest(unittest.TestCase):
             self.assertIsNone(state.key)
 
 
+class DecoderReconfigurationTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(gpu_video, "_decode_state", threading.local())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.nvc = mock.MagicMock()
+        self.nvc.CreateDecoder.side_effect = lambda **kwargs: mock.Mock()
+
+    def get_decoder(self, width, height, codec=4, stream=7):
+        return gpu_video._get_video_decoder(
+            SimpleNamespace(width=width, height=height),
+            torch.device("cuda:0"),
+            self.nvc,
+            SimpleNamespace(cuda_stream=stream),
+            codec,
+        )
+
+    def test_landscape_portrait_and_repeat_reuse_one_session(self):
+        decoder = self.get_decoder(1280, 720)
+        for width, height in ((720, 1280), (1920, 788), (1920, 870), (1280, 720)):
+            self.assertIs(self.get_decoder(width, height), decoder)
+        self.assertIs(self.get_decoder(1280, 720), decoder)
+        self.assertEqual(self.nvc.CreateDecoder.call_count, 1)
+        self.assertEqual(
+            decoder.setReconfigParams.call_args_list,
+            [
+                mock.call(720, 1280),
+                mock.call(1920, 788),
+                mock.call(1920, 870),
+                mock.call(1280, 720),
+            ],
+        )
+
+    def test_larger_input_grows_session_then_reuses_smaller_input(self):
+        original = self.get_decoder(1280, 720)
+        larger = self.get_decoder(3840, 2160)
+        self.assertIsNot(original, larger)
+        self.assertEqual(self.nvc.CreateDecoder.call_count, 2)
+        self.assertGreaterEqual(
+            self.nvc.CreateDecoder.call_args.kwargs["maxwidth"], 3840
+        )
+        self.assertGreaterEqual(
+            self.nvc.CreateDecoder.call_args.kwargs["maxheight"], 2160
+        )
+        self.assertIs(self.get_decoder(720, 1280), larger)
+        self.assertIs(self.get_decoder(3840, 2160), larger)
+        self.assertEqual(self.nvc.CreateDecoder.call_count, 2)
+
+    def test_codec_and_stream_changes_do_not_share_session(self):
+        first = self.get_decoder(1280, 720)
+        second = self.get_decoder(1280, 720, codec=8)
+        third = self.get_decoder(1280, 720, codec=8, stream=9)
+        self.assertIsNot(first, second)
+        self.assertIsNot(second, third)
+        self.assertEqual(self.nvc.CreateDecoder.call_count, 3)
+
+    def test_failed_reconfiguration_discards_session_before_retry(self):
+        decoder = self.get_decoder(1280, 720)
+        decoder.setReconfigParams.side_effect = RuntimeError("bad reconfiguration")
+        with self.assertRaisesRegex(RuntimeError, "bad reconfiguration"):
+            self.get_decoder(720, 1280)
+        self.assertIsNone(gpu_video._decode_state.decoder)
+        self.assertIsNone(gpu_video._decode_state.key)
+        self.assertIsNot(self.get_decoder(720, 1280), decoder)
+        self.assertEqual(self.nvc.CreateDecoder.call_count, 2)
+
+    def test_failed_growth_discards_previous_session(self):
+        self.get_decoder(1280, 720)
+        self.nvc.CreateDecoder.side_effect = RuntimeError("allocation failed")
+        with self.assertRaisesRegex(RuntimeError, "allocation failed"):
+            self.get_decoder(3840, 2160)
+        self.assertIsNone(gpu_video._decode_state.decoder)
+        self.assertIsNone(gpu_video._decode_state.key)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -398,6 +398,45 @@ def decode_video_cuda(data: GpuVideoInput, device):
             return _decode_on_stream(data, device, nvc, stream, consumer_stream)
 
 
+def _get_video_decoder(data, device, nvc, stream, codec):
+    # Inputs are validated as 8-bit YUV420. A session can change resolution
+    # while keeping its device, stream and codec. Reserve a 2K window for
+    # landscape/portrait HD; grow it only when a larger input requires it.
+    key = (device.index, stream.cuda_stream, codec)
+    dimensions = (data.width, data.height)
+    same_session = getattr(_decode_state, "key", None) == key
+    capacity = getattr(_decode_state, "capacity", (0, 0)) if same_session else (0, 0)
+    try:
+        if not same_session or any(d > c for d, c in zip(dimensions, capacity)):
+            _decode_state.decoder = None
+            _decode_state.key = None
+            capacity = tuple(max(2048, d, c) for d, c in zip(dimensions, capacity))
+            decoder = nvc.CreateDecoder(
+                gpuid=device.index,
+                codec=codec,
+                cudacontext=0,
+                cudastream=stream.cuda_stream,
+                usedevicememory=True,
+                maxwidth=capacity[0],
+                maxheight=capacity[1],
+                outputColorType=nvc.OutputColorType.NATIVE,
+            )
+            _decode_state.decoder = decoder
+            _decode_state.key = key
+            _decode_state.capacity = capacity
+        elif _decode_state.dimensions != dimensions:
+            # The preceding request consumed EOS and completed all surface
+            # copies. Reconfigure on the owning thread before the next stream.
+            _decode_state.decoder.setReconfigParams(*dimensions)
+        _decode_state.dimensions = dimensions
+        return _decode_state.decoder
+    except Exception:
+        # A failed reconfiguration must not leak a partially configured session.
+        _decode_state.decoder = None
+        _decode_state.key = None
+        raise
+
+
 def _decode_on_stream(data, device, nvc, stream, consumer_stream):
     # A dedicated decode stream keeps surface-lifetime waits from draining the
     # preceding ViT forward on the consumer stream. Only sampled frames cross
@@ -413,27 +452,7 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
         return len(chunk)
 
     demuxer = nvc.CreateDemuxer(feed)
-    # Dimensions and codec changes create a new bounded hardware session.
-    key = (
-        device.index,
-        stream.cuda_stream,
-        demuxer.GetNvCodecId(),
-        data.width,
-        data.height,
-    )
-    if getattr(_decode_state, "key", None) != key:
-        _decode_state.decoder = None
-        _decode_state.key = None
-        _decode_state.decoder = nvc.CreateDecoder(
-            gpuid=device.index,
-            codec=demuxer.GetNvCodecId(),
-            cudacontext=0,
-            cudastream=stream.cuda_stream,
-            usedevicememory=True,
-            outputColorType=nvc.OutputColorType.NATIVE,
-        )
-        _decode_state.key = key
-    decoder = _decode_state.decoder
+    decoder = _get_video_decoder(data, device, nvc, stream, demuxer.GetNvCodecId())
     positions = {}
     for slot, index in enumerate(data.frame_indices):
         positions.setdefault(index, []).append(slot)
