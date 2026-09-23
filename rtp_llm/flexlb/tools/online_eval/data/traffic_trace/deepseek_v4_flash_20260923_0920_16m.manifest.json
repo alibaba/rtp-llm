@@ -32,15 +32,20 @@
       "layer": "frontend",
       "deployment": "6aa3b6979ffe080d001c3dbb"
     },
+    "attribution": {
+      "identity": "deepseek-v4-flash-model traffic replication into the test deployment",
+      "status": "confirmed",
+      "evidence": "Operator identified the copied model; test frontend MODEL_TYPE=deepseek_v4 was read back from Whale. Source user-population filtering was not available."
+    },
     "spectrum": {
       "identity": null,
       "status": "unconfirmed",
       "evidence": null
     },
     "model": {
-      "name": null,
-      "status": "unconfirmed",
-      "evidence": null
+      "name": "deepseek-v4-flash-model",
+      "status": "confirmed",
+      "evidence": "Operator-identified replication target and Whale test frontend MODEL_TYPE=deepseek_v4; does not establish identical source user populations."
     },
     "enrichment": "manual_spectrum_lookup_not_automated"
   },
@@ -106,6 +111,6 @@
     "Input lengths are exact; original text and tokens are absent.",
     "Output lengths and outcomes are not retained in this codec.",
     "Prefix sharing is theoretical structure, not measured cache reuse.",
-    "Spectrum origin and model need independently confirmed manual metadata."
+    "The copied traffic includes multiple user populations and was not source-filtered to 0-32k; the source spectrum selector remains unverified."
   ]
 }

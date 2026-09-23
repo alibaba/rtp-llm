@@ -61,7 +61,7 @@ parameters:
       model: prefix_lineage
       version: '3'
       parameters:
-        path: ../../data/traffic_trace/local_flash_20260923_v3.xz
+        path: ../../data/traffic_trace/deepseek_v4_flash_20260923_0920_16m.xz
         sha256: 29d0fbee8986d465b672977154ebb9aef27353d445b383fd9135656de9e911ca
         count: 844864
         output_tokens: 8192
