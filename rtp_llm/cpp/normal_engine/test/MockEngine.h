@@ -66,21 +66,22 @@ private:
 };
 
 struct CustomConfig {
-    bool                                    reuse_cache         = false;
-    bool                                    enable_device_cache = true;
-    DataType                                kv_cache_data_type  = DataType::TYPE_FP16;
-    RoleType                                role_type           = RoleType::PDFUSION;
-    std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
+    bool                                       reuse_cache         = false;
+    bool                                       enable_device_cache = true;
+    DataType                                   kv_cache_data_type  = DataType::TYPE_FP16;
+    RoleType                                   role_type           = RoleType::PDFUSION;
+    std::map<std::string, std::vector<int>>    multi_task_prompt_tokens;
+    std::vector<int64_t>                       output_vocab_ids;  // non-empty enables output-vocab pruning
     bool                                       prefill_cp_enabled             = false;
     bool                                       speculative_enabled            = false;
     bool                                       warm_up_with_loss              = false;
     int                                        output_dispatcher_worker_count = 0;
     bool                                       warm_up                        = false;
+    bool                                       enable_ffn_disaggregate        = false;
     int                                        prefill_chunk_size             = 0;
     int64_t                                    max_context_batch_size         = 128;
     std::shared_ptr<std::vector<ForwardShape>> forward_shapes;
-    int                                        tokens_per_block               = 2;
+    int                                        tokens_per_block = 2;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -121,8 +122,8 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.attn_config.kernel_tokens_per_block = config.tokens_per_block;
     kv_cache_config.seq_size_per_block               = model_config.attn_config.tokens_per_block;
     kv_cache_config.kernel_seq_size_per_block        = model_config.attn_config.kernel_tokens_per_block;
-    runtime_config.reserve_runtime_mem_mb     = 1024;
-    const size_t hidden_units                 = 128;
+    runtime_config.reserve_runtime_mem_mb            = 1024;
+    const size_t hidden_units                        = 128;
 
     auto opts = torch::TensorOptions().dtype(torch::kHalf).device(torch::kCUDA);
 
@@ -191,7 +192,8 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::ArpcConfig            arpc_config;
     rtp_llm::GrpcConfig            grpc_config;
     rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
-    rtp_llm::VitConfig             vit_config;
+    ffn_disaggregate_config.enable_ffn_disaggregate = config.enable_ffn_disaggregate;
+    rtp_llm::VitConfig vit_config;
     runtime_config.output_dispatcher_worker_count = config.output_dispatcher_worker_count;
     pd_sep_config.role_type                       = config.role_type;
 

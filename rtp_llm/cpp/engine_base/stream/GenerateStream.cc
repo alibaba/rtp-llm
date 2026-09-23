@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -117,7 +118,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -131,9 +132,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (!input->fake_query && chunk_size > 0 && input->generate_config->isPrefillOnly()
         && !model_config.hidden_state_capture_layer_ids.empty()
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
-        reportEvent(StreamEvents::Error,
-                    ErrorCode::INVALID_PARAMS,
-                    "chunked prefill incompatible: hidden_state_capture");
+        reportEvent(
+            StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: hidden_state_capture");
         return;
     }
     if (!input->fake_query && chunk_size > 0
@@ -147,13 +147,12 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                              config.return_hidden_states                     ? "return_hidden_states" :
                              config.return_all_hidden_states                 ? "return_all_hidden_states" :
                              getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
-                             input->custom_output_token_position >= 0       ? "custom_output" :
+                             input->custom_output_token_position >= 0        ? "custom_output" :
                              multimodalFeaturesLength() != 0                 ? "multimodal" :
                                                                                nullptr;
         if (reason != nullptr) {
-            reportEvent(StreamEvents::Error,
-                        ErrorCode::INVALID_PARAMS,
-                        "chunked prefill incompatible: " + std::string(reason));
+            reportEvent(
+                StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: " + std::string(reason));
             return;
         }
         setChunkSize(static_cast<int>(chunk_size));
@@ -787,6 +786,10 @@ void GenerateStream::recordWaitLatency() {
 void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
     if (scheduler_enqueue_time_us_ == 0) {
         scheduler_enqueue_time_us_ = time_us;
+        auto& recorder             = ExecutionRecorder::instance();
+        if (!isFakeStream() && recorder.enabled()) {
+            recorded_request_ = std::make_shared<RecordedRequest>(recorder);
+        }
     }
 }
 
@@ -1294,7 +1297,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   update_info.force_update_info});
 }
 
-void GenerateStream::update(const StreamUpdateInfo& update_info) {
+void GenerateStream::update(const StreamUpdateInfo& update_info, RecordedTokenTiming* timings, size_t timing_count) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
@@ -1344,6 +1347,13 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
+
+    // Freeze TTFT after output trimming while holding the stream lock.
+    if (timings && seqLength() > inputLength()) {
+        for (size_t i = 0; i < timing_count; ++i) {
+            timings[i].ttft_us = complete_token_ids_->firstTokenLatencyUs();
+        }
+    }
 
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。

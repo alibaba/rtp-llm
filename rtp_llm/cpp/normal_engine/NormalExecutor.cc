@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -23,7 +24,6 @@ namespace rtp_llm {
 
 namespace {
 
-
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -31,6 +31,10 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     return on;
 }
 
+bool recordDecodeEnabled() {
+    static const bool enabled = readEnvFlagOnce("RTP_LLM_RECORD_DECODE", "execution-recorder", "record_decode");
+    return enabled;
+}
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
     holder.hold_host(inputs.token_ids);
     holder.hold_host(inputs.input_lengths);
@@ -47,6 +51,56 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.do_sample);
     holder.hold_host(inputs.finished_mask);
     holder.hold_host(inputs.cum_log_probs);
+}
+
+// Length values were frozen by the input gatherer, before H2D/async dispatch.
+// Recording must not re-read mutable stream lengths or synchronize CUDA.
+std::shared_ptr<RecordedBatch> recordBatchInputs(const GptModelInputs& inputs, const StreamGroups& groups) {
+    auto& recorder = ExecutionRecorder::instance();
+    if (!recorder.enabled() || !inputs.record_execution_id)
+        return nullptr;
+    if (!inputs.record_lengths)
+        throw std::runtime_error("batch CPU length snapshot missing");
+    const auto& lengths = *inputs.record_lengths;
+    using Json          = ExecutionRecorder::Json;
+    std::vector<Json> rows;
+    auto              append = [&](const auto& streams, const char* phase) {
+        for (const auto& stream : streams) {
+            const auto request = stream->recordedRequest();
+            for (int i = 0; i < stream->currentBatchSize(); ++i) {
+                Json row{{"phase", std::string(phase)},
+                                      {"input_len", stream->inputLength()},
+                                      {"reuse_len", stream->initialReuseLength()}};
+                if (request)
+                    row["request_id"] = "r" + std::to_string(request->id());
+                if (i != 0)
+                    row["sequence_id"] = i;
+                if (stream->isFakeStream())
+                    row["is_fake"] = true;
+                rows.push_back(std::move(row));
+            }
+        }
+    };
+    append(groups.decodeStreams(), "decode");
+    append(groups.contextStreams(), "prefill");
+    if (rows.size() != lengths.q_tokens.size() || rows.size() != lengths.kv_tokens_before.size()
+        || rows.size() != static_cast<size_t>(inputs.input_lengths.numel())
+        || groups.totalDecodeBatchSize() != static_cast<size_t>(inputs.sequence_lengths.numel())
+        || groups.totalContextBatchSize() != static_cast<size_t>(inputs.prefix_lengths.numel()))
+        throw std::runtime_error("batch snapshot slot/length count mismatch");
+    // JSON numbers lose int64 precision in JavaScript and other double-based consumers.
+    Json record{
+        {"schema_version", 1}, {"owner_id", recorder.owner()}, {"exec_id", std::to_string(inputs.record_execution_id)}};
+    for (size_t i = 0; i < rows.size(); ++i) {
+        // Preserve every batch slot; omitted lengths mean unknown, not zero.
+        if (lengths.q_tokens[i] > 0) {
+            rows[i]["q_len"] = lengths.q_tokens[i];
+        }
+        if (lengths.kv_tokens_before[i] >= 0) {
+            rows[i]["kv_len"] = lengths.kv_tokens_before[i];
+        }
+    }
+    return std::make_shared<RecordedBatch>(recorder, std::move(record), std::move(rows));
 }
 
 }  // namespace
@@ -84,6 +138,29 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
     role_type_          = params.pd_sep_config.role_type;
+    auto& recorder      = ExecutionRecorder::instance();
+    if (!warm_up_ && !is_propose_ && recorder.needsConfiguration()) {
+        const bool configured =
+            recorder.configure(parallelism_config_.world_rank,
+                               parallelism_config_.dp_rank,
+                               {{"tp_size", parallelism_config_.tp_size},
+                                {"dp_size", parallelism_config_.dp_size},
+                                {"world_size", parallelism_config_.world_size},
+                                {"num_layers", params.model_config_.num_layers},
+                                {"vocab_size", params.model_config_.vocab_size},
+                                {"max_seq_len", params.model_config_.max_seq_len},
+                                {"cache_block_tokens", cache_manager_->cacheConfig().seq_size_per_block},
+                                {"cache_groups", cache_manager_->cacheConfig().groupNums()},
+                                {"model_config", params.model_config_.to_string()},
+                                {"cache_config", cache_manager_->cacheConfig().debugString()},
+                                {"record_decode", recordDecodeEnabled()},
+                                {"decode_filter_policy", std::string("skip_entire_batch_containing_decode")},
+                                {"model_fingerprint", ExecutionRecorder::JsonValue()},
+                                {"scope", std::string("normal_executor")}});
+        if (!configured) {
+            RTP_LLM_LOG_WARNING("batch recorder initialization failed; configuration was not published");
+        }
+    }
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =
@@ -142,13 +219,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -254,12 +331,31 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         prepareGrpcNormalDeviceState(stream_groups);
     }
 
+    auto&      execution_recorder = ExecutionRecorder::instance();
+    const bool record_owner       = execution_recorder.enabled() && !warm_up_ && !is_propose_ && tp_rank_ == 0;
+    // dp>1 idle steps fill batches with fake streams (mayAddFakeStream); a
+    // fake-only batch carries no request slots and would drain the recorder's
+    // total-bytes budget with is_fake lines, exactly like an idle alignment
+    // round. Mixed real+fake batches keep recording (rows carry is_fake).
+    const bool has_request_stream =
+        std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& s) { return !s->isFakeStream(); });
+    // Filter before CPU snapshot allocation/JSON work. Never emit a partial
+    // mixed batch that could be mistaken for a replayable model input, and
+    // skip idle alignment rounds: empty batches still enter process() under
+    // FFN disaggregation and TP collectives, carry no request slots, and
+    // would drain the recorder's total-bytes budget with requests:[] lines.
+    const int64_t record_id = record_owner && has_request_stream && stream_groups.totalModelBatchSize() > 0
+                                      && (recordDecodeEnabled() || stream_groups.totalDecodeBatchSize() == 0) ?
+                                  execution_recorder.nextId() :
+                                  0;
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
-        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto    model_input_status =
+            batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_, record_id != 0);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input                              = std::move(model_input_status.value());
+        model_input.record_execution_id          = record_id;
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {
@@ -285,6 +381,15 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     if (profile_step_start_) {
         profile_step_start_();
+    }
+
+    std::shared_ptr<RecordedBatch> recorded_batch;
+    if (tp_rank_ == 0 && model_input.record_execution_id) {
+        try {
+            recorded_batch = recordBatchInputs(model_input, stream_groups);
+        } catch (const std::exception& e) {
+            execution_recorder.reportSnapshotError(e.what());
+        }
     }
 
     // make sure last model input is released before forward
@@ -415,7 +520,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                    std::move(model_output),
                                    std::move(sampler_output),
                                    std::move(sampler_event),
-                                   profile_step_finish_);
+                                   profile_step_finish_,
+                                   std::move(recorded_batch));
     }
 
     {
@@ -427,7 +533,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
                                                                   model_output.generation_prefill_cuda_graph_status);
         } else {
-            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
+            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output), std::move(recorded_batch)};
             if (useDeviceInput()) {
                 publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
             }
@@ -769,11 +875,12 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
     }
 }
 
-absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           stream_groups,
-                                                 GptModelOutputs               model_output,
-                                                 SamplerOutput                 sampler_output,
-                                                 std::shared_ptr<torch::Event> sampler_event,
-                                                 std::function<void()>         profile_step_finish) {
+absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            stream_groups,
+                                                 GptModelOutputs                model_output,
+                                                 SamplerOutput                  sampler_output,
+                                                 std::shared_ptr<torch::Event>  sampler_event,
+                                                 std::function<void()>          profile_step_finish,
+                                                 std::shared_ptr<RecordedBatch> recorded_batch) {
     RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_async");
 
     if (useDeviceInput()) {
@@ -796,9 +903,13 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
                              stream_groups_copy  = std::move(stream_groups_copy),
                              model_output_copy   = std::move(model_output_copy),
                              sampler_output_copy = std::move(sampler_output_copy),
-                             sampler_event]() mutable {
+                             sampler_event,
+                             recorded_batch = std::move(recorded_batch)]() mutable {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_worker");
 
+        // Local ownership submits on normal return and on worker exceptions,
+        // without retaining the snapshot in AsyncRunner's stored callback.
+        auto batch_record   = std::move(recorded_batch);
         auto worker_streams = stream_groups_copy.allStreams();
 
         // RAII: every captured stream is decremented exactly once, and the
@@ -815,8 +926,8 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
             sampler_event->block(cuda_graph::graphGetCurrentStream());
         }
 
-        auto status =
-            processor->dispatch(stream_groups_copy, {std::move(model_output_copy), std::move(sampler_output_copy)});
+        auto status = processor->dispatch(stream_groups_copy,
+                                          {std::move(model_output_copy), std::move(sampler_output_copy), batch_record});
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
         }
