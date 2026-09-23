@@ -61,6 +61,15 @@ cc_library(
 )
 
 cc_library(
+    name = "host_cache_shm",
+    srcs = ["HostCacheShm.cc"],
+    hdrs = ["HostCacheShm.h"],
+    copts = copts(),
+    linkopts = ["-lrt"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "block_pool",
     srcs = [
         "BlockCache.cc",
@@ -84,6 +93,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
+        ":host_cache_shm",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",

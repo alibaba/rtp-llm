@@ -3,6 +3,18 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "host_cache_shm_test",
+    srcs = ["HostCacheShmTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:host_cache_shm",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    tags = ["no-sandbox"],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
