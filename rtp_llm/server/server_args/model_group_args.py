@@ -1,4 +1,22 @@
+import argparse
+from typing import List
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def parse_external_model_packages(value: str) -> List[str]:
+    package_names = []
+    for item in value.split(","):
+        package_name = item.strip()
+        if not package_name:
+            continue
+        if not all(part.isidentifier() for part in package_name.split(".")):
+            raise argparse.ArgumentTypeError(
+                f"invalid external model package path: {package_name!r}"
+            )
+        if package_name not in package_names:
+            package_names.append(package_name)
+    return package_names
 
 
 def init_model_group_args(parser, model_args):
@@ -68,6 +86,17 @@ def init_model_group_args(parser, model_args):
         type=str,
         default="{}",
         help="A dictionary in JSON string format used to override default model configurations.",
+    )
+    model_group.add_argument(
+        "--external_model_packages",
+        enable_env=False,
+        bind_to=(model_args, "external_model_packages"),
+        type=parse_external_model_packages,
+        default=None,
+        help=(
+            "逗号分隔的受信任外部模型模块路径（如 "
+            "atom.plugin.rtpllm.models）；仅支持命令行配置"
+        ),
     )
     model_group.add_argument(
         "--max_seq_len",
