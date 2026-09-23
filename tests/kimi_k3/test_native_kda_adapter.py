@@ -52,12 +52,14 @@ def test_state_sequence_plans():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("checkpoint_mode", ["full", "final", "none"])
-def test_flashkda_paged_state_layout(checkpoint_mode):
+@pytest.mark.parametrize("heads", [1, 2])
+@pytest.mark.parametrize("tail_length", [1, 193])
+def test_flashkda_paged_state_layout(checkpoint_mode, heads, tail_length):
     flash_kda = pytest.importorskip("flash_kda")
     torch.manual_seed(922)
-    lengths = [4167, 193, 32]
-    cu = [0, 4167, 4360, 4392]
-    heads, dim = 2, 128
+    lengths = [4167, tail_length, 32]
+    cu = [0, 4167, 4167 + tail_length, 4199 + tail_length]
+    dim = 128
     xs = [
         torch.randn(cu[-1], heads, dim, device="cuda", dtype=torch.bfloat16)
         for _ in range(4)
@@ -104,7 +106,7 @@ def test_flashkda_paged_state_layout(checkpoint_mode):
             k,
             v,
             g,
-            beta[start:end].unsqueeze(0).contiguous(),
+            beta[start:end].unsqueeze(0).clone(memory_format=torch.contiguous_format),
             dim**-0.5,
             output,
             workspace,

@@ -153,10 +153,16 @@ def flash_kda_paged_prefill(
         for segment in seq.segments:
             start, end = segment.start, segment.end
             xs = [x[start:end].unsqueeze(0).contiguous() for x in (q, k, v, g)]
+            # A contiguous slice can retain an unaligned storage offset. With
+            # one head (or one token), the backend transpose is also contiguous
+            # and does not allocate the 16-byte-aligned beta required by TMA.
+            segment_beta = beta[start:end].unsqueeze(0).contiguous()
+            if segment_beta.data_ptr() % 16:
+                segment_beta = segment_beta.clone()
             final = torch.empty_like(state)
             torch.ops.flash_kda.fwd(
                 *xs,
-                beta[start:end].unsqueeze(0).contiguous(),
+                segment_beta,
                 128**-0.5,
                 out[start:end].unsqueeze(0),
                 workspace,
