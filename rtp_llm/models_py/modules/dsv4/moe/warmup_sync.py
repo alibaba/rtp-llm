@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
-import os
+import ctypes
 
 import torch
 
-_WARMUP_ENV = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
+_WARMUP_ENV = b"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
+# CudaGraphRunner's ScopedEnvFlag calls native setenv/unsetenv AFTER Python's
+# os.environ mapping was initialized. os.getenv reads that stale mapping and
+# misses the scoped flag, so eager warmup never prepares capture workspaces.
+# Read the same native environment as the C++ writer (do not cache its value).
+_native_getenv = ctypes.CDLL(None).getenv
+_native_getenv.argtypes = [ctypes.c_char_p]
+_native_getenv.restype = ctypes.c_char_p
 
 
 def cuda_graph_warmup_forward_enabled() -> bool:
-    return os.environ.get(_WARMUP_ENV, "0") == "1"
+    return _native_getenv(_WARMUP_ENV) == b"1"
 
 
 def sync_cuda_graph_warmup_ranks(
