@@ -53,6 +53,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
     build_cp_full_prefill_positions,
+    cp_actual_owned_kv_len_scalar,
     cp_actual_owned_kv_lens,
     cp_all_gather_full_varlen,
     cp_freqs_cis_local,
@@ -3964,10 +3965,18 @@ class AttentionFP8(nn.Module):
             wm.cmp_eb,
             cp_ctx.cp_rank,
         ).to(device=qkv.q.device, dtype=torch.int32)
-        local_N = int(local_cmp_lens.max().item()) if local_cmp_lens.numel() else 0
-        gather_len_max = (
-            int(wm.swa_gather_lens.max().item()) if wm.swa_gather_lens.numel() else 0
+        # WorkspaceMeta already holds the batch bounds as host integers.
+        # gather_len_max is M - N, and the owned-length function is monotone,
+        # so max_b f(cmp_seq_lens[b]) equals f(N). Keep the local_cmp_lens
+        # tensor for the pool reader, but avoid synchronizing its maximum.
+        local_N = (
+            cp_actual_owned_kv_len_scalar(
+                wm.N, cp_ctx.cp_size, wm.cmp_eb, cp_ctx.cp_rank
+            )
+            if local_cmp_lens.numel()
+            else 0
         )
+        gather_len_max = wm.M - wm.N if wm.swa_gather_lens.numel() else 0
         local_M = local_N + gather_len_max
         # E5b: raw-Q merge builds compact topk over written local rows only.
         workspace = torch.empty(
