@@ -457,7 +457,11 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
             )
         )
         fast_result = object()
-        with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}), patch(
+        with patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+            "deepgemm_hybrid_executor.cuda_graph_warmup_forward_enabled",
+            return_value=True,
+        ), patch(
             "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
             "deepgemm_hybrid_executor.torch.cuda.is_current_stream_capturing",
             return_value=False,

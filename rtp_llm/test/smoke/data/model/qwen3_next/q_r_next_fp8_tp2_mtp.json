@@ -27,15 +27,10 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** The questions should be thought-prov",
-                            "reasoning_content": null,
-                            "function_call": null,
-                            "tool_calls": null,
-                            "partial": false,
-                            "tool_call_id": null
+                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate).\n    *   **Goal:** The questions should be thought-provoking,",
+                            "partial": false
                         },
-                        "finish_reason": "length",
-                        "logprobs": null
+                        "finish_reason": "length"
                     }
                 ],
                 "usage": {
@@ -48,7 +43,7 @@
                 "debug_info": null,
                 "aux_info": {
                     "cost_time": 3143.197,
-                    "iter_count": 27,
+                    "iter_count": 26,
                     "prefix_len": 0,
                     "input_len": 18,
                     "output_len": 100,
@@ -103,14 +98,9 @@
                         "message": {
                             "role": "assistant",
                             "content": "Here's a thinking process that leads to the suggested revisions:\n\n1.  **Analyze the",
-                            "reasoning_content": null,
-                            "function_call": null,
-                            "tool_calls": null,
-                            "partial": false,
-                            "tool_call_id": null
+                            "partial": false
                         },
-                        "finish_reason": "length",
-                        "logprobs": null
+                        "finish_reason": "length"
                     }
                 ],
                 "usage": {
@@ -169,7 +159,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\n\n</think>\n\n这是一份经过深度润色和逻辑重构的文本。我提供了两个版本",
+                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,

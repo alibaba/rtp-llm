@@ -1,8 +1,20 @@
+from rtp_llm.server.server_args.util import str2bool
+
+
 def init_model_specific_group_args(parser, model_specific_config):
     ##############################################################################################################
     # 模型特定配置
     ##############################################################################################################
     model_specific_group = parser.add_argument_group("模型特定配置")
+
+    model_specific_group.add_argument(
+        "--load_python_model",
+        env_name="LOAD_PYTHON_MODEL",
+        bind_to=(model_specific_config, "load_python_model"),
+        type=str2bool,
+        default=False,
+        help="启用 Python-wrapped model 执行路径（绑定到 C++ ModelSpecificConfig）。",
+    )
 
     model_specific_group.add_argument(
         "--max_lora_model_size",

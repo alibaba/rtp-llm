@@ -33,13 +33,15 @@ public:
         MultimodalProcessor(py::none(), mm_model_config, max_seq_len, metrics_reporter),
         output_transport_(createMMRemoteOutputTransport(transport_config, metrics_reporter, device_id)) {}
 
-    ErrorResult<MultimodalOutput>
-    MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs, std::string ip_port = "") override {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
+                                                      std::string                                 ip_port    = "",
+                                                      int64_t                                     request_id = 0,
+                                                      grpc::ServerContext* server_context = nullptr) override {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "ip:port is empty in remote multimodal processing");
         }
-        auto request_pb = MultimodalPbConverter::inputsToPb(mm_inputs);
-        return output_transport_->fetch(ip_port, request_pb);
+        auto request_pb = MultimodalPbConverter::inputsToPb(mm_inputs, request_id);
+        return output_transport_->fetch(ip_port, request_pb, server_context);
     }
 
 private:

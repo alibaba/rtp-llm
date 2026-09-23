@@ -11,6 +11,15 @@
 
 namespace rtp_llm {
 
+namespace cache_store_detail {
+
+std::vector<std::shared_ptr<RequestBlockBuffer>>
+chunkTcpLoadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                    size_t                                                  max_chunk_bytes,
+                    size_t                                                  max_chunk_layers);
+
+}  // namespace cache_store_detail
+
 class NormalCacheStore: public CacheStore {
 private:
     NormalCacheStore() = default;
@@ -46,10 +55,11 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                  int64_t                                                 timeout_ms) override;
 
-    std::shared_ptr<RemoteStoreTask> submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
-                                                           const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                                           RemoteStoreTask::CheckCancelFunc check_cancel_func) override;
-    void                             releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
+    std::shared_ptr<RemoteStoreTask>
+         submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
+                               const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+                               RemoteStoreTask::CheckCancelFunc                              check_cancel_func) override;
+    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
 
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key) override;
@@ -90,7 +100,9 @@ private:
     std::shared_mutex                                                                remote_store_tasks_mutex_;
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
     std::shared_mutex                                                                store_tasks_mutex_;
-    std::unordered_map<std::shared_ptr<RequestBlockBuffer>, std::pair<CacheStoreStoreDoneCallback, std::function<void()>>> store_tasks_;
+    std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
+                       std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>
+        store_tasks_;
 };
 
 }  // namespace rtp_llm

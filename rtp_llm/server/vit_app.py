@@ -10,13 +10,17 @@ from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
+from google.protobuf.json_format import ParseDict, ParseError
+from pydantic import BaseModel, Field
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
 )
@@ -24,8 +28,142 @@ from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
+from rtp_llm.multimodal.multimodal_util import trans_mm_input
 from rtp_llm.ops import RoleType
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
+
+MM_CACHE_SNAPSHOT_MAX_KEYS = 100000
+
+
+class MMCacheMetadataRequest(BaseModel):
+    keys: List[str] = Field(max_length=256)
+    inputs: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=256)
+    request_id: int = 0
+    timeout_ms: int = Field(default=120000, gt=0)
+
+
+def _get_hash_key_cache(engine: MMProcessEngine):
+    """Return the routing-key index, with compatibility for lightweight fakes."""
+    return getattr(engine, "_hash_key_cache", None)
+
+
+def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
+    @app.get("/mm_cache/keys")
+    @app.post("/mm_cache/keys")
+    def cache_keys():
+        if engine is None or engine.is_proxy_mode:
+            raise HTTPException(status_code=501, detail="worker-local cache required")
+        hash_key_cache = _get_hash_key_cache(engine)
+        if hash_key_cache is None:
+            # Keep older test doubles and mixed-version workers functional.
+            cache = engine._embedding_cache
+            keys = cache.metadata_keys()
+            worker_instance = cache.instance_id
+        else:
+            keys = hash_key_cache.keys(limit=MM_CACHE_SNAPSHOT_MAX_KEYS)
+            worker_instance = hash_key_cache.instance_id
+        tiers = engine._embedding_cache.resident_tiers(limit=MM_CACHE_SNAPSHOT_MAX_KEYS)
+        # Keep recent routing hashes first, then fill the snapshot with embeddings.
+        selected = set(keys)
+        for key in tiers:
+            if len(selected) >= MM_CACHE_SNAPSHOT_MAX_KEYS:
+                break
+            selected.add(key)
+        tiers = {key: tier for key, tier in tiers.items() if key in selected}
+        if len(keys) > MM_CACHE_SNAPSHOT_MAX_KEYS:
+            raise HTTPException(status_code=413, detail="cache key snapshot too large")
+        return {
+            "worker_instance": worker_instance,
+            "feature_hash_version": 1,
+            "keys": keys,
+            "gpu_embedding_keys": [key for key, tier in tiers.items() if tier == "gpu"],
+            "cpu_embedding_keys": [key for key, tier in tiers.items() if tier == "cpu"],
+        }
+
+    @app.post("/mm_cache/metadata")
+    def cache_metadata(request: MMCacheMetadataRequest):
+        if engine is None or engine.is_proxy_mode:
+            raise HTTPException(status_code=501, detail="worker-local cache required")
+        if any(not key or len(key) > 4096 for key in request.keys):
+            raise HTTPException(status_code=400, detail="invalid multimodal cache key")
+        try:
+            hash_key_cache = _get_hash_key_cache(engine)
+            if hash_key_cache is None:
+                return engine._embedding_cache.metadata(request.keys)
+            metadata = hash_key_cache.metadata(request.keys, engine._embedding_cache)
+        except ValueError as error:
+            raise HTTPException(status_code=413, detail=str(error)) from error
+        missing = {e["key"] for e in metadata["entries"] if not e["hash_hit"]}
+        if not missing or request.inputs is None:
+            return metadata
+        try:
+            inputs_pb = ParseDict(
+                {"multimodal_inputs": request.inputs}, MultimodalInputsPB()
+            )
+            if any(
+                not i.multimodal_url or i.multimodal_tensor.ByteSize()
+                for i in inputs_pb.multimodal_inputs
+            ):
+                raise ValueError("hash submission requires URL inputs without tensors")
+            inputs = {item.cache_key(): item for item in trans_mm_input(inputs_pb)}
+            if not missing.issubset(inputs) or not inputs.keys() <= set(request.keys):
+                raise ValueError("multimodal inputs do not match requested cache keys")
+        except (ValueError, TypeError, ParseError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        del inputs_pb
+        missing_keys = [key for key in dict.fromkeys(request.keys) if key in missing]
+        try:
+            results = engine.get_embedding_result(
+                [inputs[key] for key in missing_keys],
+                request_id=request.request_id,
+                timeout_ms=request.timeout_ms,
+                hashes_only=True,
+            )
+        except TimeoutError as error:
+            raise HTTPException(
+                status_code=504, detail="ViT hash computation timed out"
+            ) from error
+        except FtRuntimeException as error:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": int(error.exception_type),
+                    "message": error.message,
+                },
+            ) from error
+        tiers = engine._embedding_cache.resident_tiers(missing_keys)
+        completed = {}
+        total_rows = sum(len(e.get("feature_hashes", [])) for e in metadata["entries"])
+        for key, result in zip(missing_keys, results):
+            hashes = result.feature_hashes
+            if not hashes or any(h.numel() == 0 for h in hashes):
+                raise HTTPException(
+                    status_code=500, detail="ViT returned no feature hashes"
+                )
+            sizes = [h.numel() for h in hashes]
+            total_rows += sum(sizes)
+            if total_rows > 1048576:
+                raise HTTPException(
+                    status_code=413,
+                    detail="multimodal metadata response exceeds row limit",
+                )
+            completed[key] = {
+                "key": key,
+                "hit": True,
+                "hash_hit": True,
+                "embedding_hit": key in tiers,
+                "embedding_tier": tiers.get(key),
+                "split_size": sizes,
+                "feature_hashes": [
+                    int(h) for tensor in hashes for h in tensor.tolist()
+                ],
+            }
+        if len(completed) != len(missing_keys):
+            raise HTTPException(
+                status_code=500, detail="ViT returned incomplete feature hashes"
+            )
+        metadata["entries"] = [completed.get(e["key"], e) for e in metadata["entries"]]
+        return metadata
 
 
 class GracefulShutdownServer(Server):
@@ -136,6 +274,7 @@ class VitEndpointApp:
             )
         ]
         app = FastAPI(middleware=middleware)
+        register_mm_cache_routes(app, self.vit_endpoint_server.mm_process_engine)
 
         @app.get("/health")
         @app.post("/health")

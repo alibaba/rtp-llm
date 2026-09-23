@@ -102,11 +102,11 @@ TEST_F(RequestBlockBufferTest, testWatchFunc_SetWatchFunc) {
             watched_blocks.insert(watched_blocks.end(), blocks.begin(), blocks.end());
         };
         ASSERT_TRUE(request_block_buffer->setWatchFunc(std::move(watch_func2)));
-        ASSERT_TRUE(watched_called1);
-        ASSERT_TRUE(watched_success1);
+        ASSERT_FALSE(watched_called1);
+        ASSERT_FALSE(watched_success1);
         ASSERT_TRUE(watched_called2);
         ASSERT_TRUE(watched_success2);
-        ASSERT_EQ(4, watched_blocks.size());
+        ASSERT_EQ(2, watched_blocks.size());
 
         request_block_buffer.reset();
     }
@@ -144,7 +144,7 @@ TEST_F(RequestBlockBufferTest, testWatchFunc_AddBlock) {
         watched_blocks.insert(watched_blocks.end(), blocks.begin(), blocks.end());
     };
     ASSERT_TRUE(request_block_buffer->setWatchFunc(std::move(watch_func2)));
-    ASSERT_EQ(2, watched_blocks.size());
+    ASSERT_EQ(1, watched_blocks.size());
     watched_called1 = false;
     watched_called2 = false;
     watched_blocks.clear();

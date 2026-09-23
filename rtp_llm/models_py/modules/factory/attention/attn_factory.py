@@ -249,6 +249,8 @@ def get_fmha_impl(
             attn_configs, attn_inputs, fmha_config
         )
 
+    rejected: List[str] = []
+
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
@@ -258,14 +260,22 @@ def get_fmha_impl(
 
         # Skip if this FMHA implementation is disabled in config
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+            rejected.append(f"{impl_class_name}: disabled by config")
+            continue
+
+        # Check parallelism config first to avoid calling support() on impls
+        # that don't support CP — some impls (e.g. TRT) abort in support().
+        # CP only splits the prefill sequence; decode runs standard attention,
+        # so the prefill-CP gate must not reject decode impls when CP is enabled.
+        if attn_inputs.is_prefill and not impl.support_parallelism_config(
+            parallelism_config
+        ):
+            rejected.append(f"{impl_class_name}: does not support prefill CP")
             continue
 
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
-            continue
-
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+            rejected.append(f"{impl_class_name}: support() returned False")
             continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
@@ -286,6 +296,7 @@ def get_fmha_impl(
             ):
                 raise
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
+            rejected.append(f"{impl_class_name}: raised {type(e).__name__}: {e}")
             continue
         if selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
             # Backend priority is part of model semantics. Do not skip an eager
@@ -299,6 +310,7 @@ def get_fmha_impl(
             return instance
         if _matches_cuda_graph_selection_mode(instance, selection_mode):
             return instance
+        rejected.append(f"{impl_class_name}: no cuda graph support")
     if (
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved
@@ -314,7 +326,12 @@ def get_fmha_impl(
             "no generation-prefill CUDA Graph attention implementation "
             "matches the current model, cache layout, dtype, and GPU"
         )
-    raise Exception("can not find mha type")
+    raise Exception(
+        "can not find mha type for "
+        f"{'prefill' if attn_inputs.is_prefill else 'decode'} "
+        f"(is_cuda_graph={is_cuda_graph}, candidates={len(mha_impls)}): "
+        + "; ".join(rejected)
+    )
 
 
 class AttnImplFactory(object):

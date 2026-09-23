@@ -31,6 +31,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.metric.NoOpFlexMonitor;
+import org.flexlb.service.VitCacheDirectory;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -1014,7 +1015,8 @@ class TransientCapacityQueueContractTest {
                             decodeSelector,
                             new RandomStrategy(workers),
                             configService,
-                            modelMeta(prefillFirst)),
+                            modelMeta(prefillFirst),
+                            mock(VitCacheDirectory.class)),
                     metrics));
         }
 
@@ -1170,7 +1172,8 @@ class TransientCapacityQueueContractTest {
                     mock(DecodeSelector.class),
                     mock(RandomStrategy.class),
                     mock(ConfigService.class),
-                    modelMeta(false));
+                    modelMeta(false),
+                    mock(VitCacheDirectory.class));
             this.delegate = delegate;
             this.metrics = metrics;
         }

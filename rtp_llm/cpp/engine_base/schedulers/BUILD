@@ -13,6 +13,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/models:context_parallel_layout",
+        "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/utils:profiling_scope",
     ],
     visibility = ["//visibility:public"],

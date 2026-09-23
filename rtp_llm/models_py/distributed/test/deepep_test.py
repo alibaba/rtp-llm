@@ -6,7 +6,7 @@ import time
 from functools import partial
 from typing import Any, Dict, Tuple
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 import torch.distributed as dist
@@ -91,6 +91,53 @@ class DeepEPTest(TestCase):
 
     def setUp(self) -> None:
         pass
+
+    def test_init_low_latency_uses_configured_speculative_capacity_once(self):
+        engine_config = MagicMock()
+        engine_config.moe_config.use_deepep_low_latency = True
+        engine_config.moe_config.ll_num_max_token = 128
+        engine_config.parallelism_config.tp_size = 1
+        engine_config.parallelism_config.ep_size = 1
+        engine_config.parallelism_config.ep_rank = 0
+        engine_config.parallelism_config.get_attn_tp_size.return_value = 1
+        engine_config.parallelism_config.get_attn_tp_rank.return_value = 0
+        engine_config.hw_kernel_config.enable_cuda_graph = True
+        model_config = MagicMock()
+        model_config.expert_num = 64
+        model_config.eplb_config.phy_exp_num = lambda count: count
+        model_config.moe_k = 8
+        model_config.moe_topk_group = 1
+        model_config.hidden_size = 7168
+        model_config.moe_inter_size = 2048
+        model_config.inter_size = 2048
+        model_config.moe_style = 1
+        model_config.n_shared_experts = 0
+        model_config.moe_w1_layout = None
+        model_config.routed_scaling_factor = 1.0
+        model_config.swiglu_limit = 0.0
+        model_config.swiglu_alpha = 0.0
+        model_config.moe_prefill_max_tokens_per_rank = None
+        model_config.max_seq_len = 1024
+        model_config.quant_config = None
+
+        with (
+            patch.object(DeepEPWrapper, "supported", return_value=True),
+            patch.object(DeepEPWrapper, "create") as create,
+            patch.object(
+                DeepepWrapperConfig,
+                "calc_low_latency_max_token_per_rank",
+                return_value=128,
+            ) as calc_capacity,
+            patch.object(
+                DeepepWrapperConfig,
+                "from_config_adapter",
+                return_value=MagicMock(),
+            ),
+        ):
+            init_deepep_wrapper(engine_config, model_config)
+
+        calc_capacity.assert_called_once_with(128, 1, model_config.quant_config)
+        create.assert_called_once()
 
     @staticmethod
     def _test_intranode_main(

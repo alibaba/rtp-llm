@@ -14,6 +14,10 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
+namespace grpc {
+class ServerContext;
+}
+
 namespace rtp_llm {
 
 // Keep the direct client and ViT proxy defaults aligned: 120s worker budget plus 5s margin.
@@ -69,8 +73,10 @@ class MMControlClient {
 public:
     virtual ~MMControlClient() = default;
 
-    virtual ErrorResult<MultimodalOutputPB>
-    request(const std::string& endpoint, MultimodalInputsPB& request_pb, DeadlineBudget& budget) = 0;
+    virtual ErrorResult<MultimodalOutputPB> request(const std::string&   endpoint,
+                                                    MultimodalInputsPB&  request_pb,
+                                                    DeadlineBudget&      budget,
+                                                    grpc::ServerContext* server_context = nullptr) = 0;
 
     // Best-effort; encoder slot GC is the backstop.
     virtual void
@@ -170,7 +176,8 @@ public:
         default_rpc_timeout_ms_(default_rpc_timeout_ms),
         rpc_timeout_margin_ms_(rpc_timeout_margin_ms) {}
 
-    ErrorResult<MultimodalOutput> fetch(const std::string& endpoint, MultimodalInputsPB& request_pb);
+    ErrorResult<MultimodalOutput>
+    fetch(const std::string& endpoint, MultimodalInputsPB& request_pb, grpc::ServerContext* server_context = nullptr);
 
 private:
     // nullptr means the receipt is inline.

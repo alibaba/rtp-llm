@@ -2520,7 +2520,10 @@ def _launch_dummy_mhc_pre_big_fuse(
     num_splits: int,
     device: torch.device,
 ) -> None:
-    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
+    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
+
+    if not tilelang_kernels.tilelang_available():
+        return
 
     _mhc_pre_big_fuse = import_module(
         "rtp_llm.models_py.3rdparty.tile_kernels.mhc.pre_big_fuse_kernel"
@@ -2599,7 +2602,11 @@ def _launch_dummy_mhc_pre_wrapper(
     m_value: int,
     device: torch.device,
 ) -> None:
+    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
     from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_pre
+
+    if not tilelang_kernels.tilelang_available():
+        return
 
     n_value, k_value = key
     mhc_mult = int(info.get("hc_mult", 4) or 4)
@@ -2657,7 +2664,11 @@ def _launch_dummy_mhc_head_fused(
     token_values: Iterable[int],
     device: torch.device,
 ) -> None:
+    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
     from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused
+
+    if not tilelang_kernels.tilelang_available():
+        return
 
     hc_mult, hidden_size = key
     fn = info.get("fn")

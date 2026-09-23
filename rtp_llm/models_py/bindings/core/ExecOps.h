@@ -61,6 +61,18 @@ void cudaCheckLastError();
 bool getEnableCommOverlap();
 
 // ===================================================================
+// CUDA graph forward phase flags
+// ===================================================================
+
+void pushCudaGraphWarmupForwardFlag();
+void popCudaGraphWarmupForwardFlag();
+bool cudaGraphWarmupForwardEnabled();
+
+void pushCudaGraphCaptureForwardFlag();
+void popCudaGraphCaptureForwardFlag();
+bool cudaGraphCaptureForwardEnabled();
+
+// ===================================================================
 // Profiling
 // ===================================================================
 

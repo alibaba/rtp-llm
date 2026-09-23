@@ -37,6 +37,12 @@ def parse_args(
         default="1024,4096",
         help="Comma-separated input lengths for grid mode",
     )
+    perf.add_argument(
+        "--grid_cases",
+        type=str,
+        default="",
+        help="Optional comma-separated batch:input_len pairs for grid mode.",
+    )
     dataset_group = perf.add_mutually_exclusive_group()
     dataset_group.add_argument(
         "--dataset_name",
@@ -152,6 +158,18 @@ def parse_args(
             "Repeatable engine environment override; explicit engine CLI arguments "
             "take precedence when both configure the same setting."
         ),
+    )
+    perf.add_argument(
+        "--prefill_reuse_cache_hit_rate",
+        type=float,
+        default=0.0,
+        help="Seed and measure a target prefix-cache hit rate in prefill mode.",
+    )
+    perf.add_argument(
+        "--prefill_reuse_cache_lengths",
+        type=str,
+        default="",
+        help="Comma-separated exact prefix-cache hit lengths for a resident prefill sweep.",
     )
 
     engine = parser.add_argument_group(
@@ -301,7 +319,12 @@ def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestCo
         batch_size_list = auto_generate_bs_list(args.concurrency_limit)
 
     effective_max_concurrency = max(batch_size_list)
-    if args.target_tpot > 0:
+    if batch_size_explicit:
+        effective_max_concurrency = max(
+            effective_max_concurrency,
+            max(int(x) for x in args.batch_size.split(",")),
+        )
+    if args.target_tpot > 0 or args.partial == 2:
         effective_max_concurrency = max(
             effective_max_concurrency, args.concurrency_limit
         )

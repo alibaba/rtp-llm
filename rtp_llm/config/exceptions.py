@@ -161,6 +161,10 @@ class ExceptionType(IntEnum):
     MM_DOWNLOAD_FAILED = 906
     MM_REMOTE_RPC_FAILED = 907
 
+    # content safety error
+    UNSAFE_INPUT_CONTENT = 908, ExceptionCategory.BAD_REQUEST
+    UNSAFE_OUTPUT_CONTENT = 909, ExceptionCategory.BAD_REQUEST
+
     @classmethod
     def from_value(cls, value):
         """根据给定的值返回对应的枚举名称，或者引发值错误。"""

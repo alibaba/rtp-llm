@@ -12,11 +12,14 @@ from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 
 
 def _hc_fallback_chunk_tokens() -> int:
-    raw = os.environ.get("DSV4_HC_FALLBACK_CHUNK_TOKENS", "16384")
+    # CUDA13 CI cannot import tilelang (apache-tvm-ffi 0.1.12), so production
+    # smokes land here. 16384 still materialises a ~1 GiB fp32 copy on a packed
+    # B300 and OOMs FlexLB 2P2D; keep the default per-chunk bound small.
+    raw = os.environ.get("DSV4_HC_FALLBACK_CHUNK_TOKENS", "2048")
     try:
         return max(int(raw), 1)
     except (TypeError, ValueError):
-        return 16384
+        return 2048
 
 
 def _hc_split_sinkhorn(
@@ -70,31 +73,20 @@ class FallbackHCUnit(HCUnitBase):
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
         shape, dtype = x.size(), x.dtype
-        x_flat = x.flatten(-2)  # [..., hc*dim] view
-        T = (
-            x_flat.shape[0]
-            if x_flat.dim() == 2
-            else int(torch.tensor(x_flat.shape[:-1]).prod().item())
-        )
+        hidden_dim = shape[-1] if x.dim() >= 3 else shape[-1] // self.hc_mult
+        x_flat = x.reshape(-1, self.hc_mult * hidden_dim)
+        T = x_flat.shape[0]
         chunk = _hc_fallback_chunk_tokens()
-
-        if x_flat.dim() == 2 and T > chunk:
-            rsqrt = torch.empty((T, 1), dtype=dtype, device=x_flat.device)
-            mixes_list = []
-            for s in range(0, T, chunk):
-                e = min(s + chunk, T)
-                rsqrt[s:e] = torch.rsqrt(
-                    x_flat[s:e].float().square().mean(-1, keepdim=True) + self.norm_eps
-                ).to(dtype)
-                mixes_list.append(self._linear_mixes(x_flat[s:e], rsqrt[s:e]))
-            mixes = torch.cat(mixes_list, dim=0).contiguous()
-            del mixes_list
-        else:
-            x_flat_f32 = x_flat.float()
-            rsqrt = torch.rsqrt(
-                x_flat_f32.square().mean(-1, keepdim=True) + self.norm_eps
+        rsqrt = torch.empty((T, 1), dtype=dtype, device=x_flat.device)
+        mixes_list = []
+        for s in range(0, T, chunk):
+            e = min(s + chunk, T)
+            rsqrt[s:e] = torch.rsqrt(
+                x_flat[s:e].float().square().mean(-1, keepdim=True) + self.norm_eps
             ).to(dtype)
-            mixes = self._linear_mixes(x_flat, rsqrt).contiguous()
+            mixes_list.append(self._linear_mixes(x_flat[s:e], rsqrt[s:e]))
+        mixes = torch.cat(mixes_list, dim=0).contiguous()
+        del mixes_list
 
         pre, post, comb = _hc_split_sinkhorn(
             mixes,
@@ -105,17 +97,20 @@ class FallbackHCUnit(HCUnitBase):
             eps=self.hc_eps,
         )
 
-        if x_flat.dim() == 2 and T > chunk:
-            x_view = x.view(*shape)
-            y = torch.empty((T, shape[-1]), dtype=dtype, device=x.device)
-            pre_dt = pre.to(dtype)
-            for s in range(0, T, chunk):
-                e = min(s + chunk, T)
-                y[s:e] = torch.sum(pre_dt[s:e].unsqueeze(-1) * x_view[s:e], dim=-2)
-            y = y.view(*shape[:-2], shape[-1])
-        else:
-            y = torch.sum(pre.to(dtype).unsqueeze(-1) * x.view(*shape), dim=-2)
-        return y.to(dtype), post.unsqueeze(-1), comb
+        x_view = x.reshape(T, self.hc_mult, hidden_dim)
+        y = torch.empty((T, hidden_dim), dtype=dtype, device=x.device)
+        pre_dt = pre.to(dtype)
+        for s in range(0, T, chunk):
+            e = min(s + chunk, T)
+            y[s:e] = torch.sum(pre_dt[s:e].unsqueeze(-1) * x_view[s:e], dim=-2)
+        # Flatten-for-chunk, then restore the public [T, ...] / [B, S, ...]
+        # contract.  Leaving post/comb as [T_flat, hc, ...] fails
+        # test_factory_fallback_cpu_shapes on 4-D decode layout.
+        leading = shape[:-2]
+        y = y.view(*leading, hidden_dim)
+        post = post.view(*leading, self.hc_mult, 1)
+        comb = comb.view(*leading, self.hc_mult, self.hc_mult)
+        return y.to(dtype), post, comb
 
     def _post_impl(
         self,
@@ -151,7 +146,7 @@ class FallbackHCUnit(HCUnitBase):
             )
             return y.type_as(x)
 
-        if residual.dim() == 3 and T > chunk:
+        if residual.dim() == 3:
             out = torch.empty(residual.shape, dtype=x.dtype, device=x.device)
             for s in range(0, T, chunk):
                 e = min(s + chunk, T)
@@ -183,7 +178,7 @@ class FallbackHCHead(HCHeadBase):
             _pre = torch.sigmoid(_mixes * self.scale + self.base) + self.hc_eps
             return torch.sum(_pre.unsqueeze(-1) * _x_flat.view(_x.shape), dim=-2)
 
-        if x.dim() == 3 and T > chunk:
+        if x.dim() == 3:
             y = torch.empty((T, shape[-1]), dtype=torch.float32, device=x.device)
             for s in range(0, T, chunk):
                 e = min(s + chunk, T)

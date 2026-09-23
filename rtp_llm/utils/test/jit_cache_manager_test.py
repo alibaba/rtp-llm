@@ -1039,7 +1039,10 @@ class BackendTest(JitCacheTestBase):
                 FakeBackendManager.instance = self
 
             def start(self):
-                assert backend.signal.SIGTERM not in handlers
+                # The rank arms a startup-phase handler before building the
+                # manager, so SIGTERM here aborts startup instead of asking a
+                # half-built manager to shut down.
+                assert backend.signal.SIGTERM in handlers
 
         backend_module = types.ModuleType("rtp_llm.server.backend_manager")
         backend_module.BackendManager = FakeBackendManager

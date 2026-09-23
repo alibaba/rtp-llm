@@ -14,6 +14,19 @@ void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   int32_t              tokens_per_batch,
                                   cudaStream_t         stream);
 
+// Expand MiniMax-M3 MSA request-row metadata into the token-row layout used by
+// paged multi-token attention. Returns, in order:
+//   physical_block_table [batch * tokens_per_batch, max_blocks]
+//   positions            [batch * tokens_per_batch]
+//   sequence_lengths     [batch * tokens_per_batch]
+//   valid_token_mask     [batch * tokens_per_batch]
+// Padded request rows are identified by input_lengths == 0. The operation is
+// asynchronous on the current PyTorch CUDA stream and performs no host readback.
+std::vector<torch::Tensor> mtpMsaTargetVerifyAddressingPrepare(const torch::Tensor& request_block_table,
+                                                               const torch::Tensor& prefix_lengths,
+                                                               const torch::Tensor& input_lengths,
+                                                               int64_t              tokens_per_batch);
+
 void invokeMtpSpecDecodeMetadataPrepare(torch::Tensor& input_lengths,
                                         torch::Tensor& lm_output_indexes,
                                         int32_t        tokens_per_batch,

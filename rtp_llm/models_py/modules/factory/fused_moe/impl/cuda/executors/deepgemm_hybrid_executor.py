@@ -34,6 +34,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
+    cuda_graph_warmup_forward_enabled,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import (
     MaskedSiluInputLayout,
     create_packed_scale_tensor,
@@ -65,7 +68,6 @@ from rtp_llm.utils.model_weight import W
 _SM120_TRITON_MIN_TOKENS = 1
 _SM120_TRITON_MAX_TOKENS = 32
 _SM120_TRITON_MAX_TOKENS_ENV = "RTP_LLM_SM120_TRITON_FP8_MAX_TOKENS"
-_CUDA_GRAPH_WARMUP_FORWARD_ENV = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
 _SM120_TUNED_FP8_CONFIGS = {
     # Qwen3-30B-A3B, TP=1. Exhaustive search over BM={8,16,32},
     # BN={64,128,256}, BK={64,128}, warps={4,8}, and stages={2,3,4,5}.
@@ -113,13 +115,12 @@ def _is_cuda_graph_warmup_or_capture() -> bool:
 
     ``enable_cuda_graph`` is an engine-level capability and is also true for
     ordinary eager prefill forwards.  The C++ graph runner marks its eager
-    warmup with an environment flag, while PyTorch exposes the subsequent
+    warmup with a thread-local flag, while PyTorch exposes the subsequent
     capture directly.  Requiring either signal keeps short eager prefill out
     of the static ``torch.compile(dynamic=False)`` routing path.
     """
     return (
-        os.environ.get(_CUDA_GRAPH_WARMUP_FORWARD_ENV) == "1"
-        or torch.cuda.is_current_stream_capturing()
+        cuda_graph_warmup_forward_enabled() or torch.cuda.is_current_stream_capturing()
     )
 
 

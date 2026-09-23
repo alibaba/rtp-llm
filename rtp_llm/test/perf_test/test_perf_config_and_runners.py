@@ -303,6 +303,56 @@ class TestRunDecode(unittest.TestCase):
             query_dict,
         )
 
+    @patch("rtp_llm.test.perf_test.batch_decode_test.TpsBinarySearchRunner")
+    def test_tps_grid_drops_tp_size(self, MockTpsRunner):
+        """main() still puts tp_size in runner_kwargs; TPS ctor must not see it."""
+        MockTpsRunner.return_value = MagicMock()
+        args = _make_args(target_tpot=30, concurrency_limit=64)
+        _run_decode(
+            8000,
+            1,
+            args,
+            self._grid_config(),
+            {128: "q128", 256: "q256"},
+            None,
+            dump_json_path="/tmp",
+            tp_size=8,
+        )
+        self.assertNotIn("tp_size", MockTpsRunner.call_args.kwargs)
+
+    @patch("rtp_llm.test.perf_test.batch_decode_test.DistributionRunner")
+    def test_decode_distribution_drops_tp_size(self, MockDistRunner):
+        MockDistRunner.return_value = MagicMock()
+        args = _make_args(target_tpot=0)
+        _run_decode(
+            8000,
+            1,
+            args,
+            self._dist_config(),
+            {128: "q", 256: "q", 512: "q"},
+            None,
+            dump_json_path="/tmp",
+            tp_size=8,
+        )
+        self.assertNotIn("tp_size", MockDistRunner.call_args.kwargs)
+
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    def test_decode_grid_keeps_tp_size(self, MockGridRunner):
+        MockGridRunner.return_value = MagicMock()
+        args = _make_args(target_tpot=0)
+        _run_decode(
+            8000,
+            1,
+            args,
+            self._grid_config(),
+            {128: "q128", 256: "q256"},
+            {"max_kv_tokens": 2048},
+            dump_json_path="/tmp",
+            tp_size=8,
+        )
+        for call in MockGridRunner.call_args_list:
+            self.assertEqual(call.kwargs.get("tp_size"), 8)
+
 
 # ---------------------------------------------------------------------------
 # Helper functions

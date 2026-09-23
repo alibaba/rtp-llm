@@ -29,6 +29,9 @@ from rtp_llm.dash_sc.codec import (
 from rtp_llm.dash_sc.grpc_metrics import report_chunk, report_forwarder_rpc_done
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
+from rtp_llm.server.server_args.grpc_group_args import (
+    DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
+)
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_client_span, start_server_span
@@ -39,6 +42,8 @@ from rtp_llm.telemetry.tracing import (
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
+    ("grpc.max_send_message_length", DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES),
+    ("grpc.max_receive_message_length", DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES),
     ("grpc.keepalive_time_ms", 30000),
     ("grpc.keepalive_timeout_ms", 10000),
     ("grpc.keepalive_permit_without_calls", 0),
@@ -54,6 +59,15 @@ _DASH_SERVER_ATTRIBUTES = {
     "rpc.system": "grpc",
     "rpc.method": _DASH_RPC_METHOD,
 }
+
+
+def _forward_channel_options(dash_sc_grpc_config=None) -> list[tuple[str, int]]:
+    """Build proxy outbound options, with explicit client config taking priority."""
+    merged = dict(_FORWARD_CHANNEL_OPTS)
+    if dash_sc_grpc_config is not None:
+        for key, value in dash_sc_grpc_config.get_client_config().items():
+            merged[str(key)] = int(value)
+    return sorted(merged.items())
 
 
 def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
@@ -176,12 +190,13 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
     def __init__(
         self,
+        dash_sc_grpc_config=None,
         *,
         rank_id: Optional[int] = None,
         server_id: str = "",
     ):
         self._channel_pool = GrpcHostChannelPool(
-            options=_FORWARD_CHANNEL_OPTS,
+            options=_forward_channel_options(dash_sc_grpc_config),
             cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
         )
         self._discovery = create_service_discovery_from_env()

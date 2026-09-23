@@ -80,6 +80,17 @@ class MtpHiddenBufferTest(unittest.TestCase):
         sliced = DeepSeekV4Model.get_mtp_target_hidden_states(model, -1)
         self.assertTrue(torch.equal(flat, sliced))
 
+    def test_decode_negative_rows_returns_none(self) -> None:
+        # CUDA graph capture calls the MiniMax-style hook with -1. Decode
+        # must not assert and must not publish a replay-unsafe buffer.
+        v4 = types.SimpleNamespace()
+        v4._mtp_hidden_buffer = torch.arange(15, dtype=torch.bfloat16).reshape(5, 3)
+        v4._mtp_hidden_valid_tokens = 0
+        model = types.SimpleNamespace(v4=v4, _is_decode_role=True)
+
+        sliced = DeepSeekV4Model.get_mtp_target_hidden_states(model, -1)
+        self.assertIsNone(sliced)
+
     def test_accessor_rejects_requests_beyond_buffer_capacity(self) -> None:
         v4 = types.SimpleNamespace()
         v4._mtp_hidden_buffer = torch.empty(5, 3, dtype=torch.bfloat16)
@@ -87,6 +98,21 @@ class MtpHiddenBufferTest(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "requested=6, capacity=5"):
             DeepSeekV4Model.get_mtp_target_hidden_states(model, 6)
+
+    def test_capability_requires_initialized_hidden_buffer(self) -> None:
+        model = DeepSeekV4Model.__new__(DeepSeekV4Model)
+
+        model.v4 = None
+        self.assertFalse(model.supports_mtp_target_hidden_states())
+
+        model.v4 = types.SimpleNamespace(_mtp_hidden_buffer=None)
+        self.assertFalse(model.supports_mtp_target_hidden_states())
+
+        model.v4._mtp_hidden_buffer = torch.empty(1, 3)
+        self.assertTrue(model.supports_mtp_target_hidden_states())
+
+        model.v4._mtp_hidden_buffer = None
+        self.assertFalse(model.supports_mtp_target_hidden_states())
 
     def test_last_hidden_accessor_slices_requested_rows(self) -> None:
         v4 = types.SimpleNamespace()

@@ -51,9 +51,13 @@ def _import_tk():
     # Importing tilelang_kernels triggers its module-level env-prep
     # (libz3 preload + TVM tmpdir setup), which must run before any tilelang
     # JIT import below.
-    from rtp_llm.models_py.modules.dsv4 import (  # noqa: F401  # pyright: ignore[reportUnusedImport]
-        tilelang_kernels,
-    )
+    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
+
+    # CUDA13 CI injects apache-tvm-ffi 0.1.12. tilelang_kernels already
+    # swallowed that AttributeError; a second ``import tilelang`` via
+    # tile_kernels.mhc.functional would raise it again and abort initialize().
+    if not tilelang_kernels.tilelang_available():
+        raise ImportError("tilelang is not importable")
 
     mod = importlib.import_module(
         "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.functional"

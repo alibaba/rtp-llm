@@ -85,6 +85,8 @@ public:
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     bool            hasMtpTargetHiddenBuffer() const override;
+    void            selectMtpIterationTopkCache(const torch::Tensor& select_indices, int64_t total_tokens) override;
+    void            copyMtpIterationTopkCacheFrom(const ModelBase& source) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
@@ -157,6 +159,7 @@ private:
     py::object                 py_model_;
     py::object                 py_forward_method_;
     py::object                 held_attn_pyobj_;
+    torch::Tensor              last_mtp_target_hidden_states_;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
@@ -479,8 +482,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
-        auto graph_runner =
-            std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
+        std::unique_ptr<CudaGraphRunner> graph_runner;
+        try {
+            graph_runner =
+                std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("CUDA graph runner construction failed with Python exception:\n%s", e.what());
+            throw;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("CUDA graph runner construction failed:\n%s", e.what());
+            throw;
+        }
+        RTP_LLM_CHECK_WITH_INFO(graph_runner != nullptr, "graph_runner can't be nullptr in PyWrapper");
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
             cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
@@ -497,6 +510,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_runner_.reset(CudaGraphRunner::initializeCapture(std::move(graph_runner)));
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
+            throw;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("Model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;
         }
 
@@ -615,6 +631,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
         has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();
     }
+    if (py::hasattr(py_model_, "supports_mtp_target_hidden_states")) {
+        has_mtp_hidden_buffer_ =
+            has_mtp_hidden_buffer_ || py_model_.attr("supports_mtp_target_hidden_states")().cast<bool>();
+    }
 
     // Speculative prefill CP needs every target rank to retain the complete
     // rank-local hidden sequence for the following draft prefill. The normal
@@ -635,9 +655,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // run only on decode roles, where prefill CP is off (colocated CP is
         // rejected at executor construction).
         //
-        // Row count identifies global versus rank-local hidden input. The
-        // model capability only resolves the small-input case where those
-        // counts happen to be equal.
+        // A model-owned MTP hidden buffer is written after CP token splitting
+        // and already contains rank-local rows. Row count identifies global
+        // versus rank-local hidden input; the model capability only resolves
+        // the small-input case where those counts happen to be equal.
         context_parallel_processor_ = ContextParallelProcessorFactory::create(
             ProcessorType::ZIG_ZAG, params.parallelism_config, has_mtp_hidden_buffer_);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, prefer_local_hidden_states=%d.",
