@@ -27,6 +27,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
         .def_readonly("group_id", &LayerKVCache::group_id, "KV cache group id")
+        .def_readonly("nvfp4", &LayerKVCache::nvfp4, "Whether storage is packed NVFP4")
         .def_readonly("region_name", &LayerKVCache::region_name, "KV cache attention type");
 
     pybind11::class_<KVCache>(m, "KVCache")
@@ -42,6 +43,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("use_mla", &KVCache::use_mla, "Whether MLA cache layout is used")
         .def_readwrite("kv_lora_rank", &KVCache::kv_lora_rank, "MLA KV LoRA rank")
         .def_readwrite("rope_head_dim", &KVCache::rope_head_dim, "MLA RoPE head dimension")
+        .def_readwrite("nvfp4", &KVCache::nvfp4, "Whether storage is packed NVFP4")
         .def_readwrite("layer_group_types",
                        &KVCache::layer_group_types,
                        "Per-layer attention type (CacheGroupType::FULL or LINEAR). "

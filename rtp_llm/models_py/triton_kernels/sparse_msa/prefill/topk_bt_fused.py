@@ -1297,6 +1297,178 @@ def flash_prefill_topk_to_block_tables(
     return bt, sl, topk_idx
 
 
+@torch.no_grad()
+def flash_prefill_topk_to_block_tables_fp4(
+    idx_q: torch.Tensor,
+    idx_k_fp4: torch.Tensor,
+    idx_k_scale_mma: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    block_size_k: int,
+    topk: int,
+    num_pages: int,
+    init_blocks: int = 0,
+    local_blocks: int = 1,
+    index_score_plan=None,
+    kv_indices=None,
+    emit_block_table: bool = False,
+):
+    """Packed-NVFP4 index score followed by RTP's production TopK emission.
+
+    The cache and Q scale tensors are already in fmha_sm100's 128x4 MMA
+    storage.  Query-row chunking bounds the FP32 page-score workspace while
+    preserving each segment's causal offset.
+    """
+    from fmha_sm100.cute.fp4_indexer_interface import fp4_indexer_block_scores
+
+    from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+        quantize_query_rows_mma,
+    )
+
+    from .score_chunk import build_prefill_score_chunks
+
+    if block_size_k != 128:
+        raise ValueError("FP4 prefill index score requires 128-token pages")
+    if idx_q.dtype != torch.bfloat16 or idx_q.dim() != 3:
+        raise ValueError("FP4 prefill index Q must be BF16 [token,head,128]")
+    if idx_k_fp4.dim() != 4 or idx_k_fp4.dtype != torch.uint8:
+        raise ValueError("FP4 prefill index K must be uint8 [page,head,128,64]")
+    total_q, num_heads, head_dim = map(int, idx_q.shape)
+    if head_dim != 128 or int(idx_k_fp4.shape[1]) != 1:
+        raise ValueError("FP4 prefill index score requires D=128 and one K head")
+    if kv_indices is None:
+        raise ValueError("FP4 prefill index score requires physical page indices")
+
+    chunk_rows = m3_index_score_chunk_rows()
+    if chunk_rows <= 0:
+        chunk_rows = total_q
+    host_metadata = None
+    if isinstance(index_score_plan, dict):
+        host_metadata = index_score_plan.get("_fp4_host_metadata")
+    chunks = build_prefill_score_chunks(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        None,
+        chunk_rows,
+        block_size_k,
+        kv_indices=kv_indices,
+        host_metadata=host_metadata,
+    )
+    block_tables, output_seq_lens, topk_idx = _allocate_topk_outputs(
+        total_q, num_heads, topk, idx_q.device, emit_block_table
+    )
+    groups = head_dim // 16
+    q_buffers = (
+        {}
+        if not isinstance(index_score_plan, dict)
+        else index_score_plan.setdefault("_fp4_q_buffers", {})
+    )
+
+    for chunk in chunks:
+        q_start, q_end = chunk.q_start, chunk.q_end
+        chunk_q = q_end - q_start
+        key = (chunk_q, num_heads, head_dim, str(idx_q.device))
+        buffers = q_buffers.get(key)
+        if buffers is None:
+            q_fp4 = torch.empty(
+                chunk_q,
+                num_heads,
+                head_dim // 2,
+                dtype=torch.uint8,
+                device=idx_q.device,
+            )
+            q_scale_mma = torch.empty(
+                num_heads,
+                triton.cdiv(chunk_q, 128),
+                groups // 4,
+                32,
+                4,
+                4,
+                dtype=torch.float8_e4m3fn,
+                device=idx_q.device,
+            )
+            buffers = (q_fp4, q_scale_mma)
+            q_buffers[key] = buffers
+        q_fp4, q_scale_mma = buffers
+        quantize_query_rows_mma(idx_q[q_start:q_end].contiguous(), q_fp4, q_scale_mma)
+
+        pages_per_segment = torch.div(
+            chunk.seq_lens + block_size_k - 1,
+            block_size_k,
+            rounding_mode="floor",
+        ).to(torch.int32)
+        cu_page_offsets = torch.zeros(
+            int(pages_per_segment.numel()) + 1,
+            dtype=torch.int32,
+            device=idx_q.device,
+        )
+        cu_page_offsets[1:] = torch.cumsum(pages_per_segment, dim=0)
+        cu_k = torch.zeros_like(chunk.cu_seqlens)
+        cu_k[1:] = torch.cumsum(chunk.seq_lens.to(torch.int32), dim=0)
+        maxscore = fp4_indexer_block_scores(
+            q_fp4,
+            idx_k_fp4,
+            q_scale_mma,
+            idx_k_scale_mma,
+            chunk.cu_seqlens,
+            cu_k,
+            cu_page_offsets,
+            max_seqlen_q=chunk.max_seqlen_q,
+            max_seqlen_k=chunk.max_seqlen_k,
+            kv_indices=chunk.kv_indices,
+            fp4_format="nvfp4",
+            causal=True,
+            qo_offset=chunk.prefix_lens,
+            scale_layout="preordered_mma",
+        )
+        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        score = _maxscore_to_score(maxscore, max_seqblock_k)
+        if emit_block_table:
+            bt_chunk = block_tables[q_start * num_heads : q_end * num_heads]
+            sl_chunk = output_seq_lens[q_start * num_heads : q_end * num_heads]
+        else:
+            bt_chunk = block_tables
+            sl_chunk = output_seq_lens
+        topk_chunk = topk_idx[:, q_start:q_end, :]
+        _launch_topk_to_block_table(
+            chunk.max_seqlen_q,
+            chunk.cu_seqlens.shape[0] - 1,
+            num_heads,
+            max_seqblock_k,
+            score,
+            bt_chunk,
+            sl_chunk,
+            topk_chunk,
+            1,
+            block_size_k,
+            chunk.cu_seqlens,
+            chunk.cu_seqlens,
+            chunk.prefix_lens,
+            topk,
+            init_blocks,
+            local_blocks,
+            num_pages,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            bt_chunk.stride(0),
+            bt_chunk.stride(1),
+            topk_chunk.stride(0),
+            topk_chunk.stride(1),
+            topk_chunk.stride(2),
+            NKV=num_heads,
+            MASK_INIT=False,
+            MASK_LOCAL=False,
+            EMIT_BLOCK_TABLE=emit_block_table,
+            EMIT_TOPK_IDX=True,
+        )
+    return block_tables, output_seq_lens, topk_idx
+
+
 def _pack_segments_into_chunks(qo_lens, chunk_size):
     """Split the flat query dim into consecutive ``chunk_size`` chunks.
 
@@ -1387,6 +1559,8 @@ def _build_chunk_meta(
     head_dim,
     partial_dtype,
     dev,
+    *,
+    nvfp4_kv=False,
 ):
     """Per-forward host metadata for ``_sparse_attn_chunked``: per-chunk
     aligned page tables + geometry/cu_seqlens tensors, built by the first
@@ -1437,12 +1611,16 @@ def _build_chunk_meta(
     # the largest chunk; csr segment covers the largest per-chunk scratch.
     # emit_schedule=True is a superset of the non-schedule size (adds only
     # row_coords), so the same buffer serves both usable_SM_count modes.
-    ws_fwd_bytes = sparse_fwd_workspace_bytes(
-        topK=topk,
-        total_q=max(c["csz"] for c in chunks),
-        head_q=num_q_heads,
-        head_dim=head_dim,
-        partial_dtype=partial_dtype,
+    ws_fwd_bytes = (
+        0
+        if nvfp4_kv
+        else sparse_fwd_workspace_bytes(
+            topK=topk,
+            total_q=max(c["csz"] for c in chunks),
+            head_q=num_q_heads,
+            head_dim=head_dim,
+            partial_dtype=partial_dtype,
+        )
     )
     ws_csr_words = max(
         k2q_csr_workspace_words(
@@ -1481,6 +1659,8 @@ def run_sparse_attn_chunk(
     ws_csr,
     ws_fwd,
     out,
+    k_scale_128x4=None,
+    v_scale_128x4=None,
 ):
     """Run existing CSR/native step3 for one chunk with caller-owned pages."""
     from interface import sparse_atten_func
@@ -1505,29 +1685,58 @@ def run_sparse_attn_chunk(
     # out= makes the K2 combine kernel write the chunk result directly
     # into the persistent output (dim-0 slice is contiguous), removing a
     # [csz, Hq, dim] DtoD copy (~83us / 256MB per 16K-q chunk).
-    sparse_atten_func(
-        q,
-        k_pages,
-        v_pages,
-        row_ptr,
-        q_ind,
-        topk,
-        cu_seqlens_q=c["cu_q"],
-        cu_seqlens_k=c["cu_k"],
-        max_seqlen_q=c["max_q"],
-        max_seqlen_k=c["kv_max"],
-        blk_kv=block_size_k,
-        causal=causal,
-        softmax_scale=sm_scale,
-        partial_dtype=partial_dtype,
-        return_softmax_lse=False,
-        page_table=page_table,
-        seqused_k=c["seqused"],
-        schedule=sched,
-        usable_SM_count=usable_sm,
-        workspace=ws_fwd,
-        out=out,
-    )
+    if k_scale_128x4 is not None:
+        from fmha_sm100.cute.interface import sparse_atten_nvfp4_kv_func
+
+        chunk_out = sparse_atten_nvfp4_kv_func(
+            q,
+            k_pages,
+            v_pages,
+            k_scale_128x4,
+            v_scale_128x4,
+            None,
+            None,
+            row_ptr,
+            q_ind,
+            topk,
+            cu_seqlens_q=c["cu_q"],
+            cu_seqlens_k=c["cu_k"],
+            max_seqlen_q=c["max_q"],
+            max_seqlen_k=c["kv_max"],
+            blk_kv=block_size_k,
+            causal=causal,
+            softmax_scale=sm_scale,
+            partial_dtype=partial_dtype,
+            return_softmax_lse=False,
+            page_table=page_table,
+            seqused_k=c["seqused"],
+            schedule=sched,
+        )
+        out.copy_(chunk_out)
+    else:
+        sparse_atten_func(
+            q,
+            k_pages,
+            v_pages,
+            row_ptr,
+            q_ind,
+            topk,
+            cu_seqlens_q=c["cu_q"],
+            cu_seqlens_k=c["cu_k"],
+            max_seqlen_q=c["max_q"],
+            max_seqlen_k=c["kv_max"],
+            blk_kv=block_size_k,
+            causal=causal,
+            softmax_scale=sm_scale,
+            partial_dtype=partial_dtype,
+            return_softmax_lse=False,
+            page_table=page_table,
+            seqused_k=c["seqused"],
+            schedule=sched,
+            usable_SM_count=usable_sm,
+            workspace=ws_fwd,
+            out=out,
+        )
 
 
 @torch.no_grad()
@@ -1544,6 +1753,8 @@ def _sparse_attn_chunked(
     chunk_size: int,
     *,
     refresh_page_map: bool = False,
+    k_scale_128x4=None,
+    v_scale_128x4=None,
 ):
     """Step3 with the query dim split into ``chunk_size`` chunks (memory-saving).
 
@@ -1569,7 +1780,8 @@ def _sparse_attn_chunked(
     usable_sm = int(p.get("usable_SM_count", -1))
     partial_dtype = p.get("partial_dtype", torch.bfloat16)
 
-    meta = None if refresh_page_map else p.get("_chunk_meta")
+    meta_key = "_chunk_meta_fp4" if k_scale_128x4 is not None else "_chunk_meta"
+    meta = None if refresh_page_map else p.get(meta_key)
     if meta is None:
         meta = _build_chunk_meta(
             p,
@@ -1581,11 +1793,12 @@ def _sparse_attn_chunked(
             head_dim,
             partial_dtype,
             dev,
+            nvfp4_kv=k_scale_128x4 is not None,
         )
         # Refreshed maps are call-local. Publishing them here would overwrite
         # the legacy path's immutable per-forward map when both APIs share a plan.
         if not refresh_page_map:
-            p["_chunk_meta"] = meta
+            p[meta_key] = meta
         global _CHUNKED_SPARSE_ATTN_LOGGED
         if not _CHUNKED_SPARSE_ATTN_LOGGED:
             _CHUNKED_SPARSE_ATTN_LOGGED = True
@@ -1626,6 +1839,8 @@ def _sparse_attn_chunked(
             ws_csr=ws_csr,
             ws_fwd=ws_fwd,
             out=out[g0:g1],
+            k_scale_128x4=k_scale_128x4,
+            v_scale_128x4=v_scale_128x4,
         )
     return out
 
@@ -1905,6 +2120,44 @@ def sparse_prefill_from_topk(
         sm_scale=sm_scale,
     )
     return out_f.view(total_q, num_q_heads, head_dim)
+
+
+@torch.no_grad()
+def sparse_prefill_from_topk_fp4(
+    q,
+    k_paged_fp4,
+    v_paged_fp4,
+    k_scale_128x4,
+    v_scale_128x4,
+    topk_idx,
+    main_kv_indices,
+    sparse_attn_plan,
+    topk,
+    block_size_k,
+    sm_scale,
+):
+    """Run fmha_sm100 sparse attention directly over packed NVFP4 pages."""
+    if sparse_attn_plan is None:
+        raise ValueError("packed FP4 sparse prefill requires a sparse_attn_plan")
+    total_q = int(q.shape[0])
+    chunk_size = _sparse_attn_chunk_size()
+    if not _sparse_attn_chunk_enabled():
+        chunk_size = total_q
+    return _sparse_attn_chunked(
+        q,
+        k_paged_fp4,
+        v_paged_fp4,
+        topk_idx,
+        main_kv_indices,
+        sparse_attn_plan,
+        topk,
+        block_size_k,
+        sm_scale,
+        max(1, chunk_size),
+        refresh_page_map=False,
+        k_scale_128x4=k_scale_128x4,
+        v_scale_128x4=v_scale_128x4,
+    )
 
 
 @torch.no_grad()

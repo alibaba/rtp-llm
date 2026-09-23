@@ -10,6 +10,12 @@ namespace rtp_llm {
 CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
+    if (model_config.attn_config.nvfp4_kv_cache) {
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.get_attn_tp_size() == 1,
+                                "MiniMax-M3.1 NVFP4 requires attention TP size 1, got %d; "
+                                "Prefill CP is supported because CP uses raw TP while attention TP remains 1",
+                                static_cast<int>(parallelism_config.get_attn_tp_size()));
+    }
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     auto layer_num = model_config.num_layers;
@@ -62,12 +68,17 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         // separate side pool, piggyback it on the MHA scale region of the main
         // paged pool so it is addressed by the same block table and travels with
         // the main K/V during PD separation. is_mla stays false (the main K/V
-        // keeps its HND layout); the scale region is exposed to Python as FP32
-        // and reinterpreted as BF16 or E4M3 there.
-        config.kv_scale_stride_bytes =
+        // keeps its HND layout). The scale region is an opaque byte plane;
+        // Python derives typed logical views from the shared layout contract.
+        const size_t indexer_bytes =
             indexerCacheBlockBytes(static_cast<size_t>(model_config.attn_config.indexer_head_dim),
                                    model_config.attn_config.indexer_cache_fp8_mode,
                                    spec->seq_size_per_block);
+        // NVFP4 needs both scale families in this opaque side region: main
+        // K/V block scales first, followed by packed indexer-K values/scales.
+        // Other M3 modes retain their historical indexer-only layout.
+        config.kv_scale_stride_bytes =
+            model_config.attn_config.nvfp4_kv_cache ? spec->scale_block_size_bytes() + indexer_bytes : indexer_bytes;
         config.kv_scale_size_bytes = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
         // PD transfer: the idx_K cache in the scale slot is a single logical
         // block (not k/v separable), and the main K/V HND block is not k/v-split

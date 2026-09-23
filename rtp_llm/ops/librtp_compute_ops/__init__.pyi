@@ -160,6 +160,10 @@ class LayerKVCache:
 
     def __init__(self) -> None: ...
     @property
+    def nvfp4(self) -> bool:
+        """Whether the persistent cache uses packed NVFP4 storage."""
+
+    @property
     def kv_cache_base(self) -> torch.Tensor:
         """
         Key/value cache tensor
@@ -205,6 +209,7 @@ class KVCache:
     use_mla: bool
     kv_lora_rank: int
     rope_head_dim: int
+    nvfp4: bool
     layer_group_types: list[CacheGroupType]
     group_region_names: list[KVCacheRegionName]
     layer_region_to_group_id: list[list[int]]

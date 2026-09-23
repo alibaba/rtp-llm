@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <numeric>
 #include <sstream>
@@ -18,28 +19,31 @@ struct MHAKVCacheSpec: public KVCacheSpec {
     MHAKVCacheSpec() = default;
 
     MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type              = KVCacheSpecType::MultiHeadAttention;
-        layer_num         = 1;  // Will be set by caller
+        type      = KVCacheSpecType::MultiHeadAttention;
+        layer_num = 1;  // Will be set by caller
 
-        // TODO(xinfei.sxf): 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
+        // TODO(xinfei.sxf):
+        // 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
         local_head_num_kv = static_cast<uint32_t>(
             (attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
                 attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
-                attn_config.kv_head_num / std::gcd(attn_config.kv_head_num, parallelism_config.get_attn_tp_size())
-        );
+                attn_config.kv_head_num / std::gcd(attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         size_per_head      = static_cast<uint32_t>(attn_config.size_per_head);
     }
 
     // TODO(xinfei.sxf) 下面的函数名字统一掉
     size_t block_size() const override {
-        return 2 * local_head_num_kv * size_per_head * seq_size_per_block;
+        const size_t values = 2 * local_head_num_kv * size_per_head * seq_size_per_block;
+        return dtype == rtp_llm::TYPE_BYTES ? values / 2 : values;
     }
     size_t k_block_size() const override {
-        return local_head_num_kv * size_per_head * seq_size_per_block;
+        const size_t values = local_head_num_kv * size_per_head * seq_size_per_block;
+        return dtype == rtp_llm::TYPE_BYTES ? values / 2 : values;
     }
     size_t v_block_size() const override {
-        return local_head_num_kv * size_per_head * seq_size_per_block;
+        const size_t values = local_head_num_kv * size_per_head * seq_size_per_block;
+        return dtype == rtp_llm::TYPE_BYTES ? values / 2 : values;
     }
 
     size_t block_size_bytes() const override {
@@ -54,6 +58,12 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 
     // Scale-related methods for MHA (only MHA supports scales for now)
     size_t scale_size_per_block() const {
+        if (dtype == rtp_llm::TYPE_BYTES) {
+            RTP_LLM_CHECK_WITH_INFO(
+                size_per_head % 16 == 0, "NVFP4 KV head dimension must be divisible by 16, got %u", size_per_head);
+            // One E4M3 byte per contiguous 16 E2M1 values, for K and V.
+            return 2 * local_head_num_kv * seq_size_per_block * (size_per_head / 16);
+        }
         // For INT8 or FP8, we need scales for both K and V
         if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
             return 2 * local_head_num_kv * seq_size_per_block;  // K and V scales
@@ -62,7 +72,7 @@ struct MHAKVCacheSpec: public KVCacheSpec {
     }
 
     size_t scale_size_bytes_per_block() const {
-        return scale_size_per_block() * sizeof(float);
+        return scale_size_per_block() * (dtype == rtp_llm::TYPE_BYTES ? sizeof(uint8_t) : sizeof(float));
     }
 
     size_t scale_block_size_bytes() const override {

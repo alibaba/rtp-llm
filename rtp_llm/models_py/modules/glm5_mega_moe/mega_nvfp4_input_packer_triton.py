@@ -221,9 +221,15 @@ def fused_pack_mega_nvfp4_inputs(
     )
     if tokens == 0:
         return
-    block_m = int(os.environ.get("GLM5_MEGA_MOE_NVFP4_PACK_BLOCK_M", "4"))
-    if block_m not in (1, 2, 4, 8):
-        raise ValueError("GLM5_MEGA_MOE_NVFP4_PACK_BLOCK_M must be one of 1,2,4,8")
+    block_m_env = os.environ.get("GLM5_MEGA_MOE_NVFP4_PACK_BLOCK_M")
+    # Large prefill chunks are launch-bound: BLOCK_M=16 quarters the program
+    # count relative to the old fixed value of 4. Keep the smaller tile for
+    # decode-sized inputs, where it avoids padding most of the token lanes.
+    block_m = (
+        int(block_m_env) if block_m_env is not None else (16 if tokens >= 1024 else 4)
+    )
+    if block_m not in (1, 2, 4, 8, 16):
+        raise ValueError("GLM5_MEGA_MOE_NVFP4_PACK_BLOCK_M must be one of 1,2,4,8,16")
     block_topk = triton.next_power_of_2(topk)
     _row_gsf_kernel[(tokens,)](
         x,

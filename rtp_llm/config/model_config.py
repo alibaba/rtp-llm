@@ -277,9 +277,13 @@ class ModelConfig(CppModelConfig):
         # Get kv_cache_dtype from attn_config
         kv_cache_dtype_enum = self.attn_config.kv_cache_dtype
         kv_cache_bytes = (
-            1
-            if kv_cache_dtype_enum in [KvCacheDataType.FP8, KvCacheDataType.INT8]
-            else 2
+            9.0 / 16.0
+            if self.attn_config.nvfp4_kv_cache
+            else (
+                1
+                if kv_cache_dtype_enum in [KvCacheDataType.FP8, KvCacheDataType.INT8]
+                else 2
+            )
         )
         kv_cache_size = (
             2
@@ -289,7 +293,21 @@ class ModelConfig(CppModelConfig):
             * kv_cache_bytes
             * self.max_seq_len
         )
-        return kv_cache_size
+        indexer_dim = int(getattr(self.attn_config, "indexer_head_dim", 0))
+        if indexer_dim <= 0:
+            return kv_cache_size
+
+        indexer_mode = int(getattr(self.attn_config, "indexer_cache_fp8_mode", 0))
+        if self.attn_config.nvfp4_kv_cache:
+            indexer_bytes_per_token = indexer_dim * 9.0 / 16.0
+        elif indexer_mode > 0:
+            # E4M3 values plus one FP32 per-token scale.
+            indexer_bytes_per_token = indexer_dim + 4
+        else:
+            indexer_bytes_per_token = indexer_dim * 2
+        return (
+            kv_cache_size + self.num_layers * self.max_seq_len * indexer_bytes_per_token
+        )
 
     def _eval_runtime_buffer_mem_size(self) -> float:
         """Evaluate runtime buffer memory size."""
@@ -693,7 +711,70 @@ class ModelConfig(CppModelConfig):
                 kv_cache_dtype_override,
             )
         elif kv_cache_config is not None:
-            if kv_cache_config.int8_kv_cache:
+            enabled_kv_quantizers = sum(
+                bool(value)
+                for value in (
+                    kv_cache_config.int8_kv_cache,
+                    kv_cache_config.fp8_kv_cache,
+                    kv_cache_config.nvfp4_kv_cache,
+                )
+            )
+            if enabled_kv_quantizers > 1:
+                raise ValueError(
+                    "int8_kv_cache, fp8_kv_cache and nvfp4_kv_cache are mutually exclusive"
+                )
+            self.attn_config.nvfp4_kv_cache = bool(kv_cache_config.nvfp4_kv_cache)
+            if kv_cache_config.nvfp4_kv_cache:
+                if not str(self.model_type).startswith("minimax_m31"):
+                    raise ValueError(
+                        "NVFP4_KV_CACHE is supported only by MiniMax-M3.1 "
+                        f"all-sparse MSA models, got model_type={self.model_type!r}"
+                    )
+                # The cache manager exposes packed E2M1 values plus E4M3
+                # block scales through the BASE pool ABI. MiniMax-M3.1's
+                # sparse prefill/decode operators consume those planes
+                # directly; there is no BF16 working-page adapter.
+                self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+                logging.info(
+                    "Enabling packed NVFP4 KV cache with native FP4 sparse attention"
+                )
+                sparse_config = getattr(self, "msa_sparse_config", None)
+                if sparse_config is None:
+                    raise ValueError("MiniMax-M3.1 NVFP4 requires sparse MSA config")
+                # KV4 always stores idxK in the packed sidecar. Unlike the
+                # legacy FP8/BF16 idxK modes, it must not depend on a separate
+                # environment switch: the paged idxK sidecar is unconditional
+                # for M3/M3.1 MSA.
+                if self.attn_config.indexer_head_dim <= 0:
+                    self.attn_config.indexer_head_dim = int(
+                        sparse_config.get("idx_head_dim", 0)
+                    )
+                if self.attn_config.indexer_head_dim <= 0:
+                    raise ValueError(
+                        "MiniMax-M3.1 NVFP4 KV cache requires sparse indexer_dim"
+                    )
+                sparse_layer_ids = sparse_config.get("sparse_layer_ids", [])
+                if sparse_layer_ids != list(range(int(self.num_layers))):
+                    raise ValueError(
+                        "MiniMax-M3.1 NVFP4 requires every layer to use sparse "
+                        "MSA; dense attention has no packed-KV4 implementation"
+                    )
+                if self.attn_config.size_per_head % 16 != 0:
+                    raise ValueError(
+                        "MiniMax-M3.1 NVFP4 KV head dimension must be divisible "
+                        f"by 16, got {self.attn_config.size_per_head}"
+                    )
+                if self.attn_config.indexer_head_dim % 16 != 0:
+                    raise ValueError(
+                        "MiniMax-M3.1 NVFP4 indexer dimension must be divisible "
+                        f"by 16, got {self.attn_config.indexer_head_dim}"
+                    )
+                # Mode 3 is internal to the MSA cache layout: packed E2M1
+                # indexer values followed by one E4M3 scale per 16 values.
+                sparse_config["idx_k_fp8_mode"] = 3
+                sparse_config["nvfp4_kv_cache"] = True
+                self.attn_config.indexer_cache_fp8_mode = 3
+            elif kv_cache_config.int8_kv_cache:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.INT8
                 logging.info(
                     "Setting attn_config.kv_cache_dtype to INT8 based on kv_cache_config.int8_kv_cache"
@@ -709,7 +790,11 @@ class ModelConfig(CppModelConfig):
                     "Setting attn_config.kv_cache_dtype to BASE (default, no int8/fp8 kv_cache specified)"
                 )
 
-        if quant_config and quant_config.get_method().lower() == "fp8":
+        if (
+            quant_config
+            and quant_config.get_method().lower() == "fp8"
+            and not self.attn_config.nvfp4_kv_cache
+        ):
             self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
             logging.info(
                 "Setting attn_config.kv_cache_dtype to FP8 based on quant_config.get_method().lower() == 'fp8'"

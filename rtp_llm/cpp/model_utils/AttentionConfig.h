@@ -52,7 +52,11 @@ struct AttentionConfigs {
     // softmax config
     float           softmax_extra_scale = 1.0f;
     KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;
-    bool            need_rope_kv_cache  = true;
+    // Persistent K/V storage uses packed E2M1 values plus one E4M3 scale per
+    // contiguous 16 values. MiniMax-M3.1 sparse attention consumes the packed
+    // cache and scale planes directly; it does not materialize BF16 history.
+    bool nvfp4_kv_cache     = false;
+    bool need_rope_kv_cache = true;
 
     // sparse attention config
     bool is_sparse        = false;

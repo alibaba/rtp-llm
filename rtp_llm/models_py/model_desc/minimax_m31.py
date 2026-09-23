@@ -13,6 +13,27 @@ from rtp_llm.models_py.model_desc.minimax_m3 import (
 )
 from rtp_llm.models_py.modules import DenseMLP
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+from rtp_llm.ops.compute_ops import PyModelInputs
+
+
+class _MiniMaxM31MSAQueryContext:
+    """No-op FMHA context for the all-sparse MSA model.
+
+    MiniMax-M3.1 has an MSA attention layer in every transformer block.  The
+    regular ``GenericMoeModel`` still asks the model for an FMHA context, but
+    MSA performs its own paged-cache/indexer path and must not instantiate a
+    CP FlashInfer/MLA implementation.  Returning this context keeps the
+    generic model output contract (``fmha_params is None``) without entering
+    ``fill_mla_params``.
+    """
+
+    fmha_params = None
+
+    def prepare_cuda_graph(self, _attn_inputs) -> None:
+        return None
+
+    def support_cuda_graph(self) -> bool:
+        return True
 
 
 class _MockNVFP4Moe(nn.Module):
@@ -73,6 +94,18 @@ class MiniMaxM31DecoderLayer(MiniMaxM3DecoderLayer):
 
 class MiniMaxM31Model(MiniMaxM3Model):
     decoder_layer_cls = MiniMaxM31DecoderLayer
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        # Every M3.1 layer is MSAAttention, including target verification.  MSA
+        # owns its paged cache, indexer and speculative metadata and does not
+        # consume GenericMoeModel's FMHA implementation.  Constructing the
+        # inherited M3 dense/FlashInfer target-verify context is both redundant
+        # and incorrect for the all-sparse checkpoint (it can enter
+        # fill_mla_params despite there being no full-attention layer).
+        del inputs, is_cuda_graph
+        return _MiniMaxM31MSAQueryContext()
 
 
 __all__ = ["MiniMaxM31DecoderLayer", "MiniMaxM31Model"]

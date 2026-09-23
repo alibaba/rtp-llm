@@ -47,6 +47,30 @@ class MiniMaxM31Weight(MiniMaxM3Weight):
         self._prepacked_nvfp4_routed = self._contains(
             weight_keys, ".block_sparse_moe.experts.0.w1.weight_packed"
         )
+        expected = set(range(self._num_layers))
+        q_layers = self._sparse_layer_set or set()
+        k_layers = set()
+        for key in weight_keys:
+            if ".mtp." in key or ".self_attn.index_k_proj.weight" not in key:
+                continue
+            try:
+                k_layers.add(int(key.split(".layers.")[1].split(".")[0]))
+            except (IndexError, ValueError):
+                continue
+        if q_layers != expected or k_layers != expected:
+            raise ValueError(
+                "MiniMax-M3.1 checkpoint must contain index_q_proj and "
+                "index_k_proj for every transformer layer; "
+                f"missing_q={sorted(expected - q_layers)}, "
+                f"missing_k={sorted(expected - k_layers)}, "
+                f"unexpected_q={sorted(q_layers - expected)}, "
+                f"unexpected_k={sorted(k_layers - expected)}"
+            )
+
+    def _should_load_msa_index(self, layer_id: int) -> bool:
+        """M3.1 is sparse in every transformer layer by checkpoint contract."""
+        sparse_set = self._sparse_layer_set or set()
+        return layer_id in sparse_set
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         layer_weights = super()._get_hf_ffn_layer_weight_info(layer_id)

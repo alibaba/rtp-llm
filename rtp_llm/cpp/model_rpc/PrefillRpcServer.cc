@@ -319,10 +319,14 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         alloc_request.add_peer_addrs(addrs);
     }
 
-    // Propagate CP size so decode knows prefill used context-parallel page-RR.
+    // Propagate the logical prefill CP size so decode can reconstruct the
+    // page-RR layout.  In the CP topology attention TP is intentionally 1
+    // (the CP group owns the physical workers), so using the physical
+    // parallelism_config.tp_size here silently sent 0 for the common
+    // tp_size=1, PREFILL_CP_SIZE>1 configuration.
     const auto& cp_cfg = maga_init_params_.parallelism_config.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
-        alloc_request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
+    if (cp_cfg.kv_cache_sharded && cp_cfg.prefill_cp_size > 1) {
+        alloc_request.set_prefill_cp_size(static_cast<int32_t>(cp_cfg.prefill_cp_size));
     }
 
     CLIENT_GRPC_RET_IF_ERROR(

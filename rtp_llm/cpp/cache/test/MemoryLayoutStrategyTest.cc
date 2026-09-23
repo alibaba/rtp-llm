@@ -224,6 +224,66 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     EXPECT_EQ(buf_info[1].size_bytes, config.kv_scale_stride_bytes);
 }
 
+TEST_F(MemoryLayoutStrategyTest, Nvfp4UsesRawValueAndSideBuffers) {
+    constexpr uint32_t layer_num   = 2;
+    constexpr uint32_t block_num   = 3;
+    constexpr uint32_t heads       = 2;
+    constexpr uint32_t page_size   = 4;
+    constexpr uint32_t head_dim    = 32;
+    constexpr uint32_t indexer_dim = 64;
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->type               = KVCacheSpecType::MultiHeadAttention;
+    spec->dtype              = rtp_llm::DataType::TYPE_BYTES;
+    spec->layer_num          = layer_num;
+    spec->local_head_num_kv  = heads;
+    spec->seq_size_per_block = page_size;
+    spec->size_per_head      = head_dim;
+
+    const size_t indexer_bytes = page_size * (indexer_dim / 2 + indexer_dim / 16);
+    CacheConfig  cache_config;
+    cache_config.cache_specs           = {spec};
+    cache_config.layer_num             = layer_num;
+    cache_config.block_num             = block_num;
+    cache_config.dtype                 = rtp_llm::DataType::TYPE_BYTES;
+    cache_config.seq_size_per_block    = page_size;
+    cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+    cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes() + indexer_bytes;
+
+    auto config          = BlockPoolConfigHelper::createConfig(cache_config).memory_layouts[0];
+    auto kv_cache_tensor = torch::zeros({static_cast<int64_t>(config.kv_block_pool_size_bytes)}, torch::kUInt8);
+    auto kv_scale_tensor = torch::zeros({static_cast<int64_t>(config.kv_scale_pool_size_bytes)}, torch::kUInt8);
+
+    auto strategy = std::make_unique<MemoryLayoutStrategy>();
+    ASSERT_TRUE(strategy->init(config, kv_cache_tensor, kv_scale_tensor, kv_cache_tensor.data_ptr()));
+
+    auto value_layers = strategy->getLayerCacheTensors();
+    auto side_layers  = strategy->getLayerScaleCacheTensors();
+    ASSERT_EQ(value_layers.size(), layer_num);
+    ASSERT_EQ(side_layers.size(), layer_num);
+    EXPECT_EQ(value_layers[0].scalar_type(), torch::kUInt8);
+    EXPECT_EQ(side_layers[0].scalar_type(), torch::kUInt8);
+    EXPECT_EQ(value_layers[0].size(0), block_num);
+    EXPECT_EQ(value_layers[0].size(1), spec->block_size_bytes());
+    EXPECT_EQ(side_layers[0].size(0), block_num);
+    EXPECT_EQ(side_layers[0].size(1), cache_config.kv_scale_stride_bytes);
+
+    auto transfer_buffers = strategy->convertIndexToBuffer(/*layer_id=*/1, /*block_id=*/2);
+    ASSERT_EQ(transfer_buffers.size(), 2u);
+    EXPECT_EQ(transfer_buffers[0].size_bytes, spec->block_size_bytes());
+    EXPECT_EQ(transfer_buffers[1].size_bytes, cache_config.kv_scale_stride_bytes);
+
+    value_layers[1][2].fill_(0x3c);
+    side_layers[1][2].fill_(0xa5);
+    auto byte_options       = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+    auto transferred_values = torch::from_blob(
+        transfer_buffers[0].addr, {static_cast<int64_t>(transfer_buffers[0].size_bytes)}, byte_options);
+    auto transferred_side = torch::from_blob(
+        transfer_buffers[1].addr, {static_cast<int64_t>(transfer_buffers[1].size_bytes)}, byte_options);
+    EXPECT_TRUE(torch::all(transferred_values == 0x3c).item<bool>());
+    EXPECT_TRUE(torch::all(transferred_side == 0xa5).item<bool>());
+}
+
 TEST_F(MemoryLayoutStrategyTest, GetLayerCacheTensors) {
     auto ctx = createTestContext();
 

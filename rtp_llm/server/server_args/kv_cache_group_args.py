@@ -69,6 +69,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         help="是否开启FP8的KV_CACHE",
     )
+    kv_cache_group.add_argument(
+        "--nvfp4_kv_cache",
+        env_name="NVFP4_KV_CACHE",
+        bind_to=(kv_cache_config, "nvfp4_kv_cache"),
+        type=int,
+        default=0,
+        help="是否开启NVFP4(E2M1 + per-16 E4M3 scale)的KV_CACHE",
+    )
     # compatible with old version
     kv_cache_group.add_argument(
         "--blockwise_use_fp8_kv_cache",

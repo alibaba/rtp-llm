@@ -50,3 +50,14 @@ py_test(
     ],
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
+
+py_test(
+    name = "test_q8kv4_decode",
+    srcs = ["test_q8kv4_decode.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)

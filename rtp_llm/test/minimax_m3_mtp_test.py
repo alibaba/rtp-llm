@@ -85,6 +85,7 @@ def _weight_info():
     weight._mtp_root = "language_model.model.mtp.layers.0."
     weight._mtp_eh_proj_is_quantized = False
     weight._sparse_layer_set = {0}
+    weight._native_mxfp4_routed = False
     weight.has_e_score_correction_bias = True
     return weight
 
@@ -210,6 +211,11 @@ class MiniMaxM3MTPAttentionTest(unittest.TestCase):
         torch.nn.Module.__init__(attention)
         attention._cuda_graph_max_seq_len = 8192
         attention.page_size = 128
+        # Tests construct the module without running MSAAttention.__init__.
+        # Keep the fixture on the ordinary paged-cache path unless a test
+        # explicitly opts into NVFP4.
+        attention.nvfp4_kv_cache = False
+        attention.idx_k_fp8_mode = 0
         return attention
 
     def test_initial_cp_prefill_delegates_without_model_specific_cache_mutation(self):
@@ -281,7 +287,7 @@ class MiniMaxM3MTPAttentionTest(unittest.TestCase):
         ), patch(
             "rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse.minimax_paged_sparse_decode",
             return_value=(torch.empty(0), o),
-        ):
+        ) as sparse_decode:
             actual = attention._forward_paged_decode(
                 torch.zeros((1, 8), dtype=torch.bfloat16),
                 SimpleNamespace(),
@@ -291,6 +297,7 @@ class MiniMaxM3MTPAttentionTest(unittest.TestCase):
             )
 
         fused_project.assert_called_once()
+        self.assertIsNone(sparse_decode.call_args.kwargs["score_block_table"])
         torch.testing.assert_close(actual, o.reshape(1, -1))
 
     def test_regular_eager_decode_keeps_exact_live_max(self):
@@ -476,6 +483,7 @@ class MiniMaxM3MTPSharedWeightTest(unittest.TestCase):
         ) as clean_cuda_memory:
             target._load("cpu")
             draft._load("cpu")
+            draft._bind_colocated_weights("cpu")
 
         self.assertIs(draft.weight.get_global_weight(W.embedding), target_embedding)
         self.assertIs(draft.weight.get_global_weight(W.lm_head), target_lm_head)
@@ -501,8 +509,9 @@ class MiniMaxM3MTPSharedWeightTest(unittest.TestCase):
 
         with patch.object(DeepSeekV2, "_load"):
             target._load("cpu")
+            draft._load("cpu")
             with self.assertRaisesRegex(RuntimeError, "embedding.*matching shape"):
-                draft._load("cpu")
+                draft._bind_colocated_weights("cpu")
 
     def test_mtp_rejects_mismatched_target_lm_head_shard(self):
         target = self._model(
@@ -514,8 +523,9 @@ class MiniMaxM3MTPSharedWeightTest(unittest.TestCase):
 
         with patch.object(DeepSeekV2, "_load"):
             target._load("cpu")
+            draft._load("cpu")
             with self.assertRaisesRegex(RuntimeError, "lm_head.*matching shape"):
-                draft._load("cpu")
+                draft._bind_colocated_weights("cpu")
 
 
 class _FakeDecoderLayer(nn.Module):

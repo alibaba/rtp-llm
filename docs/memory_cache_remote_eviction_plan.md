@@ -17,7 +17,7 @@ Task B：evictDeviceCacheToMemory
 - Task B 内再次发现 Memory 空间不足时，直接淘汰 Memory LRU，不再递归写 Remote。
 - Remote 写失败不能阻断 Device cache 回收；失败只降低缓存命中率。
 - Remote 写期间，Memory victim 不得被重新匹配、释放或覆盖。
-- 开启 `M3_IDX_PAGED=1` 时，main K/V 与 idx_K 必须作为同一个逻辑 block 完整写出。
+- MiniMax-M3/M3.1 的 paged idx_K 模式下，main K/V 与 idx_K 必须作为同一个逻辑 block 完整写出。
 
 ## 2. 范围与非目标
 
@@ -31,7 +31,7 @@ Memory backing：HOST
 Remote buffer：MemoryType::CPU
 ```
 
-MiniMax-M3 当前通过 `SingleConfigCreator` 创建一个逻辑 group。启用 `M3_IDX_PAGED=1` 后，idx_K 被放在同一物理 block 的 scale region 中，并不会形成第二个 group。
+MiniMax-M3 当前通过 `SingleConfigCreator` 创建一个逻辑 group。paged idx_K 下，idx_K 被放在同一物理 block 的 scale region 中，并不会形成第二个 group。
 
 ### 2.2 第一版暂不支持
 
@@ -437,7 +437,7 @@ bool buildHostBlockBuffers(
 - 一个 `BlockBuffer` 包含该 block 所有层的 IOV。
 - 所有 IOV 的类型均为 `kv_cache_manager::MemoryType::CPU`。
 - IOV 顺序与当前 Device Remote 写入顺序完全一致。
-- MiniMax `M3_IDX_PAGED=1` 时包含每层 main KV 和 idx_K。
+- MiniMax paged idx_K 模式包含每层 main KV 和 idx_K。
 
 示意代码：
 

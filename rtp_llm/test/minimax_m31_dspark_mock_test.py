@@ -159,6 +159,7 @@ class MiniMaxM31WeightContractTest(unittest.TestCase):
         weight._native_mxfp4_routed = False
         weight._prepacked_nvfp4_routed = False
         weight.prefix = "language_model."
+        weight._num_layers = 4
         weight._align_size = 0
         weight._is_gated_activation = True
         weight.moe_layer_index_ = [3]
@@ -175,13 +176,30 @@ class MiniMaxM31WeightContractTest(unittest.TestCase):
             "language_model.model.layers.3.block_sparse_moe.e_score_correction_bias",
         }
 
+    @classmethod
+    def _m31_keys(cls):
+        keys = cls._keys()
+        for layer_id in range(4):
+            keys.add(
+                f"language_model.model.layers.{layer_id}.self_attn.index_q_proj.weight"
+            )
+            keys.add(
+                f"language_model.model.layers.{layer_id}.self_attn.index_k_proj.weight"
+            )
+        return keys
+
     def test_prepacked_nvfp4_is_detected_without_mock_gate(self):
         weight = self._weight()
         with patch.dict(os.environ, {}, clear=True):
-            weight._process_meta([], self._keys())
+            weight._process_meta([], self._m31_keys())
 
         self.assertTrue(weight._prepacked_nvfp4_routed)
-        self.assertEqual(weight._sparse_layer_set, {0, 3})
+        self.assertEqual(weight._sparse_layer_set, {0, 1, 2, 3})
+
+    def test_m31_rejects_checkpoint_with_non_sparse_layers(self):
+        weight = self._weight()
+        with self.assertRaisesRegex(ValueError, "missing_q=\\[1, 2\\]"):
+            weight._process_meta([], self._keys())
 
     def test_prepacked_weight_contract_loads_all_nvfp4_components(self):
         weight = self._weight()
