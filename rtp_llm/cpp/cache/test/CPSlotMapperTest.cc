@@ -192,5 +192,35 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     EXPECT_EQ(mapper.layoutForGroup(config, 1).slice, CpBlockSliceMode::EQUAL_BYTES);
 }
 
+TEST_F(CPSlotMapperTest, ChunkPublicationUsesPhysicalPagesAndTerminalTail) {
+    const auto full = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    for (const size_t block : {64, 128}) {
+        std::vector<int> keys;
+        for (int rank = 0; rank < 2; ++rank) {
+            size_t begin = 0;
+            for (const size_t end : {64, 128, 130}) {
+                auto plan = buildCacheStorePlan(full, (end + block - 1) / block, 0, false,
+                                               rank, 2, block / 32, (end + 31) / 32);
+                plan = filterCacheStorePublishPlan(full, std::move(plan), block, 32, begin, end, end == 130, true);
+                for (const auto& pair : plan) {
+                    keys.push_back(pair.key_index);
+                }
+                begin = end;
+            }
+        }
+        std::sort(keys.begin(), keys.end());
+        EXPECT_EQ(keys.size(), (130 + block - 1) / block);
+        EXPECT_EQ(std::unique(keys.begin(), keys.end()), keys.end());
+        EXPECT_EQ(keys.back(), 4);  // Final key in the base-32 namespace.
+    }
+    const auto swa = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    const auto tail = buildCacheStorePlan(swa, 3, 0, true, 0, 1);
+    EXPECT_TRUE(filterCacheStorePublishPlan(swa, tail, 64, 64, 64, 128, false, true).empty());
+    EXPECT_EQ(filterCacheStorePublishPlan(swa, tail, 64, 64, 128, 130, true, true).size(), 2);
+    const auto all = buildCacheStorePlan(full, 3, 0, false, 0, 1);
+    EXPECT_TRUE(filterCacheStorePublishPlan(full, all, 64, 64, 64, 128, false, false).empty());
+    EXPECT_EQ(filterCacheStorePublishPlan(full, all, 64, 64, 128, 130, true, false).size(), 3);
+}
+
 }  // namespace test
 }  // namespace rtp_llm

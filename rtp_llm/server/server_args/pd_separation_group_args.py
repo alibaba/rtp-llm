@@ -7,6 +7,14 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     ##############################################################################################################
     pd_separation_group = parser.add_argument_group("pd_separation")
     pd_separation_group.add_argument(
+        "--enable_chunkwise_cache_transfer",
+        env_name="ENABLE_CHUNKWISE_CACHE_TRANSFER",
+        bind_to=(pd_separation_config, "enable_chunkwise_cache_transfer"),
+        type=str2bool,
+        default=False,
+        help="P 端按计算 chunk 逐层发布稳定 KV 页，仅 RDMA 生效；关闭或 TCP 时在尾块统一发布",
+    )
+    pd_separation_group.add_argument(
         "--prefill_retry_times",
         env_name="PREFILL_RETRY_TIMES",
         bind_to=(pd_separation_config, "prefill_retry_times"),

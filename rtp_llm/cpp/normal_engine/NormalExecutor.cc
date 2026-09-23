@@ -226,7 +226,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run  = model_input.skip_run || (streams.empty() && !enable_ffn_disaggregate_);
 
         // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
         // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
@@ -287,6 +287,31 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    if (model_input.cache_store_publish_begin_tokens.defined()) {
+        const auto publication_error = model_->waitCacheStorePublication();
+        bool publication_ok = publication_error.empty();
+        if (parallelism_config_.tp_size > 1) {
+            auto status = torch::full({1}, publication_ok ? 1 : 0,
+                                       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            publication_ok = execAllReduce({status, ReduceOp::Min, false, ParallelMode::TP}).buffer.item<int32_t>() != 0;
+        }
+        if (!publication_ok) {
+            for (const auto& stream : streams) {
+                stream->reportError(ErrorCode::CACHE_STORE_STORE_FAILED,
+                    "chunkwise cache publication failed: " + publication_error);
+            }
+            cudaSyncAndCheck();
+            model_->releaseBuffers();
+            if (profile_step_finish_) {
+                profile_step_finish_();
+            }
+            return absl::OkStatus();
+        }
+        if (tp_rank_ == 0) {
+            batch_stream_processor_->commitCacheStorePublishPlan(stream_groups, model_input, model_->model_id_);
+        }
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {

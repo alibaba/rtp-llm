@@ -92,7 +92,7 @@ void StreamCacheResource::releaseResource() {
     RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
                       stream_->streamId(),
                       curBlocksNum(),
-                      pd_kvcache_ref_.get());
+                      pdKVCacheRef().get());
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
@@ -174,6 +174,11 @@ void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
+    if (stream_->hasCacheStorePublication()) {
+        // Published addresses/keys belong to the old attempt. A fresh allocation
+        // must go through the existing PD cancellation/retry flow.
+        return absl::FailedPreconditionError("cannot reallocate published chunkwise KV; retry the PD request");
+    }
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) use enableCacheLookup().
     if (fake_inited_) {
@@ -568,11 +573,11 @@ void StreamCacheResource::holdKVCacheForPDSep() {
     const auto& cache_keys = resource.cacheKeys();
     auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
     if (ref) {
-        pd_kvcache_ref_ = std::move(ref);
+        std::atomic_store(&pd_kvcache_ref_, std::move(ref));
     }
 }
 
 void StreamCacheResource::releaseKVCacheForPDSep() {
-    pd_kvcache_ref_.reset();
+    std::atomic_store(&pd_kvcache_ref_, std::shared_ptr<KVCacheResource>{});
 }
 }  // namespace rtp_llm

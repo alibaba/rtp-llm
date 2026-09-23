@@ -26,6 +26,10 @@ public:
                                        CheckCancelFunc                                         check_cancel_func);
 
     void waitDone();
+    // On RDMA cancellation, application completion precedes transport isolation.
+    // Destination slots must remain reserved until every load callback has run.
+    void waitRdmaTransportDone();
+    bool transportSucceeded() const;
 
     bool                     success() const;
     const ErrorInfo&         getErrorInfo() const;
@@ -49,6 +53,7 @@ protected:
     int64_t         start_time_ms_     = 0;
     int64_t         deadline_ms_       = 0;
     bool            timed_out_         = false;
+    bool            transport_failed_  = false;
     CheckCancelFunc check_cancel_func_ = nullptr;
 
     mutable std::mutex      mutex_;

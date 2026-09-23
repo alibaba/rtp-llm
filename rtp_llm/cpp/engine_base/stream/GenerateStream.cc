@@ -576,6 +576,18 @@ int GenerateStream::initialReuseLength() const {
     return __atomic_load_n(&initial_reuse_length_, __ATOMIC_RELAXED);
 }
 
+GenerateStream::CacheStorePublishProgress GenerateStream::cacheStorePublishProgress(size_t model_id) const {
+    const auto it = cache_store_publish_progress_.find(model_id);
+    return it == cache_store_publish_progress_.end() ? CacheStorePublishProgress{} : it->second;
+}
+
+void GenerateStream::commitCacheStorePublication(size_t model_id, int begin, int end, bool terminal) {
+    auto& progress = cache_store_publish_progress_[model_id];
+    RTP_LLM_CHECK_WITH_INFO(!progress.terminal_committed && progress.committed_window_end == begin && end >= begin,
+                            "cache-store publication attempt advanced or was already committed");
+    progress = {end, terminal};
+}
+
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
 }

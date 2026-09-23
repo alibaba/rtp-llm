@@ -31,7 +31,11 @@ class CacheConfig;
 class CacheStore;
 
 using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
-using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
+struct CacheStorePublication {
+    CacheStoreCompletionCallback completion;
+    std::shared_ptr<void> source_lease;
+};
+using CacheStoreCompletionRegistrar = std::function<CacheStorePublication(
     const std::vector<int64_t>&, const std::vector<int32_t>&, size_t)>;
 
 // ===================================================================

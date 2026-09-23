@@ -257,6 +257,12 @@ struct PyCacheStoreInputs {
     torch::Tensor request_id;             // int64, [context]
     torch::Tensor request_pd_separation;  // bool, [context]
     torch::Tensor cache_keys;             // int64, [context, global key width]
+    // Immutable global token windows, CPU tensors indexed by context row only.
+    // Undefined for unchunked prefill. Never replace these with CP-local lengths.
+    torch::Tensor cache_store_publish_begin_tokens;  // int32 [context]
+    torch::Tensor cache_store_publish_end_tokens;    // int32 [context]
+    torch::Tensor cache_store_publish_terminal;      // bool [context]
+    bool cache_store_incremental = false;
 };
 
 struct PyPrefillCudaGaphCopyParams {

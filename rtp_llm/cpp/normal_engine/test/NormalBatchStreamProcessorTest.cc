@@ -138,6 +138,52 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 0, 0, 201, 202, 203, 204, 205}));
 }
 
+TEST_F(NormalBatchStreamProcessorTest, ChunkPublicationFollowsRequestAndModel) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 256;
+    model_config.vocab_size = 256;
+    model_config.num_layers = 1;
+    auto make_stream = [&](int tokens) {
+        auto query = make_shared<GenerateInput>();
+        query->input_ids = torch::ones({tokens}, torch::kInt32);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->pd_separation = true;
+        auto stream = make_shared<NormalGenerateStream>(
+            query, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setChunkSize(64);
+        return stream;
+    };
+    auto a = make_stream(130);
+    auto b = make_stream(32);
+    a->setReuseLength(64);
+    PDSepConfig pd;
+    pd.enable_chunkwise_cache_transfer = true;
+    NormalBatchStreamProcessor processor(model_config, pd, {}, CacheConfig{}, false);
+    GptModelInputs inputs;
+    inputs.pd_separation = true;
+    inputs.input_lengths = hostIntBuffer({32, 64});
+    inputs.prefix_lengths = hostIntBuffer({0, 64});
+    StreamGroups first({b, a});
+    ASSERT_TRUE(processor.prepareCacheStorePublishPlan(first, inputs, 0).ok());
+    EXPECT_EQ(toVec<int32_t>(inputs.cache_store_publish_begin_tokens), (std::vector<int32_t>{0, 0}));
+    EXPECT_EQ(toVec<int32_t>(inputs.cache_store_publish_end_tokens), (std::vector<int32_t>{32, 128}));
+    EXPECT_EQ(a->cacheStorePublishProgress(0).committed_window_end, 0); // Gather is not commit.
+    processor.commitCacheStorePublishPlan(first, inputs, 0);
+    EXPECT_TRUE(b->cacheStorePublishProgress(0).terminal_committed);
+    a->setReuseLength(128);
+    inputs.input_lengths = hostIntBuffer({2});
+    inputs.prefix_lengths = hostIntBuffer({128});
+    StreamGroups last({a});
+    ASSERT_TRUE(processor.prepareCacheStorePublishPlan(last, inputs, 0).ok());
+    EXPECT_EQ(inputs.cache_store_publish_begin_tokens.item<int32_t>(), 128);
+    EXPECT_TRUE(inputs.cache_store_publish_terminal.item<bool>());
+    ASSERT_TRUE(processor.prepareCacheStorePublishPlan(last, inputs, 1).ok());
+    EXPECT_EQ(inputs.cache_store_publish_begin_tokens.item<int32_t>(), 0); // Draft has its own cursor.
+    EXPECT_EQ(a->cacheStorePublishProgress(0).committed_window_end, 128);
+    EXPECT_EQ(a->cacheStorePublishProgress(1).committed_window_end, 0);
+}
+
 class TestStatefulLogitsProcessor: public BaseLogitsProcessor {
 public:
     explicit TestStatefulLogitsProcessor(bool async_device_state): async_device_state_(async_device_state) {}

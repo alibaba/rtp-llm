@@ -24,6 +24,7 @@
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -276,6 +277,18 @@ public:
     // Used as speculative draft prefill tail instead of a sampled token.
     int nextChunkBoundaryToken() const;
 
+    struct CacheStorePublishProgress {
+        int committed_window_end = 0;
+        bool terminal_committed = false;
+    };
+    // Engine-thread state for this request attempt, independent of batch row.
+    // Callbacks only complete writer tokens; they never mutate stream progress.
+    CacheStorePublishProgress cacheStorePublishProgress(size_t model_id) const;
+    void commitCacheStorePublication(size_t model_id, int begin, int end, bool terminal);
+    bool hasCacheStorePublication() const {
+        return !cache_store_publish_progress_.empty();
+    }
+
     bool                 isContextStream() const;
     const torch::Tensor& cumLogProbs() const;
 
@@ -472,6 +485,7 @@ public:
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
+    std::shared_ptr<KVCacheResource> pdKVCacheRef() const { return stream_cache_resource_->pdKVCacheRef(); }
 
     std::vector<int> getLatestTokens(size_t token_num);
 
@@ -919,6 +933,7 @@ protected:
     size_t                             last_output_pos_      = 0;
     int                                initial_reuse_length_ = 0;
     int                                reuse_length_         = 0;
+    std::unordered_map<size_t, CacheStorePublishProgress> cache_store_publish_progress_;
     int                                local_reuse_length_   = 0;
     int                                device_reuse_length_  = 0;
     int                                remote_reuse_length_  = 0;

@@ -35,6 +35,9 @@ public:
         std::vector<std::string>                     block_keys;
     };
     std::vector<StoreRecord> records;
+    bool retain_buffers = false;
+    std::vector<std::shared_ptr<RequestBlockBuffer>> retained_buffers;
+    std::shared_ptr<MemoryUtil> memory_util;
     bool                     store_success            = true;
     CacheStoreErrorCode      store_error              = CacheStoreErrorCode::None;
     bool                     throw_on_store           = false;
@@ -44,6 +47,9 @@ public:
 
     void store(const std::shared_ptr<rtp_llm::RequestBlockBuffer>& buf,
                rtp_llm::CacheStoreStoreDoneCallback                cb) override {
+        if (retain_buffers) {
+            retained_buffers.push_back(buf);
+        }
         StoreRecord record;
         record.request_id  = buf->getRequestId();
         record.block_count = buf->getBlocksCount();
@@ -108,13 +114,12 @@ public:
     }
 
     const std::shared_ptr<rtp_llm::MemoryUtil>& getMemoryUtil() const override {
-        return null_util_;
+        return memory_util;
     }
 
     void debugInfo() override {}
 
-private:
-    std::shared_ptr<rtp_llm::MemoryUtil> null_util_;
+
 };
 
 static size_t countKeyPrefix(const std::vector<std::string>& keys, const std::string& prefix) {
@@ -530,7 +535,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCallbackFailureReachesPublicationWait) {
                                           nullptr,
                                           [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }));
+                                                    size_t) { return CacheStorePublication{writer.registerStoreCompletion(), nullptr}; }));
     writer.finishSubmissions();
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
 }
@@ -566,7 +571,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSynchronousThrowCompletesTokenExactlyOnce
                                         nullptr,
                                         [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }),
+                                                    size_t) { return CacheStorePublication{writer.registerStoreCompletion(), nullptr}; }),
                  std::runtime_error);
     writer.finishSubmissions();
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
@@ -604,7 +609,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreDuplicateCallbackDoesNotUnderflow) {
                                           nullptr,
                                           [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }));
+                                                    size_t) { return CacheStorePublication{writer.registerStoreCompletion(), nullptr}; }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
 }
@@ -640,7 +645,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreZeroSelectedBlocksRegistersNoCompletion) 
                                           nullptr,
                                           [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }));
+                                                    size_t) { return CacheStorePublication{writer.registerStoreCompletion(), nullptr}; }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
     EXPECT_TRUE(cache_store->records.empty());
@@ -677,7 +682,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTrackedPublicationWithoutCacheStoreThrows
                                             nullptr,
                                             [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }));
+                                                    size_t) { return CacheStorePublication{writer.registerStoreCompletion(), nullptr}; }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
 }
@@ -1485,6 +1490,60 @@ TEST_F(ExecOpsTest, testWriteCacheStoreReadsNonContiguousHostMetadata) {
     const auto second_key = "kv_" + makeCacheKey(/*model_id=*/0, "200", /*layer_id=*/0, "default");
     EXPECT_NE(cache_store->records[0].blocks.find(first_key), cache_store->records[0].blocks.end());
     EXPECT_NE(cache_store->records[1].blocks.find(second_key), cache_store->records[1].blocks.end());
+}
+
+TEST_F(ExecOpsTest, ChunkPublicationFiltersRowsAndRetainsSourceAfterLocalCallback) {
+    class RdmaMemory: public MemoryUtil {
+        bool regUserMr(void*, uint64_t, bool, uint64_t) override { return true; }
+        bool deregUserMr(void*, bool) override { return true; }
+        bool isMemoryMr(void*, uint64_t, bool, bool) override { return true; }
+        bool findMemoryMr(void*, void*, uint64_t, bool, bool) override { return true; }
+        bool isRdmaMode() override { return true; }
+    };
+    auto store = std::make_shared<MockCacheStore>();
+    store->retain_buffers = true;
+    store->memory_util = std::make_shared<RdmaMemory>();
+    auto inputs = makePyCacheStoreInputs(64, 2);
+    inputs.input_lengths_host = torch::tensor({2, 2}, torch::kInt32);
+    inputs.prefix_lengths_host = torch::tensor({64, 64}, torch::kInt32);
+    inputs.host_kv_cache_offset = inputs.host_kv_cache_offset.repeat({2, 1});
+    inputs.request_id = torch::tensor({int64_t(42), int64_t(43)}, torch::kInt64);
+    inputs.request_pd_separation = torch::tensor({true, true}, torch::kBool);
+    inputs.cache_keys = inputs.cache_keys.repeat({2, 1});
+    inputs.cache_store_publish_begin_tokens = torch::tensor({64, 64}, torch::kInt32);
+    inputs.cache_store_publish_end_tokens = torch::tensor({66, 66}, torch::kInt32);
+    inputs.cache_store_publish_terminal = torch::tensor({false, true}, torch::kBool);
+    auto config = makeCacheConfig(64, 64, 0, 2, "default", 0,
+                                   defaultCacheGroupPolicy(CacheGroupType::FULL), false, true);
+    torch_ext::LayerKVCache layer;
+    layer.kv_cache_base = torch::zeros({2, 64}, torch::kUInt8);
+    layer.seq_size_per_block = 64;
+    layer.layer_id = 0;
+    layer.tag = "default";
+    for (const bool incremental : {false, true}) {
+        inputs.cache_store_incremental = incremental;
+        auto lease = std::make_shared<int>(1);
+        std::weak_ptr<int> weak_lease = lease;
+        bool completed = false;
+        runtimeWriteCacheStore(inputs, layer, config, store, 0, 0, 1, nullptr,
+            [&](const auto&, const auto&, size_t) {
+                return CacheStorePublication{[&](std::exception_ptr e) { EXPECT_FALSE(e); completed = true; }, lease};
+            });
+        ASSERT_EQ(store->records.size(), 1);
+        EXPECT_EQ(store->records[0].request_id, "43");
+        EXPECT_EQ(store->records[0].block_count, incremental ? 1 : 2);
+        EXPECT_TRUE(completed);
+        lease.reset();
+        EXPECT_FALSE(weak_lease.expired());
+        store->retained_buffers.clear();
+        EXPECT_TRUE(weak_lease.expired());
+        store->records.clear();
+    }
+    // A requested incremental mode must fall back to terminal-only on TCP.
+    store->memory_util.reset();
+    runtimeWriteCacheStore(inputs, layer, config, store, 0, 0, 1, nullptr);
+    ASSERT_EQ(store->records.size(), 1);
+    EXPECT_EQ(store->records[0].block_count, 2);
 }
 
 #if USING_CUDA

@@ -54,7 +54,11 @@ public:
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key) override;
 
-    void markRequestEnd(const std::string& requestid);
+    bool markRequestEnd(const std::string& requestid);
+    // Fail closed on an ambiguous remote transport outcome. These allocator
+    // reservations intentionally survive request teardown and require worker
+    // isolation/restart to reclaim; a client timeout is not a DMA barrier.
+    void quarantineRequestResource(const std::string& requestid, std::shared_ptr<void> resource);
 
     void debugInfo() override;
 
@@ -79,6 +83,10 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
+    std::mutex source_owners_mutex_;
+    std::unordered_map<std::string, std::vector<std::weak_ptr<void>>> source_owners_;
+    std::mutex quarantine_mutex_;
+    std::vector<std::shared_ptr<void>> quarantined_resources_;
     bool                                                                             thread_pool_close_{false};
     int                                                                              device_id_{-1};
     CacheStoreInitParams                                                             params_;

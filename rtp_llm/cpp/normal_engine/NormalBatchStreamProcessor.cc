@@ -8,6 +8,10 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
     const CacheConfig&                 cache_config,
     bool                               warm_up) {
+    incremental_cache_store_ = pd_sep_config.enable_chunkwise_cache_transfer && pd_sep_config.cache_store_rdma_mode;
+    if (pd_sep_config.enable_chunkwise_cache_transfer && !pd_sep_config.cache_store_rdma_mode) {
+        RTP_LLM_LOG_INFO("chunkwise transfer requires RDMA; TCP publishes all cache blocks at terminal prefill");
+    }
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
     model_input_gatherer_config_.vocab_size              = model_config.vocab_size;
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;
@@ -45,7 +49,79 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
                                                                             TensorHolder&       host_holder) const {
-    return model_input_gatherer_->gather(stream_groups, host_holder);
+    auto result = model_input_gatherer_->gather(stream_groups, host_holder);
+    if (result.ok()) {
+        auto status = prepareCacheStorePublishPlan(stream_groups, result.value(), 0);
+        if (!status.ok()) {
+            // The stream already owns the failure. Still synchronize skip_run
+            // so non-root TP ranks do not enter a forward without rank 0.
+            result->skip_run = true;
+        }
+    }
+    return result;
+}
+
+absl::Status NormalBatchStreamProcessor::prepareCacheStorePublishPlan(
+    const StreamGroups& streams, GptModelInputs& inputs, size_t model_id) const {
+    inputs.cache_store_publish_begin_tokens = torch::Tensor();
+    inputs.cache_store_publish_end_tokens = torch::Tensor();
+    inputs.cache_store_publish_terminal = torch::Tensor();
+    inputs.cache_store_incremental = false;
+    if (inputs.warmup || inputs.is_fake_stream || !inputs.pd_separation) {
+        return absl::OkStatus();
+    }
+    bool chunked = false;
+    for (const auto& stream : streams.contextStreams()) {
+        chunked |= stream->chunkedPrefillEnabled() && stream->queryPdSep();
+    }
+    if (!chunked) {
+        return absl::OkStatus();
+    }
+    const auto rows = static_cast<int64_t>(streams.totalContextBatchSize());
+    inputs.cache_store_publish_begin_tokens = torch::zeros({rows}, torch::kInt32).pin_memory();
+    inputs.cache_store_publish_end_tokens = torch::empty({rows}, torch::kInt32).pin_memory();
+    inputs.cache_store_publish_terminal = torch::empty({rows}, torch::kBool).pin_memory();
+    inputs.cache_store_incremental = incremental_cache_store_;
+    const auto lengths = inputs.input_lengths.cpu();
+    const auto prefixes = inputs.prefix_lengths.cpu();
+    const auto decode_rows = lengths.numel() - rows;
+    int64_t row = 0;
+    for (const auto& stream : streams.contextStreams()) {
+        const auto progress = stream->cacheStorePublishProgress(model_id);
+        if (model_id == 0 && stream->queryPdSep() && stream->resourceContext().cache_manager) {
+            stream->holdKVCacheForPDSep();
+        }
+        for (int b = 0; b < stream->currentBatchSize(); ++b, ++row) {
+            const int prefix = prefixes[row].item<int32_t>();
+            const int end = prefix + lengths[decode_rows + row].item<int32_t>();
+            if (stream->queryPdSep() && (progress.terminal_committed || progress.committed_window_end > prefix)) {
+                stream->reportError(ErrorCode::CACHE_STORE_STORE_FAILED,
+                                    "chunkwise cache publication cannot rewind; retry the PD request");
+                return absl::FailedPreconditionError("chunkwise cache publication cannot rewind");
+            }
+            inputs.cache_store_publish_begin_tokens[row] = progress.committed_window_end;
+            inputs.cache_store_publish_end_tokens[row] = end;
+            inputs.cache_store_publish_terminal[row] = !stream->isMiddleChunk();
+        }
+    }
+    return absl::OkStatus();
+}
+
+void NormalBatchStreamProcessor::commitCacheStorePublishPlan(
+    const StreamGroups& streams, const GptModelInputs& inputs, size_t model_id) const {
+    if (!inputs.cache_store_publish_begin_tokens.defined()) {
+        return;
+    }
+    int64_t row = 0;
+    for (const auto& stream : streams.contextStreams()) {
+        if (stream->queryPdSep() && stream->isActive()) {
+            stream->commitCacheStorePublication(model_id,
+                inputs.cache_store_publish_begin_tokens[row].item<int32_t>(),
+                inputs.cache_store_publish_end_tokens[row].item<int32_t>(),
+                inputs.cache_store_publish_terminal[row].item<bool>());
+        }
+        row += stream->currentBatchSize();
+    }
 }
 
 absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(

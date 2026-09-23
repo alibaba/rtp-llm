@@ -2153,6 +2153,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("role_type", &PDSepConfig::role_type)
         .def_readwrite("cache_store_rdma_mode", &PDSepConfig::cache_store_rdma_mode)
+        .def_readwrite("enable_chunkwise_cache_transfer", &PDSepConfig::enable_chunkwise_cache_transfer)
         .def_readwrite("cache_store_listen_port", &PDSepConfig::cache_store_listen_port)
         .def_readwrite("cache_store_connect_port", &PDSepConfig::cache_store_connect_port)
         .def_readwrite("cache_store_rdma_listen_port", &PDSepConfig::cache_store_rdma_listen_port)
@@ -2197,11 +2198,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_port_offset,
                                       self.decode_entrance,
                                       self.prefill_stop_stream_wait_timeout_ms,
-                                      self.prefill_prepare_resource_pool_size);
+                                      self.prefill_prepare_resource_pool_size,
+                                      self.enable_chunkwise_cache_transfer);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
-                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 fields, got "
+                if (t.size() != 22 && t.size() != 23)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 or 23 fields, got "
                                              + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
@@ -2227,6 +2229,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_entrance                     = t[19].cast<bool>();
                     c.prefill_stop_stream_wait_timeout_ms = t[20].cast<int64_t>();
                     c.prefill_prepare_resource_pool_size  = t[21].cast<int64_t>();
+                    if (t.size() == 23) {
+                        c.enable_chunkwise_cache_transfer = t[22].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

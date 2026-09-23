@@ -6,6 +6,9 @@
 #include "autil/LockFreeThreadPool.h"
 
 #include <cstring>
+#include <algorithm>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 namespace rtp_llm {
@@ -155,6 +158,15 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
         return;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(source_owners_mutex_);
+        auto& owners = source_owners_[request_block_buffer->getRequestId()];
+        for (const auto& entry : request_block_buffer->getBlocks()) {
+            if (!entry.second->source_lifetime.expired()) {
+                owners.push_back(entry.second->source_lifetime);
+            }
+        }
+    }
     auto collector = std::make_shared<CacheStoreStoreMetricsCollector>(
         metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
     auto queue_failure_callback = [callback, collector](bool success, CacheStoreErrorCode ec) {
@@ -350,8 +362,40 @@ void NormalCacheStore::releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreT
     tasks.erase(std::remove(tasks.begin(), tasks.end(), task), tasks.end());
 }
 
-void NormalCacheStore::markRequestEnd(const std::string& requestid) {
+bool NormalCacheStore::markRequestEnd(const std::string& requestid) {
     request_block_buffer_store_->delRequestBlockBuffer(requestid);
+    // Includes queued staging copies and in-flight direct RDMA source reads.
+    // The per-address token is distinct from the backing tensor's lifetime.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(source_owners_mutex_);
+            const auto it = source_owners_.find(requestid);
+            if (it == source_owners_.end()) {
+                return true;
+            }
+            const auto& owners = it->second;
+            if (std::all_of(owners.begin(), owners.end(), [](const auto& owner) { return owner.expired(); })) {
+                source_owners_.erase(it);
+                return true;
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void NormalCacheStore::quarantineRequestResource(const std::string& requestid, std::shared_ptr<void> resource) {
+    if (!resource) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(quarantine_mutex_);
+    quarantined_resources_.push_back(std::move(resource));
+    RTP_LLM_LOG_ERROR("PD request %s has no confirmed transport drain; keeping allocator reservation until "
+                      "worker isolation/restart (quarantined requests=%zu)",
+                      requestid.c_str(), quarantined_resources_.size());
 }
 
 bool NormalCacheStore::regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) {

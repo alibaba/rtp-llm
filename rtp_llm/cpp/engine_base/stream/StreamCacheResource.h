@@ -119,6 +119,7 @@ public:
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
+    std::shared_ptr<KVCacheResource> pdKVCacheRef() const { return std::atomic_load(&pd_kvcache_ref_); }
 
     std::string debugString() const {
         std::stringstream debug_string;

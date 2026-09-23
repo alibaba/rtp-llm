@@ -314,8 +314,26 @@ void PrefillGenerateContext::markRequestEnd() {
     if (stream_) {
         real_id = stream_->streamId();
     }
+    const bool stream_finished = !stream_ || stream_->getStatus() == StreamState::FINISHED;
+    bool       all_drained     = stream_finished;
+    const auto lease           = stream_ ? stream_->pdKVCacheRef() : nullptr;
+    auto settle_lease = [&] {
+        if (!stream_finished) {
+            // The scheduler may still allocate and publish another chunk. Retain
+            // the stream, including future PD leases, until worker shutdown.
+            resource->cache_store->quarantineRequestResource(std::to_string(real_id), stream_);
+            return;
+        }
+        if (!all_drained) {
+            resource->cache_store->quarantineRequestResource(std::to_string(real_id), lease);
+        }
+        if (stream_) {
+            stream_->releaseKVCacheForPDSep();
+        }
+    };
     if (!resource->isTensorParallel()) {
-        resource->cache_store->markRequestEnd(std::to_string(real_id));
+        all_drained &= resource->cache_store->markRequestEnd(std::to_string(real_id));
+        settle_lease();
         return;
     }
     const auto&           prefill_workers = resource->grpc_workers;
@@ -328,19 +346,23 @@ void PrefillGenerateContext::markRequestEnd() {
             RTP_LLM_LOG_WARNING("request [%d], get grpc connection for ip %s failed, ignore markRequestEnd for it",
                                 real_id,
                                 prefill_worker.c_str());
+            all_drained = false;
             continue;
         }
         auto          stub = connect_status.value().stub.get();
         ClientContext client_context;
+        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
         EmptyPB       response;
         auto          grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
             RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
                                 real_id,
                                 prefill_worker.c_str());
+            all_drained = false;
             continue;
         }
     }
+    settle_lease();
 }
 
 void PrefillGenerateContext::reportTime() {

@@ -11,6 +11,10 @@
 #include <mutex>
 #include <optional>
 #include <utility>
+#include <set>
+#include <string>
+#include <tuple>
+#include <vector>
 
 #include "autil/ThreadPool.h"
 #include "rtp_llm/models_py/bindings/CacheStoreWriter.h"
@@ -39,7 +43,7 @@ public:
         std::optional<std::chrono::milliseconds> store_completion_timeout = std::nullopt);
     ~CacheStoreAsyncWriter() override;
 
-    void init(bool track_store_completions = false);
+    void init(bool track_store_completions = false, std::vector<int64_t> expected_request_ids = {});
     StoreCompletionCallback registerStoreCompletion(std::shared_ptr<KVCacheResource> publication_lease = nullptr);
     void                    finishSubmissions();
     void                    waitStoreCompletions();
@@ -109,6 +113,8 @@ private:
     std::shared_ptr<StoreCompletionState>        active_store_completion_state_;
     std::shared_ptr<StoreCompletionState>        finished_store_completion_state_;
     State                                       state_{State::IDLE};
+    std::vector<int64_t> expected_request_ids_;
+    std::set<std::tuple<int64_t, int, std::string>> submitted_publications_;
     int                                         device_id_{-1};
     const std::chrono::milliseconds             store_completion_timeout_;
 

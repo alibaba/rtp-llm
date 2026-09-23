@@ -59,6 +59,7 @@ public:
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
+        std::shared_ptr<bool> transport_drained = std::make_shared<bool>(false);
     };
 
 private:

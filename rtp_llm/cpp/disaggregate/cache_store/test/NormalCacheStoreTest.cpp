@@ -27,6 +27,31 @@ protected:
     uint32_t                          port2_;
 };
 
+TEST_F(NormalCacheStoreTest, ChunkSourceDrainWaitsForBorrowedAddress) {
+    ASSERT_TRUE(initCacheStores());
+    auto buffer = std::make_shared<RequestBlockBuffer>("chunk-source-drain");
+    auto block = block_buffer_util_->makeBlockBuffer("kv", 16, 'x', false);
+    block->source_lifetime = block->addr;
+    auto borrowed = block->addr; // Simulate a direct write still reading the source.
+    buffer->addBlock(block);
+    std::promise<bool> stored;
+    cache_store1_->store(buffer, [&](bool ok, CacheStoreErrorCode) { stored.set_value(ok); });
+    ASSERT_TRUE(stored.get_future().get());
+    block.reset();
+    buffer.reset();
+    auto finish = std::async(std::launch::async, [&] { return cache_store1_->markRequestEnd("chunk-source-drain"); });
+    EXPECT_EQ(finish.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    borrowed.reset();
+    EXPECT_TRUE(finish.get());
+
+    auto lease = std::make_shared<int>(1);
+    std::weak_ptr<int> weak_lease = lease;
+    cache_store1_->quarantineRequestResource("ambiguous-remote-finish", lease);
+    lease.reset();
+    EXPECT_TRUE(cache_store1_->markRequestEnd("ambiguous-remote-finish"));
+    EXPECT_FALSE(weak_lease.expired()); // Local completion cannot release an uncertain remote reservation.
+}
+
 bool NormalCacheStoreTest::initCacheStores() {
     if (!device_util_ || !memory_util_) {
         return false;

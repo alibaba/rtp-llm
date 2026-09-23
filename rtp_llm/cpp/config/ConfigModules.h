@@ -510,6 +510,7 @@ struct RuntimeConfig {
 struct PDSepConfig {
     RoleType role_type                       = RoleType::PDFUSION;
     bool     cache_store_rdma_mode           = true;
+    bool     enable_chunkwise_cache_transfer = false;
     int64_t  cache_store_listen_port         = 0;
     int64_t  cache_store_connect_port        = 0;
     int64_t  cache_store_rdma_listen_port    = 0;

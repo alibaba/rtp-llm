@@ -550,13 +550,14 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
 
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
+
     // Decode has finished loading cache, now safe to release KV cache blocks.
     // This is called after cache store transfer is complete.
     if (prefill_context.generate_input->generate_config->pd_separation) {
         prefill_context.getStream()->releaseKVCacheForPDSep();
     }
 
-    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
 
     prefill_context.dequeueStreamFromRuntimeMeta();
@@ -921,7 +922,9 @@ grpc::Status
 PrefillRpcServer::RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) {
     RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
-    resource_.cache_store->markRequestEnd(std::to_string(request_id));
+    if (!resource_.cache_store->markRequestEnd(std::to_string(request_id))) {
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "source KV reads have not drained");
+    }
     return grpc::Status::OK;
 }
 

@@ -31,6 +31,11 @@ public:
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
 
+    absl::Status prepareCacheStorePublishPlan(const StreamGroups& streams, GptModelInputs& inputs,
+                                               size_t model_id) const;
+    void commitCacheStorePublishPlan(const StreamGroups& streams, const GptModelInputs& inputs,
+                                     size_t model_id) const;
+
     // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
     // Read-only over streams: no stream->step() and no other fields.
     // Empty input returns an undefined tensor.
@@ -60,6 +65,7 @@ protected:
                                   bool                          score_batch = false) const;
 
 protected:
+    bool incremental_cache_store_ = false;
     NormalModelInputGathererConfig              model_input_gatherer_config_;
     std::unique_ptr<NormalModelInputGatherer>   model_input_gatherer_;
     std::unique_ptr<NormalSamplerInputGatherer> sampler_input_gatherer_;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace rtp_llm {
@@ -131,6 +132,34 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
         plan.push_back(
             {keyIndexForLogicalBlock(pos), sharded_full ? block_pos / cp_size : block_pos});
     }
+    return plan;
+}
+
+// Filter the existing key/slot projection in physical group-page coordinates.
+// key_index is in base-page units, and the final key may name a partial group page.
+inline std::vector<CacheStoreBlockPair> filterCacheStorePublishPlan(
+    const CacheGroupPolicy& policy, std::vector<CacheStoreBlockPair> plan,
+    size_t group_tokens_per_block, size_t base_tokens_per_block,
+    size_t begin_tokens, size_t end_tokens, bool terminal, bool incremental) {
+    if (base_tokens_per_block == 0 || group_tokens_per_block < base_tokens_per_block
+        || group_tokens_per_block % base_tokens_per_block != 0 || begin_tokens > end_tokens) {
+        throw std::invalid_argument("invalid cache-store publication window or page size");
+    }
+    if (!terminal && (!incremental || policy.group_type != CacheGroupType::FULL)) {
+        return {};
+    }
+    if (policy.group_type != CacheGroupType::FULL) {
+        // The terminal tail may reach back into an earlier chunk (SWA).
+        return plan;
+    }
+    const size_t begin_page = incremental ? begin_tokens / group_tokens_per_block : 0;
+    const size_t end_page = end_tokens / group_tokens_per_block
+                            + (terminal && end_tokens % group_tokens_per_block != 0);
+    const size_t keys_per_page = group_tokens_per_block / base_tokens_per_block;
+    plan.erase(std::remove_if(plan.begin(), plan.end(), [&](const CacheStoreBlockPair& pair) {
+        const size_t page = static_cast<size_t>(pair.key_index) / keys_per_page;
+        return page < begin_page || page >= end_page;
+    }), plan.end());
     return plan;
 }
 

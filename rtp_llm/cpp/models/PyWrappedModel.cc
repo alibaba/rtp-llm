@@ -37,10 +37,21 @@ class CacheStoreWriteCycleGuard {
 public:
     CacheStoreWriteCycleGuard(const std::shared_ptr<CacheStoreAsyncWriter>& writer,
                               bool                                          has_work,
-                              bool                                          track_store_completions):
+                              bool                                          track_store_completions,
+                              const GptModelInputs&                         inputs):
         writer_(writer), active_(has_work), track_store_completions_(track_store_completions) {
         if (active_) {
-            writer_->init(track_store_completions_);
+            std::vector<int64_t> expected_requests;
+            if (inputs.cache_store_publish_begin_tokens.defined()) {
+                const auto ids = inputs.request_id.cpu();
+                const auto pd = inputs.request_pd_separation.cpu();
+                for (int64_t row = 0; row < ids.numel(); ++row) {
+                    if (pd[row].item<bool>()) {
+                        expected_requests.push_back(ids[row].item<int64_t>());
+                    }
+                }
+            }
+            writer_->init(track_store_completions_, std::move(expected_requests));
         }
     }
 
@@ -532,14 +543,15 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     cache_store_inputs.request_id            = inputs.request_id;
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
     cache_store_inputs.cache_keys            = inputs.cache_keys;
+    cache_store_inputs.cache_store_publish_begin_tokens = inputs.cache_store_publish_begin_tokens;
+    cache_store_inputs.cache_store_publish_end_tokens = inputs.cache_store_publish_end_tokens;
+    cache_store_inputs.cache_store_publish_terminal = inputs.cache_store_publish_terminal;
+    cache_store_inputs.cache_store_incremental = inputs.cache_store_incremental;
     return cache_store_inputs;
 }
 
 std::string PyWrappedModel::waitCacheStorePublication() {
     RTP_LLM_PROFILE_SCOPE("py_model.waitCacheStorePublication");
-    if (!track_cache_store_completion_) {
-        return {};
-    }
     try {
         cache_store_async_writer_->waitStoreCompletions();
         return {};
@@ -618,7 +630,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
     CacheStoreWriteCycleGuard cache_store_write_cycle(
-        cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
+        cache_store_async_writer_, has_cache_store_work,
+            track_cache_store_completion_ || inputs.cache_store_publish_begin_tokens.defined(), inputs);
 
     fusedCopy(d2d_copies_);
 
@@ -889,7 +902,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(
-            cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
+            cache_store_async_writer_, has_cache_store_work,
+            track_cache_store_completion_ || inputs.cache_store_publish_begin_tokens.defined(), inputs);
 
         auto           py_model_inputs = PyModelInputs({token_ids,
                                                         input_hiddens,
@@ -1369,6 +1383,12 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                         torch::Tensor();
+                micro_model_inputs.cache_store_publish_begin_tokens = inputs.cache_store_publish_begin_tokens.defined() ?
+                    inputs.cache_store_publish_begin_tokens.narrow(0, prefill_batch_idx, p_micro_batch_size) : torch::Tensor();
+                micro_model_inputs.cache_store_publish_end_tokens = inputs.cache_store_publish_end_tokens.defined() ?
+                    inputs.cache_store_publish_end_tokens.narrow(0, prefill_batch_idx, p_micro_batch_size) : torch::Tensor();
+                micro_model_inputs.cache_store_publish_terminal = inputs.cache_store_publish_terminal.defined() ?
+                    inputs.cache_store_publish_terminal.narrow(0, prefill_batch_idx, p_micro_batch_size) : torch::Tensor();
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
@@ -1408,6 +1428,13 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
+
+                micro_model_inputs.request_id = torch::Tensor();
+                micro_model_inputs.request_pd_separation = torch::Tensor();
+                micro_model_inputs.cache_keys = torch::Tensor();
+                micro_model_inputs.cache_store_publish_begin_tokens = torch::Tensor();
+                micro_model_inputs.cache_store_publish_end_tokens = torch::Tensor();
+                micro_model_inputs.cache_store_publish_terminal = torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
 
@@ -1450,6 +1477,12 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                         torch::Tensor();
+                micro_model_inputs.cache_store_publish_begin_tokens = inputs.cache_store_publish_begin_tokens.defined() ?
+                    inputs.cache_store_publish_begin_tokens.narrow(0, prefill_batch_idx, p_micro_batch_size) : torch::Tensor();
+                micro_model_inputs.cache_store_publish_end_tokens = inputs.cache_store_publish_end_tokens.defined() ?
+                    inputs.cache_store_publish_end_tokens.narrow(0, prefill_batch_idx, p_micro_batch_size) : torch::Tensor();
+                micro_model_inputs.cache_store_publish_terminal = inputs.cache_store_publish_terminal.defined() ?
+                    inputs.cache_store_publish_terminal.narrow(0, prefill_batch_idx, p_micro_batch_size) : torch::Tensor();
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
@@ -1506,6 +1539,9 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
     buffer_holder_.hold_host(inputs.cache_keys);
+    buffer_holder_.hold_host(inputs.cache_store_publish_begin_tokens);
+    buffer_holder_.hold_host(inputs.cache_store_publish_end_tokens);
+    buffer_holder_.hold_host(inputs.cache_store_publish_terminal);
 }
 
 }  // namespace rtp_llm

@@ -591,6 +591,7 @@ std::string PDSepConfig::to_string() const {
     std::ostringstream oss;
     oss << "role_type: " << roleTypeToString(role_type) << "\n"
         << "cache_store_rdma_mode: " << cache_store_rdma_mode << "\n"
+        << "enable_chunkwise_cache_transfer: " << enable_chunkwise_cache_transfer << "\n"
         << "cache_store_listen_port: " << cache_store_listen_port << "\n"
         << "cache_store_connect_port: " << cache_store_connect_port << "\n"
         << "cache_store_rdma_listen_port: " << cache_store_rdma_listen_port << "\n"

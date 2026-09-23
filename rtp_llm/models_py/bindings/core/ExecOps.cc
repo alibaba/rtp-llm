@@ -181,6 +181,17 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     requireHostTensor(param.request_pd_separation, "request_pd_separation", 1, torch::kBool);
     requireHostTensor(param.cache_keys, "cache_keys", 2, torch::kInt64);
 
+    const bool has_publish_plan = param.cache_store_publish_begin_tokens.defined();
+    if (has_publish_plan) {
+        requireHostTensor(param.cache_store_publish_begin_tokens, "publish_begin", 1, torch::kInt32);
+        requireHostTensor(param.cache_store_publish_end_tokens, "publish_end", 1, torch::kInt32);
+        requireHostTensor(param.cache_store_publish_terminal, "publish_terminal", 1, torch::kBool);
+        RTP_LLM_CHECK_WITH_INFO(param.cache_store_publish_begin_tokens.numel() == context_batch_size
+                                && param.cache_store_publish_end_tokens.numel() == context_batch_size
+                                && param.cache_store_publish_terminal.numel() == context_batch_size,
+                                "cache-store publication plan must match context rows");
+    }
+
     if (!cache_store) {
         RTP_LLM_CHECK_WITH_INFO(!register_store_completion,
                                 "writeCacheStore has tracked publication but cache_store is null; "
@@ -188,6 +199,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
         return;
     }
+
+    const auto& memory_util = cache_store->getMemoryUtil();
+    const bool incremental = param.cache_store_incremental && memory_util && memory_util->isRdmaMode();
 
     // Wait for the CUDA event before reading pinned-host metadata.
     // The event was recorded on the main stream AFTER both the async D2H
@@ -367,6 +381,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.
             if (block_id == -1) {
+                RTP_LLM_CHECK_WITH_INFO(!has_publish_plan,
+                                        "chunkwise cache publication selected an unallocated page: key=%s",
+                                        cache_key.c_str());
                 RTP_LLM_LOG_DEBUG(
                     "PD_CACHE_KEY_WRITE_SKIP_NULL key=kv_%s request_id=%ld tag=%s layer=%d cp_rank=%d cp_size=%d "
                     "key_index=%d offset_index=%d block_id=%d",
@@ -457,14 +474,30 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         // Under CP sharding, kv_cache_offset can be rank-local-compact while
         // cache_keys stays in the full logical namespace. The common cache
         // policy owns the key/offset projection for both legacy and sharded cases.
-        const auto block_plan = buildCacheStorePlan(group.policy,
+        auto block_plan = buildCacheStorePlan(group.policy,
                                                      total_logical_blocks,
                                                      /*reuse_block_size=*/0,
-                                                     use_group_cache_transfer_policy,
+                                                     use_group_cache_transfer_policy || has_publish_plan,
                                                      cp_rank,
                                                      planner_cp_size,
                                                      key_blocks_per_logical_block,
                                                      request_cache_key_count);
+        if (has_publish_plan) {
+            const int begin = param.cache_store_publish_begin_tokens[context_index].item<int32_t>();
+            const int end = param.cache_store_publish_end_tokens[context_index].item<int32_t>();
+            const bool terminal = param.cache_store_publish_terminal[context_index].item<bool>();
+            RTP_LLM_CHECK_WITH_INFO(begin >= 0 && end >= begin
+                                    && end == prefix_length + input_lengths_host[decoder_batch_size + batch_id],
+                                    "cache-store publication window disagrees with global prefill lengths");
+            block_plan = filterCacheStorePublishPlan(group.policy, std::move(block_plan), seq_size_per_block,
+                                                     base_seq_size_per_block, begin, end, terminal,
+                                                     incremental);
+            RTP_LLM_LOG_DEBUG("PD_CHUNK_PUBLISH request=%ld model=%zu layer=%d tag=%s begin=%d end=%d "
+                              "terminal=%d incremental=%d pages=%zu",
+                              static_cast<long>(request_id), cache_model_id, layer_kv.layer_id,
+                              layer_kv.tag.c_str(), begin, end, terminal, incremental,
+                              block_plan.size());
+        }
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }
@@ -472,9 +505,16 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         if (request_blocks->getBlocksCount() > 0) {
             CacheStoreCompletionCallback store_completion;
             if (register_store_completion) {
-                store_completion = register_store_completion(publication_lease_keys,
-                                                              publication_lease_blocks,
+                auto publication = register_store_completion(publication_lease_keys, publication_lease_blocks,
                                                               cache_config.groupIdForTag(layer_kv.tag));
+                store_completion = std::move(publication.completion);
+                for (const auto& entry : request_blocks->getBlocks()) {
+                    auto& block = *entry.second;
+                    auto owner = std::make_shared<std::pair<std::shared_ptr<void>, std::shared_ptr<void>>>(
+                        block.addr, publication.source_lease);
+                    block.source_lifetime = owner;
+                    block.addr = std::shared_ptr<void>(std::move(owner), block.addr.get());
+                }
             }
             auto store_callback = [layer_id = layer_kv.layer_id,
                                    cache_model_id,

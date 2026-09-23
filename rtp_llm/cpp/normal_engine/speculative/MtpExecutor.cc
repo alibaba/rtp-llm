@@ -292,7 +292,8 @@ bool MtpExecutor::reduceDSparkCacheStoreStatus(bool local_ok) {
 
 bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                                       const std::list<GenerateStreamPtr>& streams) {
-    if (!is_dspark_ || model_input.warmup || !model_input.pd_separation) {
+    if ((!is_dspark_ && !model_input.cache_store_publish_begin_tokens.defined())
+        || model_input.warmup || !model_input.pd_separation) {
         return true;
     }
 
@@ -317,7 +318,7 @@ bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&     
     // Both waits are attempted independently. No local exception may skip the
     // one status reduction that every TP rank must enter for this prefill step.
     const std::string target_error = wait_for_publication(model_.get(), "target");
-    const std::string draft_error  = wait_for_publication(sp_prefill_draft_model_.get(), "draft");
+    const std::string draft_error  = wait_for_publication(is_dspark_ ? sp_prefill_draft_model_.get() : draft_model_.get(), "draft");
     const bool        local_ok     = target_error.empty() && draft_error.empty();
     if (!local_ok) {
         RTP_LLM_LOG_ERROR("DSpARK cache-store publication failed on TP rank %d: target=[%s], draft=[%s]",
@@ -726,7 +727,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
-    if (is_dspark_ && parallelism_config_.tp_size > 1) {
+    if (parallelism_config_.tp_size > 1) {
         dspark_cache_store_status_ =
             torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     }
@@ -1037,7 +1038,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run  = model_input.skip_run || (streams.empty() && !enable_ffn_disaggregate_);
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
             return absl::OkStatus();
@@ -1084,9 +1085,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         void disarm() {
             armed = false;
         }
-    } cache_store_drain_guard{is_dspark_ && !model_input.warmup && model_input.pd_separation,
+    } cache_store_drain_guard{(is_dspark_ || model_input.cache_store_publish_begin_tokens.defined())
+                                 && !model_input.warmup && model_input.pd_separation,
                               model_.get(),
-                              sp_prefill_draft_model_.get()};
+                              is_dspark_ ? sp_prefill_draft_model_.get() : draft_model_.get()};
+    const auto target_publication_input = model_input;
+    GptModelInputs draft_publication_input;
 
     // release model input before forward
     releaseAllModelBuffers();
@@ -1153,7 +1157,18 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = torch::Tensor();
         }
+        if (isTpRank0()) {
+            const auto* draft = is_dspark_ ? sp_prefill_draft_model_.get() : draft_model_.get();
+            const auto status = batch_stream_processor_->prepareCacheStorePublishPlan(
+                stream_groups, model_input, draft->model_id_);
+            // Every rank must enter the second input sync, even on a bad attempt.
+            model_input.skip_run = !status.ok();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
+        if (model_input.skip_run) {
+            return absl::OkStatus();
+        }
+        draft_publication_input = model_input;
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -1184,6 +1199,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();
+    }
+
+    if (isTpRank0()) {
+        batch_stream_processor_->commitCacheStorePublishPlan(stream_groups, target_publication_input, model_->model_id_);
+        const auto* draft = is_dspark_ ? sp_prefill_draft_model_.get() : draft_model_.get();
+        batch_stream_processor_->commitCacheStorePublishPlan(stream_groups, draft_publication_input, draft->model_id_);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -1462,7 +1483,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_input_rank0)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run  = model_input.skip_run || (streams.empty() && !enable_ffn_disaggregate_);
         if (model_input.skip_run) {
             tpSyncModelInputs(model_input, parallelism_config_);
             return absl::OkStatus();

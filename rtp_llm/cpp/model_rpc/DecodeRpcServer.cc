@@ -889,6 +889,29 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
                                     decode_context.server_context,
                                     decode_context.prefill_cp_size};
 
+    // The engine may finish a cancelled stream while LOAD is still unwinding.
+    // Keep the allocator reservation through local transport and TP RPC drains.
+    auto cache_manager = engine_->resourceContext().cache_manager;
+    std::shared_ptr<KVCacheResource> destination_lease;
+    if (cache_manager->isAllocatorOwner()) {
+        destination_lease = cache_manager->incrKVCacheRef(
+            generate_stream->kvCachePtr()->cacheResource(0), cache_keys, /*is_connector=*/true);
+        RTP_LLM_CHECK_WITH_INFO(destination_lease != nullptr, "failed to retain PD destination cache");
+    }
+
+    struct DestinationLeaseGuard {
+        std::shared_ptr<NormalCacheStore> store;
+        std::shared_ptr<KVCacheResource> lease;
+        std::shared_ptr<bool> drained;
+        std::string request_id;
+        ~DestinationLeaseGuard() {
+            if (!*drained && store->getMemoryUtil() && store->getMemoryUtil()->isRdmaMode()) {
+                store->quarantineRequestResource(request_id, std::move(lease));
+            }
+        }
+    } destination_guard{resource_.cache_store, destination_lease, load_context.transport_drained,
+                         std::to_string(decode_context.request_id)};
+
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
         for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; i++) {
@@ -922,6 +945,26 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
     vector<WorkerRpcContext> all_context(worker_size);
     const auto               expected_response_counts = completionQueueExpectedResponseCounts(worker_size);
     vector<CompletionQueue>  completion_queues(expected_response_counts.size());
+    // Finish events still reference all_context. Drain them before either the
+    // RPC storage or the caller's destination reservation can be destroyed.
+    struct LoadRpcDrainGuard {
+        vector<CompletionQueue>& queues;
+        vector<WorkerRpcContext>& calls;
+        std::shared_ptr<bool> drained;
+        ~LoadRpcDrainGuard() {
+            for (auto& queue : queues) {
+                queue.Shutdown();
+            }
+            for (auto& queue : queues) {
+                void* tag;
+                bool ok;
+                while (queue.Next(&tag, &ok)) {}
+            }
+            *drained = std::all_of(calls.begin(), calls.end(), [](const auto& call) {
+                return !call.stub || (call.status.ok() && call.response.error_info().error_code() == 0);
+            });
+        }
+    } rpc_drain_guard{completion_queues, all_context, load_context.transport_drained};
     vector<size_t>           each_finished_count(expected_response_counts.size(), 0);
     const size_t             cq_size = completion_queues.size();
     if (worker_size == 0 || cq_size == 0) {
@@ -945,6 +988,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
         }
         auto& rpc_context = all_context[i];
         rpc_context.stub  = connect_status.value().stub;
+        rpc_context.client_context->set_deadline(std::chrono::system_clock::now()
+            + std::chrono::milliseconds(load_context.timeout_ms + EXTRA_TIMEOUT_MS));
         BroadcastLoadRequestPB load_request;
 
         if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
@@ -1117,6 +1162,19 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
     std::vector<std::pair<std::string, std::shared_ptr<LoadContext>>> load_contexts;
+    struct RdmaLoadDrainGuard {
+        decltype(load_contexts)& contexts;
+        std::shared_ptr<bool> drained;
+        ~RdmaLoadDrainGuard() {
+            for (const auto& entry : contexts) {
+                // The RDMA closure closes failed connections before invoking
+                // this callback. An application cancellation alone does not.
+                entry.second->waitRdmaTransportDone();
+            }
+            *drained = std::all_of(contexts.begin(), contexts.end(),
+                                  [](const auto& entry) { return entry.second->transportSucceeded(); });
+        }
+    } rdma_load_drain_guard{load_contexts, load_context.transport_drained};
     std::vector<size_t> required_cache_key_counts(load_context.cache_keys.size(), 0);
     std::vector<size_t> transferred_cache_key_counts(load_context.cache_keys.size(), 0);
     auto                buffersDebugInfos = [](const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers) {

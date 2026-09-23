@@ -17,13 +17,16 @@ public:
         const std::string& key_, const std::shared_ptr<void>& addr_, uint32_t len_, bool gpu_mem_, bool adopted_):
         key(key_), addr(addr_), len(len_), gpu_mem(gpu_mem_), adopted(adopted_) {}
     BlockBuffer(const BlockBuffer& rhs):
-        key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted) {}
+        key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted),
+        source_lifetime(rhs.source_lifetime) {}
 
     std::string           key;
     std::shared_ptr<void> addr;
     uint32_t              len{0};
     bool                  gpu_mem{true};
     bool                  adopted{true};
+    // Set by the model writer. Staged copies no longer borrow source KV slots.
+    std::weak_ptr<void> source_lifetime;
 };
 
 //  request 关联的 block buffer

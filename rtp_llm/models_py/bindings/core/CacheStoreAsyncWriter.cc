@@ -128,7 +128,7 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
 }
 
 // IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle.
-void CacheStoreAsyncWriter::init(bool track_store_completions) {
+void CacheStoreAsyncWriter::init(bool track_store_completions, std::vector<int64_t> expected_request_ids) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     RTP_LLM_CHECK_WITH_INFO(state_ == State::IDLE,
                             "CacheStoreAsyncWriter::init() called while already RUNNING. "
@@ -136,6 +136,8 @@ void CacheStoreAsyncWriter::init(bool track_store_completions) {
     RTP_LLM_CHECK_WITH_INFO(finished_store_completion_state_ == nullptr,
                             "CacheStoreAsyncWriter::init() called before waitStoreCompletions() drained the previous "
                             "cycle");
+    expected_request_ids_ = std::move(expected_request_ids);
+    submitted_publications_.clear();
     pending_count_.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> ex_lock(exception_mutex_);
@@ -266,6 +268,23 @@ void CacheStoreAsyncWriter::finishSubmissions() {
         std::lock_guard<std::mutex> ex_lock(exception_mutex_);
         worker_exception  = stored_exception_;
         stored_exception_ = nullptr;
+    }
+    if (!worker_exception && !expected_request_ids_.empty()) {
+        if (!cache_config_) {
+            worker_exception = std::make_exception_ptr(std::runtime_error("chunkwise publication has no cache config"));
+        } else {
+            for (const auto request_id : expected_request_ids_) {
+                for (const auto& group : cache_config_->topology().groups()) {
+                    for (const int layer : group.layer_ids) {
+                        if (!submitted_publications_.count({request_id, layer, group.tag})) {
+                            worker_exception = std::make_exception_ptr(std::runtime_error(
+                                "missing chunkwise publication: request " + std::to_string(request_id)
+                                + ", layer " + std::to_string(layer) + ", tag " + group.tag));
+                        }
+                    }
+                }
+            }
+        }
     }
     if (worker_exception) {
         terminateStoreCompletions(completion_state, worker_exception);
@@ -407,6 +426,15 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         std::lock_guard<std::mutex> lock(state_mutex_);
         RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
                                 "CacheStoreAsyncWriter::write() called when not RUNNING. Call init() first.");
+        if (!expected_request_ids_.empty()) {
+            const auto ids = cache_store_inputs.request_id.accessor<int64_t, 1>();
+            const auto pd = cache_store_inputs.request_pd_separation.accessor<bool, 1>();
+            for (int64_t row = 0; row < cache_store_inputs.request_id.numel(); ++row) {
+                if (pd[row]) {
+                    submitted_publications_.emplace(ids[row], layer_kv.layer_id, layer_kv.tag);
+                }
+            }
+        }
         auto completion_state     = active_store_completion_state_;
         register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
                                         const std::vector<int64_t>& cache_keys,
@@ -423,7 +451,8 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                     publication_lease != nullptr, "failed to retain %zu cache-store block(s)", block_ids.size());
             }
             // Every rank publishes its KV data, but only the allocator owner can pin blocks.
-            return makeStoreCompletionCallback(completion_state, std::move(publication_lease));
+            auto completion = makeStoreCompletionCallback(completion_state, publication_lease);
+            return CacheStorePublication{std::move(completion), std::move(publication_lease)};
         };
     }
     // Create the event on the main thread to avoid event-record contention in worker threads.

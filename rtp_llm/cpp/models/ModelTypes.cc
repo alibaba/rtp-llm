@@ -94,6 +94,17 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
+    if (inputs.cache_store_publish_begin_tokens.defined()) {
+        const auto rows = inputs.request_id.numel();
+        for (const auto& tensor : {inputs.cache_store_publish_begin_tokens,
+                                   inputs.cache_store_publish_end_tokens, inputs.cache_store_publish_terminal}) {
+            RTP_LLM_CHECK_WITH_INFO(tensor.defined() && tensor.device().is_cpu()
+                                    && tensor.dim() == 1 && tensor.numel() == rows,
+                                    "cache-store publication plan must be CPU [context]");
+        }
+    }
+    shape_hints[GptModelInputIndex::cacheStorePublishRows] =
+        inputs.cache_store_publish_begin_tokens.defined() ? inputs.cache_store_publish_begin_tokens.numel() : 0;
     uint32_t control_flags = 0;
     auto     encode_flag   = [&](bool enabled, GptModelInputControlFlag flag) {
         if (enabled) {
@@ -110,6 +121,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
     encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
     encode_flag(inputs.use_opaque_kv_cache_store, GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    encode_flag(inputs.cache_store_incremental, GptModelInputControlFlag::kControlChunkwiseCacheStore);
     shape_hints[GptModelInputIndex::modelControlFlags]     = static_cast<int64_t>(control_flags);
     shape_hints[GptModelInputIndex::kvBlockStrideBytes]    = static_cast<int64_t>(inputs.kv_block_stride_bytes);
     shape_hints[GptModelInputIndex::kvScaleStrideBytes]    = static_cast<int64_t>(inputs.kv_scale_stride_bytes);
@@ -229,6 +241,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
     inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    inputs.cache_store_incremental = has_flag(GptModelInputControlFlag::kControlChunkwiseCacheStore);
     inputs.kv_block_stride_bytes =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kvBlockStrideBytes, "kvBlockStrideBytes"));
     inputs.kv_scale_stride_bytes =
@@ -377,6 +390,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL,
                                                 {request_length},
                                                 pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestPdSeparation));
+        const auto publish_rows = checkedHint(GptModelInputIndex::cacheStorePublishRows, "cacheStorePublishRows");
+        inputs.cache_store_publish_begin_tokens = publish_rows ? allocBuf(DataType::TYPE_INT32, {publish_rows}) : torch::Tensor();
+        inputs.cache_store_publish_end_tokens = publish_rows ? allocBuf(DataType::TYPE_INT32, {publish_rows}) : torch::Tensor();
+        inputs.cache_store_publish_terminal = publish_rows ? allocBuf(DataType::TYPE_BOOL, {publish_rows}) : torch::Tensor();
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                             {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
@@ -462,6 +479,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
+    // Publication plans have a fixed CPU contract on every rank.
+    collect(inputs.cache_store_publish_begin_tokens);
+    collect(inputs.cache_store_publish_end_tokens);
+    collect(inputs.cache_store_publish_terminal);
     collect(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);

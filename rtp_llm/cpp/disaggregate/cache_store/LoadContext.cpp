@@ -54,6 +54,7 @@ void SyncContext::updateResult(bool                                       succes
                                const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!success) {
+        transport_failed_ = true;
         auto error_code = transCacheStoreErrorCode(ec);
         error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
         failed_request_block_buffers_.push_back(request_block_buffer);
@@ -104,6 +105,19 @@ void SyncContext::waitDone() {
             return;
         }
     }
+}
+
+void SyncContext::waitRdmaTransportDone() {
+    if (!combine_load_) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    cond_.wait(lock, [this] { return done_layer_cnt_ == expect_layer_cnt_; });
+}
+
+bool SyncContext::transportSucceeded() const {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return done_layer_cnt_ == expect_layer_cnt_ && !transport_failed_;
 }
 
 bool SyncContext::success() const {
