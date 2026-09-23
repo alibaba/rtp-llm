@@ -7283,6 +7283,6 @@
     "model": "realistic",
     "version": "1"
   },
-  "source_capture": "../traffic_models/glm-5.3_20260921_1400_15m.xz",
+  "source_capture": "../traffic_trace/glm-5.3_20260921_1400_15m.xz",
   "schema_version": 2
 }

@@ -1,4 +1,4 @@
-"""Opt-in playback controls and offline intensity planner (algorithm version 1)."""
+"""Pure validation and offline arrival-intensity calculations; no sending."""
 import json
 import math
 from traffic.output_sampling import event_uniform

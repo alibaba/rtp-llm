@@ -75,7 +75,7 @@ from datetime import datetime
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from traffic.playback import iteration_windows
+from traffic.playback_config import iteration_windows
 
 run_dir = os.getcwd()
 

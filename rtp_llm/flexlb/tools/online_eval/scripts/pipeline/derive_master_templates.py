@@ -28,9 +28,13 @@ def derive(model, count=128, max_tokens=32768, output_tokens=420):
     if max_tokens < BLOCK or max_tokens % BLOCK or output_tokens < 1:
         raise ValueError("template limit must be positive and block aligned")
     templates = []
+    clipped_count = removed_tokens = 0
     if metadata["version"] == 2:
         for _, labels in expand(events[:count]):
             blocks = labels[:max_tokens // BLOCK]
+            removed = (len(labels) - len(blocks)) * BLOCK
+            clipped_count += removed > 0
+            removed_tokens += removed
             templates.append(dict(il=len(blocks) * BLOCK, ol=output_tokens, labels=blocks))
     else:
         # v3 的残缺尾块是私有标签，长度仍保留实测值。
@@ -41,11 +45,22 @@ def derive(model, count=128, max_tokens=32768, output_tokens=420):
             labels.extend(range(next_label, next_label + fresh))
             next_label += fresh
             paths.append(labels)
+            clipped_count += length > max_tokens
+            removed_tokens += max(0, length - max_tokens)
             length = min(length, max_tokens)
             templates.append(dict(il=length, ol=output_tokens,
                                   labels=labels[:(length + BLOCK - 1) // BLOCK]))
     return dict(schema_version=1, source_sha256=pinned["sha256"],
-                block_size=BLOCK, templates=templates)
+                block_size=BLOCK, templates=templates,
+                transformations=dict(source_sha256=pinned["sha256"],
+                    source_requests=len(events), selected_requests=count, applied=[
+                    dict(kind="fixture_shape_clip", max_input_tokens=max_tokens,
+                         selected=count, clipped_requests=clipped_count,
+                         removed_tokens=removed_tokens),
+                    dict(kind="request_limit", limit=count, selected=count,
+                         excluded_after_limit=len(events)-count),
+                    dict(kind="fixed_output_length", output_tokens=output_tokens,
+                         affected_requests=count)]))
 
 
 def main(argv=None):

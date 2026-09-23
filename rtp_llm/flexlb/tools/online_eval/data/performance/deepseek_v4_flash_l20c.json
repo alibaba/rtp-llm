@@ -41,5 +41,27 @@
     "reuse_cache": false,
     "enable_gpu_prefix_tree": false,
     "reserve_block_ratio": 8
+  },
+  "capture": {
+    "status": "legacy_unverified",
+    "identity": {
+      "model": "deepseek_v4_flash",
+      "hardware": "l20c",
+      "deployment": null
+    },
+    "capture_window": null,
+    "record_sha256": "2f9faae1292b8a48f46efa724318e58222fbf053ec91eeb8f4cf09bcc3fcd99e",
+    "n_prefill": 48,
+    "n_decode": 192,
+    "prefill_kv_pool_blocks": 21553,
+    "decode_kv_pool_blocks": 221484,
+    "mock_extra_args": [
+      "--prefill-block-size",
+      "512",
+      "--decode-block-size",
+      "128",
+      "--decode-max-concurrency",
+      "128"
+    ]
   }
 }

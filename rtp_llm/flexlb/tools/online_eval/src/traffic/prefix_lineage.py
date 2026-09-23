@@ -137,28 +137,7 @@ def expand(events):
 
 
 def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
-    p = parameters
-    required = {'path', 'sha256', 'count', 'output_tokens', 'priority'}
-    if not required <= set(p) or set(p) - required - {'output_distribution'}:
-        raise ValueError('lineage v2 requires pinned model, count, output_tokens and priority; pacing belongs to client')
-    if type(p['output_tokens']) is not int or not 1 <= p['output_tokens'] <= 2147483647 or type(p['priority']) is not int or not 1 <= p['priority'] <= 100:
-        raise ValueError('invalid output length/priority')
-    from traffic.output_sampling import output_sampler, output_semantics
-    sample_output = output_sampler(p)
-    raw = (Path(base_dir) / p['path']).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != p['sha256']:
-        raise ValueError('lineage model checksum mismatch')
-    metadata, events = decode(raw)
-    if type(p['count']) is not int or len(events) != p['count']:
-        raise ValueError('lineage model count mismatch')
-    with Path(path).open('w') as out:
-        selected = events[:max_requests] if max_requests is not None else events
-        for i, (ts, labels) in enumerate(expand(selected)):
-            out.write(json.dumps(dict(rid=f'{namespace}:{i}', ts=ts, il=len(labels)*BLOCK,
-                ol=sample_output(i), priority=p['priority'], cache_key_block_size=BLOCK,
-                input_token_blocks=labels), separators=(',', ':'))+'\n')
-    return dict(realism=metadata['realism'], tail=metadata['tail'], arrival=metadata['arrival'],
-                model_sha256=p['sha256'], provenance=metadata['provenance'],
-                token_adjustment=metadata['token_adjustment'],
-                **(dict(output_semantics=output_semantics(p), output_distribution=p['output_distribution'],
-                        output_cap=p['output_tokens']) if p.get('output_distribution') else {}))
+    """Compatibility entrypoint; content projection lives in lineage_transforms."""
+    from traffic.lineage_transforms import write_trace as project
+    return project(path, parameters, namespace, base_dir, decode=decode,
+                   max_requests=max_requests)

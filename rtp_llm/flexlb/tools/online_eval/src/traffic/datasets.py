@@ -18,7 +18,7 @@ DEFAULT_PROFILE = DEFAULT_TRACE
 
 
 def trace_models():
-    return {path.stem: path for path in sorted((DATA / "traffic_models").glob("*.xz"))}
+    return {path.stem: path for path in sorted((DATA / "traffic_trace").glob("*.xz"))}
 
 
 def model_path(name=DEFAULT_TRACE):
@@ -29,10 +29,10 @@ def model_path(name=DEFAULT_TRACE):
 
 
 def profile_path(name=DEFAULT_PROFILE):
-    for path in (DATA / "calibration").glob("*.profile.json"):
+    for path in (DATA / "synthetic_parameters").glob("*.profile.json"):
         if path.name == f"{name}.profile.json":
             return path
-    raise ValueError(f"unknown calibration profile {name!r}")
+    raise ValueError(f"unknown synthetic parameter profile {name!r}")
 
 
 def distribution(values):
@@ -55,7 +55,7 @@ def statistics(events, *, version=2):
     inputs = [event[1] * resolution for event in events]
     shared = [event[3] * BLOCK for event in events]
     return dict(
-        scope="captured_requests_only_no_missing_pod_extrapolation",
+        scope="captured_requests_only_no_missing_shard_extrapolation",
         request_count=len(events), percentile_method="nearest_rank",
         arrival=dict(event_span_s=duration,
                      mean_qps=len(events) / duration if duration else None,
@@ -84,10 +84,9 @@ def build_manifest(path, source=None):
                 sha256=hashlib.sha256(raw).hexdigest(),
                 codec=dict(name="prefix_lineage", version=metadata["version"]),
                 data_kind="real", source=source or dict(
-                    capture=dict(layer="frontend", deployment=None),
-                    spectrum=dict(identity=None, status="unconfirmed", evidence=None),
-                    model=dict(name=None, status="unconfirmed", evidence=None),
-                    enrichment="manual_spectrum_lookup_not_automated"),
+                    capture=dict(layer="frontend"),
+                    attribution=dict(identity=None, status="unconfirmed", evidence=None),
+                    model=dict(name=None, status="unconfirmed", evidence=None)),
                 capture_window=dict(window, timezone="Asia/Shanghai"),
                 statistics=statistics(events, version=metadata["version"]),
                 limitations=[("Input lengths are exact; original text and tokens are absent."
@@ -95,7 +94,7 @@ def build_manifest(path, source=None):
                               "Input lengths are block aligned; original text and tokens are absent."),
                              "Output lengths and outcomes are not retained in this codec.",
                              "Prefix sharing is theoretical structure, not measured cache reuse.",
-                             "Spectrum origin and model need independently confirmed manual metadata."])
+                             "Source attribution and model require independent confirmation."])
 
 
 def read_manifest(path):

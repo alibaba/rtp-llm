@@ -1,10 +1,13 @@
 """Birth settings preserve legacy performance and Master logging ownership."""
 
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from runtime.harness import default_perf, fault_env_perf
-from runtime.perf_presets import load_preset, preset_names
+from runtime.perf_presets import ROOT, capture_defaults, load_performance_file, load_preset, preset_names
 from scenario import compile_scenarios
 from scenario.backend import make_env_spec
 from scenario.catalog import handlers
@@ -21,6 +24,35 @@ def spec(raw):
 
 
 class StartupOptionsTest(unittest.TestCase):
+    def test_capture_record_supplies_topology_and_rejects_untracked_edits(self):
+        for name, expected in (
+            ("glm_5_3_l20d", (125, 536, 31218, 46157)),
+            ("deepseek_v4_flash_l20c", (48, 192, 21553, 221484)),
+        ):
+            with self.subTest(name=name):
+                actual = spec({"perf_preset": name})
+                self.assertEqual((actual.n_prefill, actual.n_decode,
+                    actual.prefill_cache_blocks, actual.decode_cache_blocks), expected)
+                capture = capture_defaults(name)
+                self.assertEqual(tuple(capture.values()), expected)
+        source = ROOT / "data/performance/glm_5_3_l20d.json"
+        document = json.loads(source.read_text())
+        document["prefill"]["memory_cache"]["capacity_blocks"] += 1
+        with tempfile.TemporaryDirectory() as directory:
+            changed = Path(directory) / "performance.json"
+            changed.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                load_performance_file(changed)
+
+    def test_capture_deviations_require_explicit_baseline_and_reason(self):
+        with self.assertRaisesRegex(Exception, "model_override"):
+            environment({"perf_preset": "glm_5_3_l20d", "n_prefill": 64},
+                "test", "single-nonbatch")
+        declared = environment({"perf_preset": "glm_5_3_l20d", "n_prefill": 64,
+            "model_override": {"baseline": "glm_5_3_l20d", "reason": "故障注入"}},
+            "test", "single-nonbatch")
+        self.assertEqual(declared["n_prefill"], 64)
+
     def test_preset_registry_is_total_and_rejects_typos_before_launch(self):
         self.assertEqual(("default", "fault_env", "glm_5_3_l20d", "flash_capture_diagnostic", "deepseek_v4_flash_l20c"), preset_names())
         for name in preset_names():

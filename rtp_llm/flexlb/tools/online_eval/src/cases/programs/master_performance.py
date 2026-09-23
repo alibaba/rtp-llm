@@ -1,7 +1,7 @@
 """Single-run absolute gate; profiles are separate runs, never an A/B dependency."""
 
 from cases.config import output
-from traffic.playback import normalize
+from traffic.playback_config import normalize
 from workload.performance_gate import validate
 
 

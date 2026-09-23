@@ -12,7 +12,7 @@ from pathlib import Path
 from traffic.datasets import distribution, trace_models
 from traffic.prefix_lineage import BLOCK, decode
 from traffic.structure import capture_shape, generated_shape
-from traffic.calibrate_traffic import calibrate
+from traffic.derive_synthetic_parameters import derive_parameters
 from traffic.realistic import resolve, iter_requests
 
 DEFAULT_THRESHOLDS = dict(length_ks=[.03, .10], joint_tv=[.15, .35], depth_ks=[.05, .25])
@@ -120,7 +120,7 @@ def audit(profile, capture):
 
 def calibrate_capture(capture):
     raw=Path(capture['path']).read_bytes()
-    return calibrate(raw, {}, capture['metadata']['provenance'].get('fit_report_sha256'))
+    return derive_parameters(raw, {}, capture['metadata']['provenance'].get('fit_report_sha256'))
 
 
 def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, limits=None, progress=None):

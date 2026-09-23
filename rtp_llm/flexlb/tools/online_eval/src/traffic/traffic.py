@@ -1,4 +1,8 @@
-"""Bounded traffic workers shared across test orchestration policies."""
+"""Python RPC workers for finite probes and orchestration flows.
+
+These workers send requests directly; lineage trace replay and pacing run in
+the Java client, not here.
+"""
 
 import copy
 import threading

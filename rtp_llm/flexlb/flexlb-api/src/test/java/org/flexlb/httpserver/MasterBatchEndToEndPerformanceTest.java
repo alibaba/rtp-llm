@@ -248,7 +248,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         suppressRequestPathLogs();
         Path dataRoot = findTrafficDataDirectory();
         ObjectMapper mapper = new ObjectMapper();
-        String capture = "traffic_models/glm-5.3_20260921_1400_15m";
+        String capture = "traffic_trace/glm-5.3_20260921_1400_15m";
         Path modelPath = dataRoot.resolve(capture + ".xz");
         Path manifestPath = dataRoot.resolve(capture + ".manifest.json");
         Path fixturePath = dataRoot.resolve(capture + ".templates.json");
@@ -1430,12 +1430,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         Path current = Path.of("").toAbsolutePath();
         for (int depth = 0; depth < 6 && current != null; depth++) {
             Path candidate = current.resolve("tools/online_eval/data");
-            if (Files.isDirectory(candidate.resolve("traffic_models"))) {
+            if (Files.isDirectory(candidate.resolve("traffic_trace"))) {
                 return candidate;
             }
             current = current.getParent();
         }
-        throw new IOException("Cannot locate tools/online_eval/data/traffic_models from "
+        throw new IOException("Cannot locate tools/online_eval/data/traffic_trace from "
                 + Path.of("").toAbsolutePath());
     }
 

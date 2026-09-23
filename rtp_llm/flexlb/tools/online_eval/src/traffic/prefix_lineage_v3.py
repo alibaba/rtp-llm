@@ -48,46 +48,7 @@ def decode(raw):
 
 
 def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
-    p = parameters
-    required = {'path', 'sha256', 'count', 'output_tokens', 'priority'}
-    if not required <= set(p) or set(p) - required - {'max_input_tokens', 'output_distribution'}:
-        raise ValueError('lineage v3 requires pinned model and output settings')
-    cap = p.get('max_input_tokens', 2147483647)
-    if type(cap) is not int or not 1 <= cap <= 2147483647:
-        raise ValueError('invalid playback input length filter')
-    if type(p['output_tokens']) is not int or not 1 <= p['output_tokens'] <= 2147483647 or type(p['priority']) is not int or not 1 <= p['priority'] <= 100:
-        raise ValueError('invalid output length/priority')
-    sample_output = output_sampler(p)
-    raw = (Path(base_dir) / p['path']).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != p['sha256']:
-        raise ValueError('lineage model checksum mismatch')
-    metadata, events = decode(raw)
-    if type(p['count']) is not int or p['count'] != len(events):
-        raise ValueError('lineage model count mismatch')
-    paths, next_label, selected, excluded = [], 1, 0, 0
-    with Path(path).open('w') as out:
-        for i, (ts, length, parent, shared) in enumerate(events):
-            # Expand excluded parents too: filtering must never break prefix identity.
-            labels = paths[parent][:shared] if parent >= 0 else []
-            fresh = (length + BLOCK - 1) // BLOCK - shared
-            if next_label + fresh > 2147483647:
-                raise ValueError('lineage label budget exceeded')
-            labels.extend(range(next_label, next_label + fresh))
-            next_label += fresh
-            paths.append(labels)
-            if length > cap:
-                excluded += 1
-                continue
-            out.write(json.dumps(dict(rid=f'{namespace}:{i}', ts=ts, il=length,
-                ol=sample_output(i), priority=p['priority'], cache_key_block_size=BLOCK,
-                input_token_blocks=labels), separators=(',', ':')) + '\n')
-            selected += 1
-            if max_requests is not None and selected >= max_requests:
-                break
-    if not selected:
-        raise ValueError('empty playback length selection')
-    return dict(realism=metadata['realism'], tail=metadata['tail'], arrival=metadata['arrival'],
-                provenance=metadata['provenance'], model_sha256=p['sha256'],
-                length_filter=dict(max_input_tokens=cap, selected=selected, excluded_before_limit=excluded),
-                output_semantics=output_semantics(p),
-                output_distribution=p.get('output_distribution'), output_cap=p['output_tokens'])
+    """Compatibility entrypoint; content projection lives in lineage_transforms."""
+    from traffic.lineage_transforms import write_trace as project
+    return project(path, parameters, namespace, base_dir, decode=decode,
+                   max_requests=max_requests)

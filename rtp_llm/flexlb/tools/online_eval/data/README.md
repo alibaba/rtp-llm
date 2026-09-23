@@ -4,37 +4,37 @@
 
 数据分为真实流量、合成流量画像和引擎性能参数。实验输出写入 `run/` 或指定归档目录。
 新增数据提交到仓库前必须取得用户同意；通过文件发现选择数据，无需增加 case。
-已有数据的重命名不改变内容。不可重采的原始样本应保存于仓库外归档。
+不可重采的原始样本应保存于仓库外归档。
 
 | 目录 | 内容 |
 |---|---|
-| `traffic_models/` | 真实流量的匿名 prefix DAG 压缩文件及同名 manifest；保留请求顺序、到达间隔和 prefix 结构，不含真实文本或 token。`.templates.json` 是从真实流量截取的 Java 回归夹具。 |
-| `calibration/` | 参数化合成流量的统计画像。即使画像来自真实数据，生成的请求也是合成流量，不是原请求回放。 |
+| `traffic_trace/` | 真实流量的匿名 prefix DAG 压缩文件及同名 manifest；保留请求顺序、到达间隔和 prefix 结构，不含真实文本或 token。`.templates.json` 是从真实流量截取的 Java 回归夹具。 |
+| `synthetic_parameters/` | 参数化合成流量的统计画像。即使画像来自真实数据，生成的请求也是合成流量，不是原请求回放。 |
 | `performance/` | 引擎计算耗时模型，与流量来源分类独立；预设名称由 `config/performance_presets.json` 解析。 |
 
 ## 选择数据
 
-`run_stress.py --traffic-model <文件名去掉.xz>` 直接读取 `traffic_models/`，`--help` 列出可选文件。
+`run_stress.py --traffic-model <文件名去掉.xz>` 直接读取 `traffic_trace/`，`--help` 列出可选文件。
 无需中央清单。参数化合成通过 `--traffic-source-spec` 选择 `synthetic/realistic/1` 源；
-其 `profile` 按 `calibration/` 下去掉 `.profile.json` 的文件名选择，也可显式填写生成参数。
+其 `profile` 按 `synthetic_parameters/` 下去掉 `.profile.json` 的文件名选择，也可显式填写生成参数。
 场景在 YAML 中固定输入文件及 SHA，不因目录增加文件而改变默认输入。
-来源、窗口、请求数、统计值、SHA 和标定参数从对应 manifest/profile/config 读取，不在本页列清单。
+来源、窗口、请求数、统计值、SHA 和反推参数从对应 manifest/profile/config 读取，不在本页列清单。
 
 ## 命名与来源
 
 流量文件优先使用已确认的业务来源或模型，加采集起点和时长。精确窗口以 manifest 为准；
 codec 版本与 SHA 放在元数据中，不作为统一文件名前缀。`frontend` 只表示采集位置，
 不能替代业务身份。更换来源、模型或长度口径后重新确认可比性，不直接沿用其他输入的门禁结论。
-性能文件采用 `<model>_<hardware-or-calibration>.json`，性能模型与流量来源分别标识。
+性能文件采用 `<model>_<hardware-or-capture>.json`，性能模型与流量来源分别标识。
 
 ## Manifest
 
 每份真实流量旁有同名 `.manifest.json`：
 
-- `source.capture`：采集层和已知部署，不能替代业务来源或模型。
-- `source.spectrum`：Spectrum 业务来源标识、确认状态、信息依据。目前没有自动化查询链，需人工补充。
+- `source.capture`：采集层；来源身份由调用方提供的 `source.attribution` 承载，不能从采集层推断模型。
+- `source.attribution`：调用方提供的不透明来源身份、确认状态和依据；历史 sidecar 中的 `source.spectrum` 原样保留，不参与新文件的字段推断。
 - `source.model`：真实服务模型名称、确认状态、信息依据。未知时 `name: null, status: unconfirmed`，不从部署名或 mock 性能配置推断。
-- `capture_window`、`provenance`：可读时间窗，以及文件内保留的 Pod 覆盖和原始来源校验信息。
+- `capture_window`、`provenance`：可读时间窗，以及文件内保留的分片覆盖和来源校验信息。
 - `statistics`：请求数、平均 QPS、含空闲桶的每秒请求数分位数、输入长度分布及总量（v3 精确长度，v2 块对齐）、prefix 共享分布。
 - `codec`、`bytes`、`sha256`：解码格式和文件完整性；原始请求文本不入库。
 
@@ -49,14 +49,14 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 ```
 
 也可通过 `--source-info /path/to/source.json` 提供完整 `source` 对象。
-确认后填写 Spectrum `identity`、模型 `name`、`status: confirmed` 及各自的 `evidence`；
+确认后填写来源 `identity`、模型 `name`、`status: confirmed` 及各自的 `evidence`；
 未确认字段保持 `null/unconfirmed`。这一步描述已存在的文件，不自动授权提交新数据。
 `fit_frontend_prefix.py` 拟合时同时写出这份 sidecar。
 
 ## 派生数据
 
 `python3 scripts/pipeline/derive_master_templates.py --model /path/to/model.xz --out /path/to/model.templates.json`
-生成 Java 回归夹具。合成画像由 `traffic.calibrate_traffic` 从固定模型与 fit-report 标定；
+生成 Java 回归夹具。合成画像由 `traffic.derive_synthetic_parameters` 从固定模型与 fit-report 反推参数；
 它描述统计分布，不等同于原请求回放。`sampling: joint` 的用法和限制见
 [合成保真度](../docs/development/synthetic-fidelity.md)。运行命令的工作目录为 `online_eval`，
 模块入口需要 `PYTHONPATH=src:.`。
@@ -70,8 +70,8 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 缺到达时间戳等不可用日志行在 summary 显式计数；契约字段不能静默补齐。
 无 schema 的旧行文件不被自动猜测接纳，需根据真实来源核验契约，不能用拟合件冒充。
 
-仓库外按 `<来源>/<UTC起止窗口>/capture/pod-N.jsonl.gz`（或 `.jsonl.xz`）及
-`capture/pod-N.summary.json` 成对归档；Pod 索引映射和来源信息随窗口保存。
+仓库外按 `<来源>/<UTC起止窗口>/capture/shard-N.jsonl.gz`（或 `.jsonl.xz`）及
+`capture/shard-N.summary.json` 成对归档；分片身份映射和来源信息随窗口保存。
 这是“拟合前原始中间件”的唯一来源，不含原始 token。派生文件保存到同窗口的
 `fit/v3/`（历史复拟合为 `fit/v2/`），包括 `.xz`、manifest 和 fit-report。
 行文件的压缩字节 SHA256 由 summary 绑定，fit-report 保存所消费的 summary。
@@ -84,6 +84,14 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 但 summary 必须标记 `complete: false`、`truncated: true` 和 `budget_exceeded`。
 fit 拒绝不完整窗口。增加预算或分成更小的到达窗口重新采集，再分别拟合；
 不实现基于文件偏移的续采，以免轮转后的偏移被误认作同一日志。
+
+## 模型采集档案与口径
+
+模型侧真实观测值只在一个 `data/performance/` 采集档案定义。档案须携带部署身份、采集窗口和完整性字段；缺原始记录的现有档标为 `legacy_unverified`，不能宣称已核验。只含局部参数且无消费者的档标为 `orphan`，不得被新 case 当作权威采集。变更性能/容量先改档案；场景中的测试偏离必须声明基线和理由。
+
+`prefill_kv_pool_blocks`/`decode_kv_pool_blocks` 是 Java mock 的 KV 池块数；`prefill.memory_cache.capacity_blocks` 是内存前缀树容量；性能 JSON 顶层 `block_size` 是引擎时间模型块口径；capture 行契约的 `BLOCK_SIZE` 是流量前缀摘要块口径。这四者不得以裸称“blocks”混用，也不要求数值相等。mock 的 prefill/decode block-size 是档案里的独立运行参数，读取方必须按各自口径传入。
+
+真实快照的内容变换、记录字段和播放边界以 [流量架构契约](../docs/architecture/traffic.md) 为准。合成画像保留历史格式键 `calibration` 与 `held_out_validated`，目录名不改变旧工件格式或 SHA。
 
 ## 编码代际与复算
 

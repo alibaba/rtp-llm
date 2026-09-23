@@ -26,7 +26,7 @@
 {"kind":"synthetic","model":"realistic","version":"1","parameters":{"profile":"<profile-name>","sampling":"joint","seed":42,"count":10000,"output_tokens":420}}
 ```
 
-`calibrate_traffic` 仍是唯一统计标定入口，导出旧字段与联合池。报告不另写一份标定逻辑。
+`derive_synthetic_parameters` 是统计参数反推入口，导出旧字段与联合池。报告不另写一份参数反推逻辑。
 现有 `capture_frontend_prefix`、`fit_frontend_prefix`、`prefix_lineage`、`datasets/describe_traffic` 和
 `workload_profile` 分别承担采集、真实 DAG 拟合、编解码、文件描述和 LRU 诊断，仍有独立用途。
 
@@ -38,7 +38,7 @@
 # 固定现有画像，按 SHA 定位拟合源，同时观察其他真实窗口的漂移
 python3 scripts/commands/compare_traffic.py --out /tmp/fidelity --check
 
-# 每个捕获单独重新标定；用于方法的样本内比较，不是 held-out 验证
+# 每个捕获单独重新反推参数；用于方法的样本内比较，不是 held-out 验证
 python3 scripts/commands/compare_traffic.py --refit --out /tmp/fidelity-refit --check
 
 # 快速观察或自定义对照、阈值；省略 --count 使用每个捕获的事件数
@@ -52,15 +52,15 @@ python3 scripts/commands/compare_traffic.py --profile /path/to/profile.json \
 报告展示实际标签的前 8 块家族聚类、首次出现冷比例、ECDF、联合密度、KS、joint TV、相关系数与完整参数。
 JSON 保留精确直方计数、未舍入标量、seed、画像和捕获 SHA。相同输入路径与参数输出字节一致；HTML 无外链依赖。
 
-画像审计复用唯一标定实现，检查源 SHA、provenance、所有标定参数、targets 及可用的 fit-report digest，
+画像审计复用唯一参数反推实现，检查源 SHA、provenance、所有反推参数、targets 及可用的 fit-report digest，
 不会只打印失败却仍退出 0。正常单测发现与 `.github/workflows/traffic-fidelity.yml` 都运行该审计。
-手写、未声称来自真实捕获的合成形状不受经验标定等值检查。
+手写、未声称来自真实捕获的合成形状不受经验参数等值检查。
 
 ## 指标与结论的边界
 
 共享深度从生产输出的标签与此前所有请求最长公共前缀重算；使用压缩 radix trie，避免保留展开后的每个 token。
 家族统计与真实侧统一按前 8 个 block 聚类。标量分位数使用 `datasets.distribution` 的 nearest-rank；
-旧画像 targets 审计继续使用原标定的 floor-ICDF 口径，以保持历史声明可重算。
+旧画像 targets 审计继续使用原反推的 floor-ICDF 口径，以保持历史声明可重算。
 
 joint TV 使用 log₂(token) 9–21 的 32 桶和共享深度 0–2000 blocks 的 16 桶，越界归入边界桶。
 图表与度量使用相同分箱，三张密度图使用同一色标。分箱距离并不检验完整复用拓扑或时序。

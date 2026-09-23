@@ -1,4 +1,4 @@
-"""Input structure shared by calibration and standalone fidelity analysis."""
+"""Input structure shared by parameter derivation and standalone fidelity analysis."""
 from collections import Counter
 from traffic.prefix_lineage import BLOCK
 

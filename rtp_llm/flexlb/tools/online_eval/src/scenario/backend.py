@@ -530,10 +530,13 @@ def make_env_spec(plan, profile, lease):
     if "prefill_cache_policy" in plan:
         cache = plan["prefill_cache_policy"]
         prefill = spec.perf.setdefault("prefill", {})
+        capacity = cache.get("memory_blocks", prefill.get("memory_cache", {}).get("capacity_blocks"))
+        if type(capacity) is not int or capacity < 0:
+            raise ValueError("prefill memory cache policy requires captured capacity or explicit memory_blocks")
         prefill["enable_gpu_prefix_tree"] = cache["device_tree"]
         prefill["memory_cache"] = dict(
-            enabled=cache["memory_blocks"] > 0,
-            capacity_blocks=cache["memory_blocks"],
+            enabled=capacity > 0,
+            capacity_blocks=capacity,
             enable_prefix_tree=cache["memory_tree"],
             copy_lifecycle=True,
         )

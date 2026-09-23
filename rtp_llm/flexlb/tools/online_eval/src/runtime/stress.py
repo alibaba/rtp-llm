@@ -19,6 +19,7 @@ from runtime.harness import (API_JAR, FLEXLB_DIR, MOCK_JAR, TOOL_DIR, ClientOps,
                              http_get_json, http_post_json, port_in_use,
                              resolve_java21, wait_for)
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
+from runtime.perf_presets import load_performance_file
 from traffic.datasets import DEFAULT_TRACE, model_path, read_manifest, trace_models
 from traffic.traffic_source import materialize
 
@@ -79,7 +80,7 @@ def parse_args(argv=None):
     traffic = p.add_mutually_exclusive_group()
     traffic.add_argument("--traffic-source-spec", type=Path)
     traffic.add_argument("--traffic-model", choices=tuple(trace_models()),
-                         help="real capture filename stem under data/traffic_models")
+                         help="real capture filename stem under data/traffic_trace")
     p.add_argument("--traffic-output-tokens", type=int, default=420)
     p.add_argument("--limit", type=int, default=1000)
     p.add_argument("--send-mode", choices=("replay", "uniform"))
@@ -222,7 +223,7 @@ def _env_spec(a):
     return EnvSpec(
         label="stress", run_dir=a.run_dir, runtime_mode="stress", diagnostic_events=a.collection_profile == "diagnostic",
         n_prefill=a.n_prefill, n_decode=a.n_decode, mock_heap=a.mock_heap,
-        perf=json.loads(a.performance.read_text()), master_profile=a.profile,
+        perf=load_performance_file(a.performance)[0], master_profile=a.profile,
         raw_config=_config(a), master_jvm_heap=a.master_heap,
         master_env={"HIPPO_ROLE": "test", "FLEXLB_MONITOR_ENABLED": "true",
                     "FLEXLB_MONITOR_METRIC_WHITELIST": whitelist,

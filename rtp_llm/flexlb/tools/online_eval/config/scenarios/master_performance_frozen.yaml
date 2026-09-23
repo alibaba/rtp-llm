@@ -5,12 +5,8 @@ profiles:
 - batch-window
 environment:
   backend: java_mock
-  n_prefill: 48
-  n_decode: 192
   perf_preset: deepseek_v4_flash_l20c
   metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_
-  prefill_cache_blocks: 21553
-  decode_cache_blocks: 221484
   config_overrides:
     max_requests: 64
     max_collection_wait_ms: 350
@@ -65,7 +61,7 @@ parameters:
       model: prefix_lineage
       version: '3'
       parameters:
-        path: ../../data/traffic_models/local_flash_20260923_v3.xz
+        path: ../../data/traffic_trace/local_flash_20260923_v3.xz
         sha256: 29d0fbee8986d465b672977154ebb9aef27353d445b383fd9135656de9e911ca
         count: 844864
         output_tokens: 8192

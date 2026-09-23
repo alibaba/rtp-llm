@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from traffic.playback import normalize, comparison_notice
-from traffic.playback_controls import integral, inverse, poisson_count
+from traffic.playback_config import normalize, comparison_notice
+from traffic.playback_intensity import integral, inverse, poisson_count
 from traffic.output_sampling import output_sampler, event_uniform
 from traffic import prefix_lineage, prefix_lineage_v3
 

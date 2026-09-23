@@ -5,16 +5,13 @@ profiles:
 environment:
   backend: java_mock
   discovery: discovery_file
-  n_prefill: 125
-  n_decode: 536
   perf_preset: glm_5_3_l20d
-  prefill_cache_blocks: 31218
-  decode_cache_blocks: 46157
+  model_override:
+    baseline: glm_5_3_l20d
+    reason: 测试缓存迁移路径，覆盖设备树开关和调度表达式
   prefill_cache_policy:
     device_tree: false
     memory_tree: false
-    memory_blocks: 95311
-  prefill_max_waiting_batches: 256
   config_overrides:
     max_inflight_per_prefill_worker: 1024
     prefill_expression: 77.82664607924481 + 112.5170362714666 * batchSize + 10.87594301934867 * sum(computeTokens / 1024.)
@@ -61,7 +58,7 @@ parameters:
       model: prefix_lineage
       version: '2'
       parameters:
-        path: ../../data/traffic_models/glm-5.3_20260921_1400_15m.xz
+        path: ../../data/traffic_trace/glm-5.3_20260921_1400_15m.xz
         sha256: ac2f8aad472e882de2c649f5e0507d76787655a66d53e0e7285bdcb8aae87cca
         count: 141113
         output_tokens: 420

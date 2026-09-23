@@ -9,7 +9,7 @@ from pathlib import Path
 from runtime.java_flow import JavaFlowGroup
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
 from traffic.traffic_source import materialize
-from traffic.playback import normalize
+from traffic.playback_config import normalize
 
 from runtime.harness import ClientOps
 from scenario.contracts import CheckResult, StageHandler, StageOutput
@@ -92,7 +92,7 @@ def _start(ctx, p, deadline):
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
     count = json.loads(trace.with_suffix('.manifest.json').read_text())['request_count']
     laps = int(environment.get('MAX_LAPS', 0 if environment.get('LOOP')=='true' else 1))
-    from traffic.playback_controls import integral, poisson_count
+    from traffic.playback_intensity import integral, poisson_count
     curve = playback.get('rate_curve')
     if laps:
         event_budget = max(50_000, 2*count*laps)

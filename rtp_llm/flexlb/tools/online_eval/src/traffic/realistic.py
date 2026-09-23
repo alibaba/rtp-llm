@@ -42,11 +42,11 @@ def resolve(parameters, *, document=None):
     if profile:
         document = document if document is not None else json.loads(profile_path(profile).read_text())
         if document.get('schema_version', 1) not in (1, 2):
-            raise ValueError('unsupported calibration schema')
+            raise ValueError('unsupported synthetic parameter schema')
         provenance = document['calibration']
         p = dict(document['parameters'], **p)
         if set(p)-FIELDS:
-            raise ValueError('unknown parameter in calibration profile')
+            raise ValueError('unknown parameter in synthetic profile')
     p.setdefault('block_size',512)
     p.setdefault('priority',50)
     p.setdefault('shared_blocks',0)
@@ -56,7 +56,7 @@ def resolve(parameters, *, document=None):
     p.setdefault('pinned_blocks',[])
     for k in ('families','prefix_blocks','zipf_alpha','cold_fraction'):
         if k not in p:
-            raise ValueError('explicit shape or calibration profile required: '+k)
+            raise ValueError('explicit shape or synthetic parameter profile required: '+k)
     if p['block_size'] not in (512,1024):
         raise ValueError('realistic block_size supports 512 or compatibility 1024')
     for k in ('families','shared_blocks','prefix_blocks','suffix_blocks','session_requests','session_growth_blocks','priority'):
@@ -87,7 +87,7 @@ def resolve(parameters, *, document=None):
     if p['sampling'] == 'joint':
         joint = p.get('joint_distribution')
         if not isinstance(joint, dict) or joint.get('schema_version') != 1:
-            raise ValueError('joint sampling requires a schema 2 calibrated joint distribution')
+            raise ValueError('joint sampling requires a schema 2 derived joint distribution')
         warm, cold = joint.get('warm_pairs'), joint.get('cold_blocks')
         if not isinstance(warm, list) or not isinstance(cold, list):
             raise ValueError('joint pools must be arrays')
@@ -169,11 +169,11 @@ def iter_requests(p, namespace, *, max_requests=None):
 
 
 def write_trace(path, parameters, namespace, base_dir=None, *, max_requests=None):
-    p, calibration = resolve(parameters)
+    p, derivation = resolve(parameters)
     with Path(path).open('w') as out:
         for row in iter_requests(p, namespace, max_requests=max_requests):
             out.write(json.dumps(row, separators=(',', ':')) + '\n')
-    return dict(realism='CALIBRATED_STATISTICAL' if calibration else 'NOT_VALIDATED',
+    return dict(realism='CALIBRATED_STATISTICAL' if derivation else 'NOT_VALIDATED',
                 arrival='ORDINAL_PACED_BY_CLIENT',tail='EXACT_CONFIGURED_LENGTHS',
-                calibration=calibration,held_out_validated=False,sampling=p['sampling'],
+                calibration=derivation,held_out_validated=False,sampling=p['sampling'],
                 output_model='INDEPENDENT_EXPLICIT_DISTRIBUTION')

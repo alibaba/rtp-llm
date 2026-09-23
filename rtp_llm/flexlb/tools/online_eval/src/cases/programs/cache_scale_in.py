@@ -1,7 +1,7 @@
 """Warm once, shrink in one step, keep the Java sender running, adjudicate offline."""
 
 from cases.config import output
-from traffic.playback import normalize
+from traffic.playback_config import normalize
 
 
 def step(case):

@@ -74,7 +74,13 @@ class TrafficEntrypointTest(unittest.TestCase):
         from traffic.datasets import model_path
         model = model_path()
         stored = json.loads(model.with_suffix(".templates.json").read_text())
-        self.assertEqual(stored, derive(model))
+        generated = derive(model)
+        transformations = generated.pop("transformations")
+        self.assertEqual(stored, generated)
+        self.assertEqual(transformations["source_sha256"], stored["source_sha256"])
+        self.assertEqual(transformations["selected_requests"], len(stored["templates"]))
+        self.assertEqual([item["kind"] for item in transformations["applied"]],
+                         ["fixture_shape_clip", "request_limit", "fixed_output_length"])
         self.assertGreaterEqual(len({row["il"] for row in stored["templates"]}), 32)
 
 

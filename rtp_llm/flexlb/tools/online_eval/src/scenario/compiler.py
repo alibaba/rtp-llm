@@ -15,7 +15,7 @@ from flexlb_cfg import (
 )
 
 from runtime.resource_plan import VICTIM_OFFSETS
-from runtime.perf_presets import preset_names
+from runtime.perf_presets import capture_defaults, load_preset, preset_names
 from scenario.contracts import PlanContext
 from scenario.loader import ScenarioError
 
@@ -151,6 +151,7 @@ def environment(value, path, profile):
             "config_overrides",
             "discovery",
             "perf_preset",
+            "model_override",
             "prefill_perf",
             "prefill_cache_policy",
             "prefill_max_waiting_batches",
@@ -179,6 +180,20 @@ def environment(value, path, profile):
         if val not in allowed:
             fail(path + "." + key, f"invalid value {val!r}; expected one of {allowed}")
         result[key] = val
+    captured = capture_defaults(result["perf_preset"])
+    for field, capture_field in (
+        ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
+        ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
+        ("decode_cache_blocks", "decode_kv_pool_blocks"),
+    ):
+        if field not in value and capture_field in captured:
+            result[field] = captured[capture_field]
+    if "model_override" in value:
+        override = mapping(value["model_override"], path + ".model_override",
+            {"baseline", "reason"}, {"baseline", "reason"})
+        if override["baseline"] != result["perf_preset"] or not isinstance(override["reason"], str) or not override["reason"].strip():
+            fail(path + ".model_override", "baseline must name perf_preset and reason must be nonempty")
+        result["model_override"] = dict(override)
     if type(value.get("debug_enabled", False)) is not bool:
         fail(path + ".debug_enabled", "expected boolean")
     result["debug_enabled"] = value.get("debug_enabled", False)
@@ -229,11 +244,12 @@ def environment(value, path, profile):
     if "prefill_cache_policy" in value:
         field = path + ".prefill_cache_policy"
         keys = {"device_tree", "memory_tree", "memory_blocks"}
-        cache = mapping(value["prefill_cache_policy"], field, keys, keys)
+        cache = mapping(value["prefill_cache_policy"], field, keys, {"device_tree", "memory_tree"})
         for key in ("device_tree", "memory_tree"):
             if type(cache[key]) is not bool:
                 fail(field + "." + key, "expected boolean")
-        number(cache["memory_blocks"], field + ".memory_blocks", integer=True)
+        if "memory_blocks" in cache:
+            number(cache["memory_blocks"], field + ".memory_blocks", integer=True)
         result["prefill_cache_policy"] = dict(cache)
     if "prefill_perf" in value:
         field = path + ".prefill_perf"
@@ -306,6 +322,25 @@ def environment(value, path, profile):
         )
     except (TypeError, ValueError) as exc:
         fail(path + ".config_overrides", str(exc))
+    if captured:
+        changed = [field for field, source_field in (
+            ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
+            ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
+            ("decode_cache_blocks", "decode_kv_pool_blocks"),
+        ) if field in value and value[field] != captured[source_field]]
+        if "prefill_expression" in overrides or "prefill_perf" in value:
+            changed.append("prefill model")
+        if "prefill_cache_policy" in value:
+            performance, _ = load_preset(result["perf_preset"])
+            policy = value["prefill_cache_policy"]
+            original = performance.get("prefill", {})
+            memory = original.get("memory_cache", {})
+            if (policy["device_tree"] != original.get("enable_gpu_prefix_tree")
+                or policy["memory_tree"] != memory.get("enable_prefix_tree")
+                or ("memory_blocks" in policy and policy["memory_blocks"] != memory.get("capacity_blocks"))):
+                changed.append("prefill_cache_policy")
+        if changed and "model_override" not in result:
+            fail(path + ".model_override", "test deviation requires baseline and reason: " + ", ".join(changed))
     result["config_overrides"] = copy.deepcopy(overrides)
     result["effective_axes"], result["effective_capabilities"] = effective_capabilities(
         result["resolved_config"]
@@ -626,6 +661,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "config_overrides",
                     "discovery",
                     "perf_preset",
+                    "model_override",
                     "prefill_perf",
                     "prefill_cache_policy",
                     "prefill_max_waiting_batches",
@@ -648,6 +684,14 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     env[key] = {**env.get(key, {}), **copy.deepcopy(value)}
                 else:
                     env[key] = copy.deepcopy(value)
+            capture = capture_defaults(env.get("perf_preset", "default"))
+            for field, source_field in (
+                ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
+                ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
+                ("decode_cache_blocks", "decode_kv_pool_blocks"),
+            ):
+                if field not in env and source_field in capture:
+                    env[field] = capture[source_field]
             if "stages" in variant and "stage_overrides" in variant:
                 fail(
                     loc,

@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 from traffic.prefix_lineage import encode,decode,expand
 from traffic.structure import PrefixIndex,capture_shape,generated_shape
-from traffic.calibrate_traffic import calibrate
+from traffic.derive_synthetic_parameters import derive_parameters
 from traffic.realistic import resolve,iter_requests
 from traffic.datasets import profile_path,trace_models
 from analysis.traffic_fidelity import audit,load_capture,run,compare,grade,ks,thresholds
@@ -22,7 +22,7 @@ def fixture():
         blocks=rng.randint(20,500);shared=0 if i%10==0 else int(blocks*.85)
         events.append([i,blocks*512,i%32 if shared else -1,shared])
     raw=encode(events,dict(source_start=0,source_end=4031))
-    return raw,calibrate(raw,{},None)
+    return raw,derive_parameters(raw,{},None)
 
 
 class TrafficFidelityTest(unittest.TestCase):
@@ -83,7 +83,7 @@ class TrafficFidelityTest(unittest.TestCase):
         for fields in (dict(input_distribution=dict(values=[512],weights=[1])),dict(shared_blocks=1),dict(sampling='unknown')):
             args=dict(seed=1,count=2,output_tokens=1,sampling='joint');args.update(fields)
             with self.assertRaises(ValueError): resolve(args,document=self.profile)
-        prof=calibrate(encode([[0,512,-1,0],[1,1024,-1,0]]),{},None)
+        prof=derive_parameters(encode([[0,512,-1,0],[1,1024,-1,0]]),{},None)
         p,_=resolve(dict(seed=1,count=20,output_tokens=1,sampling='joint'),document=prof)
         self.assertEqual(0,sum(generated_shape(iter_requests(p,'x'))['shared']))
 

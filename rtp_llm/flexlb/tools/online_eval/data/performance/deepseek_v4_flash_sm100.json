@@ -2,11 +2,21 @@
   "block_size": 1024,
   "sleep_scale": 1.0,
   "prefill": {
-    "scale": 0.40
+    "scale": 0.4
   },
   "decode": {
     "step_base_ms": 126.3,
     "step_per_running_ms": 5.0,
     "tokens_per_step": 2.6
+  },
+  "capture": {
+    "status": "orphan",
+    "identity": {
+      "model": "deepseek_v4_flash",
+      "hardware": "sm100",
+      "deployment": null
+    },
+    "capture_window": null,
+    "record_sha256": "b8a3e9b0f0cbba8b88b66965151da212cdc292db4d19317a9375613e6239238c"
   }
 }

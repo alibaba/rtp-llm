@@ -60,7 +60,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from traffic.playback import comparison_notice
+from traffic.playback_config import comparison_notice
 
 from reporting import render, write_bundle, table, details, run_meta
 from reporting.statistics import select_window

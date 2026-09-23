@@ -36,7 +36,7 @@ class CaptureContractTest(unittest.TestCase):
 
     def fit(self, root):
         return subprocess.run([sys.executable, str(ROOT/'src/traffic/fit_frontend_prefix.py'),
-            '--source', str(root), '--out', str(root/'fit'), '--expected-pods', '1',
+            '--source', str(root), '--out', str(root/'fit'), '--expected-shards', '1',
             '--output-tokens', '10'], capture_output=True, text=True)
 
     def test_fit_rejects_bad_rows_with_line_and_reason(self):
@@ -126,7 +126,7 @@ class CaptureContractTest(unittest.TestCase):
             self.assertEqual(1024, row['block_size'])
             self.assertEqual(1024, json.loads((root/'pod-0.summary.json').read_text())['block_size'])
             subprocess.run([sys.executable, str(package/'fit_frontend_prefix.py'), '--source', str(root),
-                '--out', str(root/'fit'), '--expected-pods', '1', '--output-tokens', '10'],
+                '--out', str(root/'fit'), '--expected-shards', '1', '--output-tokens', '10'],
                 check=True, capture_output=True)
             manifest = json.loads((root/'fit/lineage-model.manifest.json').read_text())
             self.assertEqual(1024, manifest['block_size'])

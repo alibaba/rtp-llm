@@ -6,9 +6,9 @@ from pathlib import Path
 from unittest import mock
 
 from traffic import datasets, prefix_lineage, prefix_lineage_v3
-from traffic.calibrate_traffic import calibrate
+from traffic.derive_synthetic_parameters import derive_parameters
 from traffic.codecs import decode
-from traffic.playback import comparison_notice
+from traffic.playback_config import comparison_notice
 from scripts.pipeline.derive_master_templates import derive
 from scripts.pipeline.materialize_traffic import main as materialize_main
 
@@ -18,7 +18,7 @@ class CodecRoutingTest(unittest.TestCase):
         for version, codec in ((2, prefix_lineage), (3, prefix_lineage_v3)):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                model = root/'traffic_models/fixture.xz'
+                model = root/'traffic_trace/fixture.xz'
                 model.parent.mkdir()
                 raw = codec.encode([[0, 513, -1, 0], [1000, 1025, 0, 1], [2000, 1, -1, 0]])
                 model.write_bytes(raw)
@@ -26,7 +26,7 @@ class CodecRoutingTest(unittest.TestCase):
                 sidecar = model.with_suffix('.manifest.json')
                 sidecar.write_text(json.dumps(manifest))
                 self.assertEqual(manifest, datasets.read_manifest(model))
-                profile = calibrate(raw, {}, None, manifest)
+                profile = derive_parameters(raw, {}, None, manifest)
                 self.assertEqual((1539 if version == 3 else 2048) / 3,
                                  profile['calibration']['targets']['mean_input_tokens'])
                 templates = derive(model, count=3)['templates']

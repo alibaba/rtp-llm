@@ -1,7 +1,10 @@
-"""Scenario client playback parameters. Sources never decide when to send."""
+"""Validate playback settings and translate them to Java client environment.
+
+This module does not send requests. Java owns pacing and loops.
+"""
 import math
 import json
-from traffic import playback_controls as controls
+from traffic import playback_intensity as controls
 
 FIELDS={'mode','qps','speed','max_laps','identity','retain_probability','seed',
         'ramp_up_seconds','burst_factor','burst_period_seconds','burst_duty',

@@ -14,7 +14,7 @@ from traffic.datasets import read_manifest
 from traffic.structure import capture_shape, joint_distribution
 
 
-def calibrate(raw, report, report_sha, manifest=None):
+def derive_parameters(raw, report, report_sha, manifest=None):
     metadata, events=decode(raw, manifest)
     sizes=sorted(e[1] * (1 if metadata["version"] == 3 else BLOCK) for e in events)
     events=block_events(metadata, events)
@@ -59,7 +59,7 @@ def main():
     parser.add_argument('--fit-report',type=Path,required=True)
     parser.add_argument('--out',type=Path,required=True)
     a=parser.parse_args();raw=a.fit_report.read_bytes()
-    result=calibrate(a.model.read_bytes(),json.loads(raw),hashlib.sha256(raw).hexdigest(), read_manifest(a.model))
+    result=derive_parameters(a.model.read_bytes(),json.loads(raw),hashlib.sha256(raw).hexdigest(), read_manifest(a.model))
     result['source_capture']=os.path.relpath(a.model.resolve(), a.out.resolve().parent)
     a.out.write_text(json.dumps(result,indent=2)+'\n')
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from runtime.ha import LiveClientEvents
 from traffic.traffic_source import sha256_file
-from traffic.playback import normalize
+from traffic.playback_config import normalize
 
 
 class JavaFlowGroup:

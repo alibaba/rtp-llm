@@ -16,9 +16,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--expected-pods", type=int, required=True)
+    p.add_argument("--expected-shards", type=int, required=True)
+    p.add_argument("--namespace", default="fit", help="opaque request identity namespace")
     p.add_argument("--output-tokens", type=int, required=True)
-    p.add_argument("--source-info", type=Path, help="manual Spectrum/model source metadata JSON")
+    p.add_argument("--source-info", type=Path, help="caller-supplied source metadata JSON")
     p.add_argument("--model-version", choices=("2", "3"), default="3")
     p.add_argument("--v2-reason", help="仅历史复拟合：说明显式生成 v2 的理由")
     a = p.parse_args()
@@ -40,7 +41,7 @@ def fit(a):
     a.out.mkdir(parents=True, exist_ok=True)
     rows = []
     sources = {}
-    for path in sorted(list(a.source.glob("pod-*.jsonl.gz")) + list(a.source.glob("pod-*.jsonl.xz"))):
+    for path in sorted(list(a.source.glob("*.jsonl.gz")) + list(a.source.glob("*.jsonl.xz"))):
         summary = json.loads(
             path.with_name(path.name.replace(".jsonl.gz", ".summary.json").replace(".jsonl.xz", ".summary.json")).read_text()
         )
@@ -58,7 +59,6 @@ def fit(a):
                 except ValueError:
                     raise ValueError(f"{location}: invalid JSON") from None
                 validate_row(row, location)
-                row["pod"] = path.name
                 row["keys"] = [bytes.fromhex(k) for k in row["keys"]]
                 rows.append(row)
     windows = {(v["start"], v["end"]) for v in sources.values()}
@@ -67,14 +67,13 @@ def fit(a):
     capture_start, capture_end = next(iter(windows))
     if (
         capture_end <= capture_start
-        or a.expected_pods <= 0
+        or a.expected_shards <= 0
+        or len(sources) > a.expected_shards
+        or not isinstance(a.namespace, str) or not a.namespace
         or a.output_tokens <= 0
     ):
         raise ValueError("invalid capture/workload parameters")
-    present = {int(Path(name).name.split("-")[1].split(".")[0]) for name in sources}
-    if not present <= set(range(a.expected_pods)):
-        raise ValueError("capture pod index exceeds expected fleet")
-    missing = sorted(set(range(a.expected_pods)) - present)
+    missing_count = a.expected_shards - len(sources)
     rows.sort(key=lambda r: r["ts"])
     if not rows:
         raise ValueError("empty capture")
@@ -89,7 +88,7 @@ def fit(a):
     potential = 0
     gaps = []
     source_origin = rows[0]["ts"]
-    cross_duplicates = collections.Counter()
+    duplicate_counts = collections.Counter()
     plan = a.out / "input-plan.jsonl"
     with plan.open("w") as f:
         for i, row in enumerate(rows):
@@ -120,7 +119,7 @@ def fit(a):
             lengths.append(row["il"])
             status[str(row["status"])] += 1
             families[keys[7] if len(keys) >= 8 else ("short", row["tail_hash"])] += 1
-            cross_duplicates[(row["rid"], row["ts"])] += 1
+            duplicate_counts[(row["rid"], row["ts"])] += 1
             t = int((row["ts"] - source_origin) // 60000)
             w = windows.setdefault(
                 t, dict(requests=0, tokens=0, potential_tokens=0, errors=0)
@@ -136,24 +135,24 @@ def fit(a):
     gaps.sort()
     total = sum(lengths)
     model_path = a.out / "lineage-model.xz"
-    raw = encode(model, dict(missing_pod_indices=missing,source_start=rows[0]['ts'],
+    raw = encode(model, dict(missing_shard_count=missing_count,source_start=rows[0]['ts'],
         source_end=rows[-1]['ts'],capture_start=capture_start,capture_end=capture_end,
-        source_pods=len(sources),expected_pods=a.expected_pods,
+        source_shards=len(sources),expected_shards=a.expected_shards,
         **(dict(v2_reason=a.v2_reason) if a.model_version == "2" else {})))
     model_path.write_bytes(raw)
     source = json.loads(a.source_info.read_text()) if a.source_info else None
     model_path.with_suffix('.manifest.json').write_text(
         json.dumps(build_manifest(model_path, source), indent=2) + '\n')
     write_trace(plan, dict(path=str(model_path.resolve()),sha256=hashlib.sha256(raw).hexdigest(),
-        count=len(model),output_tokens=a.output_tokens,priority=50),'frontend-fit:scale_in',a.out)
+        count=len(model),output_tokens=a.output_tokens,priority=50),a.namespace,a.out)
     digest = hashlib.sha256()
     with plan.open("rb") as f:
         for chunk in iter(lambda: f.read(1048576), b""):
             digest.update(chunk)
     report = dict(
-        source_pods=len(sources),
-        expected_pods=a.expected_pods,
-        missing_pod_indices=missing,
+        source_shards=len(sources),
+        expected_shards=a.expected_shards,
+        missing_shard_count=missing_count,
         sources=sources,
         requests=len(rows),
         source_start=rows[0]["ts"],
@@ -174,15 +173,13 @@ def fit(a):
             for q in [0.5, 0.9, 0.99]
         },
         source_minute_windows=windows,
-        cross_pod_duplicate_identity_count=sum(
-            v - 1 for v in cross_duplicates.values() if v > 1
-        ),
+        duplicate_identity_count=sum(v - 1 for v in duplicate_counts.values() if v > 1),
         plan_sha256=digest.hexdigest(),
         plan_bytes=plan.stat().st_size,
         model_bytes=(a.out / "lineage-model.xz").stat().st_size,
-        realism="EMPIRICAL_PREFIX_STRUCTURE_PARTIAL_FLEET",
+        realism="EMPIRICAL_PREFIX_STRUCTURE_PARTIAL_COVERAGE",
         limitations=[
-            "Missing frontend pods: " + str(missing),
+            "Missing capture shards: " + str(missing_count),
             "Capture interval: " + str((capture_start, capture_end)),
             "Output cap supplied independently; error-censored outputs are not fitted",
             "512-token equivalence preserved; sub-block token content not reconstructed",

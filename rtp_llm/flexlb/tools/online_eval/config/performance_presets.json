@@ -7,13 +7,7 @@
   },
   "glm_5_3_l20d": {
     "performance": "data/performance/glm_5_3_l20d.json",
-    "mock_heap": "32g",
-    "mock_extra_args": [
-      "--prefill-block-size",
-      "512",
-      "--decode-block-size",
-      "64"
-    ]
+    "mock_heap": "32g"
   },
   "flash_capture_diagnostic": {
     "performance": "data/performance/synthetic_baseline.json",
@@ -27,14 +21,6 @@
   },
   "deepseek_v4_flash_l20c": {
     "performance": "data/performance/deepseek_v4_flash_l20c.json",
-    "mock_heap": "32g",
-    "mock_extra_args": [
-      "--prefill-block-size",
-      "512",
-      "--decode-block-size",
-      "128",
-      "--decode-max-concurrency",
-      "128"
-    ]
+    "mock_heap": "32g"
   }
 }

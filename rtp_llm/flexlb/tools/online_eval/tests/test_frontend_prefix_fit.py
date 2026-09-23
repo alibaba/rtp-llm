@@ -74,6 +74,11 @@ class FrontendPrefixFitTest(unittest.TestCase):
             capture = root / "pod-0.jsonl.gz"
             captured = [json.loads(line) for line in gzip.open(capture, "rt")]
             self.assertEqual(len(captured), 3)
+            # Fit accepts opaque shard names, independent of capture location.
+            renamed = root / "anonymous-source.jsonl.gz"
+            capture.rename(renamed)
+            (root / "pod-0.summary.json").rename(root / "anonymous-source.summary.json")
+            capture = renamed
             self.assertTrue(all("input_ids" not in row for row in captured))
             command = [
                 sys.executable,
@@ -82,8 +87,10 @@ class FrontendPrefixFitTest(unittest.TestCase):
                 str(root),
                 "--out",
                 str(root / "fit"),
-                "--expected-pods",
+                "--expected-shards",
                 "2",
+                "--namespace",
+                "custom",
                 "--output-tokens",
                 "420",
             ]
@@ -92,14 +99,15 @@ class FrontendPrefixFitTest(unittest.TestCase):
             self.assertIn("--v2-reason", rejected.stderr)
             subprocess.run(command, check=True, capture_output=True)
             report = json.loads((root / "fit/fit-report.json").read_text())
-            self.assertEqual(report["missing_pod_indices"], [1])
+            self.assertEqual(report["missing_shard_count"], 1)
+            self.assertEqual(report["source_shards"], 1)
             self.assertAlmostEqual(report["source_qps"], 3 / 9)
             model = root / "fit/lineage-model.xz"
             from traffic.datasets import read_manifest
             manifest = read_manifest(model)
             self.assertEqual(3, manifest['statistics']['request_count'])
             self.assertEqual('real', manifest['data_kind'])
-            self.assertEqual('unconfirmed', manifest['source']['spectrum']['status'])
+            self.assertEqual('unconfirmed', manifest['source']['attribution']['status'])
             _, fitted = decode(model.read_bytes())
             self.assertEqual(
                 [list(e[2:4]) for e in fitted], [[-1, 0], [0, 1], [0, 2]]
@@ -126,6 +134,7 @@ class FrontendPrefixFitTest(unittest.TestCase):
                 json.loads(line)
                 for line in (root / "fit/input-plan.jsonl").read_text().splitlines()
             ]
+            self.assertTrue(expected[0]["rid"].startswith("custom:"))
             for a, e in zip(actual, expected):
                 a.pop("rid")
                 e.pop("rid")

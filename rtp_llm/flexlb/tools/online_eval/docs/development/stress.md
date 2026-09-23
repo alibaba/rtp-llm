@@ -15,7 +15,7 @@ python3 tools/online_eval/scripts/commands/run_stress.py \
   --warmup-s 10 --fetch-output-stream 1
 ```
 
-真实流量从 `data/traffic_models/` 按文件名选择：`--traffic-model <model-name>`。
+真实流量从 `data/traffic_trace/` 按文件名选择：`--traffic-model <model-name>`。
 默认选择以 `--help` 为准；模型是匿名 prefix DAG，不能传入原始访问日志。
 脚本验证模型 SHA，在运行目录生成 `traffic-plan.jsonl` 及 manifest，Java 读取物化后的计划。
 事件数与采集跨度从模型 manifest 查询。全量单轮的名义平均速率可按下式估算：

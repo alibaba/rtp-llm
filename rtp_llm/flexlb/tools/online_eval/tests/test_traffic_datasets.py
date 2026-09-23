@@ -18,9 +18,18 @@ class TrafficDatasetsTest(unittest.TestCase):
         for name, path in datasets.trace_models().items():
             with self.subTest(name=name):
                 manifest = datasets.read_manifest(path)
-                self.assertEqual(datasets.build_manifest(path, manifest['source']), manifest)
+                rebuilt = datasets.build_manifest(path, manifest['source'])
+                # Legacy sidecars retain their descriptive vocabulary and bytes.
+                self.assertEqual(
+                    {k: v for k, v in rebuilt.items() if k not in ('statistics', 'limitations')},
+                    {k: v for k, v in manifest.items() if k not in ('statistics', 'limitations')},
+                )
+                self.assertEqual(
+                    {k: v for k, v in rebuilt['statistics'].items() if k != 'scope'},
+                    {k: v for k, v in manifest['statistics'].items() if k != 'scope'},
+                )
                 self.assertEqual('real', manifest['data_kind'])
-                self.assertIn('spectrum', manifest['source'])
+                self.assertIn('model', manifest['source'])
                 self.assertIn('model', manifest['source'])
         path = datasets.model_path()
         digest = datasets.read_manifest(path)['sha256']
@@ -47,7 +56,7 @@ class TrafficDatasetsTest(unittest.TestCase):
             self.assertAlmostEqual(1 / 6, stats['prefix_structure']['token_weighted_shared_fraction'])
             self.assertEqual(2, stats['prefix_structure']['parentless_requests'])
             self.assertIsNone(stats['output_tokens'])
-            self.assertEqual('unconfirmed', manifest['source']['model']['status'])
+            self.assertEqual('unconfirmed', manifest['source']['attribution']['status'])
             manifest['source']['model'] = dict(name='test-model', status='confirmed', evidence='test fixture')
             sidecar = model.with_suffix('.manifest.json')
             sidecar.write_text(json.dumps(manifest))
@@ -66,7 +75,7 @@ class TrafficDatasetsTest(unittest.TestCase):
         from traffic.traffic_source import validate_plan
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory)
-            model = data / 'traffic_models/custom_capture.xz'
+            model = data / 'traffic_trace/custom_capture.xz'
             model.parent.mkdir()
             model.write_bytes(encode([[0, 512, -1, 0], [1000, 512, 0, 1]]))
             model.with_suffix('.manifest.json').write_text(json.dumps(datasets.build_manifest(model)))
@@ -75,7 +84,7 @@ class TrafficDatasetsTest(unittest.TestCase):
                 out = data / 'plan.jsonl'
                 stress._traffic(args, out)
                 self.assertEqual(1, validate_plan(out))
-                profile = data / 'calibration/custom_shape.profile.json'
+                profile = data / 'synthetic_parameters/custom_shape.profile.json'
                 profile.parent.mkdir()
                 profile.write_text(json.dumps(dict(parameters=dict(families=2, prefix_blocks=2,
                     zipf_alpha=1, cold_fraction=0), calibration=dict(origin='unit-test'))))
@@ -99,7 +108,7 @@ class TrafficDatasetsTest(unittest.TestCase):
 
         # 入库身份来自 Git，目录位置不意味着所有外部依赖也已入库。
         tracked = {(ROOT / name).resolve() for name in subprocess.check_output(
-            ['git', 'ls-files', '--', 'data/traffic_models'], cwd=ROOT, text=True).splitlines()}
+            ['git', 'ls-files', '--', 'data/traffic_trace'], cwd=ROOT, text=True).splitlines()}
         for case in (ROOT / 'config/scenarios').glob('*.yaml'):
             for params in sources(load_document(case)):
                 path = (case.parent / params['path']).resolve()

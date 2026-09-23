@@ -42,5 +42,25 @@
     },
     "reuse_cache": false,
     "reserve_block_ratio": 8
+  },
+  "capture": {
+    "status": "legacy_unverified",
+    "identity": {
+      "model": "glm_5_3",
+      "hardware": "l20d",
+      "deployment": null
+    },
+    "capture_window": null,
+    "record_sha256": "bf557e9fd1ea1f868df07c3445d06a1a39114ed8837e4468104132accb0c080b",
+    "n_prefill": 125,
+    "n_decode": 536,
+    "prefill_kv_pool_blocks": 31218,
+    "decode_kv_pool_blocks": 46157,
+    "mock_extra_args": [
+      "--prefill-block-size",
+      "512",
+      "--decode-block-size",
+      "64"
+    ]
   }
 }

@@ -1,6 +1,6 @@
 # 播放层调节与复现
 
-在已有 frontend 采集上研究到达节奏、输出长度或缓存冷暖变化时，用播放参数生成实验负载，无需重新采集。快照 `.xz`、SHA、manifest 保持原样；`path + sha256 + count` 仍然锁定输入。这里不规定门禁阈值，也不把新负载加入默认 CI。
+在已有匿名采集上研究到达节奏、输出长度或缓存冷暖变化时，配置转换参数与播放参数生成实验负载，无需重新采集。快照 `.xz`、SHA、manifest 保持原样；`path + sha256 + count` 仍然锁定输入。这里不规定门禁阈值，也不把新负载加入默认 CI。
 
 这些旋钮用于构造受控实验，不意味着 mock 已与生产对齐。输出长度来自显式 trace `ol`，因此绕过 mock 引擎 EOS；不要把它描述为线上输出长度拟合。轮转保留率也不是缓存命中率，实际命中仍受前缀、容量、驱逐和路由影响。
 
@@ -39,7 +39,7 @@ playback:
 
 调节的是计划时间，实际发送仍受 CPU、并发上限、背压和墙钟截止约束。观察 `send_due_epoch_ms`、`send_start_epoch_ms` 与 `pacing_lag_ms` 区分计划和执行；不能把生成器的积分精度当作线上实际发送保证。
 
-## lineage 输出分布
+## lineage 内容转换：输出分布与输入过滤
 
 v2、v3 都支持以下 `source.parameters` 扩展，模型锁定字段不变：
 
@@ -56,7 +56,7 @@ output_distribution:
 
 原 geometric 形式不变：`{kind: geometric, mean_tokens: 400, seed: 42}`，均值参数至少为 1，样本被截到 cap，所以截断后的均值可能更小。geometric 与 discrete 的字段不能混用；二者都要求显式 signed int64 seed。
 
-使用 SplitMix64 原始事件索引采样，过滤和 `max_requests` 不重新编号；改变 run namespace 不改变 `ol`。v3 的 `max_input_tokens` 过滤仍展开被排除父请求，保留后代前缀身份。`realistic` 原有离散分布语法与随机流不变。
+使用 SplitMix64 原始事件索引采样，过滤和 `max_requests` 不重新编号；改变 run namespace 不改变 `ol`。v2/v3 的 `max_input_tokens` 过滤仍展开被排除父请求，保留后代前缀身份。`realistic` 原有离散分布语法与随机流不变。
 
 ## 逐轮冷暖变化
 

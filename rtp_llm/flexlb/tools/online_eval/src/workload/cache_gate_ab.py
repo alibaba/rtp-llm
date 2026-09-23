@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 from reporting import write_bundle, run_meta, compare_controls, details
-from traffic.playback import comparison_notice
+from traffic.playback_config import comparison_notice
 from workload.cache_gate import analyze, write_report
 
 REQUIRED = (
