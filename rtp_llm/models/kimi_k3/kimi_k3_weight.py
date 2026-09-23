@@ -2,10 +2,11 @@
 
 K3 is a mixed-format checkpoint: routed experts are group-32 MXFP4 (two E2M1
 values per byte plus one UE8M0 scale byte per group), most dense tensors are
-BF16, and KDA recurrence/short-convolution/output-norm control weights are
-FP32.  Treating the nested compressed-tensors config as a model-wide
-quantization mode or coercing every non-expert tensor to BF16 would corrupt the
-checkpoint, so every exceptional dtype is represented explicitly.
+BF16, and KDA recurrence/short-convolution/output-norm checkpoint tensors are
+FP32. Native K3 preserves convolution and recurrence parameters in FP32 while
+loading the gated output norm in model dtype. The nested compressed-tensors
+config is not a model-wide quantization mode; these runtime precisions are
+represented explicitly below.
 """
 
 from __future__ import annotations
@@ -495,11 +496,10 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 _merge_conv1d,
                 cfg,
-                # The checkpoint tensors are FP32, but the official model
-                # converts ShortConvolution parameters to the requested model
-                # dtype in ``from_pretrained``.  Inherit the runtime load dtype
-                # here as well; forcing FP32 changes the convolution result
-                # before KDA Q/K normalization.
+                # Native K3 keeps checkpoint convolution weights in FP32.
+                # Activation and conv-cache tensors remain model dtype; their
+                # dtype is independent of the weight and accumulation precision.
+                data_type=torch.float32,
             ),
             _w(
                 W.linear_attn_alog,
@@ -525,7 +525,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 W.linear_attn_norm_w,
                 "self_attn.o_norm.weight",
                 identity,
-                data_type=torch.float32,
+                # Native K3's gated output norm follows the model dtype.
             ),
             _w(W.linear_attn_out_w, "self_attn.o_proj.weight", transpose),
         ]

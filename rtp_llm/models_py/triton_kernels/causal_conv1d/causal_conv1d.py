@@ -458,6 +458,7 @@ def causal_conv1d_fn(
     pad_slot_id: int = PAD_SLOT_ID,
     metadata: Optional[CausalConv1dMetadata] = None,
     validate_data=False,
+    preserve_input_dtype: bool = False,
 ):
     """support varlen + continuous batching when x is 2D tensor
 
@@ -503,6 +504,11 @@ def causal_conv1d_fn(
         Providing precomputed metadata can improve performance when
         calling this function multiple times with the same sequence configuration.
 
+    preserve_input_dtype: bool
+        Keep input and output storage in the activation dtype when convolution
+        weights use a different precision (K3: BF16 activations, FP32 weights).
+        The default retains the existing weight-dtype conversion.
+
     out: same shape as `x`
     """
     if isinstance(activation, bool) and activation:
@@ -510,7 +516,8 @@ def causal_conv1d_fn(
 
     # Store original dtype to cast back at the end
     original_x_dtype = x.dtype
-    x = x.to(weight.dtype)
+    if not preserve_input_dtype:
+        x = x.to(weight.dtype)
     out = torch.empty_like(x)
 
     # Prepare metadata if not provided

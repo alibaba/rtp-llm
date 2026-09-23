@@ -82,3 +82,10 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_kimi_k3_kda_precision",
+    srcs = ["test_kimi_k3_kda_precision.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)

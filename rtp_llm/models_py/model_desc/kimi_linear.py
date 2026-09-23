@@ -196,6 +196,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
+            preserve_input_dtype=getattr(self, "preserve_conv_input_dtype", False),
         ).transpose(0, 1)
         return out
 
