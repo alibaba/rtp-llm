@@ -25,6 +25,8 @@ public:
         return model_input_gatherer_config_.position_id_len_factor;
     }
 
+    mtp::DraftInputLayout draftInputLayout() const;
+
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
                                  const MergedOutput& propose_output) const;

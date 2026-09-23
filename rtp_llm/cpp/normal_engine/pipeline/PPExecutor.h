@@ -113,28 +113,41 @@ private:
 
     void advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result);
 
-    void clipMtpAcceptedLengths(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) const;
+    void clipNewTokenLengths(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) const;
 
     absl::Status processExecutionResult(InflightBatch& batch);
 
     void verifyDraftTokens(const PPExecutionPlan& plan, const torch::Tensor& target_logits, PPExecutionResult& result);
 
-    GptModelInputs prepareDraftInputForPrefill(const GptModelInputs&  target_input,
-                                               const GptModelOutputs& target_output,
-                                               const torch::Tensor&   sampled_token_ids,
-                                               const torch::Tensor&   next_position_ids);
+    void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_prefill_input,
+                                               const torch::Tensor& target_hidden_states,
+                                               const torch::Tensor& sampled_token_ids,
+                                               const torch::Tensor& next_position_ids);
 
-    GptModelInputs prepareDraftInputForDecode(const GptModelInputs&  target_input,
-                                              const GptModelOutputs& target_output,
-                                              const torch::Tensor&   accepted_token_ids,
-                                              const torch::Tensor&   accepted_lengths);
+    void prepareDraftPrefillAfterVerify(GptModelInputs&      draft_prefill_input,
+                                        const torch::Tensor& target_hidden_states,
+                                        const torch::Tensor& accepted_token_ids,
+                                        const torch::Tensor& accepted_lengths);
 
-    void runDSparkCommit(const GptModelInputs& target_input, const GptModelOutputs& target_output);
+    void prepareDSparkCommitInput(GptModelInputs& commit_input, const torch::Tensor& target_features);
 
-    void
-    runDraftStep(const PPExecutionPlan& plan, const GptModelOutputs& model_output, PPExecutionResult& execution_result);
+    void broadcastPostRejectionInputs(GptModelInputs& draft_input);
 
-    torch::Tensor proposeDraftTokens(GptModelInputs draft_input, size_t num_draft_tokens);
+    GptModelInputs prepareDSparkProposeInput(const GptModelInputs& target_input,
+                                             bool                  is_decode,
+                                             const torch::Tensor&  new_token_ids,
+                                             const torch::Tensor&  new_token_lengths);
+
+    GptModelOutputs forwardDraftModel(GptModelInputs& draft_input);
+
+    torch::Tensor runDraftStep(const GptModelInputs& target_input,
+                               const torch::Tensor&  draft_next_position_ids,
+                               const torch::Tensor&  target_hidden_states,
+                               const torch::Tensor&  new_token_ids,
+                               const torch::Tensor&  new_token_lengths,
+                               bool                  is_decode);
+
+    void fillFailedDraftRows(PPExecutionResult& result);
 
     void asyncSendPlan(const PPExecutionPlan& plan, bool empty_plan, PPTickets& tickets);
 
@@ -191,6 +204,8 @@ private:
     int32_t                                          dspark_mask_token_id_   = -1;
     size_t                                           propose_step_           = 0;
     size_t                                           position_id_len_factor_ = 1;
+    /** PP currently publishes host state; keep layout selection on the shared device-state policy. */
+    const mtp::DraftInputLayout                      draft_input_layout_ = mtp::selectDraftInputLayout(false);
     mtp::DSparkProposeInputBuffers                   dspark_propose_input_buffers_;
     std::unique_ptr<SpecLogitsVerifyRunner>          spec_logits_verify_runner_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;

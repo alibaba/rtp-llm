@@ -459,7 +459,7 @@ torch::Tensor serializeExecutionResult(const PPExecutionResult& result) {
     w.val<uint32_t>(kVersion);
     w.tensor(result.request_ids);
     w.tensor(result.new_token_ids);
-    w.tensor(result.accept_len);
+    w.tensor(result.new_token_lengths);
     w.tensor(result.propose_token_ids);
     w.tensor(result.hidden_states);
     w.tensor(result.logits);
@@ -491,7 +491,7 @@ PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
     PPExecutionResult result;
     result.request_ids       = r.tensor();
     result.new_token_ids     = r.tensor();
-    result.accept_len        = r.tensor();
+    result.new_token_lengths = r.tensor();
     result.propose_token_ids = r.tensor();
     result.hidden_states     = r.tensor();
     result.logits            = r.tensor();

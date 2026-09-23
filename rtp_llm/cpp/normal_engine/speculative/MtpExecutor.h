@@ -113,17 +113,6 @@ protected:
 
     bool isTpRank0() const;
 
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                              ModelBase&      source,
-                                              bool            request_actual_rows = false);
-    // Normalize the model's optional pre-output-projection MTP buffer into the
-    // forward result. Callers then use the regular all_hidden_states ->
-    // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
-    // row count"; target verify passes the explicit combo row count because a
-    // graph replay does not advance the Python-side row counter.
-    void
-    maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
-
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
     absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams,

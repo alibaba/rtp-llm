@@ -761,12 +761,12 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
             ++row;
         }
     }
-    mtp::prepareDraftInputForPrefill(model_input,
-                                    model_output.all_hidden_states,
-                                    sampler_output.token_ids,
-                                    next_position_ids,
-                                    position_id_len_factor,
-                                    host_holder);
+    mtp::prepareDraftPrefillAfterTargetPrefill(model_input,
+                                             model_output.all_hidden_states,
+                                             sampler_output.token_ids,
+                                             next_position_ids,
+                                             position_id_len_factor,
+                                             host_holder);
 }
 
 void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const {
@@ -855,34 +855,30 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs& 
     mtp::prepareDSparkCommitInput(model_input, target_features);
 }
 
+mtp::DraftInputLayout MtpBatchStreamProcessor::draftInputLayout() const {
+    return mtp::selectDraftInputLayout(useMtpDeviceState());
+}
+
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     GptModelInputs&                              model_input,
     const GptModelOutputs&                       model_output,
     const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
-    const auto layout = useMtpDeviceState() ? mtp::DraftInputLayout::FIXED_WIDTH : mtp::DraftInputLayout::COMPACT;
-    auto accepted_token_ids = speculative_sampler_output.accept_tokens;
-    auto accepted_lengths   = speculative_sampler_output.accept_len;
-    if (layout == mtp::DraftInputLayout::COMPACT) {
-        if (speculative_sampler_output.accept_len_cpu.defined()
-            && speculative_sampler_output.accept_len_cpu.is_pinned()) {
-            speculative_sampler_output.transfer_done_event->synchronize();
-        }
-        if (speculative_sampler_output.accept_len_cpu.defined()) {
-            accepted_lengths = speculative_sampler_output.accept_len_cpu;
-        }
-        if (speculative_sampler_output.accept_tokens_cpu.defined()) {
-            accepted_token_ids = speculative_sampler_output.accept_tokens_cpu;
-        }
-    }
-    mtp::prepareDraftInputForDecode(model_input,
-                                   model_output.all_hidden_states,
-                                   accepted_token_ids,
-                                   accepted_lengths,
-                                   layout,
-                                   model_input_gatherer_config_.position_id_len_factor,
-                                   host_holder);
+    const auto layout = draftInputLayout();
+    /** Preserve the existing COMPACT wait boundary; FIXED_WIDTH never consumes the CPU mirrors here. */
+    const auto accepted = layout == mtp::DraftInputLayout::FIXED_WIDTH ?
+                              mtp::getDeviceAcceptedTokens(speculative_sampler_output) :
+                              mtp::getHostAcceptedTokens(speculative_sampler_output,
+                                                        speculative_sampler_output.accept_len_cpu.defined()
+                                                            && speculative_sampler_output.accept_len_cpu.is_pinned());
+    mtp::prepareDraftPrefillAfterVerify(model_input,
+                                      model_output.all_hidden_states,
+                                      accepted.token_ids,
+                                      accepted.lengths,
+                                      layout,
+                                      model_input_gatherer_config_.position_id_len_factor,
+                                      host_holder);
     hidden_states_d_t = model_input.last_hidden_states;
 }
 
@@ -1039,10 +1035,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
-    // wait for the transfer to complete
-    spec_decode_output.transfer_done_event->synchronize();
-    const auto& accept_len    = spec_decode_output.accept_len_cpu;
-    const auto& accept_tokens = spec_decode_output.accept_tokens_cpu;
+    const auto  accepted      = mtp::getHostAcceptedTokens(spec_decode_output);
+    const auto& accept_len    = accepted.lengths;
+    const auto& accept_tokens = accepted.token_ids;
 
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
@@ -1091,7 +1086,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         // Draft hidden layout differs per mode: the device-state path keeps a
         // dense (propose_step_+1) rows/stream layout, while the default sync
         // path compacts draft inputs (and thus hidden rows) to accept_len.
-        token_offset += useMtpDeviceState() ? (propose_step_ + 1) : cur_accept_len;
+        token_offset += draftInputLayout() == mtp::DraftInputLayout::FIXED_WIDTH ? (propose_step_ + 1) : cur_accept_len;
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
     }

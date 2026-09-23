@@ -94,8 +94,12 @@ struct PPIntermediateTensors {
 
 /** Final outputs produced by the lm-head stage TP root. */
 struct PPExecutionResult {
-    torch::Tensor request_ids;    // [stream_count]
-    torch::Tensor new_token_ids;  // [total_batch_size, 1]; speculative decode: [total_batch_size, propose_step + 1]
+    torch::Tensor request_ids;  // [stream_count]
+    /** New tokens to append: CPU int32 [B, 1], or [B, K+1] for verify. */
+    torch::Tensor new_token_ids;
+    /** Budget-capped valid counts, including retained correction/bonus: CPU int32 [B].
+     * Undefined for ordinary output (one token per row). */
+    torch::Tensor new_token_lengths;
 
     torch::Tensor logits;         // optional [total_batch_size, vocab_size]
     torch::Tensor softmax_probs;  // optional [total_batch_size, 1]
@@ -109,13 +113,12 @@ struct PPExecutionResult {
 
     std::vector<std::optional<PromptLogitsOutput>> prompt_logits;  // [stream_count]
 
-    // [stream_count], aligned with request_ids. Keep the first error from initialization,
-    // processing/verification, sampling, or state update; NONE_ERROR means success.
+    /** First error per request; failed-row placeholders are not committed. */
     std::vector<ErrorInfo> request_errors;
 
-    torch::Tensor accept_len;         // [total_batch_size], includes correction/bonus
-    torch::Tensor propose_token_ids;  // [total_batch_size, draft_count]; PD prefill: 0 for DSpARK, 1 for
-                                      // MTP/EAGLE; otherwise K.
+    /** Next-round drafts excluding the anchor: CPU int32 [B, K].
+     * PD prefill: one draft for MTP/EAGLE; undefined for DSpARK. */
+    torch::Tensor propose_token_ids;
 };
 
 }  // namespace rtp_llm

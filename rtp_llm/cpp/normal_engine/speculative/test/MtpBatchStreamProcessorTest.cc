@@ -3,6 +3,7 @@
 #include <cstring>
 #include <memory>
 #include <limits>
+#include <stdexcept>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -1494,6 +1495,82 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::COMMIT);
 }
 
+TEST_F(MtpBatchStreamProcessorTest, SharedHiddenOverridePreservesViewsAndFallbacks) {
+    struct RecordingHiddenModel: public ModelBase {
+        GptModelOutputs forward(const GptModelInputs&) override {
+            return {};
+        }
+
+        torch::Tensor getMtpTargetHiddenStates(int64_t rows) override {
+            requests.push_back(rows);
+            if (throw_on_access) {
+                throw std::runtime_error("MTP hidden accessor failed");
+            }
+            if (!buffer.defined() || buffer.numel() == 0) {
+                return buffer;
+            }
+            return buffer.narrow(0, 0, rows < 0 ? local_rows : rows);
+        }
+
+        torch::Tensor        buffer;
+        std::vector<int64_t> requests;
+        int64_t              local_rows      = 2;
+        bool                 throw_on_access = false;
+    };
+
+    for (bool device_input : {false, true}) {
+        SCOPED_TRACE(device_input);
+        const auto device  = device_input ? torch::kCUDA : torch::kCPU;
+        auto       options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+        RecordingHiddenModel model;
+        model.buffer = torch::arange(48, options).reshape({8, 6}).slice(1, 1, 5, 2);
+        auto fallback = torch::arange(24, options.dtype(torch::kFloat64)).reshape({4, 6}).slice(1, 1, 5, 2);
+        const auto fallback_before = fallback.clone();
+
+        GptModelOutputs output;
+        output.all_hidden_states = fallback;
+        mtp::maybeOverrideLastHiddenWithMtpBuffer(output, model, 3);
+        auto resolved = output.all_hidden_states;
+        EXPECT_EQ(model.requests, (std::vector<int64_t>{3}));
+        EXPECT_EQ(resolved.sizes().vec(), (std::vector<int64_t>{3, 2}));
+        EXPECT_EQ(resolved.strides().vec(), model.buffer.strides().vec());
+        EXPECT_EQ(resolved.storage_offset(), model.buffer.storage_offset());
+        EXPECT_EQ(resolved.scalar_type(), model.buffer.scalar_type());
+        EXPECT_EQ(resolved.device(), model.buffer.device());
+        EXPECT_EQ(resolved.data_ptr(), model.buffer.data_ptr());
+        EXPECT_TRUE(torch::equal(resolved, model.buffer.narrow(0, 0, 3)));
+
+        /** Fake draft execution writes in place and must retain the model buffer alias. */
+        resolved.zero_();
+        EXPECT_TRUE(torch::equal(model.buffer.narrow(0, 0, 3), torch::zeros_like(resolved)));
+        EXPECT_TRUE(torch::equal(fallback, fallback_before));
+
+        GptModelOutputs cp_output;
+        mtp::maybeOverrideLastHiddenWithMtpBuffer(cp_output, model, -1);
+        const auto& cp_hidden = cp_output.all_hidden_states;
+        EXPECT_EQ(cp_hidden.sizes().vec(), (std::vector<int64_t>{2, 2}));
+        EXPECT_EQ(cp_hidden.data_ptr(), model.buffer.data_ptr());
+        EXPECT_EQ(model.requests, (std::vector<int64_t>{3, -1}));
+
+        for (const auto& missing : {torch::Tensor(), torch::empty({0, 2}, options)}) {
+            model.buffer = missing;
+            output.all_hidden_states = fallback;
+            mtp::maybeOverrideLastHiddenWithMtpBuffer(output, model, 3);
+            EXPECT_EQ(output.all_hidden_states.unsafeGetTensorImpl(), fallback.unsafeGetTensorImpl());
+            EXPECT_TRUE(torch::equal(output.all_hidden_states, fallback_before));
+            cp_output.all_hidden_states = torch::Tensor();
+            mtp::maybeOverrideLastHiddenWithMtpBuffer(cp_output, model, -1);
+            EXPECT_FALSE(cp_output.all_hidden_states.defined());
+        }
+
+        model.throw_on_access = true;
+        output.all_hidden_states = fallback;
+        EXPECT_THROW(mtp::maybeOverrideLastHiddenWithMtpBuffer(output, model, 3), std::runtime_error);
+        EXPECT_EQ(output.all_hidden_states.unsafeGetTensorImpl(), fallback.unsafeGetTensorImpl());
+        EXPECT_TRUE(torch::equal(fallback, fallback_before));
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, SharedPrefillInputPreservesTargetTensors) {
     for (bool device_input : {false, true}) {
         const auto device = device_input ? torch::kCUDA : torch::kCPU;
@@ -1509,7 +1586,7 @@ TEST_F(MtpBatchStreamProcessorTest, SharedPrefillInputPreservesTargetTensors) {
         auto draft_input = target_input;
         TensorHolder holder;
 
-        mtp::prepareDraftInputForPrefill(draft_input, hidden_states, sampled_tokens, next_positions, 3, holder);
+        mtp::prepareDraftPrefillAfterTargetPrefill(draft_input, hidden_states, sampled_tokens, next_positions, 3, holder);
 
         EXPECT_EQ(toVec<int32_t>(draft_input.combo_tokens), (std::vector<int32_t>{12, 22, 23}));
         EXPECT_EQ(toVec<int32_t>(draft_input.input_lengths), (std::vector<int32_t>{1, 2}));
@@ -1539,7 +1616,7 @@ TEST_F(MtpBatchStreamProcessorTest, SharedDecodeInputCompactsDifferentAcceptLeng
         auto draft_input = verify_input;
         TensorHolder holder;
 
-        mtp::prepareDraftInputForDecode(
+        mtp::prepareDraftPrefillAfterVerify(
             draft_input, hidden_states, accepted_token_ids, accepted_lengths, mtp::DraftInputLayout::COMPACT, 1, holder);
 
         EXPECT_EQ(toVec<int32_t>(draft_input.combo_tokens), (std::vector<int32_t>{4, 5, 6, 7}));
@@ -1555,6 +1632,100 @@ TEST_F(MtpBatchStreamProcessorTest, SharedDecodeInputCompactsDifferentAcceptLeng
         EXPECT_TRUE(verify_input.is_target_verify);
         EXPECT_EQ(toVec<int32_t>(verify_input.combo_position_ids), (std::vector<int32_t>{10, 11, 12, 20, 21, 22}));
         EXPECT_EQ(toVec<int32_t>(accepted_token_ids), (std::vector<int32_t>{4, 0, 0, 5, 6, 7}));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, SharedAcceptedViewsPreserveAuthoritativeMirrors) {
+    speculative::SpeculativeSamplerOutput output;
+    output.accept_tokens = torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt32).cuda();
+    output.accept_len    = torch::tensor({3, 2}, torch::kInt32).cuda();
+    output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, true);
+    output.accept_len_cpu    = output.accept_len.to(torch::kCPU, true);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+
+    auto device = mtp::getDeviceAcceptedTokens(output);
+    EXPECT_EQ(device.token_ids.unsafeGetTensorImpl(), output.accept_tokens.unsafeGetTensorImpl());
+    EXPECT_EQ(device.lengths.unsafeGetTensorImpl(), output.accept_len.unsafeGetTensorImpl());
+    auto host = mtp::getHostAcceptedTokens(output);
+    EXPECT_EQ(host.token_ids.unsafeGetTensorImpl(), output.accept_tokens_cpu.unsafeGetTensorImpl());
+    EXPECT_EQ(host.lengths.unsafeGetTensorImpl(), output.accept_len_cpu.unsafeGetTensorImpl());
+    EXPECT_EQ(toVec<int32_t>(host.lengths), (std::vector<int32_t>{3, 2}));
+
+    /** PP clips budgets and fills failed rows on the host before preparing its next draft input. */
+    host.lengths[0] = 1;
+    host.token_ids[1].zero_();
+    auto modified_host = mtp::getHostAcceptedTokens(output, false);
+    EXPECT_EQ(toVec<int32_t>(modified_host.lengths), (std::vector<int32_t>{1, 2}));
+    EXPECT_EQ(toVec<int32_t>(modified_host.token_ids), (std::vector<int32_t>{10, 11, 12, 0, 0, 0}));
+    EXPECT_EQ(toVec<int32_t>(device.lengths), (std::vector<int32_t>{3, 2}));
+    EXPECT_EQ(toVec<int32_t>(device.token_ids), (std::vector<int32_t>{10, 11, 12, 20, 21, 22}));
+
+    output.accept_tokens_cpu = torch::Tensor();
+    auto partial = mtp::getHostAcceptedTokens(output);
+    EXPECT_TRUE(partial.token_ids.device().is_cpu());
+    EXPECT_EQ(toVec<int32_t>(partial.token_ids), (std::vector<int32_t>{10, 11, 12, 20, 21, 22}));
+    EXPECT_EQ(partial.lengths.unsafeGetTensorImpl(), host.lengths.unsafeGetTensorImpl());
+    output.accept_len_cpu = torch::Tensor();
+    auto without_mirrors = mtp::getHostAcceptedTokens(output, false);
+    EXPECT_EQ(toVec<int32_t>(without_mirrors.lengths), (std::vector<int32_t>{3, 2}));
+    EXPECT_TRUE(without_mirrors.lengths.device().is_cpu());
+}
+
+TEST_F(MtpBatchStreamProcessorTest, SharedDraftContinuationUsesValidLengthsForBothLayouts) {
+    for (bool device_state : {false, true}) {
+        for (bool device_metadata : {false, true}) {
+            SCOPED_TRACE(device_state);
+            SCOPED_TRACE(device_metadata);
+            const auto device = device_metadata ? torch::kCUDA : torch::kCPU;
+            const auto layout = mtp::selectDraftInputLayout(device_state);
+            GptModelInputs verify;
+            verify.combo_tokens      = torch::tensor({1, 2, 3, 4, 5, 6}, torch::kInt32).to(device);
+            verify.input_lengths     = torch::tensor({3, 3}, torch::kInt32).to(device);
+            verify.prefix_lengths    = torch::tensor({7, 11}, torch::kInt32).to(device);
+            verify.sequence_lengths  = torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+            verify.lm_output_indexes = torch::arange(6, torch::TensorOptions().dtype(torch::kInt32).device(device));
+            verify.combo_position_ids =
+                torch::tensor({7, 17, 27, 8, 18, 28, 9, 19, 29, 11, 21, 31, 12, 22, 32, 13, 23, 33}, torch::kInt32)
+                    .to(device);
+            verify.sequence_lengths_plus_1 = torch::tensor({8, 12}, torch::kInt32).to(device);
+            verify.request_id = torch::tensor({101, 202}, torch::kInt64);
+            verify.request_pd_separation = torch::ones({2}, torch::kBool);
+            verify.cache_keys = torch::ones({2, 3}, torch::kInt64);
+            auto target_hidden   = torch::arange(24, torch::kFloat32).reshape({6, 4}).cuda();
+            auto accepted_tokens = torch::tensor({{31, 0, 0}, {41, 42, 0}}, torch::kInt32).cuda();
+            auto accepted_lengths = torch::tensor({1, 2}, torch::kInt32).cuda();
+            auto input = verify;
+            TensorHolder holder;
+            mtp::prepareDraftPrefillAfterVerify(
+                input, target_hidden, accepted_tokens, accepted_lengths, layout, 3, holder);
+            EXPECT_EQ(input.combo_tokens.numel(), device_state ? 6 : 3);
+            EXPECT_EQ(toVec<int32_t>(input.lm_output_indexes),
+                      device_state ? (std::vector<int32_t>{0, 4}) : (std::vector<int32_t>{0, 2}));
+            auto draft_hidden = input.last_hidden_states.clone();
+            auto expected_hidden = target_hidden.index_select(
+                0, torch::tensor({0, 4}, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA)));
+
+            mtp::prepareDraftDecodeAfterPrefill(
+                input, draft_hidden, torch::tensor({{50}, {60}}, torch::kInt32).cuda(), 3);
+            draft_hidden.fill_(-1);
+            EXPECT_TRUE(torch::equal(input.last_hidden_states, expected_hidden));
+            EXPECT_EQ(toVec<int32_t>(input.combo_tokens), (std::vector<int32_t>{50, 60}));
+            EXPECT_EQ(toVec<int32_t>(input.input_lengths), (std::vector<int32_t>{1, 1}));
+            EXPECT_EQ(toVec<int32_t>(input.sequence_lengths), (std::vector<int32_t>{8, 13}));
+            EXPECT_EQ(toVec<int32_t>(input.lm_output_indexes), (std::vector<int32_t>{0, 1}));
+            EXPECT_EQ(toVec<int32_t>(input.combo_position_ids), (std::vector<int32_t>{8, 18, 28, 13, 23, 33}));
+            EXPECT_TRUE(input.combo_position_ids.is_pinned());
+            EXPECT_EQ(input.prefix_lengths.numel(), 0);
+            EXPECT_FALSE(input.sequence_lengths_plus_1.defined());
+            EXPECT_FALSE(input.request_id.defined());
+            EXPECT_FALSE(input.request_pd_separation.defined());
+            EXPECT_FALSE(input.cache_keys.defined());
+            EXPECT_EQ(toVec<int32_t>(verify.combo_tokens), (std::vector<int32_t>{1, 2, 3, 4, 5, 6}));
+            EXPECT_EQ(toVec<int32_t>(verify.input_lengths), (std::vector<int32_t>{3, 3}));
+            EXPECT_EQ(toVec<int32_t>(verify.prefix_lengths), (std::vector<int32_t>{7, 11}));
+            EXPECT_TRUE(verify.request_id.defined());
+            EXPECT_TRUE(verify.sequence_lengths_plus_1.defined());
+        }
     }
 }
 

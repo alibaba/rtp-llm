@@ -188,7 +188,7 @@ PPOutputConfig PPBatchStreamProcessor::gatherOutputConfig(const StreamGroups& st
         output_config.return_cum_log_probs |= stream->returnCumLogProbs();
         output_config.calculate_loss |= stream->calculateLoss();
         output_config.return_hidden_states |= config.return_hidden_states;
-        output_config.return_all_hidden_states |= stream->needReturnHiddenStates();
+        output_config.return_all_hidden_states |= !sp_enabled_ && stream->needReturnHiddenStates();
         output_config.prompt_logits_requests.push_back(PPPromptLogitsRequest{config.return_prompt_logits,
                                                                              config.prompt_logits_top_k,
                                                                              config.prompt_logits_start,
@@ -613,8 +613,6 @@ void PPBatchStreamProcessor::validateExecutionResult(const StreamGroups&      st
 absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamGroups& stream_groups,
                                                                    const PPExecutionResult& result) const {
     const auto all_streams = stream_groups.allStreams();
-    RTP_LLM_CHECK_WITH_INFO(!result.accept_len.defined() && !result.propose_token_ids.defined(),
-                            "ordinary PP execution result must not contain speculative fields");
 
     const auto* request_ids  = result.request_ids.data_ptr<int64_t>();
     int64_t     batch_idx    = 0;
@@ -662,8 +660,6 @@ void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&
         stream->updateFromPP(update_info);
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(result.new_token_ids.size(1) == 1,
-                            "ordinary PP execution result must contain one token per successful row");
     torch::Tensor hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
         hidden_states = result.hidden_states.narrow(0, batch_idx, stream_batch_size).clone();
@@ -774,13 +770,12 @@ absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const St
     const auto batch_size  = static_cast<int64_t>(all_streams.size());
     const bool is_prefill  = all_streams.empty() || all_streams.front()->isContextStream();
     RTP_LLM_CHECK_WITH_INFO(
-        stream_groups.totalModelBatchSize() == all_streams.size() && result.accept_len.defined()
-            && result.accept_len.device().is_cpu() && result.accept_len.scalar_type() == torch::kInt32
-            && result.accept_len.dim() == 1 && result.accept_len.size(0) == batch_size,
-        "PP speculative execution result requires one accepted length per request");
+        stream_groups.totalModelBatchSize() == all_streams.size() && result.new_token_lengths.device().is_cpu()
+            && result.new_token_lengths.numel() == batch_size,
+        "PP speculative execution result requires one new token count per request");
 
-    const auto* request_ids    = result.request_ids.data_ptr<int64_t>();
-    const auto* accept_lengths = result.accept_len.data_ptr<int32_t>();
+    const auto* request_ids       = result.request_ids.data_ptr<int64_t>();
+    const auto* new_token_lengths = result.new_token_lengths.data_ptr<int32_t>();
     int64_t row = 0;
     for (const auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(request_ids[row] == stream->streamId(),
@@ -791,22 +786,21 @@ absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const St
         if (result.request_errors[row].hasError()) {
             error_info = result.request_errors[row];
         }
-        int  accepted_length = 0;
+        int           num_new_tokens = 0;
         torch::Tensor draft_tokens;
         torch::Tensor new_tokens;
         if (!error_info.has_value()) {
-            accepted_length = accept_lengths[row];
-            RTP_LLM_CHECK_WITH_INFO(accepted_length >= 1 && accepted_length <= result.new_token_ids.size(1)
-                                        && (!is_prefill || accepted_length == 1),
-                                    "PP speculative execution result has an invalid accepted length");
+            num_new_tokens = new_token_lengths[row];
+            RTP_LLM_CHECK_WITH_INFO(num_new_tokens > 0,
+                                    "PP speculative execution result requires a positive new token count");
             if (result.propose_token_ids.defined()) {
                 draft_tokens = result.propose_token_ids[row];
             }
-            new_tokens = result.new_token_ids.narrow(0, row, 1).narrow(1, 0, accepted_length).contiguous();
+            new_tokens = result.new_token_ids.narrow(0, row, 1).narrow(1, 0, num_new_tokens).contiguous();
         }
 
         stream->specUpdate({std::move(new_tokens),
-                            accepted_length,
+                            num_new_tokens,
                             draft_tokens,
                             torch::Tensor(),
                             torch::Tensor(),

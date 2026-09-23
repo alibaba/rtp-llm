@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstring>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -107,12 +108,43 @@ torch::Tensor compactAcceptedPositionIds(const torch::Tensor&     combo_position
 
 }  // namespace
 
-void prepareDraftInputForPrefill(GptModelInputs&      draft_input,
-                                 const torch::Tensor& target_hidden_states,
-                                 const torch::Tensor& sampled_token_ids,
-                                 const torch::Tensor& next_position_ids,
-                                 size_t               position_id_len_factor,
-                                 TensorHolder&        host_holder) {
+DraftInputLayout selectDraftInputLayout(bool device_state_enabled) {
+    return device_state_enabled ? DraftInputLayout::FIXED_WIDTH : DraftInputLayout::COMPACT;
+}
+
+AcceptedTokens getDeviceAcceptedTokens(const speculative::SpeculativeSamplerOutput& output) {
+    return {output.accept_tokens, output.accept_len};
+}
+
+AcceptedTokens getHostAcceptedTokens(const speculative::SpeculativeSamplerOutput& output, bool wait_for_transfer) {
+    if (wait_for_transfer) {
+        output.transfer_done_event->synchronize();
+    }
+    return {output.accept_tokens_cpu.defined() ? output.accept_tokens_cpu : output.accept_tokens.cpu(),
+            output.accept_len_cpu.defined() ? output.accept_len_cpu : output.accept_len.cpu()};
+}
+
+void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
+                                         ModelBase&       source,
+                                         int64_t          hidden_rows) {
+    if (hidden_rows == 0) {
+        if (!model_output.all_hidden_states.defined() || model_output.all_hidden_states.size(0) == 0) {
+            return;
+        }
+        hidden_rows = model_output.all_hidden_states.size(0);
+    }
+    auto hidden_states = source.getMtpTargetHiddenStates(hidden_rows);
+    if (hidden_states.defined() && hidden_states.numel() > 0) {
+        model_output.all_hidden_states = std::move(hidden_states);
+    }
+}
+
+void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_input,
+                                          const torch::Tensor& target_hidden_states,
+                                          const torch::Tensor& sampled_token_ids,
+                                          const torch::Tensor& next_position_ids,
+                                          size_t               position_id_len_factor,
+                                          TensorHolder&        host_holder) {
     const auto batch_size           = sampled_token_ids.size(0);
     const auto sampler_token_stride = sampled_token_ids.size(1);
     const auto sampled_tokens_cpu   = sampled_token_ids.cpu().contiguous();
@@ -162,13 +194,13 @@ void prepareDraftInputForPrefill(GptModelInputs&      draft_input,
     draft_input.combo_position_ids = std::move(combo_position_ids);
 }
 
-void prepareDraftInputForDecode(GptModelInputs&      draft_input,
-                               const torch::Tensor& target_hidden_states,
-                               const torch::Tensor& accepted_token_ids,
-                               const torch::Tensor& accepted_lengths,
-                               DraftInputLayout     layout,
-                               size_t               position_id_len_factor,
-                               TensorHolder&        host_holder) {
+void prepareDraftPrefillAfterVerify(GptModelInputs&      draft_input,
+                                    const torch::Tensor& target_hidden_states,
+                                    const torch::Tensor& accepted_token_ids,
+                                    const torch::Tensor& accepted_lengths,
+                                    DraftInputLayout     layout,
+                                    size_t               position_id_len_factor,
+                                    TensorHolder&        host_holder) {
     const size_t batch_size         = accepted_lengths.numel();
     const auto   tokens_per_request = accepted_token_ids.size(1);
     draft_input.is_target_verify    = false;
@@ -231,6 +263,47 @@ void prepareDraftInputForDecode(GptModelInputs&      draft_input,
                                                            tokens_per_request);
     if (compact_position_ids.defined()) {
         draft_input.combo_position_ids = std::move(compact_position_ids);
+    }
+}
+
+void syncDraftPrefillAfterVerify(GptModelInputs&          draft_input,
+                                 DraftInputLayout         layout,
+                                 const ParallelismConfig& parallelism_config) {
+    if (layout == DraftInputLayout::FIXED_WIDTH) {
+        execBroadcast({{draft_input.combo_tokens}, 0});
+        execBroadcast({{draft_input.last_hidden_states}, 0});
+        execBroadcast({{draft_input.lm_output_indexes}, 0});
+    } else {
+        tpSyncModelInputs(draft_input, parallelism_config);
+    }
+}
+
+void prepareDraftDecodeAfterPrefill(GptModelInputs&      draft_input,
+                                    const torch::Tensor& draft_hidden_states,
+                                    const torch::Tensor& draft_token_ids,
+                                    size_t               position_id_len_factor) {
+    const auto batch_size       = draft_input.input_lengths.numel();
+    const auto output_indexes   = draft_input.lm_output_indexes.to(torch::kLong);
+    const auto physical_lengths = draft_input.input_lengths.to(torch::kLong);
+    const auto starts           = physical_lengths.cumsum(0) - physical_lengths;
+    const auto valid_lengths    = output_indexes.to(starts.device()) - starts + 1;
+
+    draft_input.combo_tokens       = draft_token_ids.reshape({batch_size});
+    draft_input.last_hidden_states =
+        draft_hidden_states.index_select(0, output_indexes.to(draft_hidden_states.device()));
+    draft_input.sequence_lengths =
+        (draft_input.prefix_lengths.to(valid_lengths.device()) + valid_lengths).to(torch::kInt32);
+    draft_input.input_lengths           = torch::ones_like(draft_input.input_lengths);
+    draft_input.prefix_lengths          = torch::empty({0}, draft_input.prefix_lengths.options());
+    draft_input.sequence_lengths_plus_1 = torch::Tensor();
+    draft_input.lm_output_indexes       = torch::arange(batch_size, draft_input.lm_output_indexes.options());
+    draft_input.request_id             = torch::Tensor();
+    draft_input.request_pd_separation  = torch::Tensor();
+    draft_input.cache_keys             = torch::Tensor();
+    if (draft_input.combo_position_ids.defined()) {
+        const auto positions = draft_input.combo_position_ids.reshape({-1, static_cast<int64_t>(position_id_len_factor)});
+        draft_input.combo_position_ids =
+            (positions.index_select(0, output_indexes.to(positions.device())) + 1).flatten().cpu().pin_memory();
     }
 }
 

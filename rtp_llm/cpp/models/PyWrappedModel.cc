@@ -1138,21 +1138,12 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
-/* PP adapter: preserves the caller's global inputs for subsequent draft construction,
-   passes rank-local upstream intermediates to forward(), and packs the stage outputs. */
+/** Pass upstream PP intermediates to forward() and collect this stage's outputs. */
 GptModelOutputs PyWrappedModel::forwardPP(const GptModelInputs&        inputs,
                                           const PPIntermediateTensors* input_tensors,
                                           PPIntermediateTensors*       output_tensors) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardPP");
     GptModelInputs local_inputs = inputs;
-    const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-    if (device_props_.enable_prefill_cp && has_context_request) {
-        // The struct copy shares tensor storage. CP rewrites CPU lengths in place,
-        // so give this forward a private copy; the other CP input fields are replaced.
-        local_inputs.input_lengths =
-            torch::empty(inputs.input_lengths.sizes(), torch::TensorOptions(torch::kInt32).pinned_memory(true));
-        local_inputs.input_lengths.copy_(inputs.input_lengths);
-    }
     if (pp_size_ > 1 && input_tensors != nullptr && !input_tensors->tensors.empty()) {
         local_inputs.pp_intermediates = input_tensors->tensors;
     }

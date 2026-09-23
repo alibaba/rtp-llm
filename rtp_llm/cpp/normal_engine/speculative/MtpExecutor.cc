@@ -162,34 +162,6 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
-void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                                       ModelBase&      source,
-                                                       bool            request_actual_rows) {
-    if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
-        return;
-    }
-    const auto rows   = request_actual_rows ? -1 : model_input.combo_tokens.numel();
-    auto       pre_hc = source.getMtpTargetHiddenStates(rows);
-    if (pre_hc.defined() && pre_hc.numel() > 0) {
-        model_input.last_hidden_states = pre_hc;
-    }
-}
-
-void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
-                                                       ModelBase&       source,
-                                                       int64_t          hidden_rows) {
-    if (hidden_rows == 0) {
-        if (!model_output.all_hidden_states.defined() || model_output.all_hidden_states.size(0) == 0) {
-            return;
-        }
-        hidden_rows = model_output.all_hidden_states.size(0);
-    }
-    auto pre_hc = source.getMtpTargetHiddenStates(hidden_rows);
-    if (pre_hc.defined() && pre_hc.numel() > 0) {
-        model_output.all_hidden_states = pre_hc;
-    }
-}
-
 bool MtpExecutor::useDeviceInput() const {
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "mtp-device-input", "enabled");
@@ -812,7 +784,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
-        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
+        mtp::maybeOverrideLastHiddenWithMtpBuffer(
+            model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -897,7 +870,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0,
                                 "CP MTP draft last-hidden buffer must contain per-request rows");
     } else if (!is_dspark_) {
-        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
+        mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
     }
 
     // draft model sample
@@ -1277,7 +1250,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output          = runTargetVerifyForward(model_input, stream_groups);
-        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
+        mtp::maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1449,7 +1422,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input);
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -1840,27 +1812,10 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
 void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    // DSpARK carries its proposal through the model-owned state buffers rather
-    // than the post-rejection model input, so there is nothing to re-broadcast.
+    /** DSpARK COMMIT reuses verify inputs and rank-local features. */
     if (parallelism_config_.tp_size > 1 && !is_dspark_) {
-        if (useStreamAsync() || useAsyncDeviceState()) {
-            // Device-state pipeline keeps the dense (propose_step + 1) layout on
-            // every rank, so only the rejection-updated tensors need a
-            // broadcast. They are all device-resident, so this stays NCCL-only
-            // and rank 0's rejection-sampled view replaces non-root local
-            // target-verify outputs.
-            execBroadcast({{model_input.combo_tokens}, 0});
-            execBroadcast({{model_input.last_hidden_states}, 0});
-            execBroadcast({{model_input.lm_output_indexes}, 0});
-        } else {
-            // Default host pipeline: updateDecodePostDraftModelInput compacts
-            // combo_tokens/input_lengths/hidden states down to accept_len on
-            // rank 0, so tensor shapes differ from the non-root ranks' dense
-            // target-verify layout and raw NCCL broadcasts would mismatch
-            // element counts (hang/corruption). Use the shape-hinted full sync,
-            // matching main's post-rejection tpSyncModelInputs.
-            tpSyncModelInputs(model_input, parallelism_config_);
-        }
+        const auto layout = mtp::selectDraftInputLayout(useStreamAsync() || useAsyncDeviceState());
+        mtp::syncDraftPrefillAfterVerify(model_input, layout, parallelism_config_);
     }
     model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
     model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
@@ -1892,7 +1847,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     if (!is_dspark_) {
         // Ordinary MTP chains this output into the next autoregressive draft
         // step. DSpARK uses this forward only for its KV-cache side effect.
-        maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *commit_model);
+        mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *commit_model);
     }
     return draft_prefill_model_output;
 }
@@ -2207,7 +2162,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto draft_decode_model_output = forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
+        mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu forward done", i);
 
         // sample
