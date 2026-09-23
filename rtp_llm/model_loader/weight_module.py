@@ -13,7 +13,15 @@ from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.database import BaseDatabase
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_id
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    WeightStyle,
+    identity,
+    sp_id,
+    transpose,
+    transpose_pad,
+)
 
 
 class WeightModule(ABC):
@@ -340,12 +348,11 @@ class AtomicWeight(WeightModule):
 
     @property
     def need_transpose(self) -> bool:
-        if isinstance(
-            self.process_fun, functools.partial
-        ) and self.process_fun.func.__name__ in ["transpose_pad", "transpose"]:
-            return True
-        else:
-            return False
+        process_fun = self.process_fun
+        while isinstance(process_fun, functools.partial):
+            process_fun = process_fun.func
+        process_fun = inspect.unwrap(process_fun)
+        return process_fun is transpose or process_fun is transpose_pad
 
     def _load_raw_tensor(
         self,

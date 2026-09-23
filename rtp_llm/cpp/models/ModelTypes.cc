@@ -110,6 +110,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
     }
+    if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.is_cuda()) {
+        device_bits |= GptModelInputDeviceBit::kDeviceBitComboPositionIds;
+    }
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     return shape_hints;
 }
@@ -311,7 +314,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                 {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
-            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {combo_position_ids_size});
+            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                 {combo_position_ids_size},
+                                                 pickAlloc(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
+        } else {
+            // tpSyncModelInputs can run more than once for the same logical
+            // batch (for example target -> draft under CP+MTP).  A zero-sized
+            // root tensor is a state update too: do not retain the local
+            // position ids produced by the preceding target forward.
+            inputs.combo_position_ids = torch::Tensor();
         }
         if (hidden_states_size) {
             // DSpARK prefill seeding makes last_hidden_states' row count

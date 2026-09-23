@@ -12,7 +12,10 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    AttentionFP8,
+    CommitOnlyAttentionFP8,
+)
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
@@ -73,12 +76,17 @@ class Block(nn.Module):
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         fp8_kv_cache: bool = False,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        cp_size: int = 1,
+        cp_enabled: bool = False,
+        commit_only: bool = False,
     ):
         super().__init__()
         self.layer_id = layer_id
         self.fp8_kv_cache = fp8_kv_cache
 
-        attn_cls = AttentionFP8
+        attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
         self.attn = attn_cls(
             layer_id=layer_id,
             dim=dim,
@@ -107,6 +115,17 @@ class Block(nn.Module):
             tp_rank=tp_rank,
         )
         self._cp_sync_after_attn_done = False
+        if commit_only:
+            # The prefill DSpARK worker only projects target features into the
+            # draft SWA pools.  It never executes residual/mHC or MoE, so do
+            # not construct those modules (or require their weights).
+            self.ffn = None
+            self.attn_norm = None
+            self.ffn_norm = None
+            self.attn_hc = None
+            self.ffn_hc = None
+            self._prefill_fast_hc_impls_cached = None
+            return
         self.ffn = MoE(
             layer_id=layer_id,
             dim=dim,
@@ -122,8 +141,13 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             ep_size=ep_size,
             ep_rank=ep_rank,
+            tp_size=tp_size,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            cp_size=cp_size,
+            cp_enabled=cp_enabled,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight

@@ -11,12 +11,12 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
 from rtp_llm.test.perf_test.grid_runner import GridRunner
-from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.perf_config import (
     parse_args,
     prepare_config,
@@ -84,11 +84,30 @@ def _effective_grid_max_seq_len(
     return max(needed_seq_len, args.max_seq_len)
 
 
+def _ensure_default_role_type(
+    engine_args: List[str], environ: Mapping[str, str] = os.environ
+) -> None:
+    """Default to PDFUSION only when neither CLI nor environment chose a role."""
+    if (
+        extract_arg(engine_args, "role_type") is None
+        and not environ.get("ROLE_TYPE", "").strip()
+    ):
+        engine_args.extend(["--role_type", "PDFUSION"])
+
+
 def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
     """--batch_size as given on the command line, or None when it was defaulted."""
     if not any(a.startswith("--batch_size") for a in sys.argv[1:]):
         return None
     return [int(x) for x in args.batch_size.split(",")]
+
+
+def _engine_tp_size(
+    engine_args: List[str], environ: Mapping[str, str] = os.environ
+) -> int:
+    """Resolve the TP topology used by the engine for result metadata."""
+    value = extract_arg(engine_args, "tp_size") or environ.get("TP_SIZE", "1")
+    return int(value)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +121,7 @@ def _run_prefill(
     config: PerfTestConfig,
     input_query_dict: Dict[int, str],
     batch_size_list: Optional[List[int]] = None,
+    tp_size: int = 1,
     **kwargs: Any,
 ) -> None:
     """Prefill grid run.
@@ -120,6 +140,7 @@ def _run_prefill(
         config.input_len_list,
         input_query_dict,
         is_decode=False,
+        tp_size=tp_size,
         **kwargs,
     ).run()
 
@@ -131,6 +152,7 @@ def _run_decode(
     config: PerfTestConfig,
     input_query_dict: Dict[int, str],
     engine_status: Dict[str, Any],
+    tp_size: int = 1,
     **kwargs: Any,
 ) -> None:
     max_kv = (
@@ -185,6 +207,7 @@ def _run_decode(
                     [input_len],
                     input_query_dict,
                     is_decode=True,
+                    tp_size=tp_size,
                     **kwargs,
                 ).run()
 
@@ -201,6 +224,11 @@ def main() -> str:
 
     args, remaining = parse_args()
     remaining = resolve_perf_engine_paths(remaining)
+    # This runner submits requests through the unified HTTP frontend.  Keep the
+    # backend in PDFUSION mode unless a caller explicitly supplies a role; the
+    # standalone DECODE RPC role intentionally does not implement the
+    # GenerateStreamCall path used by this perf client.
+    _ensure_default_role_type(remaining)
     # batch_decode_test always needs BatchDecodeScheduler
     if extract_arg(remaining, "use_batch_decode_scheduler") is None:
         remaining.extend(["--use_batch_decode_scheduler", "1"])
@@ -234,6 +262,7 @@ def main() -> str:
             decode_test_length=args.decode_test_length,
             generate_config=generate_config,
             num_measures=args.num_measures,
+            tp_size=_engine_tp_size(remaining),
         )
 
         if args.partial == 2:
@@ -257,10 +286,8 @@ def main() -> str:
                 **runner_kwargs,
             )
 
-        # Cleanup
+        # Persist runtime artifacts only after the measured work completed.
         collect_timeline_files(args.result_dir)
-        server.stop()
-        write_test_info(args, remaining)
 
         if args.partial != 2:
             from rtp_llm.test.perf_test.visualization import plot_decode_results
@@ -270,7 +297,12 @@ def main() -> str:
             except Exception as e:
                 logging.warning(f"plot_decode_results failed: {e}")
     finally:
-        summarize_and_cleanup_coredumps(args.result_dir)
+        try:
+            server.stop()
+        finally:
+            summarize_and_cleanup_coredumps(args.result_dir)
+
+    write_test_info(args, remaining)
 
     return args.result_dir
 

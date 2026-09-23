@@ -2,6 +2,21 @@ import argparse
 
 from rtp_llm.ops import CPRotateMethod
 
+UINT32_MAX = (1 << 32) - 1
+
+
+def nonnegative_uint32(value):
+    """Parse a uint32-valued CLI/env option without pybind fallback."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}") from exc
+    if not 0 <= parsed <= UINT32_MAX:
+        raise argparse.ArgumentTypeError(
+            f"expected a value in [0, {UINT32_MAX}], got {parsed}"
+        )
+    return parsed
+
 
 def str2bool(v):
     if v is None:

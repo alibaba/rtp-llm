@@ -195,17 +195,21 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
-    // DSV4 fixed-allocation pool block count. 0 means the fixed regions
-    // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
-    // linear-step-derived block count.
+    // Deprecated legacy DSV4 fixed-allocation pool block count.  A positive
+    // value still applies to INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV
+    // so upgrading an existing deployment does not silently change capacity.
+    // New deployments should use descriptor sizing plus the HCA-only override.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
-    // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
-    // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
-    uint32_t dsv4_hca_state_pool_blocks = 0;
+    // HCA_STATE-only runtime override. -1 = unset (honor the model
+    // descriptor), >0 = fixed blocks. A separate flag represents an explicit
+    // clear so legacy serialized/CLI zero values remain "unset" during
+    // rolling upgrades.
+    int64_t dsv4_hca_state_pool_blocks = -1;
+    bool    dsv4_hca_state_pool_clear  = false;
 
-    // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
-    // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
+    // DSV4 state/KV pool residency request. This does not change pool sizing;
+    // each descriptor determines whether the requested placement is supported.
     bool dsv4_fixed_pool_use_memory = false;
 
     // Remote connector configuration fields

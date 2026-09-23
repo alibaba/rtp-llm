@@ -13,31 +13,75 @@ softmax merging across both pools (mirrors vLLM
 pools -> BF16 cat -> TileLang sparse_attn" path which was
 bandwidth-bound on the dequant kernels.
 
-FlashMLA wheel is required (CUDA >= 12.9). The op asserts wheel
-availability at forward — there is no slow Python reference fallback
-because all dev/CI/prod boxes carry flash_mla.
+FlashMLA wheel is required for the non-SM120 path (CUDA >= 12.9). It is
+loaded lazily at forward — there is no slow Python reference fallback.
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
 from typing import Any, Optional
 
 import torch
 
-_FLASH_MLA_AVAILABLE = False
-try:
-    if torch.version.cuda:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 9):
-            from flash_mla import (
-                flash_mla_with_kvcache,  # type: ignore[import-not-found]
-            )
-            from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+from rtp_llm.models_py.utils.arch import is_sm120
 
-            _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, ValueError) as e:
-    logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
+_FLASH_MLA_AVAILABLE = False
+_flash_mla_load_attempted = False
+
+
+def _load_flash_mla() -> bool:
+    """Validate the optional FlashMLA wheel on first non-SM120 use.
+
+    Importing the DSv4 model package is shared by CUDA variants that do not use
+    FlashMLA.  Keep wheel loading out of module initialization so a missing or
+    ABI-incompatible optional wheel cannot break those startup paths.
+    """
+    global _FLASH_MLA_AVAILABLE, _flash_mla_load_attempted
+    if _FLASH_MLA_AVAILABLE:
+        return True
+    if _flash_mla_load_attempted:
+        return False
+    _flash_mla_load_attempted = True
+    try:
+        if not torch.version.cuda:
+            return False
+        major, minor = map(int, torch.version.cuda.split(".")[:2])
+        if (major, minor) < (12, 9):
+            return False
+        flash_mla = importlib.import_module("flash_mla")
+        getattr(flash_mla, "flash_mla_with_kvcache")
+        getattr(flash_mla, "get_mla_metadata")
+    except (ImportError, AttributeError, OSError, RuntimeError, ValueError) as error:
+        logging.info("[dsv4-fp8] FlashMLA unavailable (%s)", error)
+        return False
+    _FLASH_MLA_AVAILABLE = True
+    return True
+
+
+_sm120_sparse_mla = None
+_sm120_sparse_mla_load_attempted = False
+
+
+def _load_sm120_sparse_mla():
+    """Load the SM120-only FlashInfer entry point on first SM120 use.
+
+    Importing this module is part of ordinary DeepSeek-V4 startup on every
+    backend.  A missing/incompatible optional FlashInfer wheel must therefore
+    not prevent a FlashMLA model from loading.
+    """
+    global _sm120_sparse_mla, _sm120_sparse_mla_load_attempted
+    if _sm120_sparse_mla_load_attempted:
+        return _sm120_sparse_mla
+    _sm120_sparse_mla_load_attempted = True
+    try:
+        from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
+
+        _sm120_sparse_mla = trtllm_batch_decode_sparse_mla_dsv4
+    except (ImportError, AttributeError, OSError, RuntimeError) as error:
+        logging.info("[dsv4-fp8] SM120 FlashInfer sparse MLA unavailable (%s)", error)
+    return _sm120_sparse_mla
 
 
 class SparseAttnV4DecodeFp8Op:
@@ -73,6 +117,36 @@ class SparseAttnV4DecodeFp8Op:
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
+        self._attn_sink_fp32: Optional[torch.Tensor] = None
+        self._attn_sink_source: Optional[torch.Tensor] = None
+        self._attn_sink_source_version = -1
+
+        if torch.cuda.is_available() and is_sm120():
+            if _load_sm120_sparse_mla() is None:
+                raise RuntimeError(
+                    "SM120 FP8 sparse decode requires FlashInfer "
+                    "trtllm_batch_decode_sparse_mla_dsv4; install the CUDA 13 "
+                    "RTP-LLM dependency set before starting the service"
+                )
+            from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import warmup
+
+            warmup(torch.device("cuda", torch.cuda.current_device()))
+
+    def _cached_attn_sink(self, attn_sink: torch.Tensor) -> torch.Tensor:
+        if attn_sink.dtype == torch.float32 and attn_sink.is_contiguous():
+            return attn_sink
+        if (
+            self._attn_sink_fp32 is not None
+            and self._attn_sink_source is attn_sink
+            and self._attn_sink_source_version == attn_sink._version
+            and self._attn_sink_fp32.device == attn_sink.device
+            and self._attn_sink_fp32.shape == attn_sink.shape
+        ):
+            return self._attn_sink_fp32
+        self._attn_sink_fp32 = attn_sink.float().contiguous()
+        self._attn_sink_source = attn_sink
+        self._attn_sink_source_version = attn_sink._version
+        return self._attn_sink_fp32
 
     def forward(
         self,
@@ -103,10 +177,22 @@ class SparseAttnV4DecodeFp8Op:
         over a second FP8 KV pool in a single FlashMLA invocation. The
         kernel merges softmax across both pools natively.
         """
-        assert _FLASH_MLA_AVAILABLE, (
-            "flash_mla wheel is required for FP8 sparse decode "
-            "(install rtp_llm with cuda12_9 / cuda13 config)"
-        )
+        if q.is_cuda and is_sm120(q.device):
+            return self._forward_sm120_flashinfer(
+                q,
+                kv_cache,
+                attn_sink,
+                topk_idxs,
+                topk_length,
+                extra_k_cache,
+                extra_topk_idxs,
+                extra_topk_length,
+            )
+        if not _load_flash_mla():
+            raise RuntimeError(
+                "FlashMLA is required for non-SM120 FP8 sparse decode; "
+                "install the cuda12_9/cuda13 RTP-LLM dependency set"
+            )
         return self._forward_flash_mla(
             q,
             kv_cache,
@@ -120,6 +206,85 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_idxs,
             extra_topk_length,
         )
+
+    def _forward_sm120_flashinfer(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_sink: torch.Tensor,
+        topk_idxs: torch.Tensor,
+        topk_length: Optional[torch.Tensor] = None,
+        extra_k_cache: Optional[torch.Tensor] = None,
+        extra_topk_idxs: Optional[torch.Tensor] = None,
+        extra_topk_length: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+            SM120_EXTRA_TOPK_WIDTHS,
+            SM120_SWA_TOPK_WIDTHS,
+            canonical_topk,
+            run,
+            run_chunked_reference,
+            uses_generic_fallback,
+            warmup,
+        )
+
+        batch, q_len, heads, dim = q.shape
+        rows = batch * q_len
+        swa_indices = topk_idxs.squeeze(2) if topk_idxs.dim() == 4 else topk_idxs
+        extra_indices = extra_topk_idxs
+        if extra_indices is not None and extra_indices.dim() == 4:
+            extra_indices = extra_indices.squeeze(2)
+        swa_width = int(swa_indices.reshape(rows, -1).shape[-1])
+        extra_width = (
+            int(extra_indices.reshape(rows, -1).shape[-1])
+            if extra_indices is not None
+            else 0
+        )
+        generic_fallback = uses_generic_fallback(swa_width, extra_width)
+        swa_indices, swa_topk_lens = canonical_topk(
+            swa_indices.reshape(rows, -1),
+            topk_length,
+            (swa_width,) if generic_fallback else SM120_SWA_TOPK_WIDTHS,
+        )
+        if extra_indices is not None:
+            extra_indices, extra_topk_lens = canonical_topk(
+                extra_indices.reshape(rows, -1),
+                extra_topk_length,
+                (extra_width,) if generic_fallback else SM120_EXTRA_TOPK_WIDTHS,
+            )
+        else:
+            extra_topk_lens = None
+        # CUDA graph replay cannot allocate a 128 MiB workspace.  It must be
+        # touched during eager warmup; workspace() raises if a new allocation
+        # is attempted while capture is active.
+        if not generic_fallback:
+            warmup(q.device)
+        # FlashInfer's SM120 ABI consumes paged slot IDs and derives page size
+        # plus block stride from the original cache tensor.  Passing the cache
+        # directly avoids copying every static top-k slot into two persistent
+        # [B * width, 584] buffers (over 600 MiB at B=64, width=8192).
+        swa_decode_cache = kv_cache
+        extra_decode_cache = (
+            extra_k_cache
+            if extra_k_cache is not None and extra_indices is not None
+            else None
+        )
+        flat_q = q.reshape(batch * q_len, heads, dim).contiguous()
+        flat_out = torch.empty_like(flat_q)
+        sparse_runner = run_chunked_reference if generic_fallback else run
+        sparse_runner(
+            query=flat_q,
+            swa_cache=swa_decode_cache,
+            swa_indices=swa_indices,
+            swa_lens=swa_topk_lens,
+            extra_cache=extra_decode_cache,
+            extra_indices=extra_indices,
+            extra_lens=extra_topk_lens,
+            out=flat_out,
+            scale=self.softmax_scale,
+            sinks=self._cached_attn_sink(attn_sink),
+        )
+        return flat_out.view_as(q)
 
     def _forward_flash_mla(
         self,

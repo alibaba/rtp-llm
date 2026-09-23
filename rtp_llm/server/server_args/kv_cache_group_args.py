@@ -1,4 +1,10 @@
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.server.server_args.util import nonnegative_uint32, str2bool
+
+
+def _dsv4_hca_state_pool_blocks(value):
+    """Preserve the released CLI contract where zero means no override."""
+    parsed = nonnegative_uint32(value)
+    return -1 if parsed == 0 else parsed
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -453,19 +459,28 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "--dsv4_fixed_pool_blocks",
         env_name="DSV4_FIXED_POOL_BLOCKS",
         bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
-        type=int,
+        type=nonnegative_uint32,
         default=0,
-        help="DSV4 固定池 block 数。>0 时用于 INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV 四个 pool；"
-        "不配置或配置为 0 时，这四个 pool 按 linear_step 派生 block 数，并保持一致。",
+        help="[DEPRECATED] DSV4 固定池 block 数。>0 时继续兼容地覆盖 "
+        "INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV；新配置请仅按需设置 HCA_STATE。",
     )
     kv_cache_group.add_argument(
         "--dsv4_hca_state_pool_blocks",
         env_name="DSV4_HCA_STATE_POOL_BLOCKS",
         bind_to=(kv_cache_config, "dsv4_hca_state_pool_blocks"),
-        type=int,
-        default=0,
-        help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
-        "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或 linear_step 派生 block 数。",
+        type=_dsv4_hca_state_pool_blocks,
+        default=None,
+        help="DSV4 HCA_STATE pool block 数。不设置时使用模型 descriptor（当前为 256）；"
+        ">0 时固定 HCA_STATE；0 保留历史语义，等价于不设置。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_hca_state_pool_clear",
+        env_name="DSV4_HCA_STATE_POOL_CLEAR",
+        bind_to=(kv_cache_config, "dsv4_hca_state_pool_clear"),
+        type=str2bool,
+        default=False,
+        help="显式清除模型 descriptor 中的 HCA_STATE 固定容量并使用框架 sizing；"
+        "不能与正数 DSV4_HCA_STATE_POOL_BLOCKS 同时设置。",
     )
     kv_cache_group.add_argument(
         "--dsv4_fixed_pool_use_memory",
@@ -473,5 +488,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "dsv4_fixed_pool_use_memory"),
         type=str2bool,
         default=False,
-        help="DSV4 固定池（INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV）是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
+        help="DSV4 state/KV pool 的 residency 选择（不改变 pool sizing）：True 使用 pinned CPU memory，"
+        "False 使用 GPU memory；具体 pool 是否支持该 placement 仍由 descriptor 决定。",
     )

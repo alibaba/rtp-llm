@@ -58,6 +58,12 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "ue8m0_layout_policy_test",
+    srcs = ["ue8m0_layout_policy_test.py"],
+    deps = py_test_deps,
+)
+
 py_test (
     name = "fp8_quant_gemm_microbench",
     srcs = ["fp8_quant_gemm_microbench.py"],

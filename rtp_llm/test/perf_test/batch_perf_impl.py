@@ -49,7 +49,6 @@ def _curl_server_single_worker(
             req["top_k"] = generate_config["top_k"]
         if "top_p" in generate_config:
             req["top_p"] = generate_config["top_p"]
-
     if "top_k" not in req:
         req["top_k"] = 1
 
@@ -216,21 +215,24 @@ class BatchPerfImpl(object):
             measurements.append(metric)
             all_measure_responses.extend(responses)
 
-        if measure_runs >= 3:
+        aggregate_results = analyze_results(all_measure_responses)
+        results = aggregate_results
+        all_rounds_succeeded = all(
+            metric.total_requests > 0
+            and metric.success_requests == metric.total_requests
+            for metric in measurements
+        )
+        if len(measurements) >= 3 and all_rounds_succeeded:
             # Trim min and max, average the rest
             measurements.sort(key=lambda m: getattr(m, key))
             values = [f"{getattr(m, key):.2f}" for m in measurements]
             trimmed = measurements[1:-1]
             avg_val = sum(getattr(m, key) for m in trimmed) / len(trimmed)
             logging.debug(
-                f"{measure_runs} runs {key}: {values}, "
+                f"{len(measurements)} fully successful runs {key}: {values}, "
                 f"trimmed [{values[0]}, {values[-1]}], avg={avg_val:.2f}"
             )
-            results = trimmed[len(trimmed) // 2]  # use median of trimmed as base
             setattr(results, key, avg_val)  # override with trimmed average
-        else:
-            # Too few runs to trim: pool every response of every run instead.
-            results = analyze_results(all_measure_responses)
 
         if self.profile and self.profile_runs > 0:
             # Pre-arm via /start_profile with enable_all_rank=true so that
@@ -346,3 +348,18 @@ class BatchPerfImpl(object):
     def dump_results(self, results: List[Dict[str, Any]]):
         for result in results:
             logging.debug(json.dumps(result))
+
+
+def require_complete_measurement(
+    metric: TestResultMetrics,
+    *,
+    context: str,
+) -> TestResultMetrics:
+    """Reject incomplete measurements for result tables and golden data."""
+    if metric.total_requests <= 0 or metric.success_requests != metric.total_requests:
+        raise RuntimeError(
+            f"{context} requires every request to succeed: "
+            f"success={metric.success_requests}, failed={metric.fail_requests}, "
+            f"total={metric.total_requests}"
+        )
+    return metric

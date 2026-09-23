@@ -7,9 +7,11 @@ import torch
 from rtp_llm.models_py.modules.dsv4.indexer_topk import (
     AutoIndexerTopKBackend,
     FastIndexerTopKBackend,
+    IndexerTopKBackendName,
     PersistentIndexerTopKBackend,
     TorchIndexerTopKBackend,
     get_indexer_topk_backend,
+    parse_indexer_topk_backend_name,
     select_indexer_topk,
 )
 
@@ -132,7 +134,20 @@ class TestIndexerTopKBackend(unittest.TestCase):
         with _env("DSV4_INDEXER_TOPK_BACKEND", "fast"):
             self.assertIsInstance(get_indexer_topk_backend(), FastIndexerTopKBackend)
         with _env("DSV4_INDEXER_TOPK_BACKEND", "persistent"):
-            self.assertIsInstance(get_indexer_topk_backend(), PersistentIndexerTopKBackend)
+            self.assertIsInstance(
+                get_indexer_topk_backend(), PersistentIndexerTopKBackend
+            )
+
+    def test_backend_parser_is_shared_and_preserves_cuda_alias(self):
+        self.assertIs(
+            parse_indexer_topk_backend_name("cuda"),
+            IndexerTopKBackendName.AUTO,
+        )
+        for name in IndexerTopKBackendName:
+            with self.subTest(name=name.value):
+                self.assertIs(parse_indexer_topk_backend_name(name.value), name)
+        with self.assertRaisesRegex(ValueError, "expected auto\\|torch\\|fast"):
+            parse_indexer_topk_backend_name("unknown")
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_auto_backend_topk_512_matches_torch_sets(self):
@@ -149,9 +164,7 @@ class TestIndexerTopKBackend(unittest.TestCase):
     def test_persistent_backend_topk_512_matches_torch_sets(self):
         torch.manual_seed(2)
         score = torch.randn(4, 16384, device="cuda", dtype=torch.float32)
-        lengths = torch.tensor(
-            [16384, 9000, 512, 17], device="cuda", dtype=torch.int32
-        )
+        lengths = torch.tensor([16384, 9000, 512, 17], device="cuda", dtype=torch.int32)
         persistent = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 512, lengths=lengths)
         _assert_topk_sets(self, persistent.cpu(), ref.cpu())
@@ -207,9 +220,7 @@ class TestIndexerTopKBackend(unittest.TestCase):
     def test_fast_backend_topk_2048_matches_torch_sets(self):
         torch.manual_seed(3)
         score = torch.randn(4, 4096, device="cuda", dtype=torch.float32)
-        lengths = torch.tensor(
-            [4096, 3000, 2048, 17], device="cuda", dtype=torch.int32
-        )
+        lengths = torch.tensor([4096, 3000, 2048, 17], device="cuda", dtype=torch.int32)
         fast = FastIndexerTopKBackend().select(score, 2048, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 2048, lengths=lengths)
         _assert_topk_sets(self, fast.cpu(), ref.cpu())

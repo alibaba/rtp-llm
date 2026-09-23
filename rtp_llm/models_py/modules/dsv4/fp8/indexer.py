@@ -55,8 +55,13 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorMeta,
     _CompressorPending,
 )
+from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+    IndexerTopKBackendName,
+    parse_indexer_topk_backend_name,
+)
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -87,8 +92,10 @@ def _topk_v3_enabled() -> bool:
     return os.environ.get("DSV4_TOPK_V3", "1") != "0"
 
 
-def _fp8_prefill_fast_topk_enabled() -> bool:
+def _fp8_prefill_fast_topk_enabled(logits: torch.Tensor | None = None) -> bool:
     if not _FAST_PREFILL_TOPK_OK:
+        return False
+    if logits is not None and logits.is_cuda and is_sm120(logits.device):
         return False
     return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"
 
@@ -97,9 +104,15 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
     return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
 
 
-def _fp8_prefill_topk_use_torch() -> bool:
-    return (
-        os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower() == "torch"
+def _fp8_prefill_topk_use_torch(logits: torch.Tensor | None = None) -> bool:
+    backend = parse_indexer_topk_backend_name()
+    # Persistent decode Top-K and experimental HISA do not implement the
+    # variable-row prefill ABI.  They remain valid global selections, but this
+    # phase deliberately falls back to the exact torch implementation.
+    return backend in (
+        IndexerTopKBackendName.TORCH,
+        IndexerTopKBackendName.PERSISTENT,
+        IndexerTopKBackendName.HISA,
     )
 
 
@@ -109,6 +122,15 @@ def _fp8_prefill_topk_canonicalize() -> bool:
         "true",
         "yes",
         "on",
+    )
+
+
+def _canonicalize_prefill_topk_out(out: torch.Tensor) -> None:
+    sentinel = torch.iinfo(torch.int32).max
+    sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
+    sorted_idx = torch.sort(sortable, dim=-1).values
+    out.copy_(
+        torch.where(sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx)
     )
 
 
@@ -132,14 +154,7 @@ def _run_prefill_topk_torch(
     lengths = (row_ends - row_starts).unsqueeze(1)
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
     if _fp8_prefill_topk_canonicalize():
-        sentinel = torch.iinfo(torch.int32).max
-        sortable = torch.where(
-            indices >= 0, indices, torch.full_like(indices, sentinel)
-        )
-        sorted_idx = torch.sort(sortable, dim=-1).values
-        indices = torch.where(
-            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
-        )
+        _canonicalize_prefill_topk_out(indices)
     out[:, :k_eff].copy_(indices)
 
 
@@ -151,7 +166,7 @@ def _run_prefill_topk(
     topk: int,
     compress_ratio: int,
 ) -> None:
-    if _fp8_prefill_topk_use_torch():
+    if _fp8_prefill_topk_use_torch(logits):
         _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
         return
 
@@ -159,7 +174,7 @@ def _run_prefill_topk(
     # length so the 16k policy matches the user-visible prefill length.
     estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
     if (
-        _fp8_prefill_fast_topk_enabled()
+        _fp8_prefill_fast_topk_enabled(logits)
         and int(topk) in (512, 1024, 2048)
         and estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS
     ):
@@ -167,6 +182,8 @@ def _run_prefill_topk(
         rtp_llm_ops.fast_topk_v2_variable(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
+        if _fp8_prefill_topk_canonicalize():
+            _canonicalize_prefill_topk_out(out)
         return
 
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -180,6 +197,8 @@ def _run_prefill_topk(
         int(topk),
         _fp8_prefill_topk_force_radix_sort(),
     )
+    if _fp8_prefill_topk_canonicalize():
+        _canonicalize_prefill_topk_out(out)
 
 
 def _fp8_prefill_score_chunk_rows() -> int:
@@ -199,9 +218,7 @@ def _fp8_prefill_score_chunk_rows() -> int:
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     ws = _topk_v3_workspace_cache.get(device)
     if ws is None:
-        ws = torch.empty(
-            _TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device
-        )
+        ws = torch.empty(_TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
         _topk_v3_workspace_cache[device] = ws
     return ws
 
@@ -291,8 +308,11 @@ class _IndexerFP8PrefillMeta(NamedTuple):
 
 
 class IndexerFP8(PoolBackedModule):
-    """FP8 lightning indexer. DeepGEMM-only score; nested
-    ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
+    """FP8 lightning indexer with architecture-specific score backends.
+
+    DeepGEMM handles supported datacenter GPUs; SM120 uses the bounded torch
+    fallback. ``CompressorFP8(head_dim=128)`` writes the shared 132B pool.
+    """
 
     def __init__(
         self,
@@ -319,8 +339,8 @@ class IndexerFP8(PoolBackedModule):
             f"(matches CompressorFP8 132B layout); got {index_head_dim}"
         )
         assert has_fp8_paged_mqa_logits(), (
-            "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
-            "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
+            "FP8 paged indexer scoring is unavailable on this device. "
+            "Use IndexerBF16 or install the supported score backend."
         )
         assert layer_weights is not None, (
             "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
@@ -1106,9 +1126,9 @@ class IndexerFP8(PoolBackedModule):
                     self.rope_head_dim,
                 )
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert has_fp8_mqa_logits(
+                x.device
+            ), "FP8 MQA indexer scoring is unavailable for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="
@@ -1320,9 +1340,9 @@ class IndexerFP8(PoolBackedModule):
                     self.rope_head_dim,
                 )
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert has_fp8_mqa_logits(
+                x.device
+            ), "FP8 MQA indexer scoring is unavailable for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="
