@@ -443,3 +443,11 @@ py_test(
     data = _PREFILL_POLICY_SOURCE_DATA,
     deps = ["//rtp_llm:torch"],
 )
+
+py_test(
+    name = "test_forward_ep_plan_cpu",
+    srcs = ["test_forward_ep_plan_cpu.py"],
+    deps = ["//rtp_llm:torch"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)

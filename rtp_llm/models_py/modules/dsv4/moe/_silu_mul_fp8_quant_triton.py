@@ -144,6 +144,7 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     output_q_ptr,  # [M, inter] FP8 e4m3fn
     output_scale_ptr,  # column-major [num_packed_groups, tma_aligned_M] int32 view
     M,
+    active_indptr,
     gate_stride_m,
     up_stride_m,
     output_q_stride_m,
@@ -156,6 +157,8 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    HAS_ACTIVE_ROWS: tl.constexpr,
+    ACTIVE_INDEX: tl.constexpr,
 ):
     pid_pack = tl.program_id(0).to(tl.int64)
     pid_m = tl.program_id(1).to(tl.int64)
@@ -167,6 +170,10 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
     offs_n = tl.arange(0, GROUP_SIZE)
     row_mask = (m_offset + offs_m) < M
+    if HAS_ACTIVE_ROWS:
+        row_mask = row_mask & (
+            (m_offset + offs_m) < tl.load(active_indptr + ACTIVE_INDEX)
+        )
 
     gate_base = (m_offset + offs_m[:, None]) * gate_stride_m
     up_base = (m_offset + offs_m[:, None]) * up_stride_m
@@ -311,13 +318,48 @@ def silu_mul_fp8_quant_packed_from_parts(
     group_size: int = 128,
     output_q: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
+    active_indptr: Optional[torch.Tensor] = None,
+    zero_inactive_q: bool = True,
+    zero_inactive_scale: Optional[bool] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Bound activation work by the producer-owned current-call aligned prefix.
+
+    Initialize scale backing storage separately: contiguous() reads even inactive scales.
+    """
     assert gate.dim() == 2 and up.dim() == 2
     assert gate.shape == up.shape, f"gate/up shape mismatch: {gate.shape} vs {up.shape}"
     assert gate.stride(1) == 1 and up.stride(1) == 1, "gate/up columns must be dense"
     assert gate.dtype == torch.bfloat16 and up.dtype == torch.bfloat16
 
     M, N_2 = gate.shape
+    if active_indptr is not None:
+        # Private current-call monotone align4 prefix, produced by route counts.
+        # Validate host ABI only; NEVER convert its device last value to Python.
+        if (
+            active_indptr.dim() != 1
+            or not 2 <= active_indptr.shape[0] <= 1025
+            or active_indptr.dtype != torch.int32
+            or active_indptr.device != gate.device
+            or gate.device.type != "cuda"
+            or up.device != gate.device
+            or not active_indptr.is_contiguous()
+            or M % 4
+            or M + 127 * (active_indptr.shape[0] - 1) > 2**31 - 1
+            or gate.stride(0) < N_2
+            or up.stride(0) < N_2
+        ):
+            raise ValueError("invalid active-row activation metadata")
+        if output_q is not None or output_scale is not None:
+            raise ValueError("active-row activation owns its own scratch")
+    if zero_inactive_scale is None:
+        zero_inactive_scale = zero_inactive_q
+    q_alloc = torch.empty
+    scale_alloc = torch.empty
+    if active_indptr is not None:
+        if zero_inactive_q:
+            q_alloc = torch.zeros
+        if zero_inactive_scale:
+            scale_alloc = torch.zeros
     assert (
         N_2 % group_size == 0
     ), f"inter ({N_2}) must be a multiple of group_size ({group_size})"
@@ -331,13 +373,13 @@ def silu_mul_fp8_quant_packed_from_parts(
     tma_aligned_M = ((M + 3) // 4) * 4
 
     if output_q is None:
-        output_q = torch.empty((M, N_2), dtype=fp8_dtype, device=gate.device)
+        output_q = q_alloc((M, N_2), dtype=fp8_dtype, device=gate.device)
     else:
         assert output_q.shape == (M, N_2)
         assert output_q.dtype == fp8_dtype
 
     if output_scale is None:
-        output_scale_packed = torch.empty(
+        output_scale_packed = scale_alloc(
             (num_packed_groups, tma_aligned_M),
             dtype=torch.int32,
             device=gate.device,
@@ -359,6 +401,7 @@ def silu_mul_fp8_quant_packed_from_parts(
         output_q,
         output_scale_packed,
         M,
+        active_indptr,
         gate.stride(0),
         up.stride(0),
         output_q.stride(0),
@@ -371,6 +414,8 @@ def silu_mul_fp8_quant_packed_from_parts(
         GROUP_SIZE=group_size,
         BLOCK_M=BLOCK_M,
         HAS_CLAMP=has_clamp,
+        HAS_ACTIVE_ROWS=active_indptr is not None,
+        ACTIVE_INDEX=0 if active_indptr is None else active_indptr.shape[0] - 1,
         num_warps=max(4, group_size // 32),
         num_stages=2,
     )
