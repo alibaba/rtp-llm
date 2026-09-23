@@ -1,5 +1,7 @@
 import copy
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -400,9 +402,20 @@ class PerformanceGateTest(unittest.TestCase):
             validate(c)
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)):
             plans = compile_scenarios(
-                load_scenarios(ROOT / "config/experiments/master_performance_frozen.yaml"),
+                load_scenarios(ROOT / "config/scenarios/master_performance_frozen.yaml"),
                 handlers=handlers(),
             )
         self.assertEqual(len(plans), 2)
         for p in plans:
             self.assertIn("performance_finish", [s["action"] for s in p["stages"]])
+
+    def test_default_runner_selects_core_without_external_performance_input(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/commands/run_cases.py"),
+             "--dry-run", "--parallel", "1"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(result.stdout[result.stdout.index("\n{") + 1:])
+        self.assertEqual(len(plan["instances"]), 5)
+        self.assertNotIn("master_performance::", result.stdout)

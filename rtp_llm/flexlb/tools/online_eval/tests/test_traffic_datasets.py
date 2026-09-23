@@ -2,6 +2,7 @@
 import hashlib
 import json
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -96,12 +97,21 @@ class TrafficDatasetsTest(unittest.TestCase):
                 for value in node:
                     yield from sources(value)
 
+        # 入库身份来自 Git，目录位置不意味着所有外部依赖也已入库。
+        tracked = {(ROOT / name).resolve() for name in subprocess.check_output(
+            ['git', 'ls-files', '--', 'data/traffic_models'], cwd=ROOT, text=True).splitlines()}
         for case in (ROOT / 'config/scenarios').glob('*.yaml'):
             for params in sources(load_document(case)):
                 path = (case.parent / params['path']).resolve()
-                manifest = datasets.read_manifest(path)
-                self.assertEqual(manifest['sha256'], params['sha256'], str(case))
-                self.assertEqual(manifest['count'], params['count'], str(case))
+                with self.subTest(case=case.name, source=params['path']):
+                    self.assertRegex(params['sha256'], r'^[0-9a-f]{64}$')
+                    self.assertIs(type(params['count']), int)
+                    self.assertGreater(params['count'], 0)
+                    if path not in tracked and not path.is_file():
+                        self.skipTest(f'external capture unavailable: {path}; runtime SHA check remains required')
+                    manifest = datasets.read_manifest(path)
+                    self.assertEqual(manifest['sha256'], params['sha256'], str(case))
+                    self.assertEqual(manifest['count'], params['count'], str(case))
 
     def test_default_profile_preserves_fixed_seed_trace(self):
         from traffic.realistic import write_trace

@@ -8,8 +8,10 @@ Mock 回归标准不等于生产容量或 SLO 认证；配置一致、流量可�
 
 场景 YAML 声明拓扑、容量、性能模型、流量 SHA、输出模型、预热/测量窗口及 `criteria`。
 规模和阈值从所选配置读取，不能直接沿用另一场景的参数。`max_error_rate` 必须为 0；
-`test.collection: request` 保证逐请求证据。显式实验通过 `--case-dir` 选择，
-加入实验目录不代表加入默认 suite 或 CI。
+`test.collection: request` 保证逐请求证据。配置统一放在 `config/scenarios/`，参与目录枚举；
+默认 `core` 由 `config/suites.yaml` 的 `case::variant` 白名单在编译前筛选，
+不因文件位于该目录而执行所有实例。性能场景用 `--suite workload` 和 `--case-dir` 显式选择。
+依赖外部采集文件时，执行前须提供配置中固定 SHA256 的输入；文件不随配置入库。
 
 先按 [编译与运行底座](build-and-runtime.md)构建制品并配置 Prometheus。从 `rtp_llm/flexlb` 执行：
 
