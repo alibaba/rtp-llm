@@ -15,12 +15,9 @@ __all__ = [
     "XQAParams",
     "embedding",
     "fused_add_layernorm",
-    "fused_add_rmsnorm",
     "fused_qk_rmsnorm",
     "FlashInferMlaAttnParams",
     "layernorm",
-    "rmsnorm",
-    "silu_and_mul",
 ]
 
 class FlashInferMlaAttnParams:
@@ -96,17 +93,6 @@ def fused_add_layernorm(
     Fused Add LayerNorm kernel
     """
 
-def fused_add_rmsnorm(
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    cuda_stream: int = 0,
-) -> None:
-    """
-    Fused Add RMSNorm kernel
-    """
-
 def fused_qk_rmsnorm(
     IO: torch.Tensor,
     q_gamma: torch.Tensor,
@@ -139,22 +125,4 @@ def layernorm(
 ) -> None:
     """
     LayerNorm kernel
-    """
-
-def rmsnorm(
-    output: torch.Tensor,
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    cuda_stream: int = 0,
-) -> None:
-    """
-    RMSNorm kernel
-    """
-
-def silu_and_mul(
-    output: torch.Tensor, input: torch.Tensor, cuda_stream: int = 0
-) -> None:
-    """
-    SiLU and Multiply kernel
     """

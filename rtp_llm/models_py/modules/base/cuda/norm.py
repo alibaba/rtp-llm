@@ -19,11 +19,13 @@ class RMSNorm(BaseNorm):
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        stream_id = torch.cuda.current_stream().cuda_stream
         if output is None:
             output = torch.empty_like(hidden_states)
-        rtp_llm_ops.rmsnorm(
-            output, hidden_states, self.weight.data, self.variance_epsilon, stream_id
+        flashinfer.norm.rmsnorm(
+            hidden_states,
+            self.weight.data,
+            eps=self.variance_epsilon,
+            out=output,
         )
         return output
 
@@ -35,9 +37,11 @@ class RMSResNorm(BaseResNorm):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        stream_id = torch.cuda.current_stream().cuda_stream
-        rtp_llm_ops.fused_add_rmsnorm(
-            hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
+        flashinfer.norm.fused_add_rmsnorm(
+            hidden_states,
+            residual,
+            self.weight.data,
+            eps=self.variance_epsilon,
         )
         return hidden_states, residual
 

@@ -160,7 +160,7 @@ build:cuda13_arm --host_copt=-Wno-missing-field-initializers
 # first-party patches; target compute capabilities span H100/H200 (9.0) and
 # B100/B200 (10.0) plus older SMs kept for ecosystem compat, mirroring
 # cuda12_9.  Uses its own using_cuda13_x86 define so BUILD-file select()s
-# can swap in CUDA-13-specific deps (cutlass_cu13, flashinfer_cpp_cu13)
+# can swap in CUDA-13-specific deps (cutlass_cu13)
 # without being tied to the ARM path's using_cuda13_arm.
 build:cuda13 --config=cuda13_base
 # Same -Wno-* set as cuda13_arm — gcc 10 (al8) on the CUDA 13 toolchain is
@@ -273,7 +273,7 @@ build:cuda13_arm --host_copt=-Wno-missing-field-initializers
 # first-party patches; target compute capabilities span H100/H200 (9.0) and
 # B100/B200 (10.0) plus older SMs kept for ecosystem compat, mirroring
 # cuda12_9.  Uses its own using_cuda13_x86 define so BUILD-file select()s
-# can swap in CUDA-13-specific deps (cutlass_cu13, flashinfer_cpp_cu13)
+# can swap in CUDA-13-specific deps (cutlass_cu13)
 # without being tied to the ARM path's using_cuda13_arm.
 build:cuda13 --config=cuda13_base
 # Same -Wno-* set as cuda13_arm — gcc 10 (al8) on the CUDA 13 toolchain is
