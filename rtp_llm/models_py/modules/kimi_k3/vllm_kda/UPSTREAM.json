@@ -1,11 +1,11 @@
 {
   "upstream": "c3b48446349569512749db7f6e2164aa8a33437d",
-  "changes": "Only import namespace substitutions; separate compatibility functions. Kernel bodies unchanged.",
+  "changes": "Import namespace substitutions and runtime helpers; bounded KDA gate uses explicit Gluon layout to preserve native Triton 3.7 BS=32 FP32 scan association under RTP Triton 3.6. Other kernel bodies remain unchanged.",
   "files": [
     {
       "source": "models/kimi_k3/nvidia/ops/third_party/kda/chunk.py",
       "sha256": "9a677dc5607d6518decd455c164dc55d268dfc375780a9581770827be322a80b",
-      "adapted_sha256": "7bb47236c4ae84bd4742158864c61b010eb90d2b349d7f8341c0e3a0ef6ecc13"
+      "adapted_sha256": "a435e763e7195f24df50ae24f48a4fcd129d2e7603b09ab1496f45eac22a35d0"
     },
     {
       "source": "models/kimi_k3/nvidia/ops/third_party/kda/chunk_intra.py",
@@ -30,7 +30,7 @@
     {
       "source": "third_party/flash_linear_attention/ops/index.py",
       "sha256": "a4f8b2c052635cb519a80099e8a85411d1d5d6880b38f466788259bbe66b154d",
-      "adapted_sha256": "83bc27440418a6c48cee3f9fcc6591fc361708792fa3875ebee239044848336f"
+      "adapted_sha256": "2bd6f60a27f26ef8d38f0bba43ddc2f28ccecb64752ee3ea471f751f064080c4"
     },
     {
       "source": "third_party/flash_linear_attention/ops/l2norm.py",
@@ -50,5 +50,42 @@
   ],
   "compat_sha256": "310f7121c2a9f570e3c0be7664fb2d3bd5902734aaf5e4caa7a1e3530ecd2df7",
   "correction": "RCP_LN2 exactly matches pinned vLLM math_utils.py",
-  "integration": "Prefill kernels only; import namespace and runtime helpers adapted. Kernel arithmetic unchanged."
+  "integration": "Prefill only. Bounded gate dispatches to the local explicit-layout adaptation; unbounded gate and recurrent/decode paths retain their existing behavior.",
+  "chunk_index_adaptation": "Retain original sequence ordinals across zero-length requests; return shape [0, 2] when all requests are empty.",
+  "bounded_gate_adaptation": {
+    "file": "kda/bounded_gate.py",
+    "sha256": "d2f45bedb340818f8ec3233612a8376224c72204c42ffc53d7f3532af1a21307",
+    "reference_layout": {
+      "with_bias": {
+        "size_per_thread": [
+          1,
+          8
+        ],
+        "threads_per_warp": [
+          8,
+          4
+        ]
+      },
+      "without_bias": {
+        "size_per_thread": [
+          1,
+          4
+        ],
+        "threads_per_warp": [
+          4,
+          8
+        ]
+      },
+      "warps_per_cta": [
+        4,
+        1
+      ],
+      "order": [
+        1,
+        0
+      ],
+      "gate_tile_width": 32
+    },
+    "arithmetic": "FP32 sigmoid reciprocal then lower-bound multiplication; FP32 scan then RCP_LN2. Preserve these rounding boundaries."
+  }
 }

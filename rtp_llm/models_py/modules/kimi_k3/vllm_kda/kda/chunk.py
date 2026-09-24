@@ -550,6 +550,18 @@ def fused_kda_gate_chunk_cumsum(
     y = torch.empty_like(raw_g, dtype=output_dtype or raw_g.dtype)
     beta_out = torch.empty(raw_beta.shape, device=raw_beta.device, dtype=torch.float32)
 
+    if lower_bound is not None:
+        from .bounded_gate import bounded_gate_scan
+
+        bounded_gate_scan[(cdiv(D, 32) + 1, NT, B * H)](
+            raw_g, raw_beta, A_log, g_bias, y, beta_out,
+            cu_seqlens, chunk_indices, T,
+            *raw_beta.stride(), lower_bound,
+            H, D, chunk_size, g_bias is not None,
+            cu_seqlens is not None, num_warps=4,
+        )
+        return y, beta_out
+
     def grid(meta):
         # For each (chunk, head), program 0 computes beta without extending a
         # gate tile's critical path. The remaining programs cover the gate dim.
