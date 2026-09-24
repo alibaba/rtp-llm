@@ -19,11 +19,15 @@ namespace {
 static constexpr unsigned kWarpSyncMask = 0xFFFFFFFFu;
 
 struct MinimaxDecodeTopKTrait {
-    static constexpr uint32_t kMaxTopK        = 32;
-    static constexpr uint32_t kCTASize        = 512;
-    static constexpr uint32_t kWarpThreads    = 32;
-    static constexpr uint32_t kNumWarps       = kCTASize / kWarpThreads;
-    static constexpr uint32_t kMaxNumBlocks   = 4096;
+    static constexpr uint32_t kMaxTopK     = 32;
+    static constexpr uint32_t kCTASize     = 512;
+    static constexpr uint32_t kWarpThreads = 32;
+    static constexpr uint32_t kNumWarps    = kCTASize / kWarpThreads;
+    // MiniMax-M3.1 advertises a 1M-token context. With the required 128-token
+    // sparse-attention page size that is 8192 score blocks.  The large-input
+    // path keeps one key and one active bit per thread-local block; 8192 / 512
+    // is 16 entries, which still fits the uint32_t active mask.
+    static constexpr uint32_t kMaxNumBlocks   = 8192;
     static constexpr uint32_t kSmallThreshold = 8 * kNumWarps;
     static constexpr uint32_t kRadixBits      = 8;
     static constexpr uint32_t kRadixSize      = 1 << kRadixBits;
@@ -101,6 +105,7 @@ struct MinimaxDecodeTopKTrait {
         __syncthreads();
     }
 
+    template<uint32_t MaxNumBlocks>
     __device__ static void forward(const float* __restrict__ scores,
                                    uint32_t num_blocks,
                                    int32_t* __restrict__ topk_out,
@@ -207,9 +212,11 @@ struct MinimaxDecodeTopKTrait {
                 topk_out[write_pos] = static_cast<int32_t>(tx);
             }
         } else {
-            constexpr uint32_t kIters = kMaxNumBlocks / kCTASize;
-            uint32_t           key[kIters];
-            uint32_t           active = 0;
+            constexpr uint32_t kIters = MaxNumBlocks / kCTASize;
+            static_assert(MaxNumBlocks % kCTASize == 0, "MaxNumBlocks must be a multiple of the CTA size");
+            static_assert(kIters <= 32, "active liveness is packed into a uint32_t");
+            uint32_t key[kIters];
+            uint32_t active = 0;
 #pragma unroll
             for (uint32_t i = 0; i < kIters; ++i) {
                 uint32_t idx = i * kCTASize + tx;
@@ -309,7 +316,22 @@ __global__ __launch_bounds__(MinimaxDecodeTopKTrait::kCTASize) void minimax_deco
 
     const float* row = score + (static_cast<int64_t>(h) * batch + b) * max_seqblock;
     __shared__ MinimaxDecodeTopKTrait::Smem smem;
-    MinimaxDecodeTopKTrait::forward(row, static_cast<uint32_t>(num_blocks), out, static_cast<uint32_t>(topk), &smem);
+    // max_seqblock is CUDA-Graph capacity, while num_blocks is the live length.
+    // Keep the register-resident key array proportional to live blocks so the
+    // common short-context path does not pay the 8192-block register cost.
+    if (num_blocks <= 1024) {
+        MinimaxDecodeTopKTrait::forward<1024>(
+            row, static_cast<uint32_t>(num_blocks), out, static_cast<uint32_t>(topk), &smem);
+    } else if (num_blocks <= 2048) {
+        MinimaxDecodeTopKTrait::forward<2048>(
+            row, static_cast<uint32_t>(num_blocks), out, static_cast<uint32_t>(topk), &smem);
+    } else if (num_blocks <= 4096) {
+        MinimaxDecodeTopKTrait::forward<4096>(
+            row, static_cast<uint32_t>(num_blocks), out, static_cast<uint32_t>(topk), &smem);
+    } else {
+        MinimaxDecodeTopKTrait::forward<8192>(
+            row, static_cast<uint32_t>(num_blocks), out, static_cast<uint32_t>(topk), &smem);
+    }
 }
 
 template<typename SeqLenT>
@@ -362,7 +384,9 @@ void minimax_decode_topk(
                 "topk must be in [1, 32], got ",
                 topk);
     TORCH_CHECK(score.size(2) <= static_cast<int64_t>(MinimaxDecodeTopKTrait::kMaxNumBlocks),
-                "max_seqblock exceeds 4096: ",
+                "max_seqblock exceeds ",
+                MinimaxDecodeTopKTrait::kMaxNumBlocks,
+                ": ",
                 score.size(2));
 
     if (seq_lens.dtype() == torch::kInt32) {

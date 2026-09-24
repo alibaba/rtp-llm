@@ -87,17 +87,92 @@ class MinimaxDecodeTopkTest(unittest.TestCase):
         torch.cuda.synchronize()
         _assert_same_topk_set(self, actual, expected)
 
+    def _run_fixed_capacity_case(
+        self,
+        score: torch.Tensor,
+        live_blocks: int,
+        seq_dtype: torch.dtype,
+        block_size: int = 128,
+        topk: int = 16,
+    ) -> None:
+        seq_lens = torch.full(
+            (score.shape[1],),
+            live_blocks * block_size,
+            device=score.device,
+            dtype=seq_dtype,
+        )
+        expected = _reference_topk(score, seq_lens, block_size, topk)
+
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        actual = torch.empty_like(expected)
+        rtp_llm_ops.minimax_decode_topk(score, seq_lens, actual, block_size, topk)
+        torch.cuda.synchronize()
+        _assert_same_topk_set(self, actual, expected)
+
     def test_shapes_and_seq_len_dtypes(self) -> None:
         cases = (
             (1, 1, 1, 128, 1, torch.int32),
             (2, 3, 8, 128, 4, torch.int32),
             (4, 2, 65, 128, 8, torch.int64),
             (8, 4, 513, 128, 16, torch.int32),
+            # Exercise both sides of every live-block specialization boundary.
+            (4, 2, 1024, 128, 16, torch.int32),
+            (4, 2, 1025, 128, 16, torch.int64),
+            (4, 2, 2048, 128, 16, torch.int32),
+            (4, 2, 2049, 128, 16, torch.int64),
             (8, 3, 4096, 16, 32, torch.int64),
+            (4, 2, 4097, 128, 16, torch.int32),
+            # MiniMax-M3.1 1M-token contract: 8192 pages at page size 128.
+            (4, 3, 8192, 128, 16, torch.int64),
         )
         for case in cases:
             with self.subTest(case=case):
                 self._run_case(*case)
+
+    def test_fixed_8192_capacity_live_block_boundaries(self) -> None:
+        torch.manual_seed(20260924)
+        capacity = 8192
+        score = torch.randn(4, 3, capacity, device="cuda", dtype=torch.float32)
+        score += torch.arange(capacity, device="cuda", dtype=torch.float32) * 1e-5
+        for seq_dtype in (torch.int32, torch.int64):
+            for live_blocks in (625, 1024, 1025, 2048, 2049, 4096, 4097, 8192):
+                with self.subTest(seq_dtype=seq_dtype, live_blocks=live_blocks):
+                    self._run_fixed_capacity_case(score, live_blocks, seq_dtype)
+
+    def test_cuda_graph_replay_across_live_block_tiers(self) -> None:
+        torch.manual_seed(20260925)
+        capacity = 8192
+        block_size = 128
+        topk = 16
+        score = torch.randn(4, 3, capacity, device="cuda", dtype=torch.float32)
+        score += torch.arange(capacity, device="cuda", dtype=torch.float32) * 1e-5
+        seq_lens = torch.full(
+            (score.shape[1],),
+            625 * block_size,
+            device="cuda",
+            dtype=torch.int32,
+        )
+        actual = torch.empty(
+            (score.shape[0], score.shape[1], topk),
+            device="cuda",
+            dtype=torch.int32,
+        )
+
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        rtp_llm_ops.minimax_decode_topk(score, seq_lens, actual, block_size, topk)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            rtp_llm_ops.minimax_decode_topk(score, seq_lens, actual, block_size, topk)
+
+        for live_blocks in (625, 1025, 2049, 4097, 8192):
+            seq_lens.fill_(live_blocks * block_size)
+            graph.replay()
+            torch.cuda.synchronize()
+            expected = _reference_topk(score, seq_lens, block_size, topk)
+            _assert_same_topk_set(self, actual, expected)
 
     def test_num_blocks_le_topk_and_nan_scores(self) -> None:
         block_size = 128
@@ -118,6 +193,16 @@ class MinimaxDecodeTopkTest(unittest.TestCase):
         )
         torch.cuda.synchronize()
         self.assertTrue(torch.equal(actual.cpu(), expected.cpu()))
+
+    def test_rejects_more_than_8192_blocks(self) -> None:
+        score = torch.empty((1, 1, 8193), device="cuda", dtype=torch.float32)
+        seq_lens = torch.tensor([8193 * 128], device="cuda", dtype=torch.int32)
+        actual = torch.empty((1, 1, 16), device="cuda", dtype=torch.int32)
+
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        with self.assertRaisesRegex(RuntimeError, "max_seqblock exceeds 8192: 8193"):
+            rtp_llm_ops.minimax_decode_topk(score, seq_lens, actual, 128, 16)
 
 
 if __name__ == "__main__":
