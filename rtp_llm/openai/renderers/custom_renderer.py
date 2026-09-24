@@ -1033,12 +1033,14 @@ class CustomChatRenderer:
         that tag any more, so everything in front of the tail is ordinary
         reasoning text and has to be released; the tail itself is a partial tag
         and stays dropped, like the streaming reasoning parser does with its
-        own buffer.
+        own buffer. Both tags are checked, so the same fragment that made the
+        state machine park the text is the fragment that gets dropped here.
         """
-        if self.think_start_tag.startswith(text):
-            return ""
         for cut in range(len(text)):
-            if self.think_end_tag.startswith(text[cut:]):
+            tail = text[cut:]
+            if self.think_end_tag.startswith(tail) or self.think_start_tag.startswith(
+                tail
+            ):
                 return text[:cut]
         return text
 

@@ -1052,6 +1052,20 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(delta.reasoning_content, "<thix")
         self.assertFalse(delta.content)
 
+    def test_release_think_tail_drops_a_partial_tag_of_either_kind(self):
+        # The released text is checked against both tags, so neither a partial
+        # think_end_tag nor a partial think_start_tag can reach the client.
+        _, renderer, _ = self._create_base_thinking_endpoint("enabled")
+
+        self.assertEqual(
+            renderer._release_think_tail("ratio is a/b</thi"), "ratio is a/b"
+        )
+        self.assertEqual(
+            renderer._release_think_tail("ratio is a/b<thi"), "ratio is a/b"
+        )
+        self.assertEqual(renderer._release_think_tail("<thi"), "")
+        self.assertEqual(renderer._release_think_tail("ratio is a/b"), "ratio is a/b")
+
     async def test_enabled_parked_think_tail_is_completed_by_final_chunk(self):
         # "/think>Ans" is held back by the stop-word buffer ("Answer!"), so the
         # final flush is the first time the state machine sees the tag close.
