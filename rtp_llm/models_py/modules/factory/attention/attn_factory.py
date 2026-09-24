@@ -63,7 +63,7 @@ def _validate_dynamic_fp8_config(
         raise ValueError("FP8 KV cache mode 2 does not support MRoPE")
     if attn_configs.use_logn_attn:
         raise ValueError("FP8 KV cache mode 2 does not support use_logn_attn")
-    if getattr(attn_configs, "gen_num_per_cycle", 1) > 1:
+    if getattr(attn_configs, "gen_num_per_cycle", 0) > 0:
         raise ValueError(
             "FP8 KV cache mode 2 does not support speculative or multi-token decode"
         )

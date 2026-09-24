@@ -206,13 +206,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         }
     }
 #endif
-    auto& input_lengths  = py_attn_inputs.input_lengths;
-    auto& prefix_lengths = py_attn_inputs.prefix_lengths;
-    if (input_lengths.defined() && prefix_lengths.defined() && prefix_lengths.numel() > 0
-        && input_lengths.is_cuda() != prefix_lengths.is_cuda()) {
-        auto& device_lengths = input_lengths.is_cuda() ? input_lengths : prefix_lengths;
-        device_lengths       = normalize_i32(device_lengths.cpu());
-    }
+    RTP_LLM_CHECK_WITH_INFO(!py_attn_inputs.input_lengths.defined() || !py_attn_inputs.prefix_lengths.defined()
+                                || py_attn_inputs.prefix_lengths.numel() == 0
+                                || py_attn_inputs.input_lengths.is_cuda() == py_attn_inputs.prefix_lengths.is_cuda(),
+                            "non-empty input_lengths and prefix_lengths must be on the same device");
     py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
     py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
 

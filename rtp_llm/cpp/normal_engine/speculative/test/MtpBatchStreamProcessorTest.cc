@@ -1002,6 +1002,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
+    autil::EnvGuard             device_input("RTP_LLM_DEVICE_INPUT", "1");
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1040,11 +1041,14 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
-    EXPECT_TRUE(model_input_status.ok());
+    ASSERT_TRUE(model_input_status.ok());
 
-    auto& model_input            = model_input_status.value();
-    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
-    model_input.prefix_lengths   = torch::tensor({1, 1}, torch::kInt32);
+    auto& model_input = model_input_status.value();
+    ASSERT_FALSE(model_input.input_lengths.is_cuda());
+    ASSERT_FALSE(model_input.prefix_lengths.is_cuda());
+    model_input.sequence_lengths       = torch::tensor({1, 2}, torch::kInt32);
+    model_input.prefix_lengths         = torch::tensor({1, 1}, torch::kInt32);
+    const auto expected_prefix_lengths = toVec<int>(model_input.prefix_lengths);
 
     GptModelOutputs model_output;
     model_output.all_hidden_states =
@@ -1055,6 +1059,9 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
 
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
 
+    EXPECT_TRUE(model_input.input_lengths.is_cuda());
+    EXPECT_TRUE(model_input.prefix_lengths.is_cuda());
+    EXPECT_EQ(expected_prefix_lengths, toVec<int>(model_input.prefix_lengths));
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {2, 2, 3};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));

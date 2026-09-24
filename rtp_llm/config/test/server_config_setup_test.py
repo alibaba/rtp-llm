@@ -3,6 +3,7 @@ import io
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -12,7 +13,14 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import CPRotateMethod, KvCacheDataType, NcclCommConfig, RoleType
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.ops import (
+    CPRotateMethod,
+    KvCacheDataType,
+    NcclCommConfig,
+    RoleType,
+    SpeculativeType,
+)
 from rtp_llm.server.server_args.server_args import setup_args
 
 # clear=True must preserve gpu_lock isolation across Torch lazy initialization.
@@ -161,6 +169,36 @@ class GenerateConfigTest(TestCase):
         kv_cache_config.fp8_kv_cache = 3
         with self.assertRaisesRegex(ValueError, "one of 0, 1, or 2"):
             ModelConfig().init_precision_config(kv_cache_config, "BF16")
+
+    def test_model_factory_propagates_only_effective_speculative_tokens(self):
+        for sp_type, configured_tokens, expected_tokens in (
+            (SpeculativeType.NONE, 1, 0),
+            (SpeculativeType.NONE, 5, 0),
+            (SpeculativeType.MTP, 1, 1),
+            (SpeculativeType.EAGLE, 5, 5),
+        ):
+            with self.subTest(
+                sp_type=sp_type,
+                configured_tokens=configured_tokens,
+            ):
+                model_config = SimpleNamespace()
+                engine_config = SimpleNamespace(
+                    sp_config=SimpleNamespace(
+                        type=sp_type,
+                        gen_num_per_cycle=configured_tokens,
+                    )
+                )
+                with patch.object(
+                    ModelFactory,
+                    "_create_model",
+                    side_effect=RuntimeError("stop after propagation"),
+                ), self.assertRaisesRegex(RuntimeError, "stop after propagation"):
+                    ModelFactory.from_model_configs(
+                        model_config,
+                        engine_config,
+                        world_info=None,
+                    )
+                self.assertEqual(model_config.gen_num_per_cycle, expected_tokens)
 
     def test_jit_config(self):
         valid = (

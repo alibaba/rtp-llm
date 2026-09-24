@@ -489,11 +489,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
-    const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
-    auto                       prefix_lengths_host =
-        torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
-    ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
+    ctx.prefix_lengths_host = model_input.prefix_lengths.data_ptr<int32_t>();
 
     for (const auto& stream : stream_groups.contextStreams()) {
         model_input.need_all_logits =
@@ -579,8 +576,6 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         && ctx.mm_feature_index < model_input.mm_features_locs.numel()) {
         model_input.mm_features_locs = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
     }
-    model_input.prefix_lengths =
-        deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
     return absl::OkStatus();
 }
 

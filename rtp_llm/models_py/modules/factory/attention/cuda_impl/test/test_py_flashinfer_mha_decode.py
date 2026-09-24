@@ -1684,16 +1684,24 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
                     self.assertFalse(op.dynamic_fp8)
                     dynamic_wrapper.assert_not_called()
 
-    def test_mode2_allows_single_token_and_rejects_speculative_decode(self):
+    def test_mode2_allows_non_speculative_and_rejects_any_proposal_tokens(self):
         config = self._config()
         config.use_mla = False
         config.use_logn_attn = False
-        config.gen_num_per_cycle = 1
+        config.gen_num_per_cycle = 0
         _validate_dynamic_fp8_config(config, is_cuda_graph=False)
 
-        config.gen_num_per_cycle = 2
-        with self.assertRaisesRegex(ValueError, "multi-token decode"):
-            _validate_dynamic_fp8_config(config, is_cuda_graph=False)
+        for proposal_tokens in (1, 5):
+            with self.subTest(proposal_tokens=proposal_tokens):
+                config.gen_num_per_cycle = proposal_tokens
+                with self.assertRaisesRegex(ValueError, "multi-token decode"):
+                    _validate_dynamic_fp8_config(config, is_cuda_graph=False)
+
+        config.gen_num_per_cycle = 5
+        for mode in (0, 1):
+            with self.subTest(mode=mode):
+                config.fp8_kv_cache_mode = mode
+                _validate_dynamic_fp8_config(config, is_cuda_graph=False)
 
     def test_mode2_constructs_and_caches_versioned_fa2_direct_scale_jit(self):
         wrappers = [SimpleNamespace(_fixed_batch_size=0) for _ in range(2)]
