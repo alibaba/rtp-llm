@@ -352,7 +352,14 @@ void PrefillRpcServer::fillStagePeerGroups(GenerateRequestPB& alloc_request, con
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
-    auto    client_context     = std::make_shared<ClientContext>();
+    // Link this downstream call to the upstream server call so cancellation propagates natively.
+    std::shared_ptr<ClientContext> client_context;
+    if (prefill_context.server_context != nullptr) {
+        client_context = ClientContext::FromServerContext(*prefill_context.server_context,
+                                                          grpc::PropagationOptions().disable_deadline_propagation());
+    } else {
+        client_context = std::make_shared<ClientContext>();
+    }
     auto    request_timeout_ms = prefill_context.request_timeout_ms;
     auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
@@ -605,6 +612,11 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request write outputs pb failed"));
             return;
         }
+    }
+    // The read loop also ends when the downstream call itself ends -- including when the core cancels
+    if (prefill_context.isRequestCancelled()) {
+        RTP_LLM_LOG_WARNING("request [%ld] downstream ended while cancelled by user; releasing the decode stream",
+                            request_id);
     }
     auto status = prefill_context.closeGrpcStream();
     if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {

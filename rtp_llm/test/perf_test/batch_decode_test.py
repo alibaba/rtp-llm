@@ -71,6 +71,10 @@ def run_single(
 # ---------------------------------------------------------------------------
 
 
+def _local_concurrency(args: argparse.Namespace, grid_max_bs: int) -> int:
+    return max(1, min(int(args.concurrency_limit), int(grid_max_bs)))
+
+
 def _effective_grid_max_seq_len(
     args: argparse.Namespace, input_len_list: List[int]
 ) -> int:
@@ -297,7 +301,11 @@ def main() -> str:
     try:
         server.start(
             max_seq_len=config.max_seq_len,
-            max_concurrency=config.max_concurrency,
+            max_concurrency=(
+                _local_concurrency(args, config.max_concurrency)
+                if args.partial == 1
+                else config.max_concurrency
+            ),
             use_batch_decode_scheduler=use_batch_decode_scheduler,
         )
         engine_status = query_engine_status(server.port)

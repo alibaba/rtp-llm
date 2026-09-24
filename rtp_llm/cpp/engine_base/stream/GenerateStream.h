@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <condition_variable>
 #include <cstdint>
@@ -145,7 +146,10 @@ public:
     // wait. Zero waits without a caller interval; a request deadline, when
     // configured, remains authoritative.
     virtual ErrorResult<GenerateOutputs> nextOutput(int64_t wait_timeout_ms = 0) = 0;
-    virtual bool                         hasOutput() {
+    virtual ErrorResult<GenerateOutputs> nextOutput(const std::function<bool()>& is_cancelled) {
+        return nextOutput();
+    }
+    virtual bool hasOutput() {
         return false;
     }
 

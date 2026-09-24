@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 from typing import Any, Optional
 
 import torch
@@ -269,6 +270,25 @@ class SparseAttnV4DecodeFp8Op:
             if extra_k_cache is not None and extra_indices is not None
             else None
         )
+        if (
+            os.environ.get("DSV4_SM120_PACK_DECODE_SLOTS", "0") == "1"
+            and not generic_fallback
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+                pack_slots_to_paged,
+            )
+
+            swa_decode_cache, swa_indices = pack_slots_to_paged(
+                kv_cache, swa_indices, page_size=64, row_lens=swa_topk_lens
+            )
+            if extra_decode_cache is not None:
+                page_size = 2 if int(extra_decode_cache.shape[1]) <= 2 else 64
+                extra_decode_cache, extra_indices = pack_slots_to_paged(
+                    extra_decode_cache,
+                    extra_indices,
+                    page_size=page_size,
+                    row_lens=extra_topk_lens,
+                )
         flat_q = q.reshape(batch * q_len, heads, dim).contiguous()
         flat_out = torch.empty_like(flat_q)
         sparse_runner = run_chunked_reference if generic_fallback else run

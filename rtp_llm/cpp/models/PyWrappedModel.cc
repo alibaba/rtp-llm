@@ -769,6 +769,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
     } flag_guard{prepared_attention_inputs_};
 
+    // RAII guard: a pd_separation forward inits the cache-store writer and reaches waitAllDone()
+    struct WriterResetGuard {
+        CacheStoreAsyncWriter* writer;
+        ~WriterResetGuard() {
+            if (writer) {
+                writer->reset();
+            }
+        }
+    } writer_guard{(!inputs.warmup && inputs.pd_separation) ? cache_store_async_writer_.get() : nullptr};
+
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
@@ -1162,7 +1172,7 @@ PPIntermediateTensors PyWrappedModel::makePPWarmUpInputTensors(const GptModelInp
     if (enable_cp && batch_size != decode_batch_size) {
         // Match CP handleInputs: pad each prefill sequence independently before splitting.
         const auto* input_lengths = inputs.input_lengths.data_ptr<int32_t>();
-        local_token_num          = decode_batch_size;
+        local_token_num           = decode_batch_size;
         for (int64_t i = decode_batch_size; i < batch_size; ++i) {
             local_token_num += makeZigzagTokenLayout(input_lengths[i], device_props_.tp_size).token_count_per_rank;
         }

@@ -61,6 +61,23 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+# The nextOutput() wait/publish protocol: lost-notification ordering, exactly-once delivery,
+# bounded cancellation with no output, terminal-cause precedence, full-queue behavior and the
+# no-argument overload / subclass / coordinator-lifetime contract.
+cc_test(
+    name = "normal_generate_stream_output_wait_test",
+    srcs = [
+        "NormalGenerateStreamOutputWaitTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
 cc_test(
     name = "generate_stream_state_test",
     srcs = [

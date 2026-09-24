@@ -648,21 +648,16 @@ def _require_sm100_packed_scale_for_fp8_fp4(
     if not torch.cuda.is_available():
         return
     arch_major, _ = torch.cuda.get_device_capability(a[0].device)
-    if arch_major != 10 or not is_deep_gemm_e8m0_used(a[0].device):
+    if arch_major not in (10, 12):
         return
     if a[1].dtype != torch.int32 or b[1].dtype != torch.int32:
         raise RuntimeError(
-            "SM100 FP8xFP4 DeepGEMM calls require prepacked int32 scales; "
-            f"got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
+            "SM100/SM120 FP8xFP4 DeepGEMM calls require prepacked int32 "
+            f"scales; got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
         )
 
 
 # --- FP8 activation × FP4 weight (UE8M0 block-scale) ---
-#
-# DeepGEMM's fp8_fp4 family consumes packed-int8 FP4 weights (2 FP4/byte)
-# with UE8M0 block-32 scale along K, matching the DeepSeek-native FP4
-# recipe shipped by V3.2/V4 routed experts. Activation is FP8 e4m3fn with
-# per-token block-128 UE8M0 scale. SM100 only.
 
 
 def fp8_fp4_gemm_nt(

@@ -45,6 +45,8 @@ import torch
 import triton
 import triton.language as tl
 
+_FP8_INFO = torch.finfo(torch.float8_e4m3fn)
+
 
 @triton.jit(do_not_specialize=["M", "output_scale_stride_k"])
 def _silu_mul_fp8_quant_packed_kernel(
@@ -421,3 +423,128 @@ def silu_mul_fp8_quant_packed_from_parts(
     )
 
     return output_q, output_scale_packed
+
+
+@triton.jit
+def _silu_mul_masked_fp8_quant_packed_kernel(
+    input_ptr,
+    stride_input_0,
+    stride_input_1,
+    output_ptr,
+    stride_output_0,
+    stride_output_1,
+    output_scale_ptr,
+    stride_output_scale_0,
+    stride_output_scale_1,
+    stride_output_scale_2,
+    masked_m_ptr,
+    clamp_limit,
+    size_n,
+    fp8_max,
+    fp8_min,
+    BLOCK_N: tl.constexpr,
+    NUM_STAGE: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+):
+    """3-D masked SiLU+clamp+mul+FP8 quant. Gate in [:H], up in [H:]."""
+    expert_id = tl.program_id(2)
+    token_id = tl.program_id(1)
+    packed_group_index = tl.program_id(0)
+    block_num_per_expert = tl.num_programs(1)
+    token_num_cur_expert = tl.load(masked_m_ptr + expert_id)
+    if token_id >= token_num_cur_expert:
+        return
+
+    stride_input_0 = tl.cast(stride_input_0, dtype=tl.int64)
+    stride_output_0 = tl.cast(stride_output_0, dtype=tl.int64)
+    stride_input_1 = tl.cast(stride_input_1, dtype=tl.int64)
+    stride_output_1 = tl.cast(stride_output_1, dtype=tl.int64)
+
+    input_base = input_ptr + expert_id * stride_input_0
+    output_base = output_ptr + expert_id * stride_output_0
+    output_scale_base = (
+        output_scale_ptr
+        + expert_id * stride_output_scale_0
+        + packed_group_index * stride_output_scale_2
+    )
+    offs = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_N), 16), 16)
+    base = packed_group_index * (4 * BLOCK_N)
+
+    for token_index in tl.range(
+        token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
+    ):
+        packed_scale: tl.int32 = 0
+        token_in = input_base + token_index * stride_input_1
+        token_out = output_base + token_index * stride_output_1
+        for g in tl.static_range(4):
+            offs_in_d = base + g * BLOCK_N + offs
+            gate = tl.load(token_in + offs_in_d).to(tl.float32)
+            up = tl.load(token_in + offs_in_d + size_n).to(tl.float32)
+            if HAS_CLAMP:
+                gate = tl.minimum(gate, clamp_limit)
+                up = tl.clamp(up, -clamp_limit, clamp_limit)
+            y = (gate / (1.0 + tl.exp(-gate))) * up
+            y = y.to(tl.bfloat16).to(tl.float32)
+            absmax = tl.max(tl.abs(y))
+            scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
+            exponent = tl.ceil(tl.log2(scale_raw))
+            scale = tl.math.exp2(exponent)
+            output_q = tl.clamp(y / scale, fp8_min, fp8_max).to(
+                output_ptr.dtype.element_ty
+            )
+            tl.store(token_out + offs_in_d, output_q)
+            exponent_biased = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.int32)
+            packed_scale = packed_scale | (exponent_biased << (g * 8))
+        tl.store(
+            output_scale_base + token_index * stride_output_scale_1,
+            packed_scale,
+        )
+
+
+def silu_mul_masked_fp8_quant_packed(
+    gate_up: torch.Tensor,
+    output_q: torch.Tensor,
+    output_scale: torch.Tensor,
+    masked_m: torch.Tensor,
+    clamp_limit: float = 0.0,
+    group_size: int = 128,
+) -> None:
+    """Masked ``[E, T, 2H]`` SiLU+clamp+mul+packed UE8M0 quant (gate-first)."""
+    assert gate_up.dim() == 3 and gate_up.is_contiguous()
+    hidden = gate_up.size(-1) // 2
+    assert hidden % group_size == 0
+    groups = hidden // group_size
+    assert groups % 4 == 0, "UE8M0 packing needs groups % 4 == 0"
+    expert_num = gate_up.size(0)
+    token_pad = gate_up.size(1)
+    packed = groups // 4
+    # Pack-parallel, 1 warp. Decode T=128 with ~1-8 live tokens/expert: 8
+    # token CTAs beat 32 empty ones; prefill keeps up to 32. NUM_STAGE=2
+    # avoids the 2x regression STAGE=6 showed at live>=32.
+    if token_pad <= 256:
+        block_num = 8
+    else:
+        block_num = min(32, max(token_pad // 64, 8))
+    grid = (packed, block_num, expert_num)
+    has_clamp = clamp_limit > 0
+    _silu_mul_masked_fp8_quant_packed_kernel[grid](
+        gate_up,
+        gate_up.stride(0),
+        gate_up.stride(1),
+        output_q,
+        output_q.stride(0),
+        output_q.stride(1),
+        output_scale,
+        output_scale.stride(0),
+        output_scale.stride(1),
+        output_scale.stride(2),
+        masked_m,
+        clamp_limit if has_clamp else 0.0,
+        hidden,
+        _FP8_INFO.max,
+        _FP8_INFO.min,
+        BLOCK_N=group_size,
+        NUM_STAGE=2,
+        HAS_CLAMP=has_clamp,
+        num_warps=1,
+    )

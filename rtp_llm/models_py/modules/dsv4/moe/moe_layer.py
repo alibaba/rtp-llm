@@ -362,11 +362,16 @@ class MoE(nn.Module):
             out.copy_(routed)
             return
 
+        # Preserve the prepared-dispatch ordering used by forward().
+        prepared = self._strategy.prepare_dispatch(x, weights, indices)
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                routed = self._strategy(x, weights, indices)
+                if prepared is not None:
+                    routed = self._strategy.run_dispatch_prepared(prepared)
+                else:
+                    routed = self._strategy(x, weights, indices)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -463,6 +468,30 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_x_in_{dbg_pos_name}",
                     x[dbg_pos_mask].contiguous(),
                 )
+        if getattr(self._strategy, "single_round_dispatch", False):
+            out = _get_or_create_final_out(
+                max(int(x.size(0)), 1), self.dim, x.dtype, x.device
+            )[: x.size(0)]
+            if (
+                x.size(0) > 8192
+                and self._shared_executor is not None
+                and not self._routed_includes_shared
+            ):
+                if (
+                    torch.cuda.mem_get_info()[0] < 1_500_000_000
+                    and os.environ.get("DSV4_EMPTY_CACHE_MODE", "all") == "all"
+                ):
+                    torch.cuda.empty_cache()
+                weights, indices = self.gate(x, input_ids_flat)
+                routed = self._strategy(x, weights, indices)
+                self._shared_executor.start(self.shared_experts, x)
+                shared = self._shared_executor.finish()
+                combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+                if combined.data_ptr() != out.data_ptr():
+                    out.copy_(combined)
+            else:
+                self._run_chunk(x, input_ids_flat, out)
+            return out.view(shape)
         schedule_tokens = x.size(0)
         cuda_graph_capturing = (
             torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
@@ -573,11 +602,17 @@ class MoE(nn.Module):
                 out[:T].copy_(y)
                 return out[:T].view(shape)
 
+        # Finish host-synchronized preparation before starting the shared expert
+        # so dispatch can overlap its compute. None preserves normal ordering.
+        prepared = self._strategy.prepare_dispatch(x, weights, indices)
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                y = self._strategy(x, weights, indices)
+                if prepared is not None:
+                    y = self._strategy.run_dispatch_prepared(prepared)
+                else:
+                    y = self._strategy(x, weights, indices)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()

@@ -23,14 +23,17 @@ public:
                        perf_test),
         request_id_(query->request_id) {}
 
+    ErrorResult<GenerateOutputs> nextOutput(const std::function<bool()>& is_cancelled) override;
+
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput(int64_t wait_timeout_ms = 0) override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
 
 private:
-    GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
-    void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
-    bool            consumerReadyWithoutLock() const override;
+    ErrorResult<GenerateOutputs> nextOutputImpl(int64_t wait_timeout_ms, const std::function<bool()>& is_cancelled);
+    GenerateOutputs              prepareGenerateOutput(const StreamUpdateInfo& update_info);
+    void                         enqueueGenerateOutput(GenerateOutputs&& generate_results);
+    bool                         consumerReadyWithoutLock() const override;
 
     static constexpr size_t kOutputCapacity = 1000;
 

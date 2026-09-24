@@ -24,11 +24,14 @@ public:
     StreamGroups() = default;
 
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
+        // A padded batch still has real work unless all streams are fake.
+        // Marking a mixed batch as fake would suppress its real token commits.
+        size_t fake_count = 0;
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();
             auto next_batch_size = stream->nextBatchSize();
             if (stream->isFakeStream()) {
-                is_fake_stream_ = true;
+                ++fake_count;
             }
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
@@ -76,6 +79,7 @@ public:
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
         }
+        is_fake_stream_ = !streams.empty() && fake_count == streams.size();
     }
 
     size_t totalDecodeBatchSize() const {

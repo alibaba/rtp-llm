@@ -69,8 +69,27 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
     }
 }
 
-// IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle.
+// Drain an abandoned cycle before the writer is reused.
+void CacheStoreAsyncWriter::reset() noexcept {
+    try {
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (state_ == State::IDLE) {
+                return;
+            }
+        }
+        // Drain through the normal lifecycle before discarding an abandoned write error.
+        waitAllDone();
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("discarding an abandoned cache-write error during reset");
+    }
+}
+
+// IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle. If a prior cycle was
+// abandoned (still RUNNING), recover it first via reset() rather than asserting (see reset()).
+// The happy path is unchanged: reset() is a no-op when init() is entered at IDLE.
 void CacheStoreAsyncWriter::init() {
+    reset();
     std::lock_guard<std::mutex> lock(state_mutex_);
     RTP_LLM_CHECK_WITH_INFO(state_ == State::IDLE,
                             "CacheStoreAsyncWriter::init() called while already RUNNING. "

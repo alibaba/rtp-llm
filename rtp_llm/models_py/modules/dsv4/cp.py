@@ -417,6 +417,7 @@ def build_cp_context(
     )
     input_lengths_global: Optional[torch.Tensor] = None
     cu_seqlens_global: Optional[torch.Tensor] = None
+    input_lengths_host: Optional[list] = None
     if actual_input_lengths_cpu is not None and actual_input_lengths_cpu.numel() > 0:
         input_lengths_global = actual_input_lengths_cpu.to(
             device=device, dtype=torch.int32
@@ -425,6 +426,8 @@ def build_cp_context(
         cu_seqlens_global = torch.cat(
             [zero, torch.cumsum(input_lengths_global, dim=0).to(torch.int32)]
         ).contiguous()
+        # Reuse the CPU lengths for host decisions instead of synchronizing the GPU copy.
+        input_lengths_host = [int(v) for v in actual_input_lengths_cpu.tolist()]
 
     # Host int64 mirror of the per-request real lengths. actual_input_lengths_cpu
     # is already a CPU tensor, so this is free -- and every scalar derived from it

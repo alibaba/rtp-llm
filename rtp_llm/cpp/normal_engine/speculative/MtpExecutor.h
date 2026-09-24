@@ -123,6 +123,10 @@ protected:
                              MtpMetricsCollector&                metrics_collector,
                              int64_t                             schedule_time_us);
 
+    // Route eligible T=1 target commits through the decode wrapper's graphs.
+    bool useCommitDecodePath(const GptModelInputs& model_input) const;
+    void convertCommitRoundToDecodeInputs(GptModelInputs& model_input, const std::list<GenerateStreamPtr>& streams);
+
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
@@ -238,8 +242,10 @@ private:
     // DSpARK uses two prefill-shaped graph contracts: gamma query rows for
     // proposal and gamma+1 verified rows for commit. They must not share one
     // capture-width/phase identity.
-    std::shared_ptr<ModelBase>                       sp_prefill_draft_propose_model_;
-    std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
+    std::shared_ptr<ModelBase> sp_prefill_draft_propose_model_;
+    std::shared_ptr<ModelBase> sp_prefill_draft_model_;
+    // Shares the target Python model but captures normal one-token decode geometry.
+    std::shared_ptr<ModelBase>                       target_sp_decode_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 

@@ -86,13 +86,27 @@ void GenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
-        if (stream_->getStatus() != StreamState::FINISHED) {
+        // A request that did not finish on its own is being torn down by cancellation or abort. Read
+        // this AFTER the dequeue, exactly where the reportError() condition below has always read it,
+        // so the control flow is unchanged and the flag only drives logging.
+        const bool cancelled_before_finish = (stream_->getStatus() != StreamState::FINISHED);
+        const bool was_running             = (stream_->getStatus() == StreamState::RUNNING);
+        if (cancelled_before_finish) {
             stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
         }
         // if is running, waiting util done
+        const int64_t drain_begin_us = currentTimeUs();
         while (stream_->getStatus() == StreamState::RUNNING) {
             RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
             usleep(1000);
+        }
+        if (cancelled_before_finish) {
+            // Rare (cancellation/abort teardown only), so a WARNING per request is not spam, and this
+            RTP_LLM_LOG_WARNING("request [%ld] cancelled: removed from the scheduler (was_running=%d), "
+                                "drained in %ld us, releasing stream and KV blocks",
+                                request_id,
+                                (int)was_running,
+                                (long)((currentTimeUs() - drain_begin_us)));
         }
         stream_.reset();
     }

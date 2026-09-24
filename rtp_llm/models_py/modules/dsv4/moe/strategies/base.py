@@ -146,6 +146,21 @@ class RoutedExpertsStrategy(nn.Module):
             f"{self.__class__.__name__} does not support MegaMoE gate-pack"
         )
 
+    def prepare_dispatch(self, x, weights, indices):
+        """Optionally prepare dispatch before shared-expert compute.
+
+        Return None to use ``forward``. A prepared dispatch must preserve
+        forward's collective selection and ordering on every rank.
+        """
+        return None
+
+    def run_dispatch_prepared(self, prepared):
+        """Execute the back half for a dict returned by ``prepare_dispatch``."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} returned a prepared dispatch but does "
+            "not implement run_dispatch_prepared"
+        )
+
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
         """Whether this strategy is applicable for ``cfg`` in the current
@@ -329,6 +344,7 @@ def select_strategy(
                         "deepep",
                         "sm120_fused_moe",
                         "fork_nccl_mxfp8",
+                        "sm120_decode",
                     ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires a distributed strategy. "

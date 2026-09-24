@@ -340,6 +340,17 @@ def forward_layers(
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
     # module to compute its own per-token positions. Without CP we pass
     # None to clear any stale context from a prior forward (warmup).
+    _ec_mode = os.environ.get("DSV4_EMPTY_CACHE_MODE", "all")  # off | entry | all
+    if (
+        os.environ.get("DSV4_MOE_STRATEGY") == "sm120_decode"
+        and int(input_ids.size(0)) > 8192
+        and _ec_mode in ("entry", "all")
+    ):
+        # Big prefills start from a clean arena: the previous request's freed
+        # transients sit in the allocator cache as fragmented blocks and made
+        # even 128 MiB contiguous allocations fail at layer-0 attention while
+        # 600+ MiB sat reserved-but-unallocated. One unmap pass, ~ms cost.
+        torch.cuda.empty_cache()
     cp_info = getattr(v4, "_cp_info", None)
     cp_size = getattr(v4, "_cp_size", 1)
     cp_rank = getattr(v4, "_cp_rank", 0)

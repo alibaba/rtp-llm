@@ -6,40 +6,50 @@
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeout_ms) {
+    return nextOutputImpl(wait_timeout_ms, {});
+}
+
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(const std::function<bool()>& is_cancelled) {
+    return nextOutputImpl(0, is_cancelled);
+}
+
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutputImpl(int64_t                      wait_timeout_ms,
+                                                                  const std::function<bool()>& is_cancelled) {
     RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "nextOutput wait_timeout_ms must be non-negative");
-
     const auto stream_timeout_ms = getTimeoutMs();
+    const auto began             = std::chrono::steady_clock::now();
     auto       stream_deadline   = std::chrono::steady_clock::time_point::max();
-
+    auto       call_deadline     = wait_timeout_ms > 0 ? began + std::chrono::milliseconds(wait_timeout_ms) :
+                                                         std::chrono::steady_clock::time_point::max();
     std::unique_lock<std::mutex> lock(*mutex_);
-
     if (stream_timeout_ms > 0) {
-        const auto elapsed_us   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-        const auto remaining_us = std::max<int64_t>(stream_timeout_ms * 1000 - elapsed_us, 0);
-        stream_deadline         = std::chrono::steady_clock::now() + std::chrono::microseconds(remaining_us);
+        const auto elapsed_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        stream_deadline =
+            began + std::chrono::microseconds(std::max<int64_t>(stream_timeout_ms * 1000 - elapsed_us, 0));
     }
-
-    if (!consumerReadyWithoutLock()) {
-        if (wait_timeout_ms == 0 && stream_timeout_ms <= 0) {
-            consumer_cv_->wait(lock, [this] { return consumerReadyWithoutLock(); });
-        } else {
-            auto wait_deadline = stream_deadline;
-            if (wait_timeout_ms > 0) {
-                wait_deadline = std::min(stream_deadline,
-                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_timeout_ms));
-            }
-
-            if (!consumer_cv_->wait_until(lock, wait_deadline, [this] { return consumerReadyWithoutLock(); })) {
-                if (stream_timeout_ms > 0 && std::chrono::steady_clock::now() >= stream_deadline) {
-                    const auto running_time_ms =
-                        (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
-                    reportTimeoutWithoutLock(running_time_ms, stream_timeout_ms);
-                } else {
-                    return ErrorInfo(ErrorCode::OUTPUT_QUEUE_NO_UPDATE,
-                                     "output queue has no update within " + std::to_string(wait_timeout_ms) + " ms");
-                }
-            }
+    while (!consumerReadyWithoutLock()) {
+        if (is_cancelled) {
+            lock.unlock();
+            const bool cancelled = is_cancelled();
+            lock.lock();
+            if (consumerReadyWithoutLock())
+                break;
+            if (cancelled)
+                return ErrorInfo(ErrorCode::CANCELLED, "request cancelled while waiting for output");
         }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= stream_deadline) {
+            reportTimeoutWithoutLock((autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000,
+                                     stream_timeout_ms);
+            break;
+        }
+        if (now >= call_deadline) {
+            return ErrorInfo(ErrorCode::OUTPUT_QUEUE_NO_UPDATE, "output queue has no update within bounded wait");
+        }
+        auto deadline = std::min(stream_deadline, call_deadline);
+        if (is_cancelled)
+            deadline = std::min(deadline, now + std::chrono::milliseconds(100));
+        consumer_cv_->wait_until(lock, deadline, [this] { return consumerReadyWithoutLock(); });
     }
 
     // Preserve existing precedence: terminal errors override queued output.
