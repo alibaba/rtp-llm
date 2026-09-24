@@ -313,6 +313,13 @@ def _dash_error_mapping_for_ft_exception(
     """
 
     exception_type = exc.exception_type
+    if exception_type in (
+        ExceptionType.UNSAFE_INPUT_CONTENT,
+        ExceptionType.UNSAFE_OUTPUT_CONTENT,
+    ):
+        return _DashFtErrorMapping(
+            DASH_ERROR_BAD_REQUEST, f"DataInspectionFailed: {exc.message}"
+        )
     raw_reason = getattr(
         exc,
         "admission_reject_reason",
@@ -886,6 +893,11 @@ async def iter_real_model_stream_infer(
             else ThinkingMode.DISABLED
         )
         begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
+        env_budget = getattr(generate_env_config, "max_thinking_tokens", None)
+        if env_budget is not None:
+            generate_config.max_thinking_tokens = (
+                _INT32_MAX if int(env_budget) < 0 else int(env_budget)
+            )
         _apply_dash_sc_controls_to_generate_config(
             generate_config,
             sampling,

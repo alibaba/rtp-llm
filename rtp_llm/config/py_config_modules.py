@@ -325,9 +325,18 @@ class MMTransportConfig:
 
 
 class VitConfig:
+    # Single source of truth for the multimodal embedding timeout default,
+    # shared by the --mm_timeout_ms / MM_TIMEOUT_MS server arg and the
+    # MMScheduler fallback so the three never drift.
     DEFAULT_MM_TIMEOUT_MS: int = DEFAULT_MM_TIMEOUT_MS
     DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
     DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
+    DEFAULT_MM_VIDEO_MAX_FRAMES: int = 64
+    # Per-process byte budgets. Hashes live on CPU, independently of the
+    # tensor-bearing embedding cache. Zero disables the respective cache.
+    DEFAULT_MM_CACHE_GPU_MAX_BYTES: int = 2 * 1024 * 1024 * 1024
+    DEFAULT_MM_CACHE_CPU_MAX_BYTES: int = 2 * 1024 * 1024 * 1024
+    DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES: int = 256 * 1024 * 1024
 
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
@@ -341,7 +350,18 @@ class VitConfig:
         self.mm_video_max_file_size_kb: int = (
             VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
         )
+        self.mm_video_max_frames: int = VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES
         self.mm_cache_item_num: int = 10
+        self.mm_cache_gpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_GPU_MAX_BYTES
+        self.mm_cache_cpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_CPU_MAX_BYTES
+        self.mm_hash_key_cache_max_bytes: int = (
+            VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES
+        )
+        self.mm_remote_cache_enable: bool = False
+        self.mm_remote_cache_max_object_bytes: int = 256 * 1024**2
+        self.mm_remote_cache_max_inflight_bytes: int = 1024**3
+        self.mm_remote_cache_max_pending: int = 8
+        self.mm_remote_cache_read_timeout_ms: int = 200
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
         self.igraph_search_dom: str = "com.taobao.search.igraph.common"
@@ -349,6 +369,8 @@ class VitConfig:
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
         self.mm_preprocess_max_workers: int = 4
+        self.vit_concurrency: int = 64
+        self.vit_max_queue_size: int = 64
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
@@ -375,9 +397,9 @@ class VitConfig:
         """Resolved MMScheduler kwargs, inferred from gpu_max_batch_size alone.
 
         gpu_max_batch_size > 1 -> cross-request GPU batching with the gpu_* limits;
-        gpu_max_batch_images then caps both the batch and (since a request is never
-        split) the single-request image count; gpu_batch_wait_ms is the collect
-        window.
+        gpu_max_batch_images caps each forward. Models with work estimates may
+        split a request across bounded forwards; other models keep the whole-request
+        image cap. gpu_batch_wait_ms is the collect window.
         gpu_max_batch_size == 1 -> serial: one request per forward, no wait window
         (effective batch_wait_ms forced to 0 regardless of the configured value),
         and no image cap (sys.maxsize) — matches the old serial path, which never
@@ -417,7 +439,16 @@ class VitConfig:
             f"download_headers: {self.download_headers}\n"
             f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
             f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
+            f"mm_video_max_frames: {self.mm_video_max_frames}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
+            f"mm_cache_gpu_max_bytes: {self.mm_cache_gpu_max_bytes}\n"
+            f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"
+            f"mm_hash_key_cache_max_bytes: {self.mm_hash_key_cache_max_bytes}\n"
+            f"mm_remote_cache_enable: {self.mm_remote_cache_enable}\n"
+            f"mm_remote_cache_max_object_bytes: {self.mm_remote_cache_max_object_bytes}\n"
+            f"mm_remote_cache_max_inflight_bytes: {self.mm_remote_cache_max_inflight_bytes}\n"
+            f"mm_remote_cache_max_pending: {self.mm_remote_cache_max_pending}\n"
+            f"mm_remote_cache_read_timeout_ms: {self.mm_remote_cache_read_timeout_ms}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"
@@ -425,6 +456,8 @@ class VitConfig:
             f"igraph_table_name: {self.igraph_table_name}\n"
             f"igraph_default_key: {self.default_key}\n"
             f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
+            f"vit_concurrency: {self.vit_concurrency}\n"
+            f"vit_max_queue_size: {self.vit_max_queue_size}\n"
             f"biencoder_preprocess: {self.biencoder_preprocess}\n"
             f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
             f"mm_timeout_ms: {self.mm_timeout_ms}\n"
@@ -454,6 +487,7 @@ class GenerateEnvConfig:
     def __init__(self):
         self.think_end_tag: str = "</think>\n\n"
         self.think_end_token_id: int = -1
+        self.max_thinking_tokens: Optional[int] = None
         self.think_mode: str = "disabled"
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
@@ -466,6 +500,7 @@ class GenerateEnvConfig:
         return (
             f"think_end_tag: {self.think_end_tag}\n"
             f"think_end_token_id: {self.think_end_token_id}\n"
+            f"max_thinking_tokens: {self.max_thinking_tokens}\n"
             f"think_mode: {self.think_mode}\n"
             f"force_stop_words: {self.force_stop_words}\n"
             f"stop_words_list: {self.stop_words_list}\n"

@@ -77,6 +77,11 @@ class AccMetrics(Enum):
     OUTPUT_REPETITION_QPS_METRIC = "py_rtp_output_repetition_qps"
     SAME_TOKEN_RUN_QPS_METRIC = "py_rtp_same_token_run_qps"
 
+    VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
+    VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
+    VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
+    VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -155,6 +160,16 @@ class GaugeMetrics(Enum):
     OUTPUT_REPETITION_DUPLICATE_TOKENS_METRIC = (
         "py_rtp_output_repetition_duplicate_tokens"
     )
+
+    VIT_DOWNLOAD_RT_METRIC = "py_rtp_vit_download_rt"
+    VIT_PREPROCESS_OTHER_RT_METRIC = "py_rtp_vit_preprocess_other_rt"
+    VIT_PREPROCESS_QUEUE_SIZE_METRIC = "py_rtp_vit_preprocess_queue_size"
+    VIT_EMBEDDING_LENGTH_METRIC = "py_rtp_vit_embedding_length"
+    VIT_IMAGE_COUNT_METRIC = "py_rtp_vit_image_count"
+    VIT_EMBEDDING_QUEUE_SIZE_METRIC = "py_rtp_vit_embedding_queue_size"
+    VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
+    VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
+    VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
 
 
 class MetricReporter(object):

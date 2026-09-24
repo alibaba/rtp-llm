@@ -29,8 +29,13 @@ def _resolve_dash_sc_grpc_config(dash_sc_grpc_config):
     if dash_sc_grpc_config is not None:
         return dash_sc_grpc_config
     from rtp_llm.ops import DashScGrpcConfig
+    from rtp_llm.server.server_args.grpc_group_args import (
+        default_dash_sc_grpc_config_json,
+    )
 
-    return DashScGrpcConfig()
+    config = DashScGrpcConfig()
+    config.from_json(default_dash_sc_grpc_config_json())
+    return config
 
 
 def dash_sc_grpc_server_channel_options(dash_sc_grpc_config) -> list[tuple[str, int]]:
@@ -68,29 +73,22 @@ _SERVER_KEEPALIVE_OPTS: list[tuple[str, int]] = [
 
 
 class _ShutdownManager(Protocol):
-    def try_begin_request(self) -> bool:
-        ...
+    def try_begin_request(self) -> bool: ...
 
-    def finish_request(self) -> int:
-        ...
+    def finish_request(self) -> int: ...
 
-    def is_unavailable(self) -> bool:
-        ...
+    def is_unavailable(self) -> bool: ...
 
-    def is_draining(self) -> bool:
-        ...
+    def is_draining(self) -> bool: ...
 
-    def drain_reason(self) -> str:
-        ...
+    def drain_reason(self) -> str: ...
 
-    def active_request_count(self) -> int:
-        ...
+    def active_request_count(self) -> int: ...
 
 
 @runtime_checkable
 class _ClosableServicer(Protocol):
-    async def close(self) -> None:
-        ...
+    async def close(self) -> None: ...
 
 
 def _merge_server_keepalive(
