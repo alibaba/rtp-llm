@@ -21,7 +21,9 @@ def situ(gate, up, beta, linear_beta, *, inplace=False):
     if gate.is_cuda:
         from rtp_llm.models_py.triton_kernels.common.situ import situ as fused_situ
 
-        return fused_situ(gate, up, beta, linear_beta, inplace=inplace)
+        return fused_situ(
+            gate, up, beta, linear_beta, inplace=inplace, native_k3=True
+        )
     g, u = gate.float(), up.float()
     g = beta * torch.tanh(g / beta) * torch.sigmoid(g)
     if linear_beta is not None:
