@@ -17,12 +17,21 @@ def init_jit_group_args(parser, jit_config):
     ##############################################################################################################
     jit_group = parser.add_argument_group("JIT Configuration")
     jit_group.add_argument(
+        "--local_jit_dir",
+        env_name="LOCAL_JIT_DIR",
+        bind_to=(jit_config, "local_jit_dir"),
+        type=str,
+        default="",
+        help="统一JIT本地cache根目录（自动追加版本和scope）；为空时使用/tmp/rtp-llm/.jit_cache。"
+        "须可写且允许加载动态库；本地路径参与远端scope，变更后需重新生成缓存",
+    )
+    jit_group.add_argument(
         "--remote_jit_dir",
         env_name="REMOTE_JIT_DIR",
         bind_to=(jit_config, "remote_jit_dir"),
         type=str,
         default="",
-        help="JIT远程v1快照根（可信绝对路径或FUSE URI）；为空只关远端、仍用统一本地缓存/tmp/rtp-llm/.jit_cache；"
+        help="JIT远程v1快照根（可信绝对路径或FUSE URI）；为空只关远端、仍用--local_jit_dir指定的本地缓存；"
         "完全关闭见--manage_jit_cache；预设组件cache环境变量可退出该组件的jit产物重定向",
     )
     jit_group.add_argument(
