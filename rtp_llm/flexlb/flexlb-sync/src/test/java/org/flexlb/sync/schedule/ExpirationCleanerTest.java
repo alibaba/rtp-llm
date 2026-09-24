@@ -5,17 +5,31 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ExpirationCleanerTest {
 
     private static final long WORKER_TIMEOUT_US = 3_000_000L;
     private static final long VIT_WORKER_TIMEOUT_US = 10_000_000L;
+
+    @Test
+    void should_createBeanInSpringContext() {
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(FlexMonitor.class, () -> Mockito.mock(FlexMonitor.class));
+            context.register(ExpirationCleaner.class);
+
+            context.refresh();
+
+            assertNotNull(context.getBean(ExpirationCleaner.class));
+        }
+    }
 
     @Test
     void should_useLongerExpirationWindowForVitWorkers() {
