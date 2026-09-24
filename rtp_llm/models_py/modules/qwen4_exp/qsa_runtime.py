@@ -20,6 +20,7 @@ unsupported; prefix-cache reuse is restricted to page-aligned prefixes.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -216,6 +217,21 @@ def _validate_required_blocks(
     ):
         raise RuntimeError(f"QSA cache {tag!r} has invalid required-column geometry")
     required_columns = required_columns.to(device=table.device)
+    # The bounded Triton path has one launch and one verdict synchronization.
+    # The environment switch permits an immediate Torch fallback if needed.
+    fused_validation = os.environ.get(
+        "RTP_LLM_QWEN4_FUSED_CACHE_VALIDATE", "1"
+    ).strip().lower() not in ("0", "false", "off", "no")
+    if fused_validation and table.is_cuda and torch.version.hip is None:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa_validation_triton import (
+            is_supported,
+            required_blocks_are_valid,
+        )
+
+        if is_supported(table, required_columns) and required_blocks_are_valid(
+            table, required_columns, pool_blocks
+        ):
+            return
     columns = torch.arange(int(table.shape[1]), device=table.device).unsqueeze(0)
     required = columns < required_columns.unsqueeze(1)
     negative_columns = torch.any(required_columns < 0)
