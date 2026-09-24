@@ -64,7 +64,7 @@ void validateInactivePayloadsAreEmpty(const TensorPB& tensor_pb) {
 
 }  // namespace
 
-torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
+at::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
     validateInactivePayloadsAreEmpty(tensor_pb);
     void* data_ptr = nullptr;
@@ -72,49 +72,49 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
         case TensorPB::FP32: {
             validateTensorPayload(tensor_pb, tensor_pb.fp32_data(), sizeof(float));
             data_ptr     = const_cast<char*>(tensor_pb.fp32_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            auto options = at::TensorOptions().dtype(at::kFloat);
+            return at::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::INT32: {
             validateTensorPayload(tensor_pb, tensor_pb.int32_data(), sizeof(int32_t));
             data_ptr     = const_cast<char*>(tensor_pb.int32_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kInt32);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            auto options = at::TensorOptions().dtype(at::kInt);
+            return at::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::FP16: {
             validateTensorPayload(tensor_pb, tensor_pb.fp16_data(), sizeof(c10::Half));
             data_ptr     = const_cast<char*>(tensor_pb.fp16_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kFloat16);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            auto options = at::TensorOptions().dtype(at::kHalf);
+            return at::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::BF16: {
             validateTensorPayload(tensor_pb, tensor_pb.bf16_data(), sizeof(c10::BFloat16));
             data_ptr     = const_cast<char*>(tensor_pb.bf16_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kBFloat16);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            auto options = at::TensorOptions().dtype(at::kBFloat16);
+            return at::from_blob(data_ptr, shape, options).clone();
         }
         default:
             throw std::runtime_error("Unsupported data type.");
     }
 }
 
-void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor) {
+void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const at::Tensor& tensor) {
     tensor_pb->clear_shape();
     tensor_pb->clear_fp32_data();
     tensor_pb->clear_int32_data();
     tensor_pb->clear_fp16_data();
     tensor_pb->clear_bf16_data();
     switch (tensor.dtype().toScalarType()) {
-        case torch::kFloat32:
+        case at::kFloat:
             tensor_pb->set_data_type(TensorPB::FP32);
             break;
-        case torch::kInt32:
+        case at::kInt:
             tensor_pb->set_data_type(TensorPB::INT32);
             break;
-        case torch::kFloat16:
+        case at::kHalf:
             tensor_pb->set_data_type(TensorPB::FP16);
             break;
-        case torch::kBFloat16:
+        case at::kBFloat16:
             tensor_pb->set_data_type(TensorPB::BF16);
             break;
         default:
@@ -124,27 +124,27 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
     for (auto dim : shape) {
         tensor_pb->add_shape(dim);
     }
-    torch::Tensor contiguous_tensor = tensor.contiguous();
+    at::Tensor contiguous_tensor = tensor.contiguous();
     switch (tensor.dtype().toScalarType()) {
-        case torch::kFloat32: {
+        case at::kFloat: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(float);
             const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
             tensor_pb->set_fp32_data(data_ptr, num_bytes);
             break;
         }
-        case torch::kInt32: {
+        case at::kInt: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(int32_t);
             const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
             tensor_pb->set_int32_data(data_ptr, num_bytes);
             break;
         }
-        case torch::kFloat16: {
+        case at::kHalf: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(c10::Half);
             const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
             tensor_pb->set_fp16_data(data_ptr, num_bytes);
             break;
         }
-        case torch::kBFloat16: {
+        case at::kBFloat16: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(c10::BFloat16);
             const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
             tensor_pb->set_bf16_data(data_ptr, num_bytes);
