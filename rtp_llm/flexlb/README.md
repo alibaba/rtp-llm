@@ -206,8 +206,9 @@ JSON mapping of service domains to HTTP host:port lists. Production discovery
 providers continue to resolve their service domains.
 
 Master configuration uses `FLEXLB_CONFIG`, `MODEL_SERVICE_CONFIG`,
-`FLEXLB_SYNC_CONSISTENCY_CONFIG`, and `LOG_LEVEL`. Spring does not bind environment
-variables. Configure ports, RPC transport and logging with their standard
+`FLEXLB_SYNC_CONSISTENCY_CONFIG`, and `LOG_LEVEL`. Spring binds environment
+variables to infrastructure properties, including `SERVER_PORT` and
+`FLEXLB_MONITOR_PROVIDER`. Ports, RPC transport and logging also accept standard
 command-line properties, such as `--server.port` and
 `--flexlb.engine-grpc.enqueue-timeout-ms`.
 HA currently retains `HIPPO_ROLE` as its existing election group identifier.

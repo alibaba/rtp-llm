@@ -13,6 +13,10 @@ FlexLB 保留两个职责独立的配置文档：
 基础设施环境变量仍各自独立；它们不构成
 FlexLB 行为配置的别名。
 
+Spring 按标准规则读取环境变量，例如 `SERVER_PORT` 对应 `server.port`，
+`FLEXLB_MONITOR_PROVIDER` 对应 `flexlb.monitor.provider`。内源部署通过
+`FLEXLB_MONITOR_PROVIDER=kmonitor` 启用 KMonitor 指标上报。
+
 ## FlexlbConfig 加载与动态更新
 
 `ConfigService` 是统一读取入口。`ConfigSourceSelection` 在启动时根据 FlexLB 进程的
