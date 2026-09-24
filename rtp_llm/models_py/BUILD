@@ -42,7 +42,18 @@ py_library(
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [":cutlass_moe_config"],
+    data = [
+        ":cutlass_moe_config",
+        "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_jit_headers",
+    ] + glob([
+        "modules/dsv4/fp8/_v41_wo_a_*.cu",
+        "modules/dsv4/fp8/_v41_wo_a_*.cuh",
+        "modules/dsv4/fp8/_v41_wo_a_driver.cc",
+        "modules/dsv4/fp8/_v41_grouped_gemm.cc",
+        "modules/dsv4/fp8/_v41_candidate_topk.cu",
+        "modules/dsv4/fp8/_v41_candidate_topk_sb.cuh",
+        "modules/dsv4/fp8/_v41_candidate_topk.LICENSE",
+    ]),
     deps = [
         ":utils",
         ":tile_kernels_mhc",

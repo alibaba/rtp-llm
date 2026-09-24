@@ -1,4 +1,4 @@
-"""Single-request FlashMLA index plans without a bool argsort or host reads.
+"""FlashMLA index plans without a bool argsort or host reads.
 
 The caller still owns per-forward plan caching and CED/layout invalidation.
 Unsupported metadata returns None before allocation/launch; execution errors
@@ -45,17 +45,28 @@ if triton is not None:
         WINDOW: tl.constexpr,
         PADDED: tl.constexpr,
         BLOCK: tl.constexpr,
+        TENSOR_META: tl.constexpr = False,
+        OFFSET_STRIDE: tl.constexpr = 0,
+        COUNT_STRIDE: tl.constexpr = 0,
+        START_STRIDE: tl.constexpr = 0,
     ):
         row = tl.program_id(0).to(tl.int64)
         column = tl.arange(0, BLOCK)
         picked = tl.load(
             selected + row * SELECTED_STRIDE + column, column < K, other=-1
         ).to(tl.int64)
-        position = tl.load(positions + row * POSITION_STRIDE).to(tl.int64)
-        offset = OFFSET.to(tl.int64)
-        size = GLOBAL_COUNT.to(tl.int64)
-        start = SWA_START.to(tl.int64)
-        swpos = position - WINDOW + 1 + (column - K).to(tl.int64)
+        position = tl.load(positions + row * POSITION_STRIDE)
+        if TENSOR_META:
+            offset = tl.load(OFFSET + row * OFFSET_STRIDE).to(tl.int64)
+            size = tl.load(GLOBAL_COUNT + row * COUNT_STRIDE).to(tl.int64)
+            start = tl.load(SWA_START + row * START_STRIDE).to(tl.int64)
+        else:
+            offset = OFFSET.to(tl.int64)
+            size = GLOBAL_COUNT.to(tl.int64)
+            start = SWA_START.to(tl.int64)
+        # Eager subtract/add happens before promotion by the int64 arange.
+        swbase = (position - WINDOW + 1).to(position.dtype).to(tl.int64)
+        swpos = swbase + (column - K).to(tl.int64)
         global_index = tl.where(picked >= 0, offset + picked, -1)
         swa_index = tl.where(swpos >= start, offset + size + swpos - start, -1)
         # The eager path casts to int32 BEFORE sorting validity and summing.
@@ -82,14 +93,11 @@ else:
 
 
 def is_supported(selected, positions, offset, global_count, swa_start, window_size):
-    """Metadata-only gate; tensor-valued/batched offsets deliberately fall back."""
+    """Accept scalar metadata or the caller's per-row [M,1] integer views."""
     if not (
         _prefill_index_plan_kernel is not None
         and torch.version.hip is None
-        and all(type(x) is int for x in (offset, global_count, swa_start, window_size))
-        and 0 <= offset <= _INT32_MAX
-        and 0 <= global_count <= _INT32_MAX - offset
-        and -(2**31) <= swa_start <= _INT32_MAX
+        and type(window_size) is int
         and 1 <= window_size <= _MAX_WIDTH
         and selected.is_cuda
         and selected.dtype in (torch.int32, torch.int64)
@@ -103,6 +111,23 @@ def is_supported(selected, positions, offset, global_count, swa_start, window_si
         and positions.shape[0] == selected.shape[0]
         and positions.dtype in (torch.int32, torch.int64)
         and positions.stride(0) > 0
+    ):
+        return False
+    metadata = (offset, global_count, swa_start)
+    if all(type(value) is int for value in metadata):
+        if not (
+            0 <= offset <= _INT32_MAX
+            and 0 <= global_count <= _INT32_MAX - offset
+            and -(2**31) <= swa_start <= _INT32_MAX
+        ):
+            return False
+    elif not all(
+        isinstance(value, torch.Tensor)
+        and value.device == selected.device
+        and value.dtype in (torch.int32, torch.int64)
+        and value.shape == (selected.shape[0], 1)
+        and value.stride(0) >= 0
+        for value in metadata
     ):
         return False
     return _device_supported(selected.device)
@@ -121,7 +146,7 @@ def try_build_index_plan(
 ):
     """Return contiguous int32 (indices[M,pad64(K+window)], lengths[M]).
 
-    Scalar metadata follows _prefill_chunk_meta's single-request contract.
+    Metadata follows _prefill_chunk_meta's scalar or per-row [M,1] contract.
     Negative selected entries are normalized to -1 before offsetting. SWA
     validity uses exactly the eager lower bound, with no extra upper clamp.
     Optional outputs avoid allocation during graph capture/replay. No tensor
@@ -145,6 +170,11 @@ def try_build_index_plan(
     # Storage metadata is host-visible and never requires a CUDA synchronize.
     provided = [x for x in (out, lengths_out) if x is not None and x.numel()]
     sources = [x for x in (selected, positions) if x.numel()]
+    sources.extend(
+        x
+        for x in (offset, global_count, swa_start)
+        if isinstance(x, torch.Tensor) and x.numel()
+    )
     storage = {x.untyped_storage().data_ptr() for x in sources}
     for output in provided:
         pointer = output.untyped_storage().data_ptr()
@@ -170,6 +200,16 @@ def try_build_index_plan(
             window_size,
             padded,
             triton.next_power_of_2(padded),
+            **(
+                {
+                    "TENSOR_META": True,
+                    "OFFSET_STRIDE": offset.stride(0),
+                    "COUNT_STRIDE": global_count.stride(0),
+                    "START_STRIDE": swa_start.stride(0),
+                }
+                if isinstance(offset, torch.Tensor)
+                else {}
+            ),
             num_warps=4,
         )
     return out, lengths_out

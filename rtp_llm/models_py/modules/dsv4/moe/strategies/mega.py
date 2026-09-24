@@ -18,7 +18,6 @@ from functools import lru_cache
 from typing import Dict, Optional
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.model_loader.weight_memory_saver import (
     feature_weights_region,
@@ -835,7 +834,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         import deep_gemm
 
         with record_function_range("dsv4.moe.gate_linear_bf16"):
-            scores_bf16 = F.linear(x, gate._weight_bf16())
+            scores_bf16 = gate._project_scores(x, gate._weight_bf16())
 
         with record_function_range("dsv4.moe.mega_gate_pack"):
             if gate.hash:

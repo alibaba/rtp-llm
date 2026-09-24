@@ -160,6 +160,78 @@ class PrefillRequestRowsCPU(unittest.TestCase):
                         request_row_slices=supplied,
                     )
 
+    def test_poisoned_output_shortcut_and_legacy_ced_tails(self):
+        original_empty = torch.empty
+        for shortcut in (False, True):
+            for fast in (False, True):
+                with self.subTest(shortcut=shortcut, slices=fast):
+                    lengths = [1, 2, 2]
+                    counts = [0, 1, 3 if shortcut else 5]
+                    positions = torch.tensor([-1, -1, 0, 0, 2])
+                    requests = torch.tensor([0, 1, 1, 2, 2])
+                    x = torch.ones(5, 2)
+                    projection = Mock(side_effect=torch.nn.functional.linear)
+                    owner = SimpleNamespace(
+                        is_index_source=True,
+                        kv_source_layer_id=0,
+                        layer_id=0,
+                        index_topk=4,
+                        compress_ratio=1,
+                        index_n_heads=1,
+                        index_head_dim=2,
+                        rope_head_dim=0,
+                        index_wq=None,
+                        index_weights=torch.ones(1, 2),
+                        freqs_cis=torch.ones(8, 1, dtype=torch.complex64),
+                        _lin=lambda weight, value: value,
+                        _shared_attention={
+                            "global": {
+                                0: [
+                                    (
+                                        None,
+                                        torch.arange(n).float()[:, None].expand(n, 2),
+                                    )
+                                    for n in counts
+                                ]
+                            },
+                            "ced_indexer_projection": projection,
+                        },
+                    )
+
+                    def poison(*args, **kwargs):
+                        result = original_empty(*args, **kwargs)
+                        if result.shape == (5, 4) and result.dtype == torch.int32:
+                            result.fill_(1234567)
+                        return result
+
+                    with patch.object(torch, "empty", side_effect=poison), patch.object(
+                        attention, "rope_only", side_effect=lambda q, *a: q
+                    ), patch.object(
+                        attention, "fp8_roundtrip", side_effect=lambda q: q
+                    ), patch.object(
+                        attention.prefill_topk, "try_select_tokens", return_value=None
+                    ):
+                        actual = attention.AttentionV41FP8._select_indices(
+                            owner,
+                            x,
+                            x,
+                            positions,
+                            requests,
+                            request_row_slices=_slices(lengths) if fast else None,
+                        )
+                    expected = torch.tensor(
+                        [
+                            [-1, -1, -1, -1],
+                            [-1, -1, -1, -1],
+                            [0, -1, -1, -1],
+                            [0, -1, -1, -1],
+                            [0, 1, 2, -1] if shortcut else [2, 1, 0, -1],
+                        ],
+                        dtype=torch.int32,
+                    )
+                    self.assertTrue(torch.equal(actual, expected))
+                    self.assertEqual(projection.call_count, 0 if shortcut else 1)
+
     def test_builder_attaches_slices_and_restores_compression_ratio(self):
         common = PrefillMeta(
             seqlen=8,
@@ -189,14 +261,14 @@ class PrefillRequestRowsCPU(unittest.TestCase):
 
         def base(*args, **kwargs):
             self.assertEqual(owner.compress_ratio, 0)
-            self.assertIsNone(kwargs["reuse_common_meta"])
+            self.assertIs(kwargs["reuse_common_meta"], common)
             return common
 
         with patch.object(
             attention.AttentionFP8, "_build_shared_prefill_meta", side_effect=base
         ) as parent:
             actual = owner._build_shared_prefill_meta(
-                torch.empty(8, 1), 28672, reuse_common_meta=object()
+                torch.empty(8, 1), 28672, reuse_common_meta=common
             )
         parent.assert_called_once()
         self.assertEqual(actual.request_row_slices, _slices([2, 0, 6]))

@@ -14,7 +14,8 @@ fixed maximum Q and CP row capacities, identical on every forward for allocator
 reuse. V4.1 bounds Q to one attention chunk of rank-local padded tokens and
 passes ``reserve_cp=False``: it owns its CP gather buffers separately, without V4's
 compressor or nested indexer modules. Widths remain model-level maxima, and the
-union retains its 1 GiB allocation buckets for both models.
+union uses 1 GiB allocation buckets by default. V4.1 requests 64 MiB buckets
+so a short padded tail does not add almost 1 GiB of unused scratch.
 
 The CP region is split per gather ROLE, because two concurrent compressor gather
 lifetimes can be in flight within a single CSA layer:

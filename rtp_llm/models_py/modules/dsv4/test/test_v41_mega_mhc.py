@@ -194,6 +194,36 @@ class V41MegaMHCCudaTest(unittest.TestCase):
                 _, case["post"], case["comb"] = case["previous"].pre(case["residual"])
                 self.check_case(case)
 
+    @torch.inference_mode()
+    def test_compaction_preserves_original_split_arithmetic_bitwise(self):
+        for original_tokens in (34, 193, 321, 449, 4096, 32768):
+            with self.subTest(original_tokens=original_tokens):
+                case = make_case((original_tokens,))
+                expected = fused(case)
+                rows = torch.tensor(
+                    [i * (original_tokens - 1) // 31 for i in range(32)],
+                    dtype=torch.int64,
+                    device="cuda",
+                )
+                compact = {
+                    **case,
+                    **{
+                        key: case[key].index_select(0, rows)
+                        for key in ("attn_out", "residual", "post", "comb")
+                    },
+                }
+                previous = case["previous"]
+                previous.pre_mix_out = previous.pre_mix_out.index_select(0, rows)
+                previous_pre = previous.pre_mix_out
+                result = try_fused_post_pre(**compact, original_tokens=original_tokens)
+                self.assertIsNotNone(result)
+                actual = (*result, case["next_hc"].pre_mix_out)
+                self.assertIs(previous.pre_mix_out, previous_pre)
+                for got, full in zip(actual, expected):
+                    ref = full.index_select(0, rows)
+                    bits = torch.int16 if got.dtype == torch.bfloat16 else torch.int32
+                    self.assertTrue(torch.equal(got.view(bits), ref.view(bits)))
+
     @torch.no_grad()
     def test_gate_and_predecessor_contract(self):
         case = make_case((1, 6))

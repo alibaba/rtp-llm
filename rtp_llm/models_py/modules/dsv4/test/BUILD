@@ -88,6 +88,13 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_mega_mhc_compact",
+    srcs = ["test_v41_mega_mhc_compact.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_v41_fused_qkv",
     srcs = ["test_v41_fused_qkv.py"],
     deps = _DSV4_TEST_DEPS,

@@ -163,6 +163,8 @@ class Block(nn.Module):
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
         )
+        if v41_config is not None and not is_decode_role:
+            self.ffn.gate._prefill_gate_chunk_rows = 32768
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight
         # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
@@ -282,7 +284,7 @@ class Block(nn.Module):
             self.engram_token_mask,
         ).reshape(shape)
 
-    def _try_mega_mhc(self, attn_out, residual, post, comb):
+    def _try_mega_mhc(self, attn_out, residual, post, comb, *, original_tokens=None):
         """Fuse the intra-layer delayed mHC seam and FFN RMSNorm."""
         from rtp_llm.models_py.modules.dsv4.hc.v41_mega_mhc import try_fused_post_pre
 
@@ -294,6 +296,7 @@ class Block(nn.Module):
             self.attn_hc,
             self.ffn_hc,
             self.ffn_norm,
+            original_tokens=original_tokens,
         )
 
     def prefill_fast_attn_pre(self, x: torch.Tensor):
@@ -528,6 +531,65 @@ class Block(nn.Module):
             _, x_pre, post, comb = fused_mhc
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)
+
+    def forward_prefill_ced_l20(
+        self, x, input_ids, positions, plan, *, kv_cache=None, block_tables_by_type=None
+    ):
+        """Full L20 source writes, then compact queries and residual/FFN state."""
+        if self.layer_id != 20 or self.engram is not None or input_ids is None:
+            raise ValueError("L20 CED requires the supported generation-only Block")
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
+
+        attn_pre, ffn_pre, attn_post, ffn_post = self._prefill_fast_hc_impls()
+        residual = x
+        x_pre, post, comb = attn_pre(x)
+        shared_quant = None
+        if self.attn.can_fuse_prefill_attn_norm_input_quant(
+            x_pre, self.attn_norm.weight.data
+        ):
+            x_pre, shared_quant = self.attn.prefill_fused_attn_norm_input_quant(
+                x_pre, self.attn_norm.weight.data, self.attn_norm.variance_epsilon
+            )
+        else:
+            x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+        with bind_attn_cache(self.attn, kv_cache, block_tables_by_type):
+            self.attn._set_compressor_pool_context()
+            try:
+                common, qkv, swa, swa_starts, _ = self.attn._prefill_produce(
+                    x_pre, positions, shared_quant
+                )
+                del shared_quant
+                residual, post, comb, input_ids = plan.compact_l20(
+                    self, residual, post, comb, input_ids
+                )
+                x_pre = plan.exchange.compact(x_pre)
+                qkv = qkv._replace(qr=plan.exchange.compact(qkv.qr))
+                common = plan.l20_query_metadata(common)
+                with bind_attn_cache(self.attn, cp_ctx=common.cp_ctx):
+                    attn_out = self.attn._prefill_query(
+                        x_pre, common, qkv, swa, swa_starts
+                    )
+                del qkv, swa
+            finally:
+                self.attn._clear_compressor_pool_context()
+        fused = self._try_mega_mhc(
+            attn_out,
+            residual,
+            post,
+            comb,
+            original_tokens=plan.original_context.chunk_length,
+        )
+        x = attn_post(attn_out, residual, post, comb) if fused is None else fused[0]
+        self._sync_after_first_cp_prefill_attention()
+        residual = x
+        if fused is None:
+            x_pre, post, comb = ffn_pre(x)
+            x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        else:
+            _, x_pre, post, comb = fused
+        with plan.router_projection(self.ffn):
+            ffn_out = self.ffn(x_pre, input_ids)
+        return ffn_post(ffn_out, residual, post, comb), input_ids
 
     def forward(
         self,

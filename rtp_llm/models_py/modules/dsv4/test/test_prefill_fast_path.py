@@ -128,8 +128,8 @@ class PrefillFastPathTest(unittest.TestCase):
             (4, True, [0], [0], 20, False),
             (1, False, [536, 3202, 5400, 106050], [0, 0, 0, 1024], 16, False),
             (4, False, [17], [99], 16, False),
-            # V4.1 caps padded local Q rows to one chunk; the nonempty
-            # allocations below fit in one 1-GiB allocator bucket.
+            # V4.1 caps padded local Q rows to one chunk and rounds the
+            # resulting bytes to 64-MiB allocation buckets.
             (4, True, [107074], [0], 1, True),
             (4, True, [100930], [6144], 1, True),
             (4, True, [162350], [0], 1, True),
@@ -208,7 +208,12 @@ class PrefillFastPathTest(unittest.TestCase):
                 ws = captured[0]
                 expected_rows = min(rows, chunk_rows) if v41 else v4._prefill_ws_q_rows
                 self.assertEqual(ws._q_rows, expected_rows)
-                self.assertEqual(ws._union.numel(), expected_gib * (1 << 30))
+                expected_bytes = expected_gib * (1 << 30)
+                if v41:
+                    bucket = 64 << 20
+                    q_bytes = expected_rows * 64 * 512 * 2
+                    expected_bytes = ((q_bytes + bucket - 1) // bucket) * bucket
+                self.assertEqual(ws._union.numel(), expected_bytes)
                 self.assertEqual(
                     ws._main_bytes,
                     v4._prefill_ws_full_rows * 2048 * 4 if cp_active and not v41 else 0,
@@ -767,6 +772,38 @@ class PrefillFastPathTest(unittest.TestCase):
             ),
         )
 
+    def test_active_profiler_keeps_nested_ranges_on_fast_path(self):
+        v4 = _FakeV4()
+        observed = []
+        for layer in v4.layers:
+            original = layer.forward_prefill_fast
+
+            def wrapped(*args, _original=original, **kwargs):
+                observed.append(_profiler.record_function_ranges_enabled())
+                return _original(*args, **kwargs)
+
+            layer.forward_prefill_fast = wrapped
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(
+            prefill_forward._fwd_dbg, "enabled", lambda: False
+        ), patch.object(
+            _profiler, "_torch_profiler_enabled", return_value=True
+        ), patch.object(
+            prefill_forward, "build_and_propagate_prefill_meta_fp8"
+        ), patch.object(
+            prefill_forward, "clear_prefill_meta_shared_fp8"
+        ):
+            prefill_forward.forward_layers(
+                v4,
+                None,
+                torch.tensor([3, 4]),
+                torch.tensor([0, 1]),
+                torch.tensor([0, 2]),
+                None,
+            )
+        self.assertEqual(observed, [True, True])
+
     def test_forward_layers_uses_normal_layer_call_when_fast_path_disabled(self):
         v4 = _FakeV4()
         input_ids = torch.tensor([3, 4], dtype=torch.long)
@@ -1069,14 +1106,121 @@ class NormalBlockNormQuantTest(unittest.TestCase):
                         self.case(engram=engram, previous=previous), fused=True
                     )
 
-    def test_engram_disables_whole_fast_stack_but_normal_blocks_still_fuse(self):
-        plain, engram = self.case(), self.case(engram=True)
+    def test_v41_engram_preserves_normal_layer_and_fast_neighbors(self):
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor
+
+        def make_chain():
+            cases = [self.case(engram=i == 1, previous=i == 0) for i in range(3)]
+            for i, c in enumerate(cases):
+                c.layer.layer_id = i
+                # Input-dependent, distinct mixes expose stale/cross-layer reads.
+                for unit in (c.layer.attn_hc, c.layer.ffn_hc):
+                    unit.fn.copy_(
+                        torch.linspace(-0.03, 0.05, unit.fn.numel()).reshape_as(unit.fn)
+                        * (i + 1)
+                    )
+                if i:
+                    c.layer.attn_hc.set_previous(cases[i - 1].layer.ffn_hc)
+            return cases
+
+        normal, mixed = make_chain(), make_chain()
+        model = SimpleNamespace(fp8_kv_cache=True, layers=[c.layer for c in mixed])
+        calls = prefill_forward._prefill_fast_path_layer_calls(model)
+        self.assertEqual(calls[0], mixed[0].layer.prefill_fast_callable())
+        self.assertIs(calls[1], mixed[1].layer)
+        self.assertEqual(calls[2], mixed[2].layer.prefill_fast_callable())
+        self.assertIs(calls, prefill_forward._prefill_fast_path_layer_calls(model))
+
+        inputs = normal[0]
+
+        def run_chain(cases, layer_calls, normal_call_counts):
+            hidden = inputs.hidden.clone()
+            outputs = []
+            for i, (c, call) in enumerate(zip(cases, layer_calls)):
+                layer = c.layer
+                residual = hidden.clone()
+                if layer.engram is not None:
+                    delta = residual.new_tensor([0.25, -0.5, 0.75, 1.0]).view(1, 4, 1)
+                    residual += delta * layer.engram_token_mask[:, None, None]
+                previous = cases[i - 1].layer.ffn_hc if i else c.previous
+                expected_pre = (
+                    (residual.float() * previous.pre_mix_out.unsqueeze(-1))
+                    .sum(-2)
+                    .to(residual.dtype)
+                )
+                before = hidden.clone()
+                with patch.object(layer, "forward", wraps=layer.forward) as forward:
+                    hidden = call(
+                        hidden,
+                        inputs.ids,
+                        inputs.positions,
+                        inputs.cu,
+                        kv_cache=inputs.cache,
+                        block_tables_by_type=inputs.tables,
+                    )
+                self.assertEqual(forward.call_count, normal_call_counts[i])
+                self.assertEqual(len(layer.attn.fused_calls), 1)
+                self.assertTrue(torch.equal(layer.attn.fused_calls[0][0], expected_pre))
+                wrong_pre = (
+                    (residual.float() * layer.attn_hc.pre_mix_out.unsqueeze(-1))
+                    .sum(-2)
+                    .to(residual.dtype)
+                )
+                self.assertFalse(torch.equal(expected_pre, wrong_pre))
+                (
+                    attn_value,
+                    attn_residual,
+                    post,
+                    comb,
+                ) = layer._try_mega_mhc.call_args.args
+                self.assertTrue(torch.equal(attn_residual, residual))
+                middle = (
+                    post.float() * attn_value.float().unsqueeze(-2)
+                    + comb.float().transpose(-1, -2) @ residual.float()
+                ).to(residual.dtype)
+                expected_ffn_pre = (
+                    (middle.float() * layer.attn_hc.pre_mix_out.unsqueeze(-1))
+                    .sum(-2)
+                    .to(middle.dtype)
+                )
+                self.assertEqual(len(layer.ffn_norm.inputs), 1)
+                self.assertTrue(torch.equal(layer.ffn_norm.inputs[0], expected_ffn_pre))
+                self.assertEqual(len(layer.ffn.inputs), 1)
+                self.assertIs(layer.ffn.inputs[0][1], inputs.ids)
+                self.assertEqual(len(layer.attn.shared_calls), 1)
+                _, positions, pair, kwargs = layer.attn.shared_calls[0]
+                self.assertIs(positions, inputs.positions)
+                self.assertIs(pair, layer.attn.pair)
+                self.assertIs(kwargs["kv_cache"], inputs.cache)
+                self.assertIs(kwargs["block_tables_by_type"], inputs.tables)
+                if layer.engram is not None:
+                    self.assertEqual(len(layer.engram.calls), 1)
+                    seen, hashes, mask = layer.engram.calls[0]
+                    self.assertTrue(torch.equal(seen, before))
+                    self.assertIs(hashes, layer.engram_hashes)
+                    self.assertIs(mask, layer.engram_token_mask)
+                layer._sync_after_first_cp_prefill_attention.assert_called_once()
+                outputs.append(hidden.clone())
+            return outputs
+
+        with patch.object(_record_tensor, "should_record_layer", return_value=False):
+            expected = run_chain(normal, [c.layer for c in normal], [1, 1, 1])
+            actual = run_chain(mixed, calls, [0, 1, 0])
+        for i, (reference, result) in enumerate(zip(expected, actual)):
+            with self.subTest(layer=i):
+                self.assertTrue(torch.equal(reference, result))
+                for name in ("attn_hc", "ffn_hc"):
+                    self.assertTrue(
+                        torch.equal(
+                            getattr(normal[i].layer, name).pre_mix_out,
+                            getattr(mixed[i].layer, name).pre_mix_out,
+                        )
+                    )
+
+    def test_non_v41_engram_still_disables_fast_stack(self):
+        plain, engram = self.case(), self.case(engram=True, config=None)
         model = SimpleNamespace(fp8_kv_cache=True, layers=[plain.layer, engram.layer])
-        self.assertIsNotNone(plain.layer.prefill_fast_callable())
-        self.assertIsNone(engram.layer.prefill_fast_callable())
         self.assertIsNone(prefill_forward._prefill_fast_path_layer_calls(model))
-        self.exercise(plain, fused=True)
-        self.exercise(engram, fused=True)
 
     def test_v4_and_missing_v41_config_preserve_ordinary_norm(self):
         for config in (None, False):

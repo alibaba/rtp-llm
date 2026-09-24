@@ -5,6 +5,13 @@ at commit `d96d33afe1fab0d6066da49cdc91e64c2bee65ea`, the revision pinned by
 vLLM's `cmake/external_projects/deepselect.cmake`. See `LICENSE` (MIT,
 Copyright 2025 DeepSeek).
 
+The selecting kernels were also checked against the official
+[deepseek-ai/DeepSelect](https://github.com/deepseek-ai/DeepSelect) commit
+`0f03b68748b304863fdf0181a11458d04ae533a9`. Its `cuda_kernels`, `structs.h`,
+and kerutils sources match the pinned vLLM fork; the fork changes the host API
+to the Torch stable ABI. The RTP adaptations below remain necessary. This
+integration does not convert FP32 dense or candidate scores to BF16.
+
 Only the BF16 normal selector and its required headers are included. The
 FP32 selector, cluster selector, Torch stable-ABI API, tests, generated
 instantiations, and CUTLASS submodule are excluded. CUTLASS comes from RTP's

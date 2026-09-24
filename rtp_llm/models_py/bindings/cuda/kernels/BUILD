@@ -224,6 +224,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "topk_v3_jit_headers",
+    srcs = ["topk_v3.cuh", "topk_v3_compat.cuh"],
+    visibility = ["//visibility:public"],
+)
+
 # MIT BF16-only K512 subset from vllm-project/DeepSelect @ d96d33afe1fa.
 # Older CUDA builds retain a queryable unsupported stub and the FP32 fallback.
 cc_library(

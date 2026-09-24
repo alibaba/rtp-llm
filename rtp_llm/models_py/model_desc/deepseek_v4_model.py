@@ -735,9 +735,20 @@ class DeepSeekV4Model(GptModelBase):
         self._is_decode_role = bool(init_resource.is_decode_role)
         self._max_context_batch_size = init_resource.max_context_batch_size
         self._v4_args.is_decode_role = self._is_decode_role
+        moe_budget = int(self._v4_args.max_tokens_per_rank)
+        if (
+            self._v4_args.v41_config is not None
+            and not self._is_decode_role
+            and self._max_prefill_batch_tokens > 0
+        ):
+            moe_budget = cp_padded_batch_tokens_per_rank_bound(
+                self._max_prefill_batch_tokens,
+                self._prefill_cp_size,
+                self._max_generate_batch_size,
+            )
         runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=int(self._v4_args.max_seq_len),
-            current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
+            current_max_tokens_per_rank=moe_budget,
             cp_size=1,
             max_generate_batch_size=int(self._max_generate_batch_size),
             is_decode_role=self._is_decode_role,

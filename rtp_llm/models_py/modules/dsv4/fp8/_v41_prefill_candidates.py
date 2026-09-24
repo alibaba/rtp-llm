@@ -3,8 +3,9 @@
 """V4.1 prefill candidate pooling and reusable packed candidate masks.
 
 Adapted from vLLM's model_executor/kernels/attention/dsa/candidate_blocks.py
-and RTP's _v41_decode_topk.py. Unlike the decode helper, prefill retains
-torch.topk(sorted=True), including its tied-score membership and ordering.
+and RTP's _v41_decode_topk.py. Bitmap publication retains torch.topk(sorted=True).
+Candidate-only publication skips the final score sort: sparse plans sort and
+deduplicate block IDs before scoring, so they only consume the selected set.
 The caller has already applied causal masking to logits, as in the old
 select_candidate_blocks path. Only newest-block overwrite is done here.
 
@@ -73,10 +74,35 @@ def is_supported(
 
 @triton.jit
 def _max_with_nan(a, b):
-    return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
+    # Torch MaxNanFunctor takes the right finite tie and the left NaN.
+    bits = tl.where(
+        (a != a) | (a > b),
+        a.to(tl.int32, bitcast=True),
+        b.to(tl.int32, bitcast=True),
+    )
+    return bits.to(tl.float32, bitcast=True)
 
 
-@triton.jit(do_not_specialize=["WIDTH", "STRIDE", "NBLOCKS"])
+@triton.jit
+def _torch_amax(values, BLOCK_SIZE: tl.constexpr):
+    if BLOCK_SIZE <= 4:
+        # TILE=128 uses one lane per reduced value for B<=4 in the qualified
+        # CUDA13 toolchain, matching Torch's descending-offset shuffle tree.
+        return tl.reduce(values, 1, _max_with_nan)
+    else:
+        # Larger groups may span registers: force the Torch tree explicitly.
+        for log_width in tl.static_range(5, 0, -1):
+            if BLOCK_SIZE >= (1 << log_width):
+                pairs = tl.permute(
+                    tl.reshape(values, (values.shape[0], 2, values.shape[1] // 2)),
+                    (0, 2, 1),
+                )
+                left, right = tl.split(pairs)
+                values = _max_with_nan(left, right)
+        return tl.reshape(values, (values.shape[0],))
+
+
+@triton.jit(do_not_specialize=["WIDTH", "STRIDE", "NBLOCKS", "OUT_K", "OUT_STRIDE"])
 def _prefill_candidate_pool_kernel(
     logits,
     visible,
@@ -87,34 +113,65 @@ def _prefill_candidate_pool_kernel(
     BLOCK_SIZE: tl.constexpr,
     NBLOCKS,
     TILE: tl.constexpr,
+    RETURN_IDS: tl.constexpr = False,
+    OUT_K=0,
+    OUT_STRIDE=0,
+    MASK_TAIL: tl.constexpr = False,
+    token_indices=None,
+    token_ends=None,
+    FILTER_TOKENS: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     blocks = tl.program_id(1) * TILE + tl.arange(0, TILE)
     offsets = tl.arange(0, BLOCK_SIZE)
     columns = blocks[:, None] * BLOCK_SIZE + offsets[None, :]
+    mask = (blocks[:, None] < NBLOCKS) & (columns < WIDTH)
+    if MASK_TAIL:
+        length = tl.load(visible + row * VISIBLE_STRIDE)
+        mask &= columns < length
     values = tl.load(
         logits + row * STRIDE + columns,
-        (blocks[:, None] < NBLOCKS) & (columns < WIDTH),
+        mask,
         other=-float("inf"),
     )
-    pooled = tl.reduce(values, 1, _max_with_nan)
-    length = tl.load(visible + row * VISIBLE_STRIDE)
+    pooled = _torch_amax(values, BLOCK_SIZE)
+    if not MASK_TAIL:
+        length = tl.load(visible + row * VISIBLE_STRIDE)
     newest = tl.maximum(length - 1, 0) // BLOCK_SIZE
     pooled = tl.where(
         blocks == newest,
         tl.where(length > 0, float("inf"), -float("inf")),
         pooled,
     )
-    tl.store(scores + row * NBLOCKS + blocks, pooled, blocks < NBLOCKS)
+    if RETURN_IDS:
+        valid = (blocks < NBLOCKS) & (pooled > -float("inf"))
+        tl.store(
+            scores + row * OUT_STRIDE + blocks,
+            tl.where(valid, blocks, -1),
+            blocks < OUT_K,
+        )
+    else:
+        tl.store(scores + row * NBLOCKS + blocks, pooled, blocks < NBLOCKS)
+    if FILTER_TOKENS:
+        if tl.program_id(1) == 0:
+            slot = tl.arange(0, 512)
+            end = tl.load(token_ends + row)
+            index = tl.load(token_indices + row * 512 + slot)
+            in_range = (index >= 0) & (index < end)
+            value = tl.load(
+                logits + row * STRIDE + index, in_range, other=-float("inf")
+            )
+            keep = in_range & (tl.abs(value) < float("inf"))
+            tl.store(token_indices + row * 512 + slot, tl.where(keep, index, -1))
 
 
-@triton.jit(do_not_specialize=["FLAG_WORDS", "FLAG_STRIDE"])
+@triton.jit(do_not_specialize=["K", "FLAG_WORDS", "FLAG_STRIDE"])
 def _prefill_candidate_store_bitmap_kernel(
     values,
     indices,
     candidates,
     flags,
-    K: tl.constexpr,
+    K,
     OUT_K: tl.constexpr,
     OUT_STRIDE: tl.constexpr,
     FLAG_WORDS,
@@ -206,6 +263,58 @@ def _valid_output(tensor, rows, columns, device):
     )
 
 
+def can_select_candidates(
+    logits: torch.Tensor,
+    visible: torch.Tensor,
+    block_size: int,
+    topk_blocks: int,
+    *,
+    out: torch.Tensor | None = None,
+    flags: torch.Tensor | None = None,
+    build_bitmap: bool = True,
+    token_indices: torch.Tensor | None = None,
+    token_ends: torch.Tensor | None = None,
+) -> bool:
+    """Metadata-only preflight shared by selection and its fused caller."""
+    if not is_supported(logits, visible, block_size, topk_blocks):
+        return False
+    rows, width = logits.shape
+    nblocks = triton.cdiv(width, block_size)
+    count = min(topk_blocks, nblocks)
+    words = bitmap_words(width, block_size)
+    if out is not None and (
+        not _valid_output(out, rows, count, logits.device) or out.shape[1] > 4096
+    ):
+        return False
+    if flags is not None and not _valid_output(flags, rows, words, logits.device):
+        return False
+    if (
+        build_bitmap
+        and flags is None
+        and not bitmap_is_bounded(rows, width, block_size)
+    ):
+        return False
+    if token_indices is not None or token_ends is not None:
+        if not (
+            isinstance(token_indices, torch.Tensor)
+            and isinstance(token_ends, torch.Tensor)
+            and token_indices.device == token_ends.device == logits.device
+            and token_indices.dtype == token_ends.dtype == torch.int32
+            and token_indices.shape == (rows, 512)
+            and token_ends.shape == (rows,)
+            and token_indices.is_contiguous()
+            and token_ends.is_contiguous()
+        ):
+            return False
+        storage = token_indices.untyped_storage().data_ptr()
+        if any(
+            t is not None and t.untyped_storage().data_ptr() == storage
+            for t in (logits, visible, token_ends, out, flags)
+        ):
+            return False
+    return True
+
+
 def select_candidates(
     logits: torch.Tensor,
     visible: torch.Tensor,
@@ -215,41 +324,64 @@ def select_candidates(
     out: torch.Tensor | None = None,
     flags: torch.Tensor | None = None,
     build_bitmap: bool = True,
+    mask_tail: bool = False,
+    token_indices: torch.Tensor | None = None,
+    token_ends: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
-    """Return sorted candidate IDs and bitmap, or None before launching on fallback.
+    """Return candidate IDs and bitmap, or None before launching on fallback.
 
-    ``visible`` must contain request-local lengths in [0, logits.shape[1]].
-    Logits must already contain their causal mask. ``flags`` can be a view of
-    the complete bounded cross-layer cache; use bitmap_is_bounded on its full
-    allocation before making chunk views. Extra cache words are cleared, too.
-    The output may have extra candidate columns, which are padded with -1.
-    Candidate-only scoring sets ``build_bitmap=False`` and consumes IDs
-    directly. A dense fallback can still rebuild its own bounded chunk mask.
+    ``visible`` contains request-local lengths in [0, logits.shape[1]]. The
+    default requires masked logits; ``mask_tail=True`` masks at the pool load.
+    Optional contiguous raw K512 IDs are finite-filtered in each row's tile0;
+    their ends must describe the same visible range. Candidate +inf pins and
+    token finite filtering deliberately use different predicates.
+    Flags may be bounded cache views; extra words are cleared. Output padding
+    is -1. IDs are score-ordered by default; ``build_bitmap=False`` consumers
+    use an unordered set and can rebuild their own bounded bitmap.
     """
-    if not is_supported(logits, visible, block_size, topk_blocks):
+    if not can_select_candidates(
+        logits,
+        visible,
+        block_size,
+        topk_blocks,
+        out=out,
+        flags=flags,
+        build_bitmap=build_bitmap,
+        token_indices=token_indices,
+        token_ends=token_ends,
+    ):
         return None
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
     count = min(topk_blocks, nblocks)
     words = bitmap_words(width, block_size)
-    if out is not None and (
-        not _valid_output(out, rows, count, logits.device) or out.shape[1] > 4096
-    ):
-        return None
-    if flags is not None and not _valid_output(flags, rows, words, logits.device):
-        return None
-    if (
-        build_bitmap
-        and flags is None
-        and not bitmap_is_bounded(rows, width, block_size)
-    ):
-        return None
     if out is None:
         out = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
     if build_bitmap and flags is None:
         flags = torch.empty((rows, words), dtype=torch.int32, device=logits.device)
     if not build_bitmap:
         flags = None
+        if nblocks <= topk_blocks:
+            # Every block is selected, so only pooling/pinning/filtering remain.
+            _prefill_candidate_pool_kernel[(rows, triton.cdiv(out.shape[1], 128))](
+                logits,
+                visible,
+                out,
+                width,
+                logits.stride(0),
+                visible.stride(0),
+                block_size,
+                nblocks,
+                128,
+                True,
+                out.shape[1],
+                out.stride(0),
+                mask_tail,
+                token_indices,
+                token_ends,
+                token_indices is not None,
+            )
+            return out, None
     scores = torch.empty((rows, nblocks), dtype=logits.dtype, device=logits.device)
     _prefill_candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
         logits,
@@ -261,8 +393,18 @@ def select_candidates(
         block_size,
         nblocks,
         128,
+        MASK_TAIL=mask_tail,
+        token_indices=token_indices,
+        token_ends=token_ends,
+        FILTER_TOKENS=token_indices is not None,
     )
-    values, indices = scores.topk(count, dim=-1, largest=True, sorted=True)
+    if not build_bitmap:
+        from ._v41_candidate_topk import try_select
+
+        selected = try_select(scores, out, k=count)
+        if selected is not None:
+            return selected, None
+    values, indices = scores.topk(count, dim=-1, largest=True, sorted=build_bitmap)
     _prefill_candidate_store_bitmap_kernel[(rows,)](
         values,
         indices,

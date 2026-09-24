@@ -13,7 +13,6 @@ import os
 from typing import Dict
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.model_loader.weight_memory_saver import (
     feature_weights_region,
@@ -491,7 +490,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         y = self._mega_y[:tokens]
 
         with record_function_range("dsv4.moe.gate_linear_bf16"):
-            scores_bf16 = F.linear(x, gate._weight_bf16())
+            scores_bf16 = gate._project_scores(x, gate._weight_bf16())
         with record_function_range("dsv4.moe.mega_se_gate_pack"):
             if gate.hash:
                 assert input_ids is not None

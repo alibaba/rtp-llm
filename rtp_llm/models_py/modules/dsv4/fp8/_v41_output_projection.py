@@ -69,17 +69,10 @@ def quantization_scale_min(tokens: int, group_width: int) -> float:
     return 0.0 if use_v2 else 1e-10
 
 
-def grouped_output_projection(o, freqs, weight, weight_scale, *, out=None):
-    """Return BF16 [tokens, groups * rank] for the existing wo_b linear.
-
-    Call only after ``is_supported``. CUDA/JIT errors intentionally propagate.
-    ``out`` optionally supplies a contiguous [tokens, groups, rank] tensor.
-    """
-    import deep_gemm
-
-    groups, rank, width = weight.shape
+def _quantize_projection_input(o, freqs, weight):
+    groups, _, width = weight.shape
     tokens = o.numel() // (o.shape[-2] * o.shape[-1])
-    quantized, scales = fused_inv_rope_fp8_quant(
+    return fused_inv_rope_fp8_quant(
         o,
         freqs,
         n_groups=groups,
@@ -91,6 +84,45 @@ def grouped_output_projection(o, freqs, weight, weight_scale, *, out=None):
         round_rope_to_input_dtype=True,
         scale_min=quantization_scale_min(tokens, width),
     )
+
+
+def try_grouped_output_quant(o, freqs, weight, weight_scale):
+    """Return wo_b's group32 (E4M3 [M,8192], packed scales), or None.
+
+    The BF16 API below is unchanged. Callers explicitly consume this pair with
+    V41MXFP8Linear.forward_quantized and retain their original path on None.
+    Startup warmup must have prepared the device; cold calls never compile.
+    """
+    from rtp_llm.models_py.modules.dsv4.fp8 import _v41_wo_a_quant
+
+    if (
+        o.requires_grad
+        or freqs.requires_grad
+        or not is_supported(o, freqs, weight, weight_scale)
+        or not _v41_wo_a_quant.is_ready(weight, weight_scale)
+    ):
+        return None
+    pair = _quantize_projection_input(o, freqs, weight)
+    return _v41_wo_a_quant.try_grouped_quant(pair, (weight, weight_scale))
+
+
+def warmup_quantized_output(weight, weight_scale):
+    from rtp_llm.models_py.modules.dsv4.fp8 import _v41_wo_a_quant
+
+    return _v41_wo_a_quant.warmup(weight, weight_scale)
+
+
+def grouped_output_projection(o, freqs, weight, weight_scale, *, out=None):
+    """Return BF16 [tokens, groups * rank] for the existing wo_b linear.
+
+    Call only after ``is_supported``. CUDA/JIT errors intentionally propagate.
+    ``out`` optionally supplies a contiguous [tokens, groups, rank] tensor.
+    """
+    import deep_gemm
+
+    groups, rank, _ = weight.shape
+    tokens = o.numel() // (o.shape[-2] * o.shape[-1])
+    quantized, scales = _quantize_projection_input(o, freqs, weight)
     if out is None:
         out = torch.empty(tokens, groups, rank, dtype=torch.bfloat16, device=o.device)
     deep_gemm.fp8_einsum(

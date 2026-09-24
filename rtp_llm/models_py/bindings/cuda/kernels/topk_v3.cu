@@ -90,25 +90,40 @@ struct Params {
     }
 };
 
+template <bool kFilterFinite = false>
+__device__ __forceinline__ int32_t output_index(const TopKProblem& problem,
+                                               int32_t index) {
+    if constexpr (kFilterFinite) {
+        if (index < 0 || static_cast<uint32_t>(index) >= problem.seq_len) return -1;
+        return fabsf(problem.in[index]) < std::numeric_limits<float>::infinity()
+                   ? index
+                   : -1;
+    }
+    return index;
+}
+
+template <bool kFilterFinite = false>
 __device__ __forceinline__ void trivial(const TopKProblem& problem) {
     for (uint32_t i = threadIdx.x; i < problem.topk; i += blockDim.x) {
-        problem.out[i] = i < problem.seq_len ? static_cast<int32_t>(i) : -1;
+        const int32_t index = i < problem.seq_len ? static_cast<int32_t>(i) : -1;
+        problem.out[i] = output_index<kFilterFinite>(problem, index);
     }
 }
 
+template <bool kFilterFinite = false>
 __device__ __forceinline__ void copy_output(
     const TopKProblem& problem, int32_t* destination) {
     for (uint32_t i = threadIdx.x; i < problem.topk; i += blockDim.x) {
-        destination[i] = problem.out[i];
+        destination[i] = output_index<kFilterFinite>(problem, problem.out[i]);
     }
 }
 
-template <int Level, bool kAlignedInput>
+template <int Level, bool kAlignedInput, bool kFilterFinite = false>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void main_kernel(const __grid_constant__ Params params) {
     auto problem = params.problem(blockIdx.x);
     if (problem.seq_len <= problem.topk) {
-        trivial(problem);
+        trivial<kFilterFinite>(problem);
         return;
     }
     __shared__ impl::MaxSmem<
@@ -126,16 +141,21 @@ void main_kernel(const __grid_constant__ Params params) {
             Streaming::forward<false, kAlignedInput>(problem, &smem);
         }
     }
+    if constexpr (kFilterFinite) {
+        // Radix/tie writers may belong to other warps and return without a barrier.
+        __syncthreads();
+        copy_output<true>(problem, problem.out);
+    }
 }
 
-template <typename ClusterImpl, bool kAlignedInput>
+template <typename ClusterImpl, bool kAlignedInput, bool kFilterFinite = false>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void direct_cluster_kernel(const __grid_constant__ Params params) {
     auto problem = params.problem(blockIdx.x);
     constexpr uint32_t cluster_size = ClusterImpl::kClusterSize;
     const uint32_t worker_rank = blockIdx.x % cluster_size;
     if (problem.seq_len <= problem.topk) {
-        if (blockIdx.y == worker_rank) trivial(problem);
+        if (blockIdx.y == worker_rank) trivial<kFilterFinite>(problem);
         return;
     }
     __shared__ impl::MaxSmem<typename ClusterImpl::Smem> smem;
@@ -145,10 +165,10 @@ void direct_cluster_kernel(const __grid_constant__ Params params) {
     problem.out = cluster.map_shared_rank(indices, worker_rank);
     ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
     cluster.sync();
-    if (blockIdx.y == worker_rank) copy_output(problem, destination);
+    if (blockIdx.y == worker_rank) copy_output<kFilterFinite>(problem, destination);
 }
 
-template <typename ClusterImpl, bool kAlignedInput>
+template <typename ClusterImpl, bool kAlignedInput, bool kFilterFinite = false>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void persistent_cluster_kernel(const __grid_constant__ Params params) {
     constexpr uint32_t cluster_size = ClusterImpl::kClusterSize;
@@ -160,12 +180,12 @@ void persistent_cluster_kernel(const __grid_constant__ Params params) {
         auto problem = params.problem(row);
         auto* destination = problem.out;
         if (problem.seq_len <= problem.topk) {
-            if (blockIdx.y == worker_rank) trivial(problem);
+            if (blockIdx.y == worker_rank) trivial<kFilterFinite>(problem);
         } else {
             problem.out = cluster.map_shared_rank(indices, worker_rank);
             ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
             cluster.sync();
-            if (blockIdx.y == worker_rank) copy_output(problem, destination);
+            if (blockIdx.y == worker_rank) copy_output<kFilterFinite>(problem, destination);
         }
         cluster.sync();
     }
@@ -191,7 +211,7 @@ cudaError_t launch_cluster(Kernel kernel,
     return cudaLaunchKernelEx(&config, kernel, params);
 }
 
-template <bool kAlignedInput>
+template <bool kAlignedInput, bool kFilterFinite = false>
 cudaError_t launch_topk(const Params& params,
                         int64_t k,
                         int64_t max_seq_len,
@@ -199,18 +219,18 @@ cudaError_t launch_topk(const Params& params,
     const uint32_t batch = params.batch;
     cudaError_t error = cudaSuccess;
     if (max_seq_len <= kReg1MaxSeqLen && (batch <= 32 || k <= 1024)) {
-        main_kernel<-1, kAlignedInput>
+        main_kernel<-1, kAlignedInput, kFilterFinite>
             <<<batch, kBlockSize, 0, stream>>>(params);
     } else if (max_seq_len <= kReg2MaxSeqLen) {
-        main_kernel<0, kAlignedInput>
+        main_kernel<0, kAlignedInput, kFilterFinite>
             <<<batch, kBlockSize, 0, stream>>>(params);
     } else if (max_seq_len <= kReg4MaxSeqLen) {
-        main_kernel<1, kAlignedInput>
+        main_kernel<1, kAlignedInput, kFilterFinite>
             <<<batch, kBlockSize, 0, stream>>>(params);
     } else if (max_seq_len <= kCluster32KMaxSeqLen &&
                batch <= kCluster8SmallBatchLimit) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster8, kAlignedInput>,
+            direct_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster8::kClusterSize,
@@ -218,18 +238,18 @@ cudaError_t launch_topk(const Params& params,
     } else if (max_seq_len <= kCluster32KMaxSeqLen &&
                batch <= kCluster4SmallBatchLimit) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster4, kAlignedInput>,
+            direct_cluster_kernel<Cluster4, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster4::kClusterSize,
             stream);
     } else if (max_seq_len <= kCluster32KMaxSeqLen) {
-        main_kernel<2, kAlignedInput>
+        main_kernel<2, kAlignedInput, kFilterFinite>
             <<<batch, kBlockSize, 0, stream>>>(params);
     } else if (max_seq_len <= kCluster64KMaxSeqLen &&
                batch <= kCluster8SmallBatchLimit) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster8, kAlignedInput>,
+            direct_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster8::kClusterSize,
@@ -237,7 +257,7 @@ cudaError_t launch_topk(const Params& params,
     } else if (max_seq_len <= kCluster64KMaxSeqLen &&
                batch <= kCluster4BatchLimit) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster4, kAlignedInput>,
+            direct_cluster_kernel<Cluster4, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster4::kClusterSize,
@@ -245,17 +265,17 @@ cudaError_t launch_topk(const Params& params,
     } else if (max_seq_len <= kCluster64KMaxSeqLen &&
                batch <= kCluster2BatchLimit) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster2, kAlignedInput>,
+            direct_cluster_kernel<Cluster2, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster2::kClusterSize,
             stream);
     } else if (max_seq_len <= kCluster64KMaxSeqLen) {
-        main_kernel<2, kAlignedInput>
+        main_kernel<2, kAlignedInput, kFilterFinite>
             <<<batch, kBlockSize, 0, stream>>>(params);
     } else if (batch <= kCluster8LongBatchLimit) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster8, kAlignedInput>,
+            direct_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster8::kClusterSize,
@@ -263,14 +283,14 @@ cudaError_t launch_topk(const Params& params,
     } else if (batch <= kCluster4BatchLimit &&
                max_seq_len <= kCluster4MaxSeqLen) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster4, kAlignedInput>,
+            direct_cluster_kernel<Cluster4, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster4::kClusterSize,
             stream);
     } else if (batch <= kCluster4BatchLimit) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster8, kAlignedInput>,
+            direct_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster8::kClusterSize,
@@ -278,32 +298,32 @@ cudaError_t launch_topk(const Params& params,
     } else if (batch <= kCluster2BatchLimit &&
                max_seq_len <= kCluster2MaxSeqLen) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster2, kAlignedInput>,
+            direct_cluster_kernel<Cluster2, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster2::kClusterSize,
             stream);
     } else if (batch <= kCluster2BatchLimit) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster4, kAlignedInput>,
+            direct_cluster_kernel<Cluster4, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster4::kClusterSize,
             stream);
     } else if (batch <= kCluster2LongBatchLimit && max_seq_len > 131072) {
         error = launch_cluster(
-            direct_cluster_kernel<Cluster2, kAlignedInput>,
+            direct_cluster_kernel<Cluster2, kAlignedInput, kFilterFinite>,
             params,
             batch,
             Cluster2::kClusterSize,
             stream);
     } else if (!uniform_plan_uses_cluster(
                    batch, static_cast<uint32_t>(max_seq_len))) {
-        main_kernel<2, kAlignedInput>
+        main_kernel<2, kAlignedInput, kFilterFinite>
             <<<batch, kBlockSize, 0, stream>>>(params);
     } else {
         error = launch_cluster(
-            persistent_cluster_kernel<Cluster8, kAlignedInput>,
+            persistent_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite>,
             params,
             kPersistentClusters,
             Cluster8::kClusterSize,
@@ -312,9 +332,8 @@ cudaError_t launch_topk(const Params& params,
     return error == cudaSuccess ? cudaGetLastError() : error;
 }
 
-}  // namespace
-
-void topk_v3(const torch::Tensor& scores,
+template <bool kFilterFinite>
+void topk_v3_impl(const torch::Tensor& scores,
                           const torch::Tensor& lengths,
                           torch::Tensor& output,
                           torch::Tensor& workspace,
@@ -340,6 +359,9 @@ void topk_v3(const torch::Tensor& scores,
                 "output shape mismatch");
     TORCH_CHECK(k == 512 || k == 1024 || k == 2048,
                 "topk_v3 supports K=512, 1024, or 2048");
+    if constexpr (kFilterFinite) {
+        TORCH_CHECK(k == 512, "dsv41_topk_v3_finite supports K=512 only");
+    }
     TORCH_CHECK(max_seq_len > 0 && max_seq_len <= scores.size(1),
                 "invalid max_seq_len");
     TORCH_CHECK(max_seq_len <= std::numeric_limits<int32_t>::max(),
@@ -371,12 +393,32 @@ void topk_v3(const torch::Tensor& scores,
         (reinterpret_cast<uintptr_t>(params.scores) % kVectorAlignment == 0) &&
         ((params.stride * sizeof(float)) % kVectorAlignment == 0);
     const cudaError_t error = aligned_input
-                                  ? launch_topk<true>(
+                                  ? launch_topk<true, kFilterFinite>(
                                         params, k, max_seq_len, stream)
-                                  : launch_topk<false>(
+                                  : launch_topk<false, kFilterFinite>(
                                         params, k, max_seq_len, stream);
     TORCH_CHECK(error == cudaSuccess,
                 "DeepSeek V4 TopK launch failed: ", cudaGetErrorString(error));
+}
+
+}  // namespace
+
+void topk_v3(const torch::Tensor& scores,
+             const torch::Tensor& lengths,
+             torch::Tensor& output,
+             torch::Tensor& workspace,
+             int64_t k,
+             int64_t max_seq_len) {
+    topk_v3_impl<false>(scores, lengths, output, workspace, k, max_seq_len);
+}
+
+void dsv41_topk_v3_finite(const torch::Tensor& scores,
+                         const torch::Tensor& lengths,
+                         torch::Tensor& output,
+                         torch::Tensor& workspace,
+                         int64_t k,
+                         int64_t max_seq_len) {
+    topk_v3_impl<true>(scores, lengths, output, workspace, k, max_seq_len);
 }
 
 }  // namespace torch_ext

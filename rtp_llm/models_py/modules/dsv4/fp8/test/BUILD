@@ -66,6 +66,8 @@ _DSV4_FP8_CPU_TESTS = [
     "test_attention_v41_request_rows",
     "test_attention_v41_sparse_selection",
     "test_attention_v41_prefill_producer",
+    "test_attention_v41_cp_raw_groups",
+    "test_v41_producer_metadata",
     "test_v41_prefill_indexer",
     "test_v41_prefill_meta_cache",
     "test_attention_cp_prefill_paths",
@@ -93,8 +95,51 @@ _DSV4_FP8_CPU_TESTS = [
         "test_v41_prefill_q_memory",
         "test_v41_prefill_index_plan",
         "test_v41_norm_quant",
+        "test_v41_wo_a_quant",
+        "test_v41_prefill_pools",
+        "test_v41_joint_pool",
+        "test_v41_swa_fresh",
+        "test_v41_prefill_kv_workspace",
+        "test_v41_grouped_gemm",
+        "test_v41_fp4_transport",
     ]
 ]
+
+py_test(
+    name = "test_v41_candidate_topk",
+    srcs = ["test_v41_candidate_topk.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = select({
+        "//:using_cuda13_arm": {"RTP_CANDIDATE_TOPK_GPU_TEST": "1"},
+        "//conditions:default": {"RTP_CANDIDATE_TOPK_GPU_TEST": "0"},
+    }),
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
+    name = "test_v41_batched_producer",
+    srcs = ["test_v41_batched_producer.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {
+        "DSV41_RUN_PRODUCER_GPU_TESTS": "1",
+        "RTP_V41_BATCHED_PRODUCER": "1",
+    },
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
+    name = "test_v41_grouped_prefill_score",
+    srcs = ["test_v41_grouped_prefill_score.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"DSV41_GROUPED_SCORE_GPU_TEST": "1"},
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
 
 py_test(
     name = "test_v41_sparse_prefill_indexer",

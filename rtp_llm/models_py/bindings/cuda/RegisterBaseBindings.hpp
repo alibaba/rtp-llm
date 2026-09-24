@@ -279,6 +279,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("k"),
                   py::arg("max_seq_len"));
 
+    rtp_ops_m.def("dsv41_topk_v3_finite",
+                  &dsv41_topk_v3_finite,
+                  "DSv4.1 prefill FP32 K512 TopK with fused finite-token filtering",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
     rtp_ops_m.def("deepselect_bf16_available", &deepselect_bf16_available);
     rtp_ops_m.def("deepselect_bf16",
                   &deepselect_bf16,

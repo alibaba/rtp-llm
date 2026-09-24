@@ -53,6 +53,7 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
             "prefill_kv_workspace",
             "prefill_index_plan",
             "prefill_meta_common",
+            "prefill_producer_host_tables",
         ):
             shared.pop(key, None)
         return

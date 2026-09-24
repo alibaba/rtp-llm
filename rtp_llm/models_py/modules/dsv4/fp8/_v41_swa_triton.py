@@ -55,7 +55,18 @@ def _check_pool(pool_3d: torch.Tensor, slots: torch.Tensor) -> None:
         )
 
 
-@triton.jit(do_not_specialize=["block_stride", "input_stride"])
+def _valid_keys(kv, device, rows):
+    return (
+        kv.device == device
+        and kv.ndim == 2
+        and kv.shape == (rows, HEAD_DIM)
+        and kv.stride(1) == 1
+        and kv.stride(0) >= HEAD_DIM
+        and kv.dtype in (torch.bfloat16, torch.float16, torch.float32)
+    )
+
+
+@triton.jit(do_not_specialize=["block_stride", "input_stride", "rank", "local_bytes"])
 def _quantize_and_insert_swa_kernel(
     kv,
     pool,
@@ -63,36 +74,92 @@ def _quantize_and_insert_swa_kernel(
     input_stride,
     block_stride,
     ENTRIES: tl.constexpr,
+    unique_blocks=None,
+    rank=0,
+    local_bytes=0,
+    CP_BYTES: tl.constexpr = False,
+    fresh_out=None,
+    fresh_slots=None,
+    STORE_FRESH: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
+    columns = tl.arange(0, 512)
+    if STORE_FRESH:
+        # Fresh attention rows remain valid even when ring ownership skips KV.
+        original = tl.load(kv + row * input_stride.to(tl.int64) + columns)
+        destination = tl.load(fresh_slots + row).to(tl.int64)
+        tl.store(
+            fresh_out.to(tl.pointer_type(tl.uint16)) + destination * 512 + columns,
+            original.to(tl.uint16, bitcast=True),
+        )
     slot = tl.load(slots + row).to(tl.int64)
     if slot < 0:
         return
     block = slot // ENTRIES
     position = slot % ENTRIES
+    if CP_BYTES:
+        block = tl.load(unique_blocks + block).to(tl.int64)
     base = pool + block * block_stride.to(tl.int64)
-    columns = tl.arange(0, 512)
-    values = tl.load(kv + row * input_stride.to(tl.int64) + columns).to(tl.float32)
+    if STORE_FRESH:
+        values = original.to(tl.float32)
+    else:
+        values = tl.load(kv + row * input_stride.to(tl.int64) + columns).to(tl.float32)
     groups = values.reshape((16, 32))
     maximum = tl.maximum(tl.max(tl.abs(groups), 1), 1e-4)
     exponent = tl.ceil(tl.log2(maximum * (1.0 / 448.0)))
     scaled = tl.clamp(groups * tl.exp2(-exponent)[:, None], -448.0, 448.0)
     payload = scaled.to(tl.float8e4nv).to(tl.uint8, bitcast=True).reshape((512,))
-    tl.store(base + position * 512 + columns, payload)
+    payload_byte = position * 512 + columns
+    if CP_BYTES:
+        begin = rank.to(tl.int64) * local_bytes
+        tl.store(
+            base + payload_byte - begin,
+            payload,
+            (payload_byte >= begin) & (payload_byte < begin + local_bytes),
+        )
+    else:
+        tl.store(base + payload_byte, payload)
     encoded = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.uint8)
-    tl.store(base + ENTRIES * 512 + position * 16 + tl.arange(0, 16), encoded)
+    scale_byte = ENTRIES * 512 + position * 16 + tl.arange(0, 16)
+    if CP_BYTES:
+        tl.store(
+            base + scale_byte - begin,
+            encoded,
+            (scale_byte >= begin) & (scale_byte < begin + local_bytes),
+        )
+    else:
+        tl.store(base + scale_byte, encoded)
 
 
 @triton.jit
-def _load_swa_row(pool, slot, block_stride, ENTRIES: tl.constexpr):
+def _load_swa_row(
+    pool,
+    slot,
+    block_stride,
+    ENTRIES: tl.constexpr,
+    compact_blocks=0,
+    local_bytes=0,
+    RANK_MAJOR: tl.constexpr = False,
+):
     columns = tl.arange(0, 512)
     slot64 = slot.to(tl.int64)
     block = slot64 // ENTRIES
     position = slot64 % ENTRIES
-    base = pool + block * block_stride.to(tl.int64)
-    payload = tl.load(base + position * 512 + columns, slot64 >= 0, other=0)
+    payload_byte = position * 512 + columns
+    scale_byte = ENTRIES * 512 + position * 16 + tl.arange(0, 16)
+    if RANK_MAJOR:
+        payload_address = (
+            (payload_byte // local_bytes) * compact_blocks + block
+        ) * local_bytes + payload_byte % local_bytes
+        scale_address = (
+            (scale_byte // local_bytes) * compact_blocks + block
+        ) * local_bytes + scale_byte % local_bytes
+    else:
+        payload_address = block * block_stride.to(tl.int64) + payload_byte
+        scale_address = block * block_stride.to(tl.int64) + scale_byte
+    payload = tl.load(pool + payload_address, slot64 >= 0, other=0)
     encoded = tl.load(
-        base + ENTRIES * 512 + position * 16 + tl.arange(0, 16),
+        pool + scale_address,
         slot64 >= 0,
         other=127,
     )
@@ -118,6 +185,8 @@ def _dequantize_swa_kernel(
         "out_stride0",
         "out_stride1",
         "offset",
+        "compact_blocks",
+        "local_bytes",
     ]
 )
 def _gather_swa_kernel(
@@ -132,6 +201,9 @@ def _gather_swa_kernel(
     out_stride1,
     offset,
     ENTRIES: tl.constexpr,
+    compact_blocks=0,
+    local_bytes=0,
+    RANK_MAJOR: tl.constexpr = False,
 ):
     batch = tl.program_id(0).to(tl.int64)
     column = tl.program_id(1).to(tl.int64)
@@ -141,7 +213,9 @@ def _gather_swa_kernel(
     slot = tl.load(
         slots + batch * slot_stride0.to(tl.int64) + column * slot_stride1.to(tl.int64)
     )
-    values = _load_swa_row(pool, slot, block_stride, ENTRIES)
+    values = _load_swa_row(
+        pool, slot, block_stride, ENTRIES, compact_blocks, local_bytes, RANK_MAJOR
+    )
     output = (
         out
         + batch * out_stride0.to(tl.int64)
@@ -159,14 +233,7 @@ def quantize_and_insert_swa_k_cache(
     must apply their normal ownership mask before calling this function.
     """
     _check_pool(pool_3d, slots)
-    if (
-        kv.device != pool_3d.device
-        or kv.ndim != 2
-        or kv.shape != (slots.numel(), HEAD_DIM)
-        or kv.stride(1) != 1
-        or kv.stride(0) < HEAD_DIM
-        or kv.dtype not in (torch.bfloat16, torch.float16, torch.float32)
-    ):
+    if not _valid_keys(kv, pool_3d.device, slots.numel()):
         raise ValueError(
             "V4.1 SWA keys must be [N, 512] floating rows on the cache device"
         )
@@ -219,19 +286,7 @@ def dequantize_swa_k_cache(
     return out
 
 
-def dequantize_and_gather_k_cache_slots(
-    out: torch.Tensor,
-    k_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    gather_lens: Optional[torch.Tensor],
-    offset: int,
-) -> None:
-    """Gather ``[B, W]`` slots into strided ``out[:, offset:offset+W, :]``.
-
-    Rows outside each request's gather length are left untouched. Lengths
-    remain on device, including during CUDA graph capture and replay.
-    """
-    _check_pool(k_cache, slot_mapping)
+def _check_gather_output(out, device, slot_mapping, gather_lens, offset):
     if (
         slot_mapping.ndim != 2
         or out.ndim != 3
@@ -240,7 +295,7 @@ def dequantize_and_gather_k_cache_slots(
         or out.stride(2) != 1
         or out.stride(1) < HEAD_DIM
         or out.stride(0) < out.shape[1] * out.stride(1)
-        or out.device != k_cache.device
+        or out.device != device
         or out.dtype not in (torch.bfloat16, torch.float16, torch.float32)
         or offset < 0
         or offset + slot_mapping.shape[1] > out.shape[1]
@@ -255,6 +310,22 @@ def dequantize_and_gather_k_cache_slots(
         raise ValueError(
             "SWA gather lengths must be a contiguous device integer [B] tensor"
         )
+
+
+def dequantize_and_gather_k_cache_slots(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    offset: int,
+) -> None:
+    """Gather ``[B, W]`` slots into strided ``out[:, offset:offset+W, :]``.
+
+    Rows outside each request's gather length are left untouched. Lengths
+    remain on device, including during CUDA graph capture and replay.
+    """
+    _check_pool(k_cache, slot_mapping)
+    _check_gather_output(out, k_cache.device, slot_mapping, gather_lens, offset)
     if slot_mapping.numel():
         _gather_swa_kernel[tuple(slot_mapping.shape)](
             k_cache,
@@ -270,6 +341,57 @@ def dequantize_and_gather_k_cache_slots(
             ENTRIES=k_cache.shape[1],
             num_warps=4,
         )
+
+
+def _gather_swa_rank_major(
+    out, gathered, slots, lengths, offset, compact_blocks, local_bytes, entries
+):
+    """Decode private or all-gathered CP4 bytes; this helper has no collective."""
+    if not (
+        gathered.is_cuda
+        and gathered.dtype == torch.uint8
+        and gathered.is_contiguous()
+        and gathered.numel() == 4 * compact_blocks * local_bytes
+        and entries == 136
+        and local_bytes == 18048
+        and slots.device == gathered.device
+        and slots.dtype in (torch.int32, torch.int64)
+    ):
+        raise ValueError("Invalid V4.1 rank-major SWA gather metadata")
+    _check_gather_output(out, gathered.device, slots, lengths, offset)
+    if slots.numel():
+        _gather_swa_kernel[tuple(slots.shape)](
+            gathered,
+            slots,
+            lengths,
+            out,
+            local_bytes * 4,
+            slots.stride(0),
+            slots.stride(1),
+            out.stride(0),
+            out.stride(1),
+            offset,
+            ENTRIES=entries,
+            compact_blocks=compact_blocks,
+            local_bytes=local_bytes,
+            RANK_MAJOR=True,
+            num_warps=4,
+        )
+
+
+def _cp_addressing_supported(raw, slots, unique, entries, cp_size):
+    return (
+        cp_size == 4
+        and entries == 136
+        and raw.shape[1] == 18048
+        and raw.stride(0) >= raw.shape[1]
+        and slots.device == unique.device == raw.device
+        and slots.dtype in (torch.int32, torch.int64)
+        and slots.is_contiguous()
+        and unique.dtype in (torch.int32, torch.int64)
+        and unique.ndim == 1
+        and unique.is_contiguous()
+    )
 
 
 def _check_cp_pool(
@@ -288,6 +410,47 @@ def _check_cp_pool(
         raise ValueError("Invalid V4.1 CP SWA byte-sliced pool contract")
 
 
+def is_supported_fresh_store(
+    k, raw, slots, full_entries_per_block, cp_rank, cp_size, compaction, fresh_slots
+):
+    """Qualify a BF16 fresh scatter without reading device slot values.
+
+    Fresh slots must be unique, in-range workspace row indices from the same
+    full-token planner as ``k``. Negative cache slots do not suppress scatter.
+    """
+    if compaction is None or fresh_slots is None:
+        return False
+    try:
+        _check_cp_pool(raw, full_entries_per_block, cp_rank, cp_size)
+    except (ValueError, AttributeError):
+        return False
+    return (
+        _cp_addressing_supported(
+            raw,
+            compaction.compact_slots,
+            compaction.unique_blocks,
+            full_entries_per_block,
+            cp_size,
+        )
+        and _valid_keys(k, raw.device, slots.numel())
+        and k.dtype == torch.bfloat16
+        and compaction.compact_slots.numel() == k.shape[0]
+        and fresh_slots.device == raw.device
+        and fresh_slots.dtype in (torch.int32, torch.int64)
+        and fresh_slots.shape == (k.shape[0],)
+        and fresh_slots.is_contiguous()
+        and all(
+            t.untyped_storage().data_ptr() != raw.untyped_storage().data_ptr()
+            for t in (
+                k,
+                compaction.compact_slots,
+                compaction.unique_blocks,
+                fresh_slots,
+            )
+        )
+    )
+
+
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,
@@ -296,20 +459,85 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     cp_rank: int,
     cp_size: int,
     compaction: CPByteSlicedSlotCompaction,
+    *,
+    fresh_out: Optional[torch.Tensor] = None,
+    fresh_slots: Optional[torch.Tensor] = None,
 ) -> None:
     """Update this rank's byte slice while preserving other slots and padding.
 
-    Only the local slice needs its previous bytes: the encoder computes every
-    updated payload/scale byte from ``k`` independently. Bytes in other ranks'
-    temporary slices are never copied back, so no all-gather is required.
+    Qualified CP4 layouts store only this rank's bytes directly. Other layouts
+    retain the local-slice staging path; no writer all-gather is required.
+    Optional fresh output is a disjoint contiguous BF16 [B, M, 512] workspace.
+    Only fresh_slots rows are written, with original BF16 bits preserved.
     """
     _check_cp_pool(k_cache_raw, full_entries_per_block, cp_rank, cp_size)
     if slot_mapping.numel() != compaction.compact_slots.numel():
         raise ValueError("CP SWA compaction and original slots must have equal length")
     unique_blocks = compaction.unique_blocks
-    if slot_mapping.numel() == 0 or unique_blocks.numel() == 0:
+    if fresh_out is not None:
+        if not is_supported_fresh_store(
+            k,
+            k_cache_raw,
+            slot_mapping,
+            full_entries_per_block,
+            cp_rank,
+            cp_size,
+            compaction,
+            fresh_slots,
+        ) or not (
+            fresh_out.device == k.device
+            and fresh_out.dtype == torch.bfloat16
+            and fresh_out.ndim == 3
+            and fresh_out.shape[2] == HEAD_DIM
+            and fresh_out.is_contiguous()
+            and all(
+                fresh_out.untyped_storage().data_ptr() != t.untyped_storage().data_ptr()
+                for t in (
+                    k,
+                    k_cache_raw,
+                    compaction.compact_slots,
+                    unique_blocks,
+                    fresh_slots,
+                )
+            )
+        ):
+            raise ValueError("Unsupported or aliased V4.1 SWA fresh workspace")
+    elif fresh_slots is not None:
+        raise ValueError("SWA fresh slots require fresh output")
+    if slot_mapping.numel() == 0 or (unique_blocks.numel() == 0 and fresh_out is None):
         return
     local_bytes = k_cache_raw.shape[1]
+    if (
+        _cp_addressing_supported(
+            k_cache_raw,
+            compaction.compact_slots,
+            unique_blocks,
+            full_entries_per_block,
+            cp_size,
+        )
+        and _valid_keys(k, k_cache_raw.device, slot_mapping.numel())
+        and all(
+            t.untyped_storage().data_ptr() != k_cache_raw.untyped_storage().data_ptr()
+            for t in (k, compaction.compact_slots, unique_blocks)
+        )
+    ):
+        _quantize_and_insert_swa_kernel[(slot_mapping.numel(),)](
+            k,
+            k_cache_raw,
+            compaction.compact_slots,
+            k.stride(0),
+            k_cache_raw.stride(0),
+            ENTRIES=full_entries_per_block,
+            unique_blocks=unique_blocks,
+            rank=cp_rank,
+            local_bytes=local_bytes,
+            CP_BYTES=True,
+            fresh_out=fresh_out,
+            fresh_slots=fresh_slots,
+            STORE_FRESH=fresh_out is not None,
+            num_warps=4,
+        )
+        return
     full_stride = local_bytes * cp_size
     full_raw = torch.empty(
         (unique_blocks.numel(), full_stride),
@@ -330,6 +558,38 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     )
 
 
+def _try_all_gather_cp4_bytes(local: torch.Tensor) -> Optional[torch.Tensor]:
+    """Use an uninitialized receive buffer only for the ordinary NCCL route."""
+    if (
+        not local.is_cuda
+        or local.dtype != torch.uint8
+        or local.ndim != 2
+        or not local.is_contiguous()
+        or local.numel() == 0
+        or torch.version.hip is not None
+        or torch.cuda.is_current_stream_capturing()
+        or not torch.distributed.is_initialized()
+    ):
+        return None
+    from rtp_llm.models_py.distributed import collective_torch as collective
+
+    symm = collective._get_symm_mem().get_symm_mem_communicator()
+    if symm is not None and symm.should_torch_symm_mem_allgather(local):
+        return None
+    group = collective._get_group(collective.Group.TP)
+    if (
+        torch.distributed.get_world_size(group) != 4
+        or torch.distributed.get_backend(group) != "nccl"
+    ):
+        return None
+    gathered = torch.empty(
+        (4 * local.shape[0], local.shape[1]), device=local.device, dtype=local.dtype
+    )
+    # The same collective overwrites every receive byte, on the caller's stream.
+    torch.distributed.all_gather_into_tensor(gathered, local, group=group)
+    return gathered
+
+
 def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     out: torch.Tensor,
     k_cache_raw: torch.Tensor,
@@ -341,7 +601,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     cp_size: int,
     compaction: CPByteSlicedSlotCompaction,
 ) -> None:
-    """All-gather byte slices, restore page planes, then gather on device."""
+    """All-gather byte slices and decode qualified rank-major storage directly."""
     _check_cp_pool(k_cache_raw, full_entries_per_block, cp_rank, cp_size)
     if slot_mapping.shape != compaction.compact_slots.shape:
         raise ValueError("CP SWA compaction and original slots must have equal shape")
@@ -349,6 +609,13 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         return
     unique_blocks = compaction.unique_blocks
     local_bytes = k_cache_raw.shape[1]
+    rank_major = _cp_addressing_supported(
+        k_cache_raw,
+        compaction.compact_slots,
+        unique_blocks,
+        full_entries_per_block,
+        cp_size,
+    )
     if unique_blocks.numel() == 0:
         full_raw = torch.empty(
             (0, local_bytes * cp_size), dtype=torch.uint8, device=k_cache_raw.device
@@ -365,9 +632,23 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         else:
             from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-            gathered = all_gather(local, group=Group.TP)
+            gathered = _try_all_gather_cp4_bytes(local) if rank_major else None
+            if gathered is None:
+                gathered = all_gather(local, group=Group.TP)
             if gathered.numel() != cp_size * local.numel():
                 raise RuntimeError("CP SWA all_gather size does not match cp_size")
+            if rank_major and gathered.is_contiguous():
+                _gather_swa_rank_major(
+                    out,
+                    gathered,
+                    compaction.compact_slots,
+                    gather_lens,
+                    offset,
+                    unique_blocks.numel(),
+                    local_bytes,
+                    full_entries_per_block,
+                )
+                return
             full_raw = (
                 gathered.view(cp_size, unique_blocks.numel(), local_bytes)
                 .permute(1, 0, 2)

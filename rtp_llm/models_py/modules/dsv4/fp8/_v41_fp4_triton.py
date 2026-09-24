@@ -161,13 +161,17 @@ def _fp4_global_dequant_kernel(
     block_stride,
     num_cache_blocks,
     OUT_DTYPE: tl.constexpr,
+    IDENTITY_SLOTS: tl.constexpr = False,
 ):
     pid = tl.program_id(0).to(tl.int64)
     if pid >= N:
         return
     channels = tl.arange(0, DIM)
     out_row = out_ptr + pid * DIM + channels
-    slot = tl.load(slot_mapping_ptr + pid).to(tl.int64)
+    if IDENTITY_SLOTS:
+        slot = pid
+    else:
+        slot = tl.load(slot_mapping_ptr + pid).to(tl.int64)
     if slot < 0:
         tl.store(out_row, tl.zeros((DIM,), dtype=tl.float32).to(OUT_DTYPE))
         return
@@ -299,7 +303,8 @@ def gather_k_cache_bytes_fp4(
     physical pool page layout; each row contains 256 payload and 32 scale bytes.
     """
     N = int(slot_indices.numel())
-    out = torch.zeros(
+    # Both valid and negative slots overwrite all 288 bytes in the gather kernel.
+    out = torch.empty(
         (N, FP4_GLOBAL_ENTRY_BYTES), dtype=torch.uint8, device=pool_3d.device
     )
     if N == 0:
@@ -342,8 +347,26 @@ def dequantize_k_cache_bytes_fp4(
     if N == 0:
         return out
     pool_view = raw_bytes.view(N, 1, FP4_GLOBAL_ENTRY_BYTES)
-    slots = torch.arange(N, dtype=torch.int64, device=raw_bytes.device)
-    return dequantize_k_cache_slots_fp4(pool_view, slots, out_dtype=out_dtype, out=out)
+    _OUT_DTYPE = {
+        torch.float32: tl.float32,
+        torch.bfloat16: tl.bfloat16,
+    }[out.dtype]
+    _fp4_global_dequant_kernel[(N,)](
+        pool_view,
+        None,
+        out,
+        N,
+        DIM=FP4_GLOBAL_HEAD_DIM,
+        GROUP=FP4_GLOBAL_GROUP,
+        ROW_BYTES=FP4_GLOBAL_ENTRY_BYTES,
+        cache_block_size=1,
+        block_stride=int(pool_view.stride(0)),
+        num_cache_blocks=N,
+        OUT_DTYPE=_OUT_DTYPE,
+        IDENTITY_SLOTS=True,
+        num_warps=4,
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------

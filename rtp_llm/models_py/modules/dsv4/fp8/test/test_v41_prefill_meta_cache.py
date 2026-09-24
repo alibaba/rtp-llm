@@ -29,7 +29,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[5]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from rtp_llm.models_py.modules.dsv4.attn_type import DECODER_SWA_KV, SWA_KV
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8  # noqa: E402
+from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (  # noqa: E402
     AttentionV41FP8,
 )
@@ -46,6 +48,7 @@ class _FakeMeta(NamedTuple):
     freqs_cis: object = None
     request_row_slices: object = None
     workspace: object = None
+    swa_meta: object = None
 
 
 def _make_attn(ratio: int, layer_id: int, shared: dict) -> AttentionV41FP8:
@@ -180,8 +183,49 @@ class V41PrefillMetaCacheTest(unittest.TestCase):
                         self.assertTrue(
                             all(a._prefill_meta_shared is not None for a in layers)
                         )
-                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(calls), 2 if fail else 3)
                 self.assertNotIn("prefill_meta_common", shared)
+
+    def test_broadcast_reuse_restores_full_swa_and_preserves_parent_rope(self):
+        shared = {}
+        attn = _make_attn(2, 2, shared)
+        x, inputs = torch.zeros(8, 5120), _inputs()
+        full_swa, current_freqs = object(), object()
+        source = _FakeMeta(swa_meta=full_swa, freqs_cis=object())
+        # A prior same-key entry must not bypass parent RoPE identity checks.
+        self._build(attn, x, 0, inputs)
+        with patch.object(
+            AttentionFP8,
+            "_build_shared_prefill_meta",
+            return_value=_FakeMeta(swa_meta=None, freqs_cis=current_freqs),
+        ) as parent:
+            actual = attn._build_shared_prefill_meta(
+                x, 0, **inputs, reuse_common_meta=source, reuse_freqs_meta=source
+            )
+        self.assertEqual(parent.call_count, 1)
+        self.assertIs(parent.call_args.kwargs["reuse_common_meta"], source)
+        self.assertIs(parent.call_args.kwargs["reuse_freqs_meta"], source)
+        self.assertIs(actual.swa_meta, full_swa)
+        self.assertIs(actual.freqs_cis, current_freqs)
+        self.assertEqual(actual.request_row_slices, (slice(0, 8),))
+        self.assertEqual(attn.compress_ratio, 2)
+
+    def test_reuse_exception_restores_ratio_and_does_not_publish(self):
+        attn = _make_attn(1, 20, {})
+        with patch.object(
+            AttentionFP8,
+            "_build_shared_prefill_meta",
+            side_effect=RuntimeError("reuse failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reuse failed"):
+                attn._build_shared_prefill_meta(
+                    torch.zeros(8, 5120),
+                    0,
+                    **_inputs(),
+                    reuse_common_meta=_FakeMeta(swa_meta=object()),
+                )
+        self.assertEqual(attn.compress_ratio, 1)
+        self.assertEqual(attn._shared_attention["prefill_meta_common"], {})
 
     def _build(self, attn, x, start_pos, inputs):
         with patch.object(
@@ -278,6 +322,221 @@ class V41PrefillMetaCacheTest(unittest.TestCase):
             self.assertEqual(parent20.count, 0)
             self.assertEqual(meta20.request_row_slices, (slice(0, 8),))
             self.assertIs(meta2, meta20)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required for actual SWA planner")
+class V41CommonMetaIntegrationTest(unittest.TestCase):
+    def assert_meta_equal(self, got, want):
+        if isinstance(want, torch.Tensor):
+            self.assertEqual(got.dtype, want.dtype)
+            self.assertEqual(got.shape, want.shape)
+            self.assertTrue(torch.equal(got, want))
+        elif isinstance(want, tuple):
+            self.assertEqual(len(got), len(want))
+            for a, b in zip(got, want):
+                self.assert_meta_equal(a, b)
+        else:
+            self.assertEqual(got, want)
+
+    def fixture(self, rank, prefixes, *, bound=True, compressed_first=False):
+        lengths = (9, 3, 5)
+        chunks = tuple(2 * ((n + 7) // 8) for n in lengths)
+        positions, requests = [], []
+        for b, (n, p, chunk) in enumerate(zip(lengths, prefixes, chunks)):
+            half = chunk // 2
+            local = list(range(rank * half, (rank + 1) * half)) + list(
+                range((7 - rank) * half, (8 - rank) * half)
+            )
+            positions.extend(p + min(i, n - 1) for i in local)
+            requests.extend([b] * chunk)
+        device = "cuda"
+        tensor = lambda values, dtype=torch.int32: torch.tensor(
+            values, device=device, dtype=dtype
+        )
+        cp = SimpleNamespace(
+            cp_size=4,
+            cp_rank=rank,
+            kv_cache_sharded=True,
+            seq_len_full=sum(lengths),
+            chunk_lengths_per_req=chunks,
+            input_lengths_global=tensor(lengths),
+            cu_seqlens_global=tensor([0, 9, 12, 17]),
+            global_positions=tensor(positions, torch.int64),
+        )
+        ratios = (2, 1, 2, 1) if compressed_first else (0, 2, 1, 2, 1)
+        normal_count = len(ratios) - 2
+        raw = [
+            torch.zeros((8, 18048), device=device, dtype=torch.uint8) for _ in range(2)
+        ]
+        mapping = []
+        for i in range(len(ratios)):
+            row = [-1] * (DECODER_SWA_KV + 1)
+            row[SWA_KV if i < normal_count else DECODER_SWA_KV] = int(i >= normal_count)
+            mapping.append(row)
+        cache = (
+            SimpleNamespace(
+                group_region_names=[SWA_KV, DECODER_SWA_KV],
+                layer_region_to_group_id=mapping,
+                seq_size_per_block=128,
+                group_seq_size_per_block=[128, 128],
+                get_layer_cache=lambda layer, region: SimpleNamespace(
+                    kv_cache_base=raw[int(layer >= normal_count)]
+                ),
+            )
+            if bound
+            else None
+        )
+        tables = (
+            {
+                SWA_KV: tensor([[1, 2]] * 3),
+                DECODER_SWA_KV: tensor([[3, 4]] * 3),
+            }
+            if bound
+            else None
+        )
+        base = torch.arange(4096 * 32, device=device, dtype=torch.float32).reshape(
+            4096, 32
+        )
+        compressed = base + 0.5
+        layers = []
+        for i, ratio in enumerate(ratios):
+            a = _make_attn(ratio, i, {})
+            a.rope_head_dim = 64
+            a.head_dim = 512
+            a._cp_ctx = cp
+            a.freqs_cis = compressed if ratio else base
+            a._pool_spec = {SWA_KV: (torch.uint8, 528)}
+            layers.append(a)
+        x = torch.zeros(sum(chunks), 5120, device=device, dtype=torch.bfloat16)
+        inputs = dict(
+            sp_per_req=tensor(prefixes, torch.int64),
+            cu_seqlens=tensor([0, chunks[0], sum(chunks[:2]), sum(chunks)]),
+            batch_size=3,
+            input_lengths=tensor(chunks),
+            prefix_lengths=tensor(prefixes),
+            position_ids=cp.global_positions,
+            req_id_per_token=tensor(requests),
+            max_seqlen_q=max(chunks),
+        )
+        return layers, x, inputs, cache, tables, normal_count
+
+    def test_actual_parent_cp4_broadcast_exact_region_rope_and_reentry(self):
+        for rank in range(4):
+            for prefixes, bound, compressed_first in (
+                ((127, 0, 129), True, False),
+                ((0, 0, 0), True, False),
+                ((127, 0, 129), False, False),
+                ((1, 0, 513), True, True),
+            ):
+                with self.subTest(
+                    rank=rank,
+                    prefixes=prefixes,
+                    bound=bound,
+                    compressed_first=compressed_first,
+                ):
+                    layers, x, inputs, cache, tables, normal_count = self.fixture(
+                        rank, prefixes, bound=bound, compressed_first=compressed_first
+                    )
+                    expected = []
+                    for a in layers:
+                        with bind_attn_cache(a, cache, tables):
+                            expected.append(
+                                a._build_shared_prefill_meta(x, 0, **inputs)
+                            )
+                        a._shared_attention.pop("prefill_meta_common", None)
+                    model = SimpleNamespace(
+                        layers=[SimpleNamespace(attn=a) for a in layers]
+                    )
+                    workspace = object()
+                    calls = []
+                    planner = AttentionFP8._build_swa_prefill_meta_varlen
+
+                    def counted(attn, *args, **kwargs):
+                        calls.append(attn._swa_cache_region)
+                        return planner(attn, *args, **kwargs)
+
+                    with patch.object(
+                        AttentionFP8, "_build_swa_prefill_meta_varlen", counted
+                    ):
+                        build_and_propagate_prefill_meta_fp8(
+                            model, x, 0, cache, tables, workspace=workspace, **inputs
+                        )
+                    self.assertEqual(len(calls), 2 if bound else 1)
+                    for a, want in zip(layers, expected):
+                        got = a._prefill_meta_shared
+                        for field in want._fields:
+                            if field not in ("workspace", "cp_ctx"):
+                                self.assert_meta_equal(
+                                    getattr(got, field), getattr(want, field)
+                                )
+                        self.assertIs(got.workspace, workspace)
+                        self.assertIsNone(a._kv_cache)
+                        self.assertEqual(got.freqs_cis_source_id, id(a.freqs_cis))
+                    source = layers[0]._prefill_meta_shared.swa_meta
+                    for a in layers[:normal_count]:
+                        self.assertIs(a._prefill_meta_shared.swa_meta, source)
+                    if bound:
+                        other = layers[-1]._prefill_meta_shared.swa_meta
+                        self.assertIsNot(other, source)
+                        self.assertIs(layers[-2]._prefill_meta_shared.swa_meta, other)
+                    # Full real parent must honor a different table identity even
+                    # with an existing same-rope-kind cache entry and reuse source.
+                    a = layers[1]
+                    source_meta = layers[0]._prefill_meta_shared
+                    with bind_attn_cache(a, cache, tables):
+                        same = a._build_shared_prefill_meta(
+                            x,
+                            0,
+                            **inputs,
+                            reuse_common_meta=source_meta,
+                            reuse_freqs_meta=a._prefill_meta_shared,
+                        )
+                        self.assertIs(same.freqs_cis, a._prefill_meta_shared.freqs_cis)
+                        a.freqs_cis = a.freqs_cis + 7
+                        different = a._build_shared_prefill_meta(
+                            x,
+                            0,
+                            **inputs,
+                            reuse_common_meta=source_meta,
+                            reuse_freqs_meta=same,
+                        )
+                        self.assertTrue(
+                            torch.equal(
+                                different.freqs_cis,
+                                a.freqs_cis.index_select(0, inputs["position_ids"]),
+                            )
+                        )
+                        self.assertIsNot(different.freqs_cis, same.freqs_cis)
+                        self.assertIs(different.swa_meta, source_meta.swa_meta)
+                    # Same identities on a new broadcast still rebuild; errors
+                    # clear propagated state, and a subsequent invocation recovers.
+                    calls.clear()
+                    with patch.object(
+                        AttentionFP8, "_build_swa_prefill_meta_varlen", counted
+                    ):
+                        build_and_propagate_prefill_meta_fp8(
+                            model, x, 0, cache, tables, workspace=workspace, **inputs
+                        )
+                    self.assertEqual(len(calls), 2 if bound else 1)
+                    with patch.object(
+                        layers[1],
+                        "_build_shared_prefill_meta",
+                        side_effect=RuntimeError("injected"),
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "injected"):
+                            build_and_propagate_prefill_meta_fp8(
+                                model,
+                                x,
+                                0,
+                                cache,
+                                tables,
+                                workspace=workspace,
+                                **inputs,
+                            )
+                    self.assertTrue(all(a._prefill_meta_shared is None for a in layers))
+                    build_and_propagate_prefill_meta_fp8(
+                        model, x, 0, cache, tables, workspace=workspace, **inputs
+                    )
 
 
 if __name__ == "__main__":

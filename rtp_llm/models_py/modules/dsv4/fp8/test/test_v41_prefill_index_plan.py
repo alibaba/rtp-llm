@@ -24,7 +24,6 @@ def reference_plan(
     selected, positions, offset, global_count, swa_start, window_size=128
 ):
     """Frozen eager attention path, deliberately using stable argsort."""
-    positions = positions.long()
     swpos = (
         positions[:, None]
         - window_size
@@ -197,6 +196,92 @@ class IndexPlanCUDA(unittest.TestCase):
         x = torch.tensor([[2**31 - 1, -9, 3], [2**40, 2**31, -1]], device="cuda")
         p = torch.tensor([2**31, -(2**40)], device="cuda")
         self.check(x, p, 1, 7, 0, 7)
+
+    def test_batched_metadata_strides_dtypes_and_cast_before_validity(self):
+        for rows in (0, 1, 17, 257):
+            for dtype in (torch.int32, torch.int64):
+                with self.subTest(rows=rows, dtype=dtype):
+                    x, p = make_inputs(
+                        rows, 17, device="cuda", strided=True, dtype=dtype
+                    )
+                    storage = torch.full(
+                        (rows * 2 + 1, 7), 123, device="cuda", dtype=dtype
+                    )
+                    offset, size, start = (storage[1::2, i : i + 1] for i in (1, 3, 5))
+                    offset.fill_(2**31 - 9)
+                    size.fill_(13)
+                    start.fill_(31)
+                    if rows:
+                        offset[::3] = -7
+                        x[:, 0] = 2**31 - 1
+                        x[:, 2] = -2
+                    before = storage.clone()
+                    self.check(x, p, offset, size, start, 7)
+                    torch.testing.assert_close(storage, before, rtol=0, atol=0)
+                    # Read-only zero row strides are valid broadcast metadata.
+                    scalar = torch.tensor([[3]], device="cuda", dtype=dtype)
+                    self.check(x, p, scalar.expand(rows, 1), size, start, 7)
+
+    def test_int32_positions_wrap_before_arange_promotion(self):
+        x, _ = make_inputs(5, 17, device="cuda")
+        p = torch.tensor(
+            [-(2**31), -(2**31) + 3, -3, 0, 2**31 - 1],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        metadata = [
+            torch.full((5, 1), v, device="cuda", dtype=torch.int32)
+            for v in (7, 4096, 0)
+        ]
+        self.check(x, p, *metadata, 7)
+        self.check(x, p, 7, 4096, 0, 7)
+
+    def test_batched_graph_replay_metadata_updates_aliases_and_guards(self):
+        x, p = make_inputs(17, device="cuda", strided=True)
+        storage = torch.zeros((34, 6), device="cuda", dtype=torch.int64)
+        offset, size, start = (storage[::2, i : i + 1] for i in (0, 2, 4))
+        size.fill_(4096)
+        out = torch.empty((17, 640), device="cuda", dtype=torch.int32)
+        lengths = torch.empty(17, device="cuda", dtype=torch.int32)
+        call = lambda: fused.try_build_index_plan(
+            x, p, offset, size, start, out=out, lengths_out=lengths
+        )
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            call()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = call()
+        for shift in (2**31 - 10, 5):
+            offset.fill_(shift)
+            size.add_(3)
+            start.add_(7)
+            p.add_(19)
+            x[:, ::3] = -1
+            graph.replay()
+            for got, ref in zip(captured, reference_plan(x, p, offset, size, start)):
+                torch.testing.assert_close(got, ref, rtol=0, atol=0)
+        self.assertIs(captured[0], out)
+        # No launch or allocation is allowed for unsupported layouts or aliases.
+        aliased = out[:, :1]
+        for meta in (
+            (offset[:, 0], size, start),
+            (offset.float(), size, start),
+            (offset, size.cpu(), start),
+            (offset, size, 0),
+            (offset[:1], size, start),
+            (aliased, size, start),
+        ):
+            with patch.object(
+                torch, "empty", side_effect=AssertionError("fallback allocation")
+            ):
+                self.assertIsNone(
+                    fused.try_build_index_plan(
+                        x, p, *meta, out=out, lengths_out=lengths
+                    )
+                )
 
     def test_graph_replay_outputs_alias_checks_and_changed_inputs(self):
         x, p = make_inputs(32, device="cuda", strided=True)

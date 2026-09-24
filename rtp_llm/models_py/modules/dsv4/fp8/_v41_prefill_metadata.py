@@ -22,6 +22,85 @@ def _integer_vector(value, rows, device):
     )
 
 
+@triton.jit(do_not_specialize=["ROWS", "BATCH", "PS", "LS", "RS"])
+def _chunk_metadata_kernel(
+    prefixes,
+    lengths,
+    requests,
+    output,
+    ROWS,
+    BATCH,
+    PS,
+    LS,
+    RS,
+    RATIO: tl.constexpr,
+    WINDOW: tl.constexpr,
+    REPLAY: tl.constexpr,
+):
+    index = tl.arange(0, 128)
+    prefix = tl.load(prefixes + index * PS, index < BATCH, other=0).to(tl.int64)
+    length = tl.load(lengths + index * LS, index < BATCH, other=0).to(tl.int64)
+    tail = tl.full((128,), 0, tl.int64) if REPLAY else tl.minimum(prefix, WINDOW - 1)
+    size = prefix + length
+    if RATIO == 2:
+        size = size >> 1
+    chunk = size + length + tail
+    offset = tl.cumsum(chunk) - chunk
+    row = tl.program_id(0) * 128 + index
+    request = tl.load(requests + row * RS, row < ROWS, other=0).to(tl.int64)
+    request = tl.where(request < 0, request + BATCH, request)
+    valid = (request >= 0) & (request < BATCH)
+    if tl.sum(((row < ROWS) & ~valid).to(tl.int32), 0) > 0:
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
+    request = tl.minimum(tl.maximum(request, 0), 127).to(tl.int32)
+    tl.store(output + row, tl.gather(offset, request, 0), row < ROWS)
+    tl.store(output + ROWS + row, tl.gather(size, request, 0), row < ROWS)
+    tl.store(output + 2 * ROWS + row, tl.gather(prefix - tail, request, 0), row < ROWS)
+
+
+def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
+    """Original long-arithmetic chunk offsets, counts and SWA starts in one launch."""
+    if not (
+        isinstance(prefixes, torch.Tensor)
+        and isinstance(lengths, torch.Tensor)
+        and isinstance(requests, torch.Tensor)
+        and prefixes.is_cuda
+        and torch.version.hip is None
+        and 2 <= prefixes.numel() <= 128
+        and _integer_vector(prefixes, prefixes.numel(), prefixes.device)
+        and _integer_vector(lengths, prefixes.numel(), prefixes.device)
+        and _integer_vector(requests, requests.numel(), prefixes.device)
+        and prefixes.dtype == lengths.dtype
+        and requests.dtype == torch.int64
+        and ratio in (1, 2)
+        and type(window) is int
+        and window > 0
+        and type(replay) is bool
+    ):
+        return None
+    rows = requests.numel()
+    output = torch.empty((3, rows, 1), dtype=torch.int64, device=prefixes.device)
+    if rows:
+        _chunk_metadata_kernel[(triton.cdiv(rows, 128),)](
+            prefixes,
+            lengths,
+            requests,
+            output,
+            rows,
+            prefixes.numel(),
+            prefixes.stride(0),
+            lengths.stride(0),
+            requests.stride(0),
+            ratio,
+            window,
+            replay,
+            num_warps=4,
+        )
+    return output.unbind(0)
+
+
 @triton.jit(do_not_specialize=["ROWS", "REQUESTS", "COLS", "TABLE_STRIDE"])
 def _prefill_slots_kernel(
     positions,
@@ -109,7 +188,7 @@ def try_slot_mapping(
     ):
         return None
     owner_tpb = owner_tokens_per_block or tokens_per_block
-    if owner_tpb <= 0 or owner_tpb % tokens_per_block:
+    if owner_tpb <= 0 or (not state and owner_tpb % tokens_per_block):
         return None
     if seq_ends is not None and not _integer_vector(
         seq_ends, table.shape[0], positions.device

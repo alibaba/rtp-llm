@@ -1,5 +1,6 @@
 """Prefill slots preserve CP ownership, physical pages, and STATE tail writes."""
 
+import itertools
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +16,63 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillMetadataTest(unittest.TestCase):
+    def test_chunk_metadata_preserves_long_arithmetic(self):
+        for batch in (2, 32, 128):
+            for dtype in (torch.int32, torch.int64):
+                p = ((torch.arange(batch * 2, device="cuda", dtype=dtype) - 2) * 513)[
+                    ::2
+                ]
+                n = (torch.arange(batch * 2, device="cuda", dtype=dtype) * 137 + 1)[::2]
+                req = (
+                    (torch.arange(514, device="cuda", dtype=torch.int64) % batch)
+                    - batch
+                )[1::2]
+                for ratio, replay, window in itertools.product(
+                    (1, 2), (False, True), (1, 128)
+                ):
+                    prefix, length = p.long(), n.long()
+                    tail = (
+                        torch.zeros_like(prefix)
+                        if replay
+                        else prefix.clamp(max=window - 1)
+                    )
+                    sizes = (prefix + length) // ratio
+                    chunks = sizes + length + tail
+                    expected = (
+                        (chunks.cumsum(0) - chunks)[req, None],
+                        sizes[req, None],
+                        (prefix - tail)[req, None],
+                    )
+                    actual = fused.try_chunk_metadata(p, n, req, ratio, window, replay)
+                    self.assertIsNotNone(actual)
+                    for got, want in zip(actual, expected):
+                        torch.testing.assert_close(got, want, rtol=0, atol=0)
+        p = torch.tensor([2**31 - 1, 2**31 - 2], device="cuda", dtype=torch.int32)
+        n = torch.tensor([101, 259], device="cuda", dtype=torch.int32)
+        req = torch.tensor([0, 1], device="cuda", dtype=torch.int64)
+        sizes = (p.long() + n.long()) // 2
+        actual = fused.try_chunk_metadata(p, n, req, 2, 128, True)
+        torch.testing.assert_close(actual[1][:, 0], sizes, rtol=0, atol=0)
+        self.assertIsNone(fused.try_chunk_metadata(p, n.long(), req, 2, 128, True))
+
+    def test_chunk_metadata_graph_and_empty_rows(self):
+        p = torch.tensor([512, 16384, 30720], device="cuda", dtype=torch.int64)
+        n = torch.tensor([1, 7, 8], device="cuda", dtype=torch.int64)
+        req = torch.tensor([2, 1, 0], device="cuda", dtype=torch.int64)
+        fused.try_chunk_metadata(p, n, req, 2, 128, False)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = fused.try_chunk_metadata(p, n, req, 2, 128, False)
+        p.add_(17)
+        n.add_(3)
+        req.copy_(req.flip(0))
+        graph.replay()
+        expected = fused.try_chunk_metadata(p, n, req, 2, 128, False)
+        for got, want in zip(captured, expected):
+            torch.testing.assert_close(got, want, rtol=0, atol=0)
+        empty = fused.try_chunk_metadata(p, n, req[:0], 2, 128, False)
+        self.assertTrue(all(t.shape == (0, 1) for t in empty))
+
     def _inputs(self, dtype):
         # Strided vectors and tables, ragged prefixes, unallocated pages,
         # and positions beyond the final allocated physical page.
@@ -90,6 +148,50 @@ class PrefillMetadataTest(unittest.TestCase):
                             pos, table, req, 4, 256, cp, rank, ends
                         )
                         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_state_owner_span_independent_of_checkpoint_span(self):
+        for dtype in (torch.int32, torch.int64):
+            positions = torch.arange(0, 2049, device="cuda", dtype=dtype)
+            requests = positions % 3
+            table = torch.arange(1, 16, device="cuda", dtype=dtype).reshape(3, 5)
+            table[1, 1] = 0
+            for rank in range(4):
+                for end in (
+                    None,
+                    torch.tensor([513, 1024, 2049], device="cuda", dtype=dtype),
+                ):
+                    actual = fused.try_slot_mapping(
+                        positions,
+                        requests,
+                        table,
+                        3,
+                        512,
+                        2,
+                        4,
+                        rank,
+                        owner_tokens_per_block=128,
+                        state=True,
+                        seq_ends=end,
+                    )
+                    self.assertIsNotNone(actual)
+                    expected = cp_state_slot_mapping(
+                        positions, table, requests, 3, 512, 4, rank, end
+                    )
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            self.assertIsNone(
+                fused.try_slot_mapping(
+                    positions,
+                    requests,
+                    table,
+                    64,
+                    512,
+                    2,
+                    4,
+                    0,
+                    owner_tokens_per_block=128,
+                    state=False,
+                )
+            )
 
     def test_bounds_clamp_before_int32_conversion(self):
         for ratio in (1, 2):

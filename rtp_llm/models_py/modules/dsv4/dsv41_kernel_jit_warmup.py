@@ -98,6 +98,9 @@ def warmup_v41_dense_jit(model, *, max_m, device):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_output_projection
 
         for (groups, n, k), (name, attn) in outputs.items():
+            _v41_output_projection.warmup_quantized_output(
+                attn._wo_a_stk_w, attn._wo_a_stk_s
+            )
             grid = _dense_m_grid(max_m, n, k, sms, groups)
             logging.info("[DSV41 BatchedFP8Einsum] %s M=%s recipe=32", name, grid)
             for m in grid:

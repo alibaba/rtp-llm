@@ -21,6 +21,61 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_prefill_chunk_meta_cuda_mixed_replay(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_metadata
+
+        lengths = [1 + i * 137 % 2048 for i in range(32)]
+        prefixes = [i * 1024 for i in range(32)]
+        requests = torch.arange(2051, device="cuda", dtype=torch.long) % 32
+        for ratio in (1, 2):
+            for replay in (False, True):
+                attn = self._chunk_meta_fixture(ratio, 128)
+                attn.swa_bounded_replay = replay
+                tails = [0 if replay else min(p, 127) for p in prefixes]
+                globals_by_req = [
+                    (torch.empty((p + n) // ratio, 1), None)
+                    for p, n in zip(prefixes, lengths)
+                ]
+                swa = [torch.empty(n + t, 1) for n, t in zip(lengths, tails)]
+                starts = [p - t for p, t in zip(prefixes, tails)]
+                common = SimpleNamespace(
+                    cp_on=True,
+                    input_lengths=torch.ones(32, device="cuda", dtype=torch.int32),
+                    prefix_lengths=torch.tensor(
+                        prefixes, device="cuda", dtype=torch.int32
+                    ),
+                    cp_ctx=SimpleNamespace(
+                        input_lengths_global=torch.tensor(
+                            lengths, device="cuda", dtype=torch.int32
+                        )
+                    ),
+                )
+                original = _v41_prefill_metadata.try_chunk_metadata
+                calls = []
+
+                def checked(*args):
+                    value = original(*args)
+                    self.assertIsNotNone(value)
+                    calls.append(value)
+                    return value
+
+                with patch.object(_v41_prefill_metadata, "try_chunk_metadata", checked):
+                    actual = attn._prefill_chunk_meta(
+                        globals_by_req,
+                        swa,
+                        starts,
+                        requests,
+                        torch.device("cuda"),
+                        common=common,
+                    )
+                self.assertEqual(len(calls), 1)
+                expected = self._chunk_meta_reference(
+                    globals_by_req, swa, starts, requests.cpu()
+                )
+                for got, want in zip(actual, expected):
+                    torch.testing.assert_close(got.cpu(), want, rtol=0, atol=0)
+
     @staticmethod
     def _chunk_meta_fixture(ratio, window_size, *, pool_bound=True):
         attn = AttentionV41FP8.__new__(AttentionV41FP8)
@@ -28,6 +83,7 @@ class AttentionV41Test(unittest.TestCase):
         attn.layer_id = 2
         attn.compress_ratio = ratio
         attn.window_size = window_size
+        attn.swa_bounded_replay = False
         attn._shared_attention = {"layers": {2: attn}}
         attn._source_pool = lambda region: object() if pool_bound else None
         return attn
@@ -499,6 +555,38 @@ class AttentionV41Test(unittest.TestCase):
 
         attn._write_states = record_writes
         return attn
+
+    def test_global_pair_layout_reuse_does_not_reuse_values(self):
+        attn = self._kv_source_fixture([])
+        positions = torch.tensor([3, 4, 5, 6, 7, 8, 9, 10, 11])
+        requests = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 1])
+        starts, lengths = torch.tensor([3, 7]), torch.tensor([4, 5])
+        first = torch.randn(9, 4).bfloat16()
+        second = torch.randn(9, 4).bfloat16()
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.compressor._linear_bf16_bf16_fp32",
+            side_effect=lambda x, w: torch.nn.functional.linear(x.float(), w.float()),
+        ):
+            attn._produce_global(
+                first, positions, requests, starts, lengths, prefill=True
+            )
+            cache = attn._shared_attention["prefill_meta_common"]["global_pairs"]
+            indices = tuple(cache.values())
+            attn._produce_global(
+                second, positions, requests, starts, lengths, prefill=True
+            )
+            self.assertEqual(len(cache), len(indices))
+            self.assertTrue(all(a is b for a, b in zip(indices, cache.values())))
+            actual = attn._shared_attention["global"][2]
+            fresh = self._kv_source_fixture([])
+            fresh._produce_global(
+                second, positions, requests, starts, lengths, prefill=True
+            )
+            for pair, reference in zip(actual, fresh._shared_attention["global"][2]):
+                for result, expected in zip(pair, reference):
+                    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+            attn._begin_forward()
+            self.assertNotIn("prefill_meta_common", attn._shared_attention)
 
     def test_produce_global_tiling_is_bit_identical_across_tile_sizes(self):
         # Chunked gather-project: tiles cut at arbitrary rows (including inside

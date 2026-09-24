@@ -16,7 +16,9 @@ indexer projection needed to preserve BF16 head-weight rounding.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import Any, Optional, Tuple
 
 import torch
@@ -30,6 +32,7 @@ from rtp_llm.models_py.modules.dsv4.cp import CPContext
 _CP_SIZE = 4
 _TAIL_TOKENS = 3072
 _MIN_TOKENS = 32768
+_MIN_L20_SPLIT_TOKENS = 65536
 _DERIVED_KEYS = (
     "prefill_chunk_meta",
     "prefill_kv_workspace",
@@ -134,6 +137,9 @@ class _RowExchange:
     send_sizes: Tuple[int, ...]
     receive_sizes: Tuple[int, ...]
     group: Any
+    candidate_rows_host: Optional[Tuple[int, ...]] = None
+    projection_groups_host: Tuple = ()
+    receive_is_identity: bool = False
 
     def compact(self, value):
         if value.shape[0] != self.original_rows:
@@ -147,6 +153,8 @@ class _RowExchange:
             input_split_sizes=list(self.send_sizes),
             group=self.group,
         )
+        if self.receive_is_identity:
+            return received
         output = value.new_zeros((self.compact_rows, *value.shape[1:]))
         return output.index_copy_(0, self.receive_positions, received)
 
@@ -171,7 +179,7 @@ class _RowExchange:
         return out.index_copy_(0, self.send_indices, received)
 
 
-def _query_layout(original, selected, group):
+def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     """Derive transport from the actual engine inverse map, not rank0 ownership."""
     device = original.global_positions.device
     cp, rank = original.cp_size, original.cp_rank
@@ -196,6 +204,7 @@ def _query_layout(original, selected, group):
     local_real = torch.zeros(rows, dtype=torch.bool)
     local_real[local[own]] = True
     sends, receives, send_sizes, receive_sizes, indexer_groups = [], [], [], [], []
+    projection_groups_host = []
     for peer in range(cp):
         outgoing = (source_owners == rank) & (owners == peer)
         incoming = (source_owners == peer) & own
@@ -207,14 +216,34 @@ def _query_layout(original, selected, group):
             indexer_groups.append(
                 (local[incoming].to(device), source_rows[incoming].to(device))
             )
+            if keep_candidate_rows:
+                projection_groups_host.append(
+                    (
+                        tuple(local[incoming].tolist()),
+                        tuple(source_rows[incoming].tolist()),
+                    )
+                )
+    receive_positions_host = torch.cat(receives)
     exchange = _RowExchange(
         original.chunk_length,
         rows,
         torch.cat(sends).to(device),
-        torch.cat(receives).to(device),
+        receive_positions_host.to(device),
         tuple(send_sizes),
         tuple(receive_sizes),
         group,
+        candidate_rows_host=(
+            tuple(sorted(source_rows[source_owners == rank].tolist()))
+            if keep_candidate_rows
+            else None
+        ),
+        projection_groups_host=tuple(projection_groups_host),
+        receive_is_identity=(
+            sum(receive_sizes) == rows
+            and torch.equal(
+                receive_positions_host, torch.arange(rows, dtype=torch.int64)
+            )
+        ),
     )
     # Only query geometry changes. All write-side lengths and true prefixes
     # remain original; cp.py scatters gathered KV into that original fresh view.
@@ -246,6 +275,8 @@ class CEDPlan:
     _capture_ids: Tuple[int, ...]
     _compacted: bool = field(default=False, init=False)
     _aux_restored: bool = field(default=False, init=False)
+    _router_groups: Optional[Tuple] = field(default=None, init=False)
+    _router_chunk_rows: Optional[int] = field(default=None, init=False)
 
     @classmethod
     @torch.inference_mode()
@@ -335,7 +366,9 @@ class CEDPlan:
             or torch.distributed.get_rank(group) != cp_ctx.cp_rank
         ):
             raise ValueError("CED CP metadata does not match its process group")
-        context, exchange, indexer_groups = _query_layout(cp_ctx, selected, group)
+        context, exchange, indexer_groups = _query_layout(
+            cp_ctx, selected, group, keep_candidate_rows=bounded_replay
+        )
         if bounded_replay:
             context.swa_replay_start = cp_ctx.seq_len_full - 128
         return cls(
@@ -349,6 +382,149 @@ class CEDPlan:
             exchange,
             indexer_groups,
             tuple(v4.capture_aux_hidden_layer_ids),
+        )
+
+    @contextmanager
+    def candidate_publication(self, shared):
+        """Limit L20 publication only when this forward will compact its consumers."""
+        rows = self.exchange.candidate_rows_host
+        if self.context.swa_replay_start is None or rows is None:
+            yield
+            return
+        shared["ced_candidate_rows"] = rows
+        try:
+            yield
+        finally:
+            shared.pop("ced_candidate_rows", None)
+
+    def can_split_l20(self, v4):
+        """Keep Stage0 publication/compaction if a split interface is absent."""
+        if self.original_context.seq_len_full < _MIN_L20_SPLIT_TOKENS:
+            return False
+        block = v4.layers[20]
+        interfaces = (
+            self.context.swa_replay_start is not None
+            and callable(getattr(block, "forward_prefill_ced_l20", None))
+            and callable(getattr(block.attn, "_prefill_produce", None))
+            and callable(getattr(block.attn, "_prefill_query", None))
+            and hasattr(getattr(block, "attn_hc", None), "pre_mix_out")
+            and callable(getattr(getattr(block, "ffn", None), "_should_chunk", None))
+            and callable(
+                getattr(
+                    getattr(getattr(block, "ffn", None), "gate", None),
+                    "_project_scores",
+                    None,
+                )
+            )
+        )
+        if not interfaces:
+            return False
+        # The callback maps all compact rows. A separately chunked compact FFN
+        # would need its own call-local row offsets, so retain Stage0 there.
+        if block.ffn._should_chunk(self.context.chunk_length):
+            return False
+        from rtp_llm.models_py.modules.dsv4.hc.v41_mega_mhc import (
+            can_preserve_compact_mhc,
+        )
+
+        if not can_preserve_compact_mhc(
+            block.attn_hc,
+            getattr(block, "ffn_hc", None),
+            getattr(block, "ffn_norm", None),
+            original_tokens=self.original_context.chunk_length,
+            compact_tokens=self.context.chunk_length,
+        ):
+            return False
+        self._prepare_router_projection(block.ffn)
+        return True
+
+    def _prepare_router_projection(self, ffn):
+        """Prepare only eligible Stage1 maps during the pre-L0 admission check."""
+        if ffn._should_chunk(self.original_context.chunk_length):
+            rows = int(ffn.max_tokens_per_rank)
+            if self._router_groups is None or self._router_chunk_rows != rows:
+                self._router_groups = self._router_chunk_groups(rows)
+                self._router_chunk_rows = rows
+        else:
+            self._router_groups = None
+            self._router_chunk_rows = None
+
+    @contextmanager
+    def router_projection(self, ffn):
+        """Scope original-row router arithmetic to the compact L20 FFN."""
+        gate = getattr(ffn, "gate", None)
+        if (
+            not self._compacted
+            or self.context.swa_replay_start is None
+            or not callable(getattr(gate, "_project_scores", None))
+            or not callable(getattr(ffn, "_should_chunk", None))
+            or ffn._should_chunk(self.context.chunk_length)
+        ):
+            raise ValueError("L20 router projection requires a supported compact plan")
+        projection = self.project_indexer_weights
+        if ffn._should_chunk(self.original_context.chunk_length):
+            if self._router_groups is None or self._router_chunk_rows != int(
+                ffn.max_tokens_per_rank
+            ):
+                raise ValueError("CED router chunk mapping was not prepared before L0")
+            projection = partial(
+                self._project_original_rows, groups=self._router_groups
+            )
+        elif self._router_groups is not None:
+            raise ValueError("CED router chunk policy changed after admission")
+        missing = object()
+        previous = getattr(gate, "_ced_row_projection", missing)
+        gate._ced_row_projection = projection
+        try:
+            yield
+        finally:
+            if previous is missing:
+                del gate._ced_row_projection
+            else:
+                gate._ced_row_projection = previous
+
+    @torch.inference_mode()
+    def compact_l20(self, block, residual, post, comb, input_ids):
+        """Move the current Block state after full L20 source production."""
+        if (
+            self._compacted
+            or self.context.swa_replay_start is None
+            or block.layer_id != 20
+        ):
+            raise ValueError("invalid L20 CED transition")
+        shared = block.attn._shared_attention
+        if "ced_candidate_rows" in shared:
+            raise ValueError(
+                "L20 compact queries cannot use original-owner candidate rows"
+            )
+        residual = self.exchange.compact(residual)
+        post = self.exchange.compact(post)
+        comb = self.exchange.compact(comb)
+        input_ids = self.exchange.compact(input_ids)
+        block.attn_hc.pre_mix_out = self.exchange.compact(block.attn_hc.pre_mix_out)
+        shared["ced_indexer_projection"] = self.project_indexer_weights
+        for key in _DERIVED_KEYS:
+            shared.pop(key, None)
+        self._compacted = True
+        return residual, post, comb, input_ids
+
+    def l20_query_metadata(self, common):
+        """Replace only query fields; L20 keeps exact SWA/global visibility."""
+        if not self._compacted or self.context.swa_replay_start is None:
+            raise ValueError("L20 query metadata requires a completed transition")
+        query_context = replace(self.context, swa_replay_start=None)
+        rows = query_context.chunk_length
+        return common._replace(
+            seqlen=rows,
+            cp_ctx=query_context,
+            freqs_cis=self.exchange.compact(common.freqs_cis),
+            cu_seqlens=self.cu_seqlens,
+            input_lengths=self.cu_seqlens[1:],
+            position_ids=query_context.global_positions,
+            req_id_per_token=query_context.req_id_per_token,
+            max_seqlen_q=rows,
+            request_row_slices=(slice(0, rows),),
+            swa_meta=None,
         )
 
     @torch.inference_mode()
@@ -371,13 +547,49 @@ class CEDPlan:
         self._compacted = True
         return compact_hidden, compact_ids
 
+    def _router_chunk_groups(self, rows_per_chunk):
+        if rows_per_chunk <= 0 or not self.exchange.projection_groups_host:
+            raise ValueError("missing original router chunk geometry")
+        device = self.context.global_positions.device
+        groups = []
+        for compact_rows, original_rows in self.exchange.projection_groups_host:
+            # Keep original owners separate even when their chunk-local row
+            # indices coincide. All grouping uses metadata retained on CPU.
+            chunks = {}
+            for dst, src in zip(compact_rows, original_rows):
+                start = src // rows_per_chunk * rows_per_chunk
+                destinations, sources = chunks.setdefault(start, ([], []))
+                destinations.append(dst)
+                sources.append(src - start)
+            for start, (destinations, sources) in chunks.items():
+                groups.append(
+                    (
+                        torch.tensor(destinations, dtype=torch.long, device=device),
+                        torch.tensor(sources, dtype=torch.long, device=device),
+                        min(rows_per_chunk, self.original_context.chunk_length - start),
+                    )
+                )
+        return tuple(groups)
+
     def project_indexer_weights(self, x, weight):
+        return self._project_original_rows(
+            x,
+            weight,
+            (
+                (dst, src, self.original_context.chunk_length)
+                for dst, src in self.indexer_groups
+            ),
+        )
+
+    def _project_original_rows(self, x, weight, groups):
         # Original CP owners can share the same local row index. Group them
         # separately: scattering all compact rows into one M-sized matrix loses
         # values at those collisions and changes sparse attention selection.
+        if x.shape[0] != self.context.chunk_length:
+            raise ValueError("CED projection query row count changed")
         output = x.new_zeros((x.shape[0], weight.shape[0]))
-        for compact_rows, original_rows in self.indexer_groups:
-            full_x = x.new_zeros((self.original_context.chunk_length, x.shape[1]))
+        for compact_rows, original_rows, rows in groups:
+            full_x = x.new_zeros((rows, x.shape[1]))
             full_x.index_copy_(0, original_rows, x.index_select(0, compact_rows))
             projected = F.linear(full_x, weight).index_select(0, original_rows)
             output.index_copy_(0, compact_rows, projected)

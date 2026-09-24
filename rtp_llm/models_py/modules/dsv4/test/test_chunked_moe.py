@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ast
+import inspect
 import os
 import sys
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -52,11 +55,108 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
     DEFAULT_MOE_CHUNK_TOKENS,
     MoE,
     chunked_moe_enabled,
+    cp_padded_batch_tokens_per_rank_bound,
     cp_padded_tokens_per_rank_bound,
     moe_chunk_tokens_from_env,
     resolve_moe_max_tokens_per_rank,
 )
 from rtp_llm.models_py.modules.dsv4.moe.strategies.mega import _mega_output_capacity
+
+
+class BlockGateBudgetTest(unittest.TestCase):
+    def test_v41_prefill_only_without_moe_api_plumbing(self):
+        # Run the complete production constructor with heavyweight modules mocked.
+        path = Path(__file__).resolve().parent.parent / "block.py"
+        tree = ast.parse(path.read_text())
+        cls = next(
+            n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Block"
+        )
+        scope = dict(torch=torch, nn=nn)
+        prefix = ast.parse("from __future__ import annotations").body
+        exec(
+            compile(
+                ast.Module(body=prefix + [cls], type_ignores=[]), str(path), "exec"
+            ),
+            scope,
+        )
+        block_cls = scope["Block"]
+
+        class FakeModule(nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+        class FakeMoE(FakeModule):
+            def __init__(self, **kwargs):
+                super().__init__()
+                self.gate = nn.Module()
+                self.kwargs = kwargs
+
+        scope.update(
+            AttentionFP8=FakeModule,
+            CommitOnlyAttentionFP8=FakeModule,
+            MoE=FakeMoE,
+            RMSNorm=FakeModule,
+            build_hc_unit=FakeModule,
+        )
+        names = (
+            "v4_attn_norm",
+            "v4_ffn_norm",
+            "v4_hc_attn_fn",
+            "v4_hc_attn_base",
+            "v4_hc_attn_scale",
+            "v4_hc_ffn_fn",
+            "v4_hc_ffn_base",
+            "v4_hc_ffn_scale",
+        )
+        weights = {name: torch.ones(1) for name in names}
+        modules = {}
+        for name, attrs in {
+            "rtp_llm.models_py.modules.dsv4.fp8.attention_v41": {
+                "AttentionV41FP8": FakeModule
+            },
+            "rtp_llm.models_py.modules.dsv4.fp8.attention_v41_commit": {
+                "CommitOnlyAttentionV41FP8": FakeModule
+            },
+            "rtp_llm.models_py.modules.dsv4.hc.delayed": {"DelayedHCUnit": FakeModule},
+            "rtp_llm.utils.model_weight": {
+                "W": SimpleNamespace(**{n: n for n in names})
+            },
+        }.items():
+            module = types.ModuleType(name)
+            vars(module).update(attrs)
+            modules[name] = module
+        args = {
+            name: 1
+            for name, param in inspect.signature(block_cls).parameters.items()
+            if param.default is inspect.Parameter.empty
+        }
+        for v41, decode, commit in (
+            (None, False, False),
+            (None, True, False),
+            ({}, False, False),
+            ({}, True, False),
+            ({}, False, True),
+        ):
+            with self.subTest(v41=v41, decode=decode, commit=commit), mock.patch.dict(
+                sys.modules, modules
+            ), mock.patch.object(
+                block_cls, "_resolve_prefill_fast_hc_impls", return_value=None
+            ):
+                block = block_cls(
+                    **args,
+                    layer_weights=weights,
+                    v41_config=v41,
+                    is_decode_role=decode,
+                    commit_only=commit,
+                )
+                if commit:
+                    self.assertIsNone(block.ffn)
+                    continue
+                self.assertEqual(
+                    getattr(block.ffn.gate, "_prefill_gate_chunk_rows", 0),
+                    32768 if v41 is not None and not decode else 0,
+                )
+                self.assertNotIn("_prefill_gate_chunk_rows", block.ffn.kwargs)
 
 
 class _FakeGate(nn.Module):
@@ -160,6 +260,7 @@ def _fake_moe(dim: int, cap: int, is_decode_role: bool = False) -> MoE:
     moe._shared_executor = _FakeSharedExecutor()
     moe._strategy = _FakeStrategy(cap)
     moe._gate_pack_static = False
+    moe._has_visual_tokens = False
     return moe
 
 
@@ -251,6 +352,26 @@ class ChunkedMoETest(unittest.TestCase):
                 max_generate_batch_size=8,
             )
         self.assertEqual(budget, 65536)
+
+    def test_v41_batch_padding_bound_then_global_chunk_cap(self):
+        lengths = [4105] * 12 + [4097] * 20
+        self.assertEqual(sum(lengths), 131200)
+        bound = cp_padded_batch_tokens_per_rank_bound(131200, 4, len(lengths))
+        self.assertEqual(bound, sum(2 * ((n + 7) // 8) for n in lengths))
+        self.assertEqual(bound, 32856)
+        for chunk, expected in ((16384, 16384), (32768, 32768), (33280, 32856)):
+            with self.subTest(chunk=chunk), mock.patch.dict(
+                os.environ, {"DSV4_CHUNK_TOKENS": str(chunk)}, clear=True
+            ):
+                self.assertEqual(
+                    resolve_moe_max_tokens_per_rank(
+                        max_seq_len=131200,
+                        current_max_tokens_per_rank=bound,
+                        cp_size=1,
+                        max_generate_batch_size=32,
+                    ),
+                    expected,
+                )
 
     def test_cp_token_budget_includes_zigzag_padding(self):
         self.assertEqual(cp_padded_tokens_per_rank_bound(200002, 4), 50002)

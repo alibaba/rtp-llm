@@ -35,6 +35,46 @@ def attention(layer, ratio=2, producer=False):
 
 
 class V41AttentionWarmupCPU(unittest.TestCase):
+    def test_joint_pool_layout_fallback_and_required_compilation(self):
+        package = "rtp_llm.models_py.modules.dsv4.fp8"
+        joint = SimpleNamespace(
+            PoolLayout=SimpleNamespace,
+            is_supported_layout=Mock(return_value=True),
+            warmup=Mock(return_value=True),
+        )
+        modules = {
+            "torch": SimpleNamespace(int32="int32", int64="int64"),
+            package: SimpleNamespace(_v41_joint_pool=joint),
+        }
+        main = warmup.PoolLayout(1, 64, 64 * 288, 128, 512, 2)
+        index = warmup.PoolLayout(2, 128, 128 * 68, 128, 512, 2)
+        with patch.dict(sys.modules, modules):
+            warmup._warm_joint_pool(main, index, 3, "private-device")
+            self.assertEqual(joint.warmup.call_count, 4)
+            self.assertEqual(
+                {
+                    (c.args[0].table_dtype, c.args[1].table_dtype)
+                    for c in joint.warmup.call_args_list
+                },
+                {(a, b) for a in ("int32", "int64") for b in ("int32", "int64")},
+            )
+            for call in joint.warmup.call_args_list:
+                self.assertEqual(call.args[0].entries_per_block, 64)
+                self.assertEqual(call.args[1].entries_per_block, 128)
+                self.assertEqual(call.args[0].owner_tokens_per_block, 512)
+                self.assertEqual(call.args[0].ratio, 2)
+                self.assertEqual(
+                    call.kwargs, dict(cp_size=4, cp_rank=3, device="private-device")
+                )
+            joint.warmup.reset_mock()
+            joint.is_supported_layout.return_value = False
+            warmup._warm_joint_pool(main, index, 3, "private-device")
+            joint.warmup.assert_not_called()
+            joint.is_supported_layout.return_value = True
+            joint.warmup.return_value = False
+            with self.assertRaisesRegex(RuntimeError, "joint pool readback"):
+                warmup._warm_joint_pool(main, index, 3, "private-device")
+
     def test_collects_live_ratios_and_deduplicates_layers(self):
         modules = [
             attention(0, 0),
@@ -119,9 +159,162 @@ class V41AttentionWarmupCPU(unittest.TestCase):
         result = object()
         self.assertIs(warmup._require_launch(result, "producer"), result)
 
-    def test_short_context_does_not_warm_unreachable_candidates(self):
+    def test_short_context_has_no_topk_width_buckets(self):
         for length in (4096, 8192, 16384):
             self.assertEqual(warmup._candidate_widths(length, 8, 2048), ())
+
+    def test_candidate_warmup_covers_all_blocks_fit_boundary_and_visible_views(self):
+        import torch
+
+        # Execute the unchanged candidate-only section, with the preceding Q
+        # preparation excluded. No GPU/JIT implementation is imported here.
+        path = _FP8 / "_v41_attention_jit_warmup.py"
+        tree = ast.parse(path.read_text())
+        fn = next(
+            n
+            for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name == "_warm_indexer_layout"
+        )
+        first = next(
+            i
+            for i, n in enumerate(fn.body)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "config" for t in n.targets)
+        )
+        last = next(
+            i
+            for i, n in enumerate(fn.body[first:], first)
+            if isinstance(n, ast.For)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == "width"
+        )
+        candidate_fn = ast.parse(
+            "def candidate_only(attn, max_seq_len, device, rows, vector_stride, vector_offset, candidates):\n    pass\n"
+        ).body[0]
+        candidate_fn.body = fn.body[first : last + 1]
+        scope = dict(vars(warmup), torch=torch)
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[candidate_fn], type_ignores=[])
+                ),
+                str(path),
+                "exec",
+            ),
+            scope,
+        )
+        attn = attention(20, ratio=1, producer=True)
+        attn.v41_config = {"candidate_topk_blocks": 2048, "candidate_block_size": 8}
+
+        def select(
+            logits,
+            visible,
+            block,
+            count,
+            *,
+            build_bitmap=True,
+            mask_tail=False,
+            token_indices=None,
+            token_ends=None,
+        ):
+            if mask_tail:
+                self.assertEqual(token_indices.shape, (len(logits), 512))
+                self.assertEqual(token_indices.dtype, torch.int32)
+                self.assertTrue(token_indices.is_contiguous())
+                self.assertIs(token_ends, visible)
+                self.assertTrue(token_ends.is_contiguous())
+            ids = torch.zeros(
+                (len(logits), min(count, (logits.shape[1] + block - 1) // block)),
+                dtype=torch.int32,
+            )
+            return (
+                ids,
+                (
+                    torch.zeros((len(logits), 1), dtype=torch.int32)
+                    if build_bitmap
+                    else None
+                ),
+            )
+
+        candidates = SimpleNamespace(
+            select_candidates=Mock(side_effect=select),
+            is_supported=lambda *a: True,
+            bitmap_is_bounded=lambda *a: True,
+            build_flags=Mock(return_value=torch.zeros((2, 1), dtype=torch.int32)),
+            mask_candidates=Mock(return_value=True),
+        )
+        with patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ) as cuda_init:
+            for length in (7, 8192, 16384, 16385, 32768):
+                for stride in (1, 2):
+                    for offset in (0, 1):
+                        candidates.select_candidates.reset_mock()
+                        candidates.build_flags.reset_mock()
+                        candidates.mask_candidates.reset_mock()
+                        scope["candidate_only"](
+                            attn, length, "cpu", 4, stride, offset, candidates
+                        )
+                        all_calls = candidates.select_candidates.call_args_list
+                        calls = [c for c in all_calls if not c.kwargs.get("mask_tail")]
+                        fused = [c for c in all_calls if c.kwargs.get("mask_tail")]
+                        direct = [
+                            c for c in calls if c.kwargs.get("build_bitmap") is False
+                        ]
+                        bitmap = [
+                            c for c in calls if c.kwargs.get("build_bitmap", True)
+                        ]
+                        widths = set(warmup._candidate_widths(length, 8, 2048)) | {
+                            min(length, 16384)
+                        }
+                        self.assertEqual(
+                            len(fused), 2 * len(widths) if stride == 1 else 0
+                        )
+                        if stride == 1:
+                            self.assertEqual(
+                                {
+                                    (c.args[0].shape[1], c.kwargs["build_bitmap"])
+                                    for c in fused
+                                },
+                                {
+                                    (width, bitmap)
+                                    for width in widths
+                                    for bitmap in (False, True)
+                                },
+                            )
+                        self.assertEqual({c.args[0].shape[1] for c in direct}, widths)
+                        self.assertEqual(len(direct), 2 * len(widths))
+                        self.assertEqual(len(bitmap), len(direct))
+                        self.assertEqual(
+                            {c.args[1].dtype for c in direct},
+                            {torch.int32, torch.int64},
+                        )
+                        self.assertTrue(
+                            any((c.args[0].shape[1] + 7) // 8 <= 2048 for c in direct)
+                        )
+                        self.assertEqual(
+                            any(c.args[0].shape[1] > 16384 for c in direct),
+                            length > 16384,
+                        )
+                        for call in direct:
+                            logits, visible = call.args[:2]
+                            self.assertEqual(logits.stride(0), logits.shape[1] + 256)
+                            self.assertEqual(visible.stride(0), stride)
+                            self.assertEqual(visible.storage_offset(), offset)
+                        self.assertEqual(candidates.build_flags.call_count, len(direct))
+                        self.assertEqual(
+                            candidates.mask_candidates.call_count, 2 * len(direct)
+                        )
+            # These row-layout passes must not repeat the candidate bucket work.
+            for rows in (1, 2):
+                candidates.select_candidates.reset_mock()
+                scope["candidate_only"](attn, 32768, "cpu", rows, 1, 0, candidates)
+                candidates.select_candidates.assert_not_called()
+            candidates.select_candidates.side_effect = None
+            candidates.select_candidates.return_value = None
+            with self.assertRaisesRegex(RuntimeError, "candidate selection"):
+                scope["candidate_only"](attn, 16384, "cpu", 4, 1, 0, candidates)
+            cuda_init.assert_not_called()
 
     def test_every_reachable_bitmap_tile_is_covered_at_512k(self):
         widths = warmup._candidate_widths(524288, 8, 2048)
@@ -200,19 +393,84 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             ),
             _v41_sparse_prefill_indexer=sparse,
         )
-        with patch.dict(sys.modules, {"rtp_llm.models_py.modules.dsv4.fp8": package}):
+
+        class Kernel:
+            def __init__(self):
+                self.launch = Mock()
+
+            def __getitem__(self, grid):
+                return self.launch
+
+        grouped_bounds, mask_tail = Kernel(), Kernel()
+        grouped_score = Mock(return_value=torch.zeros(1, 1024))
+        package_name = "rtp_llm.models_py.modules.dsv4.fp8"
+        modules = {
+            package_name: package,
+            package_name
+            + "._indexer_score": SimpleNamespace(
+                fp8_fp4_mqa_indexer_score=grouped_score
+            ),
+            package_name
+            + "._v41_grouped_prefill_score": SimpleNamespace(
+                _grouped_score_bounds_kernel=grouped_bounds,
+                _mask_tail_kernel=mask_tail,
+            ),
+        }
+        # Exercise SM100 branches with CPU tensors; fail on any real CUDA init.
+        with patch.dict(sys.modules, modules), patch.object(
+            warmup, "__package__", package_name
+        ), patch.object(
+            warmup,
+            "__spec__",
+            importlib.util.spec_from_loader(
+                package_name + "._v41_attention_jit_warmup", loader=None
+            ),
+        ), patch.object(
+            torch.cuda, "get_device_capability", return_value=(10, 0)
+        ) as capability, patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ) as cuda_init:
             warmup._warm_indexer_layout(
                 attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
             )
             meta.try_score_bounds.assert_called_once()
-            self.assertEqual(sparse.prepare_plan.call_count, 2)
-            self.assertEqual(sparse.remap.call_count, 2)
+            capability.assert_called_once_with("cpu")
+            grouped_bounds.launch.assert_called_once()
+            grouped_score.assert_called_once()
+            mask_tail.launch.assert_called_once()
+            # Each visible dtype warms both plain and mixed-request lookup plans.
+            self.assertEqual(sparse.prepare_plan.call_count, 8)
+            self.assertEqual(
+                {
+                    call.kwargs.get("positions_ratio")
+                    for call in sparse.prepare_plan.call_args_list
+                },
+                {None, 1, 2},
+            )
+            self.assertEqual(sparse.remap.call_count, 4)
+            for i, dtype in enumerate((torch.int32, torch.int64)):
+                plain, lookup, ratio1, ratio2 = sparse.prepare_plan.call_args_list[
+                    4 * i : 4 * i + 4
+                ]
+                self.assertEqual(ratio1.kwargs["positions_ratio"], 1)
+                self.assertEqual(ratio2.kwargs["positions_ratio"], 2)
+                self.assertEqual(ratio1.args[1].dtype, dtype)
+                self.assertEqual(ratio2.args[1].dtype, dtype)
+                self.assertEqual(plain.args[1].dtype, dtype)
+                self.assertEqual(plain.kwargs, {})
+                self.assertEqual(lookup.kwargs["request_ids"].dtype, torch.int64)
+                self.assertEqual(lookup.kwargs["request_ids"].tolist(), [1])
+                counts = lookup.kwargs["request_key_counts"]
+                self.assertEqual(counts.dtype, torch.int32)
+                self.assertEqual(counts.tolist(), [16392, 16392])
+                self.assertEqual(lookup.args[2], 16640 + 16392)
             # Supported warmup work must fail loudly if a helper stops launching.
             meta.try_score_bounds.return_value = None
             with self.assertRaisesRegex(RuntimeError, "score bounds"):
                 warmup._warm_indexer_layout(
                     attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
                 )
+            cuda_init.assert_not_called()
 
     def test_slot_table_alignment_is_independent_of_position_alignment(self):
         self.assertEqual(

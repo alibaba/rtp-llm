@@ -206,6 +206,64 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                 warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertFalse(warmup._DENSE_WARMED)
 
+    def output_fixture(self):
+        self.dense_fixture()
+        output = sys.modules[
+            "rtp_llm.models_py.modules.dsv4.fp8._v41_output_projection"
+        ]
+        output.is_supported.return_value = True
+        output.warmup_quantized_output = mock.Mock(return_value=False)
+        output.grouped_output_projection = mock.Mock()
+        attn = types.SimpleNamespace(
+            _wo_a_stk_w=object(),
+            _wo_a_stk_s=object(),
+            n_heads=64,
+            head_dim=512,
+            rope_head_dim=64,
+        )
+        warmup.collect_v41_dense_shapes.return_value = (
+            {},
+            {(8, 1024, 4096): ("wo_a", attn)},
+        )
+        self.stack.enter_context(
+            mock.patch.object(
+                warmup.torch,
+                "ones",
+                side_effect=lambda size, **kw: torch.empty(size, dtype=kw["dtype"]),
+            )
+        )
+        return output, attn
+
+    def test_wo_a_epilogue_warmup_precedes_fallback_grid_and_memoizes(self):
+        output, attn = self.output_fixture()
+        calls = []
+        output.warmup_quantized_output.side_effect = lambda *args: calls.append(
+            "prepare"
+        )
+        output.grouped_output_projection.side_effect = lambda x, *args: calls.append(
+            x.shape[0]
+        )
+        warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+        warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+        output.warmup_quantized_output.assert_called_once_with(
+            attn._wo_a_stk_w, attn._wo_a_stk_s
+        )
+        self.assertEqual(calls, ["prepare", 1, 3])
+
+    def test_wo_a_epilogue_warmup_failure_does_not_poison_retry(self):
+        output, _ = self.output_fixture()
+        output.warmup_quantized_output.side_effect = RuntimeError(
+            "epilogue compile failed"
+        )
+        with self.assertRaisesRegex(RuntimeError, "epilogue compile failed"):
+            warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+        self.assertFalse(warmup._DENSE_WARMED)
+        output.grouped_output_projection.assert_not_called()
+        output.warmup_quantized_output.side_effect = None
+        warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+        self.assertEqual(output.warmup_quantized_output.call_count, 2)
+        self.assertEqual(output.grouped_output_projection.call_count, 2)
+
     def prefill_fixture(self):
         calls = {}
         for name in (

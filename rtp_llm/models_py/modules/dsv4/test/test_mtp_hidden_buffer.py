@@ -1,3 +1,4 @@
+import os
 import types
 import unittest
 from itertools import product
@@ -5,6 +6,7 @@ from unittest import mock
 
 import torch
 
+from rtp_llm.models_py.model_desc import deepseek_v4_model as model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     DeepSeekV4Model,
     Dsv4MtpHiddenBufferSpec,
@@ -62,6 +64,67 @@ class MtpHiddenBufferTest(unittest.TestCase):
             _is_speculative=speculative,
             _gen_num_per_cycle=gen_num_per_cycle,
         )
+
+    def test_initialization_uses_v41_batch_budget_before_chunk_cap(self):
+        cases = (
+            # v41, CP, scheduler tokens, maxgen, decode, speculative, budget, cap
+            (True, 4, 131200, 32, False, False, 32856, 32856),
+            (True, 4, 131200, 64, False, False, 32912, 32912),
+            (True, 8, 131200, 32, False, False, 16460, 16460),
+            (True, 1, 131200, 32, False, False, 131200, 33280),
+            (False, 4, 131200, 32, False, False, 32800, 32800),
+            (True, 4, 0, 32, False, False, 32800, 32800),
+            (True, 4, None, 32, False, False, 32800, 32800),
+            (True, 4, 131200, 32, True, False, 32800, 32),
+            (True, 4, 131200, 64, True, True, 32800, 384),
+        )
+        for v41, cp, tokens, batch, decode, speculative, budget, cap in cases:
+            with self.subTest(case=(v41, cp, tokens, batch, decode, speculative)):
+                model = DeepSeekV4Model.__new__(DeepSeekV4Model)
+                torch.nn.Module.__init__(model)
+                fixture = self._capacity_model(
+                    v41=v41,
+                    cp_size=cp,
+                    max_seq_len=131200,
+                    max_batch_size=batch,
+                    context_batch_size=1,
+                )
+                for name, value in vars(fixture).items():
+                    setattr(model, name, value)
+                model._v4_args.max_tokens_per_rank = 32800
+                model._v4_args.commit_only = True
+                model._materialized = False
+                model.weight = types.SimpleNamespace(
+                    global_weights={"stub": torch.empty(0)}
+                )
+                resource = types.SimpleNamespace(
+                    kv_cache=None,
+                    is_speculative=speculative,
+                    is_decode_role=decode,
+                    max_context_batch_size=1,
+                )
+                if tokens is not None:
+                    resource.max_batch_tokens_size = tokens
+                # Stop after the real initialization has resolved the budget.
+                with (
+                    mock.patch.dict(os.environ, {"DSV4_CHUNK_TOKENS": "33280"}),
+                    mock.patch.object(
+                        DeepSeekV4Model, "_initialize_commit_only", return_value=True
+                    ) as materialize,
+                    mock.patch.object(
+                        model_module,
+                        "resolve_moe_max_tokens_per_rank",
+                        wraps=model_module.resolve_moe_max_tokens_per_rank,
+                    ) as resolve,
+                ):
+                    self.assertTrue(model._initialize_impl(resource))
+                self.assertEqual(
+                    resolve.call_args.kwargs["current_max_tokens_per_rank"], budget
+                )
+                self.assertEqual(resolve.call_args.kwargs["cp_size"], 1)
+                self.assertEqual(model._v4_args.max_tokens_per_rank, cap)
+                self.assertEqual(model._v4_args.max_seq_len, 131200)
+                materialize.assert_called_once_with(resource, "cpu")
 
     def test_v41_aux_capacity_covers_many_independently_padded_requests(self):
         model = self._capacity_model()
@@ -311,11 +374,14 @@ class MtpHiddenBufferTest(unittest.TestCase):
 
         from rtp_llm.models_py.modules.dsv4.moe import mega_se_buf
 
-        with mock.patch.object(
-            mega_se_buf, "_MEGA_SE_OUTPUT_CACHE", {}
-        ), mock.patch.object(mega_se_buf, "_MEGA_SE_BUF_CACHE", {}), mock.patch(
-            "rtp_llm.model_loader.weight_memory_saver.pausable_empty", wraps=torch.empty
-        ) as allocate:
+        with (
+            mock.patch.object(mega_se_buf, "_MEGA_SE_OUTPUT_CACHE", {}),
+            mock.patch.object(mega_se_buf, "_MEGA_SE_BUF_CACHE", {}),
+            mock.patch(
+                "rtp_llm.model_loader.weight_memory_saver.pausable_empty",
+                wraps=torch.empty,
+            ) as allocate,
+        ):
             first = mega_se_buf._get_or_create_mega_se_output(
                 8, 4, torch.bfloat16, "cpu"
             )

@@ -76,6 +76,7 @@ def _select_tokens(
     *,
     bounds=None,
     out=None,
+    filter_finite=True,
 ) -> torch.Tensor:
     """Use native v3 selection, which canonicalizes both NaN signs."""
     rows, width = logits.shape
@@ -91,10 +92,21 @@ def _select_tokens(
         if out is not None
         else torch.empty((rows, topk), device=logits.device, dtype=torch.int32)
     )
-    rtp_llm_ops.topk_v3(
-        logits, ends, output, _get_topk_workspace(logits.device), topk, width
+    finite_select = (
+        getattr(rtp_llm_ops, "dsv41_topk_v3_finite", None) if filter_finite else None
     )
-    _prefill_topk_finite_kernel[(rows,)](logits, ends, output, logits.stride(0), topk)
+    select = finite_select if finite_select is not None else rtp_llm_ops.topk_v3
+    select(logits, ends, output, _get_topk_workspace(logits.device), topk, width)
+    if filter_finite and finite_select is None:
+        finish_tokens(logits, ends, output)
+    return output
+
+
+def finish_tokens(logits, ends, output):
+    """Finish a previously qualified raw selection with the original predicate."""
+    _prefill_topk_finite_kernel[(logits.shape[0],)](
+        logits, ends, output, logits.stride(0), output.shape[1]
+    )
     return output
 
 
@@ -105,9 +117,16 @@ def try_select_tokens(
     *,
     bounds=None,
     out=None,
+    filter_finite=True,
 ) -> torch.Tensor | None:
-    """Return selected int32 indices, or None before launching if unsupported."""
+    """Return selected int32 indices, or None before launching if unsupported.
+
+    A caller disabling finite filtering must supply bounds/output and complete
+    the same filter before exposing the result, including on epilogue fallback.
+    """
     if not is_supported(logits, visible, topk):
+        return None
+    if not filter_finite and (bounds is None or out is None):
         return None
     if bounds is not None and not (
         len(bounds) == 2
@@ -127,4 +146,6 @@ def try_select_tokens(
         and out.is_contiguous()
     ):
         return None
-    return _select_tokens(logits, visible, topk, bounds=bounds, out=out)
+    return _select_tokens(
+        logits, visible, topk, bounds=bounds, out=out, filter_finite=filter_finite
+    )

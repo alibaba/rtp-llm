@@ -124,6 +124,208 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
 
+    @torch.no_grad()
+    def test_pool_torch_bits_with_causal_mask_and_token_epilogue(self):
+        patterns = torch.tensor(
+            [
+                0,
+                -2147483648,
+                -1082130432,
+                0x3F800000,
+                0x7F800000,
+                -8388608,
+                0x7FC00001,
+                0x7FC01234,
+                -4194303,
+            ],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        for block in (1, 2, 4, 8, 16, 32):
+            width = 521 * block - 1
+            torch.manual_seed(33000 + block)
+            raw = patterns[torch.randint(len(patterns), (4, width + 17), device="cuda")]
+            raw = raw.view(torch.float32)[:, :width]
+            ends = torch.tensor(
+                [0, 1, width - 3, width], device="cuda", dtype=torch.int32
+            )
+            clean = raw.masked_fill(
+                torch.arange(width, device="cuda")[None] >= ends[:, None], -torch.inf
+            )
+            nblocks = (width + block - 1) // block
+            expected = F.pad(clean, (0, nblocks * block - width), value=-torch.inf)
+            expected = expected.reshape(4, nblocks, block).amax(-1)
+            expected.scatter_(
+                1,
+                ((ends.long() - 1).clamp_min(0) // block)[:, None],
+                torch.where(ends > 0, torch.inf, -torch.inf)[:, None],
+            )
+            for fused_epilogue in (False, True):
+                with self.subTest(block=block, fused=fused_epilogue):
+                    tokens = torch.arange(512, device="cuda", dtype=torch.int32)[
+                        None
+                    ].repeat(4, 1)
+                    expected_tokens = torch.where(
+                        (tokens < ends[:, None]) & clean[:, :512].isfinite(), tokens, -1
+                    )
+                    output = torch.empty_like(expected)
+                    source = raw if fused_epilogue else clean
+                    fused._prefill_candidate_pool_kernel[(4, (nblocks + 127) // 128)](
+                        source,
+                        ends,
+                        output,
+                        width,
+                        source.stride(0),
+                        1,
+                        block,
+                        nblocks,
+                        128,
+                        MASK_TAIL=fused_epilogue,
+                        token_indices=tokens if fused_epilogue else None,
+                        token_ends=ends if fused_epilogue else None,
+                        FILTER_TOKENS=fused_epilogue,
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            output.view(torch.int32), expected.view(torch.int32)
+                        )
+                    )
+                    if fused_epilogue:
+                        self.assertTrue(torch.equal(tokens, expected_tokens))
+
+    @torch.no_grad()
+    def test_publication_filter_graph_replay_matches_masked_reference(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as topk
+
+        for width in (1033, 32769):
+            for bitmap in (False, True):
+                with self.subTest(width=width, bitmap=bitmap):
+                    torch.manual_seed(33001)
+                    logits = torch.randn(4, width + 17, device="cuda")[:, :width]
+                    ends = torch.full((4,), width, device="cuda", dtype=torch.int32)
+                    bounds = (torch.zeros_like(ends), ends)
+                    tokens = torch.empty(4, 512, device="cuda", dtype=torch.int32)
+                    candidates = torch.empty(4, 2048, device="cuda", dtype=torch.int32)
+                    flags = (
+                        torch.empty(
+                            4,
+                            fused.bitmap_words(width, 8),
+                            device="cuda",
+                            dtype=torch.int32,
+                        )
+                        if bitmap
+                        else None
+                    )
+
+                    def run():
+                        self.assertIs(
+                            topk.try_select_tokens(
+                                logits,
+                                ends,
+                                bounds=bounds,
+                                out=tokens,
+                                filter_finite=False,
+                            ),
+                            tokens,
+                        )
+                        self.assertIsNotNone(
+                            fused.select_candidates(
+                                logits,
+                                ends,
+                                8,
+                                2048,
+                                out=candidates,
+                                flags=flags,
+                                build_bitmap=bitmap,
+                                mask_tail=True,
+                                token_indices=tokens,
+                                token_ends=ends,
+                            )
+                        )
+
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        run()
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            run()
+                    torch.cuda.current_stream().wait_stream(stream)
+                    for changed in (False, True):
+                        if changed:
+                            ends.copy_(
+                                torch.tensor(
+                                    [0, 1, 511, width - 3],
+                                    device="cuda",
+                                    dtype=torch.int32,
+                                )
+                            )
+                            logits[:, ::19] = torch.nan
+                            logits[:, ::31] = torch.inf
+                            logits[:, ::43] = -torch.inf
+                            logits[:, 4::47] = -0.0
+                            logits[:, 5::47] = 0.0
+                        graph.replay()
+                        clean = logits.masked_fill(
+                            torch.arange(width, device="cuda")[None] >= ends[:, None],
+                            -torch.inf,
+                        )
+                        expected_tokens = topk.try_select_tokens(
+                            clean, ends, bounds=bounds
+                        )
+                        self.assertTrue(
+                            (
+                                (tokens == -1)
+                                | ((tokens >= 0) & (tokens < ends[:, None]))
+                            )
+                            .all()
+                            .item()
+                        )
+                        if not changed:
+                            self.assertTrue(
+                                torch.equal(
+                                    tokens.sort(-1).values,
+                                    expected_tokens.sort(-1).values,
+                                )
+                            )
+                        actual_values = clean.gather(
+                            1, tokens.clamp_min(0).long()
+                        ).masked_fill(tokens < 0, -torch.inf)
+                        expected_values = clean.gather(
+                            1, expected_tokens.clamp_min(0).long()
+                        ).masked_fill(expected_tokens < 0, -torch.inf)
+                        self.assertTrue(
+                            torch.equal(
+                                actual_values.sort(-1).values,
+                                expected_values.sort(-1).values,
+                            )
+                        )
+                        self.assertTrue(
+                            torch.equal(
+                                (tokens >= 0).sum(-1), (expected_tokens >= 0).sum(-1)
+                            )
+                        )
+                        for row in tokens:
+                            self.assertEqual(
+                                row[row >= 0].numel(), row[row >= 0].unique().numel()
+                            )
+                        expected = reference_select(clean, ends, 8, 2048)
+                        expected = F.pad(
+                            expected, (0, 2048 - expected.shape[1]), value=-1
+                        )
+                        self.assertTrue(
+                            torch.equal(
+                                candidates.sort(-1).values, expected.sort(-1).values
+                            )
+                        )
+                        if bitmap:
+                            self.assertTrue(torch.equal(candidates, expected))
+                            self.assertTrue(
+                                torch.equal(
+                                    flags, fused.build_flags(expected, width, 8)
+                                )
+                            )
+
     def check_case(self, logits, visible, block=8, k=2048):
         before = logits.clone()
         expected = reference_select(logits, visible, block, k)
@@ -135,6 +337,16 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         rebuilt = fused.build_flags(actual, logits.shape[1], block)
         torch.testing.assert_close(rebuilt, flags, rtol=0, atol=0)
+        unordered, unused_flags = fused.select_candidates(
+            logits, visible, block, k, build_bitmap=False
+        )
+        self.assertIsNone(unused_flags)
+        torch.testing.assert_close(
+            unordered.sort(dim=-1).values, expected.sort(dim=-1).values, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            fused.build_flags(unordered, logits.shape[1], block), flags, rtol=0, atol=0
+        )
         torch.testing.assert_close(
             logits.view(torch.int32), before.view(torch.int32), rtol=0, atol=0
         )
@@ -203,7 +415,197 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
             )
         self.assertIsNotNone(result)
         self.assertIsNone(result[1])
-        torch.testing.assert_close(result[0], expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            result[0].sort(dim=-1).values, expected.sort(dim=-1).values, rtol=0, atol=0
+        )
+
+    @torch.no_grad()
+    def test_all_blocks_unordered_sliced_output_and_graph(self):
+        logits, visible = make_case(11, 1033)
+        logits[2:, ::17] = float("nan")
+        logits[2:, ::53] = torch.inf
+        logits.masked_fill_(
+            torch.arange(1033, device="cuda")[None] >= visible[:, None], -torch.inf
+        )
+        expected = reference_select(logits, visible, 8, 2048)
+        before = logits.view(torch.int32).clone()
+        storage = torch.full((15, 151), 123, dtype=torch.int32, device="cuda")
+        out = storage[2:-2, 1:138]
+
+        def run():
+            result = fused.select_candidates(
+                logits, visible, 8, 2048, out=out, build_bitmap=False
+            )
+            self.assertIs(result[0], out)
+            self.assertIsNone(result[1])
+
+        with patch.object(
+            torch.Tensor, "topk", side_effect=AssertionError("unused TopK")
+        ):
+            run()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                run()
+            out.fill_(99)
+            graph.replay()
+        torch.testing.assert_close(
+            out[:, :130].sort(-1).values,
+            expected.sort(-1).values,
+            rtol=0,
+            atol=0,
+        )
+        self.assertTrue(torch.all(out[:, 130:] == -1).item())
+        for guard in (storage[:2], storage[-2:], storage[:, :1], storage[:, 138:]):
+            self.assertTrue(torch.all(guard == 123).item())
+        torch.testing.assert_close(logits.view(torch.int32), before, rtol=0, atol=0)
+
+    @torch.no_grad()
+    def test_candidate_only_preserves_sparse_plan_scores_and_remap(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as indexer
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_sparse_prefill_indexer as sparse,
+        )
+
+        if (
+            torch.cuda.get_device_capability()[0] != 10
+            or sparse._get_deep_gemm() is None
+        ):
+            self.skipTest("SM100 sparse DeepGEMM is required")
+        rows, width = 13, 32769
+        q = torch.randn(rows, 32, 128, device="cuda").bfloat16()
+        key = torch.randn(width, 128, device="cuda").bfloat16()
+        q_payload, q_sf = indexer.quantize_indexer_q(q)
+        keys = indexer.PrefillIndexerKeys(*indexer.quantize_indexer_k_reference(key))
+        weights = torch.randn(rows, 32, device="cuda") / 64
+        for pattern in ("random", "ties", "nonfinite"):
+            with self.subTest(pattern=pattern):
+                logits, visible = make_case(rows, width)
+                if pattern == "ties":
+                    logits.round_()
+                elif pattern == "nonfinite":
+                    logits[2:, ::17] = float("nan")
+                    logits[2:, ::53] = torch.inf
+                    logits[2:, ::71] = -torch.inf
+                    logits.masked_fill_(
+                        torch.arange(width, device="cuda")[None] >= visible[:, None],
+                        -torch.inf,
+                    )
+                reference = reference_select(logits, visible, 8, 2048)
+                actual, flags = fused.select_candidates(
+                    logits, visible, 8, 2048, build_bitmap=False
+                )
+                self.assertIsNone(flags)
+                torch.testing.assert_close(
+                    actual.sort(1).values, reference.sort(1).values, rtol=0, atol=0
+                )
+                old_plan = sparse.prepare_plan(reference, visible, width)
+                new_plan = sparse.prepare_plan(actual, visible, width)
+                for name in ("sparse_indices", "end", "row_ks", "row_ke"):
+                    torch.testing.assert_close(
+                        getattr(new_plan, name), getattr(old_plan, name), rtol=0, atol=0
+                    )
+                old_scores = sparse.score(q_payload, q_sf, keys, weights, old_plan)
+                new_scores = sparse.score(q_payload, q_sf, keys, weights, new_plan)
+                valid = (
+                    torch.arange(old_plan.sparse_columns, device="cuda")[None]
+                    < old_plan.end[:, None]
+                )
+                torch.testing.assert_close(
+                    new_scores[valid], old_scores[valid], rtol=0, atol=0
+                )
+                columns = (
+                    old_scores.float()
+                    .masked_fill(~valid, -torch.inf)
+                    .topk(512, dim=-1)
+                    .indices.int()
+                )
+                torch.testing.assert_close(
+                    sparse.remap(columns, new_plan, logits=new_scores),
+                    sparse.remap(columns, old_plan, logits=old_scores),
+                    rtol=0,
+                    atol=0,
+                )
+
+    @torch.no_grad()
+    def test_runtime_count_fixed_output_does_not_recompile(self):
+        def compiled_count():
+            return sum(len(cache) for cache, *_ in kernel.device_caches.values())
+
+        rows, out_k = 11, 2048
+        out = torch.empty((rows, out_k), dtype=torch.int32, device="cuda")
+        flags = torch.empty((rows, 64), dtype=torch.int32, device="cuda")
+        counts = (
+            1,
+            3,
+            7,
+            17,
+            31,
+            33,
+            63,
+            65,
+            127,
+            129,
+            257,
+            511,
+            513,
+            1023,
+            1025,
+            1537,
+            2047,
+            2048,
+        )
+        for build_bitmap in (False, True):
+            kernel = (
+                fused._prefill_candidate_store_bitmap_kernel
+                if build_bitmap
+                else fused._prefill_candidate_pool_kernel
+            )
+            kernel.device_caches.clear()
+            before = compiled_count()
+            for count in counts:
+                with self.subTest(build_bitmap=build_bitmap, count=count):
+                    # Keep output/bitmap geometry fixed; only runtime K changes.
+                    width = count * 8 - count % 7
+                    logits, visible = make_case(rows, width)
+                    expected = reference_select(logits, visible, 8, out_k)
+                    result = fused.select_candidates(
+                        logits,
+                        visible,
+                        8,
+                        out_k,
+                        out=out,
+                        flags=flags if build_bitmap else None,
+                        build_bitmap=build_bitmap,
+                    )
+                    self.assertIsNotNone(result)
+                    self.assertIs(result[0], out)
+                    torch.testing.assert_close(
+                        (
+                            out[:, :count]
+                            if build_bitmap
+                            else out[:, :count].sort(dim=-1).values
+                        ),
+                        expected if build_bitmap else expected.sort(dim=-1).values,
+                        rtol=0,
+                        atol=0,
+                    )
+                    self.assertTrue(torch.all(out[:, count:] == -1).item())
+                    if build_bitmap:
+                        self.assertIs(result[1], flags)
+                        rebuilt = fused.build_flags(expected, width, 8)
+                        words = fused.bitmap_words(width, 8)
+                        torch.testing.assert_close(
+                            flags[:, :words], rebuilt, rtol=0, atol=0
+                        )
+                        self.assertTrue(torch.all(flags[:, words:] == 0).item())
+                        masked = reference_mask(logits.clone(), expected, 8)
+                        self.assertTrue(fused.mask_candidates(logits, flags, 8))
+                        torch.testing.assert_close(logits, masked, rtol=0, atol=0)
+                    else:
+                        self.assertIsNone(result[1])
+                    # Exactly one specialization per WRITE_FLAGS geometry,
+                    # including K=1, odd K, and aligned K=2048.
+                    self.assertEqual(compiled_count(), before + 1)
 
     @torch.no_grad()
     def test_dynamic_cuda_graph_replay(self):

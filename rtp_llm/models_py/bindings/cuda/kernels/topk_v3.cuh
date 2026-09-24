@@ -169,6 +169,13 @@ SGL_DEVICE int32_t page_to_indices(const int32_t* __restrict__ page_table, uint3
   return (page_table[i >> page_bits] << page_bits) | (i & mask);
 }
 
+// Optional state owned only by the candidate CTA wrapper; default layouts stay unchanged.
+struct CandidateContext {
+  int32_t status;
+  uint32_t expected_above;
+  uint32_t expected_equal;
+};
+
 /// One batch element's worth of work. `emit(pos, raw_idx)` writes the selected raw
 /// index to output slot `pos`; `transform_output` then applies the page-table
 /// transform in a separate pass (and records the raw index in `raw_out` if set).
@@ -344,14 +351,20 @@ struct TopKConfig {
   /// Resolve the threshold bin's ties exactly. `base` is the number of strictly
   /// "above" elements already emitted (final output starts at slot `base`);
   /// `topk` here is the number of remaining slots to fill (== global_topk - base).
+  template <bool kCandidate = false>
   SGL_DEVICE static void handle_tie(  //
       const TieValue* tie_buffer,
       const TopKProblem& problem,
       const uint32_t base,
       const uint32_t num_ties,
       const uint32_t topk,
-      TieHandleSmem* smem) {
+      TieHandleSmem* smem,
+      CandidateContext* candidate = nullptr) {
     constexpr auto is_greater = [](const TieValue& a, const TieValue& b) {
+      if constexpr (kCandidate) {
+        const uint32_t ka = extract_exact_bin(a.value), kb = extract_exact_bin(b.value);
+        return ka > kb || (ka == kb && a.idx < b.idx);
+      }
       return (a.value > b.value) || (a.value == b.value && a.idx < b.idx);
     };
     const auto tx = threadIdx.x;
@@ -360,6 +373,7 @@ struct TopKConfig {
     static_assert(kNumWarps == kWarpSize);
 
     if (num_ties <= topk) {
+      if constexpr (kCandidate) if (tx == 0) candidate->status = 1;
       for (uint32_t t = tx; t < num_ties; t += kBlockSize) {
         problem.emit(base + t, tie_buffer[t].idx);
       }
@@ -367,6 +381,7 @@ struct TopKConfig {
         problem.emit(base + t, base + t);
       }
     } else if (num_ties <= kWarpSize) {
+      if constexpr (kCandidate) if (tx == 0) candidate->status = 2;
       if (lane_id >= num_ties || warp_id >= num_ties) return;  // some threads are idle
       /// NOTE: use long long to avoid mask overflow when num_tie == 32
       const uint32_t mask = (1ull << num_ties) - 1u;
@@ -375,6 +390,7 @@ struct TopKConfig {
       const auto rank = warp_sum_bool(is_greater(tie, target), mask);
       if (lane_id == 0 && rank < topk) problem.emit(base + rank, target.idx);
     } else if (num_ties <= kWarpSize * 2) {
+      if constexpr (kCandidate) if (tx == 0) candidate->status = 3;
       // 64 x 64 topk implementation: each thread takes 2 elements
       const auto warp_id_0 = warp_id;
       const auto warp_id_1 = warp_id + kWarpSize;
@@ -397,6 +413,7 @@ struct TopKConfig {
         if (lane_id == 0 && rank < topk) problem.emit(base + rank, target_1.idx);
       }
     } else if (num_ties <= kWarpSize * 4) {
+      if constexpr (kCandidate) if (tx == 0) candidate->status = 4;
       // 128 x 128 topk implementation: each thread takes 4 elements and does local sort + merge
       const auto invalid = TieValue::invalid();
       const TieValue tie[] = {
@@ -423,29 +440,31 @@ struct TopKConfig {
       }
     } else if (num_ties <= kBlockSize) {
       // Common case: one candidate per thread.
-      radix_tie_select<1>(tie_buffer, problem, base, num_ties, topk, smem);
+      radix_tie_select<1, kCandidate>(tie_buffer, problem, base, num_ties, topk, smem, candidate);
     } else {
       // Rare overflow case (kBlockSize < num_ties <= kMaxNumTie), kept out of
       // the common path so it alone pays the multi-item register cost.
-      radix_tie_select<kTieItems>(tie_buffer, problem, base, num_ties, topk, smem);
+      radix_tie_select<kTieItems, kCandidate>(tie_buffer, problem, base, num_ties, topk, smem, candidate);
     }
   }
 
   /// Exact radix select over the tie candidates: each thread owns kItems
   /// strided elements (inactive beyond num_ties). Requires
   /// num_ties <= kItems * kBlockSize.
-  template <uint32_t kItems>
+  template <uint32_t kItems, bool kCandidate = false>
   SGL_DEVICE static void radix_tie_select(  //
       const TieValue* tie_buffer,
       const TopKProblem& problem,
       const uint32_t base,
       const uint32_t num_ties,
       const uint32_t topk,
-      TieHandleSmem* smem) {
+      TieHandleSmem* smem,
+      CandidateContext* candidate = nullptr) {
     const auto tx = threadIdx.x;
     const auto lane_id = tx % kWarpSize;
     const auto warp_id = tx / kWarpSize;
 
+    if constexpr (kCandidate) if (tx == 0) candidate->status = 5;
     bool active[kItems];
     uint32_t key[kItems];
     uint32_t idx[kItems];
@@ -502,6 +521,14 @@ struct TopKConfig {
       const auto [threshold_bin, above_count, equal_count, __] = smem->match;
       if (round < 3) total_active = equal_count;
       topk_remain -= above_count;
+
+      // Only the final full FP32 key can establish ambiguous cutoff membership.
+      if constexpr (kCandidate) {
+        if (round == 3 && equal_count > topk_remain) {
+          if (tx == 0) candidate->status = -3;
+          return;
+        }
+      }
 
       // 4. Scatter
 #pragma unroll
@@ -605,7 +632,9 @@ struct TopKRadixBase : TopKConfig {
     }
   }
 
-  SGL_DEVICE static void find_threshold(const uint32_t topk, const uint32_t seq_len, Smem* smem) {
+  template <bool kCandidate = false>
+  SGL_DEVICE static void find_threshold(const uint32_t topk, const uint32_t seq_len, Smem* smem,
+                                        CandidateContext* candidate = nullptr) {
     const auto tx = threadIdx.x;
     constexpr uint32_t kItems = kHistSize / kBlockSize;
     uint32_t orig[kItems];
@@ -636,6 +665,10 @@ struct TopKRadixBase : TopKConfig {
       const auto above = seq_len - prefix_sum;
       if (above < topk && above + orig[i] >= topk) {
         smem->threshold_bin = tx * kItems + i;
+        if constexpr (kCandidate) {
+          candidate->expected_above = above;
+          candidate->expected_equal = orig[i];
+        }
       }
     }
     __syncthreads();
@@ -655,8 +688,9 @@ struct TopKRegister : TopKRadixBase<12> {
   static constexpr uint32_t kMaxSeqLen = kBlockSize * kVecSize * kLocalVecs;
   using Smem = typename TopKRadixBase<12>::Smem;
 
-  template <bool kUsePDL, bool kAlignedInput>
-  SGL_DEVICE static void forward(const TopKProblem problem, void* _smem) {
+  template <bool kUsePDL, bool kAlignedInput, bool kCandidate = false>
+  SGL_DEVICE static void forward(const TopKProblem problem, void* _smem,
+                                  CandidateContext* candidate = nullptr) {
     const auto tx = threadIdx.x;
     const auto smem = static_cast<Smem*>(_smem);
 
@@ -709,14 +743,77 @@ struct TopKRegister : TopKRadixBase<12> {
     __syncthreads();
 
     // Phase 2: Find the threshold bin
-    find_threshold(problem.topk, problem.seq_len, smem);
+    find_threshold<kCandidate>(problem.topk, problem.seq_len, smem, candidate);
 
     // Phase 3: collect by two fp32 boundaries (raw indices; transform applied later)
     const auto topk = problem.topk;
     const auto threshold_bin = smem->threshold_bin;
+    if constexpr (kCandidate) {
+      // Exact FP16 ordered-key buckets containing +/-zero, infinity/saturation or NaN.
+      if (threshold_bin <= (0x03ffu >> 4) || threshold_bin >= (0xfc00u >> 4) ||
+          threshold_bin == (0x7fffu >> 4) || threshold_bin == (0x8000u >> 4)) {
+        // Count exact ordered keys, including every NaN, before publishing.
+        // A saturated negative finite value shares the half -inf bucket but
+        // still has an FP32 key strictly greater than key(-inf).
+        constexpr uint32_t kNegInfKey = 0x007fffffu;
+        uint32_t local_count = 0;
+#pragma unroll
+        for (uint32_t i = 0; i < kLocalVecs; ++i) {
+          const auto vi = tx + kBlockSize * i;
+          if (vi >= num_full) break;
+#pragma unroll
+          for (uint32_t j = 0; j < kVecSize; ++j)
+            local_count += extract_exact_bin(local_vecs[i][j]) > kNegInfKey;
+        }
+        if (tx >= kBlockSize - tail) {
+          const uint32_t idx = tail_start + tx - (kBlockSize - tail);
+          local_count += extract_exact_bin(problem.in[idx]) > kNegInfKey;
+        }
+        const auto lane = tx % kWarpSize;
+        const auto warp_count = warp::reduce_sum(local_count);
+        if (lane == 0) smem->warp_sum[tx / kWarpSize] = warp_count;
+        __syncthreads();
+        const auto exact_count = warp::reduce_sum(smem->warp_sum[lane]);
+        if (exact_count <= topk) {
+          const auto emit_finite_or_posinf = [&](float value, uint32_t idx) {
+            if (value > -std::numeric_limits<float>::infinity()) {
+              const auto pos = atomicAdd(&smem->count_gt, 1u);
+              problem.emit(pos, idx);
+            }
+          };
+#pragma unroll
+          for (uint32_t i = 0; i < kLocalVecs; ++i) {
+            const auto vi = tx + kBlockSize * i;
+            if (vi >= num_full) break;
+#pragma unroll
+            for (uint32_t j = 0; j < kVecSize; ++j)
+              emit_finite_or_posinf(local_vecs[i][j], vi * kVecSize + j);
+          }
+          if (tx >= kBlockSize - tail) {
+            const uint32_t idx = tail_start + tx - (kBlockSize - tail);
+            emit_finite_or_posinf(problem.in[idx], idx);
+          }
+          if (tx == 0) candidate->status = 7;
+          return;
+        }
+        if (tx == 0) candidate->status = -1;
+        return;
+      }
+    }
     const auto v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
     const auto v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
     const auto collect = [&](float val, uint32_t idx) {
+      if constexpr (kCandidate) {
+        const uint32_t key = extract_coarse_bin<kHistBits>(val);
+        if (key > threshold_bin) {
+          const auto pos = atomicAdd(&smem->count_gt, 1u);
+          if (pos < topk) problem.emit(pos, idx);
+        } else if (key == threshold_bin) {
+          const auto pos = atomicAdd(&smem->count_eq, 1u);
+          if (pos < kMaxNumTie) smem->tie.values[pos] = {val, idx};
+        }
+        return;
+      }
       if (is_nan(val) || val >= v_hi) {
         const auto pos = atomicAdd(&smem->count_gt, 1);
         if (pos < topk) [[likely]]
@@ -745,6 +842,20 @@ struct TopKRegister : TopKRadixBase<12> {
     __syncthreads();
     const auto above_count = smem->count_gt;
     const auto equal_count = smem->count_eq;
+    if constexpr (kCandidate) {
+      if (above_count != candidate->expected_above || equal_count != candidate->expected_equal ||
+          above_count >= topk || above_count + equal_count < topk) {
+        if (tx == 0) candidate->status = -4;
+        return;
+      }
+      if (equal_count > kMaxNumTie) {
+        if (tx == 0) candidate->status = -2;
+        return;
+      }
+      handle_tie<true>(smem->tie.values, problem, above_count, equal_count,
+                       topk - above_count, &smem->tie.handle, candidate);
+      return;
+    }
     if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
       // A negative FP16 midpoint can make the FP32 collect count reach topk.
       // In that case the output is already complete; do not underflow the

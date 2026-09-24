@@ -18,6 +18,8 @@ disjointness. ``align_bytes=1`` is passed throughout to avoid the production
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -354,6 +356,53 @@ def test_production_bucket_boundaries_on_meta_device():
         assert ws._main_bytes == ws._idx_bytes == 0
 
 
+def test_v41_forward_uses_64_mib_buckets_and_v4_keeps_default():
+    from rtp_llm.models_py.modules.dsv4 import chunk_env
+    from rtp_llm.models_py.modules.dsv4.prefill import forward
+
+    class AllocationCaptured(Exception):
+        pass
+
+    mib = 1 << 20
+    for v41 in (False, True):
+        for rows, v41_mib in ((32768, 2048), (32770, 2112), (32856, 2112)):
+            v4 = SimpleNamespace(
+                fp8_kv_cache=True,
+                layers=(),
+                args=SimpleNamespace(v41_config={} if v41 else None),
+                _prefill_ws_q_rows=rows,
+                _prefill_ws_q_dim=64 * 512,
+                _prefill_ws_full_rows=0,
+                _prefill_ws_main_w=0,
+                _prefill_ws_idx_w=0,
+            )
+            allocated = []
+
+            def allocate(*args, **kwargs):
+                allocated.append((kwargs, PrefillWorkspace(*args, **kwargs)))
+                raise AllocationCaptured
+
+            with (
+                patch.object(chunk_env, "FLASH_MLA_SPARSE_Q_CHUNK", 33280),
+                patch.object(forward, "PrefillWorkspace", side_effect=allocate),
+            ):
+                try:
+                    forward.forward_layers(
+                        v4, None, torch.empty(rows, device="meta"), None, None, None
+                    )
+                except AllocationCaptured:
+                    pass
+                else:
+                    raise AssertionError("forward did not allocate a workspace")
+            kwargs, ws = allocated[0]
+            assert kwargs["align_bytes"] == (64 * mib if v41 else 1024 * mib)
+            expected_mib = v41_mib if v41 else (2048 if rows == 32768 else 3072)
+            assert ws._union.numel() == expected_mib * mib
+            assert ws._q_rows == rows
+            assert ws.prefill_q(rows).shape == (rows, 64 * 512)
+            assert ws._main_bytes == ws._idx_bytes == 0
+
+
 if __name__ == "__main__":
     test_prefill_q_eager_alloc_shape_and_dtype()
     print("PASS test_prefill_q_eager_alloc_shape_and_dtype")
@@ -383,4 +432,6 @@ if __name__ == "__main__":
     print("PASS test_live_padded_batch_gather_restore_and_q_aliases")
     test_production_bucket_boundaries_on_meta_device()
     print("PASS test_production_bucket_boundaries_on_meta_device")
+    test_v41_forward_uses_64_mib_buckets_and_v4_keeps_default()
+    print("PASS test_v41_forward_uses_64_mib_buckets_and_v4_keeps_default")
     print("ALL TESTS PASSED")

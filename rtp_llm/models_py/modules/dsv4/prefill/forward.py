@@ -184,8 +184,16 @@ def _prefill_fast_path_layer_calls(
                 break
             fast_call = fast_callable_fn()
             if fast_call is None:
-                calls = []
-                break
+                if (
+                    getattr(layer.attn, "v41_config", None) is not None
+                    and getattr(layer, "engram", None) is not None
+                ):
+                    # Engram runs before HC only on these layers; compatible
+                    # neighbors can still use the existing FP8 fast body.
+                    fast_call = layer
+                else:
+                    calls = []
+                    break
             calls.append(fast_call)
         if calls:
             layer_calls = tuple(calls)
@@ -371,6 +379,7 @@ def forward_layers(
             cp_rows=v4._prefill_ws_full_rows,
             main_w=v4._prefill_ws_main_w,
             idx_w=v4._prefill_ws_idx_w,
+            align_bytes=(64 << 20) if v41 else (1 << 30),
         )
 
     # Build + propagate CP context once per prefill step. Under CP the
@@ -457,7 +466,7 @@ def forward_layers(
         prefill_fast_layer_calls = None
     record_range_ctx = (
         _profiler.disable_record_function_ranges
-        if use_prefill_fast_path
+        if use_prefill_fast_path and not _profiler._torch_profiler_enabled()
         else nullcontext
     )
     # FP8 KV-cache: hoist host-side prefill metadata once per ratio bucket
@@ -542,6 +551,18 @@ def forward_layers(
     ced_tail = None
     original_cp_ctx = cp_ctx
     try:
+        if shared_prefill is not None and _env_flag("RTP_V41_BATCHED_PRODUCER"):
+            host_tables = getattr(attn_inputs, "kv_cache_block_id_host", None)
+            if (
+                kv_cache is not None
+                and isinstance(host_tables, torch.Tensor)
+                and host_tables.device.type == "cpu"
+                and host_tables.ndim == 3
+            ):
+                shared_prefill["prefill_producer_host_tables"] = (
+                    tuple(kv_cache.group_region_names),
+                    host_tables,
+                )
         if allow_ced and _env_flag("DSV41_CED"):
             if shared_prefill is not None and not _rt_on and not _fwd_dbg.enabled():
                 ced_tail = CEDPlan.create(
@@ -552,6 +573,7 @@ def forward_layers(
                     prepare_hidden_fn=prepare_hidden_fn,
                     bounded_replay=v4.swa_bounded_replay,
                 )
+        ced_in_l20 = ced_tail is not None and ced_tail.can_split_l20(v4)
         with record_range_ctx():
             # Two callable chains intentionally coexist:
             #   * normal ``Block.forward`` keeps debug checks and fallback layouts;
@@ -566,9 +588,10 @@ def forward_layers(
             for layer_idx, layer_call in enumerate(layer_calls):
                 if layer_idx == 21 and ced_tail is not None:
                     with _profiler.record_function_range("dsv41.ced.compact"):
-                        h, input_ids = ced_tail.compact(
-                            v4, h, input_ids, shared_prefill
-                        )
+                        if not ced_in_l20:
+                            h, input_ids = ced_tail.compact(
+                                v4, h, input_ids, shared_prefill
+                            )
                         cp_ctx = ced_tail.context
                         positions = cp_ctx.global_positions
                         cu_seqlens = ced_tail.cu_seqlens
@@ -591,14 +614,29 @@ def forward_layers(
                             workspace=ws,
                         )
                 with layer_forward_range(layer_idx):
-                    h = layer_call(
-                        h,  # [T, hc, dim]
-                        input_ids,  # [T]
-                        positions,  # [T]
-                        cu_seqlens,  # [B+1]
-                        kv_cache=kv_cache,
-                        block_tables_by_type=block_tables_by_type,
-                    )  # [T, hc, dim]
+                    with (
+                        ced_tail.candidate_publication(shared_prefill)
+                        if layer_idx == 20 and ced_tail is not None and not ced_in_l20
+                        else nullcontext()
+                    ):
+                        if layer_idx == 20 and ced_in_l20:
+                            h, input_ids = v4.layers[20].forward_prefill_ced_l20(
+                                h,
+                                input_ids,
+                                positions,
+                                ced_tail,
+                                kv_cache=kv_cache,
+                                block_tables_by_type=block_tables_by_type,
+                            )
+                        else:
+                            h = layer_call(
+                                h,  # [T, hc, dim]
+                                input_ids,  # [T]
+                                positions,  # [T]
+                                cu_seqlens,  # [B+1]
+                                kv_cache=kv_cache,
+                                block_tables_by_type=block_tables_by_type,
+                            )  # [T, hc, dim]
                     if shared_prefill is not None:
                         release_v41_prefill_shared(shared_prefill, layer_idx)
                     if layer_idx in capture_ids:

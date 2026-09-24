@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -112,6 +112,65 @@ class V41PrefillTopKCPU(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "launch failure"):
                 topk.try_select_tokens(None, None)
+
+    def test_raw_selection_requires_explicit_completion_buffers(self):
+        with patch.object(topk, "is_supported", return_value=True), patch.object(
+            topk, "_select_tokens", side_effect=AssertionError("must not launch")
+        ):
+            self.assertIsNone(topk.try_select_tokens(None, None, filter_finite=False))
+
+    def test_finite_entry_raw_publication_and_older_binary_fallback(self):
+        logits = torch.zeros((2, 1024))
+        starts = torch.zeros((2,), dtype=torch.int32)
+        ends = torch.full((2,), 1024, dtype=torch.int32)
+        out = torch.empty((2, 512), dtype=torch.int32)
+        workspace = object()
+        for available, filtering in (
+            (True, True),
+            (True, False),
+            (False, True),
+            (False, False),
+        ):
+            legacy, fused, finish = Mock(), Mock(), Mock()
+            ops = SimpleNamespace(topk_v3=legacy)
+            if available:
+                ops.dsv41_topk_v3_finite = fused
+            with patch.object(topk, "rtp_llm_ops", ops), patch.object(
+                topk, "_get_topk_workspace", return_value=workspace
+            ), patch.object(topk, "finish_tokens", finish):
+                self.assertIs(
+                    topk._select_tokens(
+                        logits,
+                        ends,
+                        bounds=(starts, ends),
+                        out=out,
+                        filter_finite=filtering,
+                    ),
+                    out,
+                )
+            self.assertEqual(fused.call_count, int(available and filtering))
+            self.assertEqual(legacy.call_count, int(not (available and filtering)))
+            self.assertEqual(finish.call_count, int(filtering and not available))
+            selected = fused if available and filtering else legacy
+            selected.assert_called_once_with(logits, ends, out, workspace, 512, 1024)
+            if filtering and not available:
+                finish.assert_called_once_with(logits, ends, out)
+
+    def test_finite_entry_failure_is_not_retried(self):
+        logits = torch.zeros((2, 1024))
+        ends = torch.full((2,), 1024, dtype=torch.int32)
+        out = torch.empty((2, 512), dtype=torch.int32)
+        ops = SimpleNamespace(
+            topk_v3=Mock(),
+            dsv41_topk_v3_finite=Mock(side_effect=RuntimeError("fused launch")),
+        )
+        with patch.object(topk, "rtp_llm_ops", ops), patch.object(
+            topk, "_get_topk_workspace", return_value=None
+        ), patch.object(topk, "finish_tokens") as finish:
+            with self.assertRaisesRegex(RuntimeError, "fused launch"):
+                topk._select_tokens(logits, ends, bounds=(ends, ends), out=out)
+        ops.topk_v3.assert_not_called()
+        finish.assert_not_called()
 
 
 @unittest.skipUnless(

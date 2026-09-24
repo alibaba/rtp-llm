@@ -172,6 +172,32 @@ class Gate(nn.Module):
             self._w_bf16 = cached
         return cached
 
+    def _project_scores(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Preserve the prefill gate's GEMM rows independently of the MoE budget."""
+        projection = getattr(self, "_ced_row_projection", None)
+        if projection is not None:
+            return projection(x, weight)
+        rows = getattr(self, "_prefill_gate_chunk_rows", 0)
+        if (
+            rows <= 0
+            or torch.is_grad_enabled()
+            or x.ndim != 2
+            or weight.ndim != 2
+            or x.dtype != torch.bfloat16
+            or weight.dtype != torch.bfloat16
+            or not x.is_cuda
+            or not weight.is_cuda
+            or x.shape[0] <= rows
+        ):
+            return F.linear(x, weight)
+        scores = torch.empty(
+            (x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device
+        )
+        wt = weight.T
+        for start in range(0, x.shape[0], rows):
+            torch.mm(x[start : start + rows], wt, out=scores[start : start + rows])
+        return scores
+
     def forward(
         self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -192,10 +218,10 @@ class Gate(nn.Module):
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
         if os.environ.get("DSV4_GATE_FP32", "0") == "1":
-            scores = F.linear(x.float(), self.weight.float())
+            scores = self._project_scores(x.float(), self.weight.float())
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
-            scores = F.linear(x_bf16, self._weight_bf16()).float()
+            scores = self._project_scores(x_bf16, self._weight_bf16()).float()
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_linear_scores", scores)
 

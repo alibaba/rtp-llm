@@ -20,7 +20,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, PropertyMock, patch
 
 import torch
 import torch.nn.functional as F
@@ -41,6 +41,114 @@ def _load_eager_route_selector():
     )
 
     return _select_routes_with_nonfinite_fallback
+
+
+def _load_projection_gate():
+    path = os.path.join(os.path.dirname(__file__), "..", "moe", "gate.py")
+    spec = importlib.util.spec_from_file_location("_v41_projection_gate", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    gate = module.Gate.__new__(module.Gate)
+    torch.nn.Module.__init__(gate)
+    return gate
+
+
+class GateProjectionTest(unittest.TestCase):
+    def setUp(self):
+        self.gate = _load_projection_gate()
+        self.gate._prefill_gate_chunk_rows = 32768
+
+    def test_partition_rows_mm_out_and_no_retained_scores(self):
+        # CPU arithmetic with CUDA metadata mocked exercises the actual wrapper.
+        weight = torch.arange(30).reshape(3, 10).to(torch.bfloat16)[:, ::2]
+        for rows in (32769, 32770, 32856, 33280, 65537):
+            with self.subTest(rows=rows), torch.no_grad():
+                x = torch.zeros((rows * 2, 10), dtype=torch.bfloat16)[::2, ::2]
+                x[:, 0] = 1
+                expected = torch.cat(
+                    [F.linear(x[s : s + 32768], weight) for s in range(0, rows, 32768)]
+                )
+                state = dict(vars(self.gate))
+                with patch.object(
+                    torch.Tensor,
+                    "is_cuda",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ), patch.object(torch, "mm", wraps=torch.mm) as mm, patch.object(
+                    torch, "cat", side_effect=AssertionError("no cat")
+                ):
+                    result = self.gate._project_scores(x, weight)
+                torch.testing.assert_close(result, expected, rtol=0, atol=0)
+                self.assertEqual(
+                    [c.args[0].shape[0] for c in mm.call_args_list],
+                    [min(32768, rows - s) for s in range(0, rows, 32768)],
+                )
+                self.assertTrue(
+                    all(
+                        c.kwargs["out"].untyped_storage().data_ptr()
+                        == result.untyped_storage().data_ptr()
+                        for c in mm.call_args_list
+                    )
+                )
+                self.assertEqual(result.untyped_storage().nbytes(), rows * 3 * 2)
+                self.assertEqual(vars(self.gate), state)
+
+    def test_original_branches(self):
+        x = torch.zeros((32856, 5), dtype=torch.bfloat16)
+        w = torch.zeros((3, 5), dtype=torch.bfloat16)
+        cases = [
+            ("cpu", x, w, 32768, False),
+            ("default", x, w, None, True),
+            ("disabled", x, w, 0, True),
+            ("fp32", x.float(), w.float(), 32768, True),
+            ("weight_fp32", x, w.float(), 32768, True),
+            ("3d", x.unsqueeze(0), w, 32768, True),
+        ]
+        cases += [("small_%d" % n, x[:n], w, 32768, True) for n in (0, 1, 32768)]
+        for name, a, b, rows, cuda in cases:
+            with self.subTest(case=name), torch.no_grad():
+                if rows is None:
+                    del self.gate._prefill_gate_chunk_rows
+                else:
+                    self.gate._prefill_gate_chunk_rows = rows
+                marker = object()
+                with patch.object(
+                    torch.Tensor,
+                    "is_cuda",
+                    new_callable=PropertyMock,
+                    return_value=cuda,
+                ), patch.object(
+                    F, "linear", return_value=marker
+                ) as linear, patch.object(
+                    torch, "mm", side_effect=AssertionError("no mm-out")
+                ):
+                    self.assertIs(self.gate._project_scores(a, b), marker)
+                    linear.assert_called_once_with(a, b)
+
+    def test_grad_enabled_falls_back_and_backward_works(self):
+        x = torch.ones((32769, 2), dtype=torch.bfloat16, requires_grad=True)
+        w = torch.ones((3, 2), dtype=torch.bfloat16, requires_grad=True)
+        with torch.enable_grad(), patch.object(
+            torch.Tensor, "is_cuda", new_callable=PropertyMock, return_value=True
+        ), patch.object(F, "linear", wraps=F.linear) as linear, patch.object(
+            torch, "mm", side_effect=AssertionError("no out with autograd")
+        ):
+            result = self.gate._project_scores(x, w)
+            linear.assert_called_once_with(x, w)
+            result.float().sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertIsNotNone(w.grad)
+
+    def test_ced_precedes_partition_and_dtype_grad_gates(self):
+        projection = Mock(return_value=object())
+        self.gate._ced_row_projection = projection
+        x = torch.empty((32856, 5))
+        w = torch.empty((3, 5))
+        with torch.enable_grad(), patch.object(
+            F, "linear", side_effect=AssertionError("CED first")
+        ):
+            self.assertIs(self.gate._project_scores(x, w), projection.return_value)
+        projection.assert_called_once_with(x, w)
 
 
 def _eager_sqrtsoftplus_gate(
