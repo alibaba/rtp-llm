@@ -48,11 +48,14 @@ class _StubIndexerFP8:
         freqs_cis: torch.Tensor,
         kv_block_table: Optional[torch.Tensor],
         kv_eb: int,
+        *,
+        request_local_scoring: bool = False,
     ) -> None:
         self.compress_ratio = compress_ratio
         self.freqs_cis = freqs_cis
         self._kv_block_table = kv_block_table
         self._kv_eb = kv_eb
+        self._request_local_scoring = request_local_scoring
 
 
 def _call(
@@ -341,6 +344,12 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
         self.assertTrue(torch.equal(legacy.freqs_cis_slice, new.freqs_cis_slice))
 
     def test_b2_mixed_sp_geometry(self) -> None:
+        self._check_b2_mixed_sp_geometry(request_local_scoring=False)
+
+    def test_b2_mixed_sp_geometry_request_local_scoring(self) -> None:
+        self._check_b2_mixed_sp_geometry(request_local_scoring=True)
+
+    def _check_b2_mixed_sp_geometry(self, *, request_local_scoring: bool) -> None:
         """B=2: req0 (sp=0, S=16) + req1 (sp=8, S=12), ratio=4.
         T_per_req = [16//4, 20//4] = [4, 5] → cu_kv_seqlens = [0,4,9].
         T_total (M) = 28. positions = [0..15, 8..19]."""
@@ -348,8 +357,15 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             prefix_lengths=[0, 8],
             input_lengths=[16, 12],
         )
+        stub = _StubIndexerFP8(
+            self.ratio,
+            self.freqs_cis,
+            self.bt,
+            self.kv_eb,
+            request_local_scoring=request_local_scoring,
+        )
         meta = IndexerFP8.prepare(
-            self.stub,
+            stub,
             kw["batch_size"],
             int(kw["max_seqlen_q"]),
             0,
@@ -363,6 +379,10 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
         self.assertEqual(meta.M, 28)
         self.assertEqual(meta.T, 9)  # 4 + 5
         self.assertEqual(meta.cu_kv_seqlens.tolist(), [0, 4, 9])
+        self.assertEqual(
+            meta.request_score_slices,
+            ((0, 16, 0, 4), (16, 28, 4, 9)) if request_local_scoring else None,
+        )
         self.assertEqual(meta.positions_d.shape, (28,))
         self.assertEqual(meta.positions_d[0].item(), 0)
         self.assertEqual(meta.positions_d[15].item(), 15)
@@ -411,6 +431,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
         self.assertTrue(torch.equal(wrapped.ks, flat.ks))
         self.assertTrue(torch.equal(wrapped.ke, flat.ke))
         self.assertTrue(torch.equal(wrapped.cu_kv_seqlens, flat.cu_kv_seqlens))
+        self.assertEqual(wrapped.request_score_slices, flat.request_score_slices)
 
     def test_b2_ke_clamps_per_request_T_b(self) -> None:
         """ke[t] = ``cu_kv_seqlens[b] + clamp_max((pos+1)//ratio, T_b)`` —

@@ -1150,8 +1150,14 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
+    GenerateStreamPtr middle_stream =
+        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
+    middle_stream->setChunkSize(2);
+    ASSERT_TRUE(middle_stream->isMiddleChunk());
 
-    auto stream_groups = StreamGroups({stream1, stream2});
+    std::list<GenerateStreamPtr> streams{stream1, stream2, stream3, middle_stream};
+    auto                         stream_groups = StreamGroups(streams);
 
     auto processor = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
@@ -1159,20 +1165,19 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input            = model_input_status.value();
-    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    auto& model_input = model_input_status.value();
 
     GptModelOutputs model_output;
-    model_output.all_hidden_states =
-        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f}, torch::kFloat32).reshape({3, 2});
+    model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
 
     SamplerOutput sampler_output;
-    sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+    sampler_output.token_ids =
+        torch::tensor({1, -2, 2, 1, 2, 3, 3, 2, 1, 0, 1, 2}, torch::kInt32).reshape({4, 3});
 
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
 
     auto        combo_tokens        = model_input.combo_tokens;
-    vector<int> expect_combo_tokens = {2, 2, 3};
+    vector<int> expect_combo_tokens = {2, 2, 3, 2, 1, 2, 3};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 }
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsComboPositionIds) {
@@ -1193,23 +1198,32 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ResourceContext resource_context;
     auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
     auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 2);
+    auto            middle_stream =
+        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
     stream1->setContextPositionIds(torch::tensor({100, 101, 102, 110, 111, 112}, torch::kInt32));
     stream2->setContextPositionIds(torch::tensor({200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32));
-    auto           stream_groups = StreamGroups({stream1, stream2});
+    middle_stream->setContextPositionIds(
+        torch::tensor({300, 301, 302, 310, 311, 312, 320, 321, 322, 330, 331, 332}, torch::kInt32));
+    middle_stream->setChunkSize(2);
+    ASSERT_TRUE(middle_stream->isMiddleChunk());
+    auto           stream_groups = StreamGroups({stream1, stream2, middle_stream});
     GptModelInputs model_input;
-    model_input.input_lengths = torch::tensor({2, 3}, torch::kInt32);
-    model_input.combo_tokens  = torch::tensor({10, 11, 20, 21, 22}, torch::kInt32);
+    model_input.input_lengths = torch::tensor({2, 3, 2}, torch::kInt32);
+    model_input.combo_tokens  = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
     model_input.combo_position_ids =
-        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32);
+        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212,
+                       220, 221, 222, 300, 301, 302, 310, 311, 312},
+                      torch::kInt32);
     GptModelOutputs model_output;
-    model_output.all_hidden_states =
-        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f}, torch::kFloat32).reshape({5, 2});
+    model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
     SamplerOutput sampler_output;
-    sampler_output.token_ids = torch::tensor({1, -2, 12, 1, 2, 23}, torch::kInt32).reshape({2, 3});
+    sampler_output.token_ids = torch::tensor({1, -2, 12, 1, 2, 23, 3, 2, 1}, torch::kInt32).reshape({3, 3});
     TensorHolder holder;
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
-    EXPECT_EQ((vector<int>{11, 12, 21, 22, 23}), toVec<int>(model_input.combo_tokens));
-    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221, 222, 222, 222, 222}),
+    EXPECT_EQ((vector<int>{11, 12, 21, 22, 23, 31, 3}), toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112,
+                           210, 211, 212, 220, 221, 222, 222, 222, 222,
+                           310, 311, 312, 320, 321, 322}),
               toVec<int>(model_input.combo_position_ids));
 }
 
@@ -1531,6 +1545,70 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
 
     vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8};
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+    EXPECT_FALSE(sampler_output.token_ids_are_point_mass);
+
+    stream1->getSPOutputBuffer()->all_probs = torch::Tensor();
+    stream1->getSPOutputBuffer()->token_ids_are_point_mass = true;
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder);
+    EXPECT_FALSE(sampler_output.token_ids_are_point_mass);
+    EXPECT_EQ((vector<float>{0, 0, 1, 0, 0.5, 0.6, 0.7, 0.8}), toVec<float>(sampler_output.all_probs));
+
+    for (auto stream : {stream1, stream2}) {
+        stream->getSPOutputBuffer()->all_probs = torch::Tensor();
+        stream->getSPOutputBuffer()->token_ids_are_point_mass = true;
+    }
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder);
+    EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
+    EXPECT_TRUE(sampler_output.token_ids_are_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
+    EXPECT_FALSE(draft_token_probs_d_t.defined());
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testReducedVocabularyMixedProposal) {
+    ModelConfig model_config;
+    model_config.vocab_size = 6;
+    model_config.max_seq_len = 2048;
+    model_config.num_layers = 1;
+    RuntimeConfig runtime_config;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 1;
+    auto cache_config = makeProcessorCacheConfig();
+    MtpBatchStreamProcessor processor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{},
+                                      cache_config, sp_config, false);
+    processor.setDraftToTargetMap(torch::tensor({4, 1, 5, 2}, torch::kInt64));
+    ResourceContext resource_context;
+    auto a = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    auto b = createContextStream(model_config, runtime_config, resource_context, {2}, 2);
+    a->getSPOutputBuffer()->tokens = torch::tensor({{0, 4}}, torch::kInt32);
+    a->getSPOutputBuffer()->token_ids_are_point_mass = true;
+    b->getSPOutputBuffer()->tokens = torch::tensor({{0, 5}}, torch::kInt32);
+    b->getSPOutputBuffer()->all_probs = torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}});
+    StreamGroups groups({a, b});
+    SamplerOutput output;
+    TensorHolder holder;
+    torch::Tensor probs;
+    processor.updateOneStepDraftSamplerOutput(groups, output, probs, holder);
+    EXPECT_EQ((vector<float>{0, 0, 0, 0, 1, 0, 0, 0.2, 0.4, 0, 0.1, 0.3}), toVec<float>(probs));
+    EXPECT_FALSE(output.token_ids_are_point_mass);
+
+    auto ids = torch::tensor({{0, 4, 1, 2}, {0, 5, 4, 1}}, torch::kInt32);
+    sp_config.gen_num_per_cycle = 3;
+    MtpBatchStreamProcessor multi_processor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{},
+                                            cache_config, sp_config, false);
+    multi_processor.setDraftToTargetMap(torch::tensor({4, 1, 5, 2}, torch::kInt64));
+    torch::Tensor spec;
+    std::vector<torch::Tensor> tail;
+    multi_processor.updateMultiStepDraftSamplerOutput(groups, output, ids, spec, probs, tail);
+    EXPECT_EQ(probs.sizes(), torch::IntArrayRef({2, 3, 6}));
+    EXPECT_EQ((vector<float>{0, 0.2, 0.4, 0, 0.1, 0.3}), toVec<float>(probs[1][0]));
+    EXPECT_EQ((vector<float>{0, 0, 0, 0, 1, 0}), toVec<float>(probs[1][1]));
+    EXPECT_EQ((vector<float>{0, 1, 0, 0, 0, 0}), toVec<float>(probs[1][2]));
+
+    a->getSPOutputBuffer()->token_ids_are_point_mass = false;
+    a->getSPOutputBuffer()->all_probs = torch::tensor({{1.0f, 0.0f, 0.0f, 0.0f}});
+    tail.clear();
+    multi_processor.updateMultiStepDraftSamplerOutput(groups, output, ids, spec, probs, tail);
+    EXPECT_EQ((vector<float>{0, 0, 0, 0, 1, 0}), toVec<float>(probs[0][0]));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDeviceState) {
@@ -1600,6 +1678,19 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDevic
     vector<float> expect_all_probs = {0.9, 0.8, 0.7, 0.6, 0.4, 0.3, 0.2, 0.1};
     EXPECT_TRUE(sampler_output.all_probs.is_cuda());
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+
+    // Device state is authoritative even while the worker-owned stream still
+    // holds the previous dense distribution and different proposal tokens.
+    for (auto stream : {stream1, stream2}) {
+        auto state = stream->getMtpAsyncDeviceState();
+        state.draft_all_probs_gpu = torch::Tensor();
+        state.draft_token_ids_are_point_mass = true;
+        stream->setMtpAsyncDeviceState(std::move(state));
+    }
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder);
+    EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
+    EXPECT_TRUE(sampler_output.token_ids_are_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
 
     unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
 }
@@ -1675,6 +1766,39 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
     vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4,
                                       0.5, 0.6, 0.7, 0.8, 1.5, 1.6, 1.7, 1.8, 2.5, 2.6, 2.7, 2.8};
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+
+    // A dense first proposal from an older prefill peer followed by top-1
+    // steps must still supply one distribution for every draft token.
+    draft_token_probs_list.clear();
+    processor.updateMultiStepDraftSamplerOutput(stream_groups, sampler_output,
+                                                draft_token_ids_d_t, spec_token_ids_d_t,
+                                                draft_token_probs_d_t, draft_token_probs_list);
+    EXPECT_EQ(sampler_output.all_probs.sizes(), torch::IntArrayRef({2, 3, 4}));
+    EXPECT_EQ((vector<float>{0.1, 0.2, 0.3, 0.4, 0, 1, 0, 0, 0, 0, 1, 0,
+                            0.5, 0.6, 0.7, 0.8, 0, 0, 1, 0, 0, 0, 0, 1}),
+              toVec<float>(sampler_output.all_probs));
+    stream1->getSPOutputBuffer()->token_ids_are_point_mass = true;
+    stream1->getSPOutputBuffer()->all_probs = torch::Tensor();
+    draft_token_probs_list.clear();
+    processor.updateMultiStepDraftSamplerOutput(stream_groups, sampler_output,
+                                                draft_token_ids_d_t, spec_token_ids_d_t,
+                                                draft_token_probs_d_t, draft_token_probs_list);
+    EXPECT_FALSE(sampler_output.token_ids_are_point_mass);
+    EXPECT_EQ((vector<float>{1, 0, 0, 0}), toVec<float>(sampler_output.all_probs[0][0]));
+    EXPECT_EQ(sampler_output.all_probs.sizes(), torch::IntArrayRef({2, 3, 4}));
+
+    for (auto stream : {stream1, stream2}) {
+        stream->getSPOutputBuffer()->token_ids_are_point_mass = true;
+        stream->getSPOutputBuffer()->all_probs = torch::Tensor();
+    }
+    draft_token_probs_list.clear();
+    processor.updateMultiStepDraftSamplerOutput(stream_groups, sampler_output,
+                                                draft_token_ids_d_t, spec_token_ids_d_t,
+                                                draft_token_probs_d_t, draft_token_probs_list);
+    EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
+    EXPECT_TRUE(sampler_output.token_ids_are_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
+    EXPECT_FALSE(draft_token_probs_d_t.defined());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverride) {
@@ -1714,12 +1838,16 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverri
     draft_output.sampler_output.all_probs =
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
     auto draft_last_hidden_states = torch::tensor({9.1f, 9.2f, 8.1f, 8.2f}, torch::kFloat32).reshape({2, 2});
+    auto draft_to_target_map = torch::tensor({3, 1}, torch::kInt64);
+    processor.setDraftToTargetMap(draft_to_target_map);
 
     auto status = processor.dispatchPrefill(stream_groups, target_output, draft_output, draft_last_hidden_states);
     EXPECT_TRUE(status.ok());
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {9.1, 9.2});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {8.1, 8.2});
+    EXPECT_TRUE(torch::equal(stream1->getSPOutputBuffer()->draft_to_target_map, draft_to_target_map));
+    EXPECT_TRUE(torch::equal(stream2->getSPOutputBuffer()->draft_to_target_map, draft_to_target_map));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkCommitOnlyPrefillDispatch) {
@@ -1839,6 +1967,23 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesEvery
     }
 
     EXPECT_TRUE(torch::equal(actual, expected));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testOpaqueCacheSnapshotKeepsShortRingAtLongPositionsAndOwnsStorage) {
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    // OPAQUE state/SWA tables are short rings, not absolute-position LINEAR
+    // tables.  Crossing position 8192 must not index slot 32 in a two-slot ring.
+    auto original = torch::arange(12, torch::kInt32).reshape({3, 2, 2});
+    auto source = original.to(cuda_i32);
+    auto snapshot = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
+        source,
+        torch::tensor({8192, 8193}, torch::kInt32).to(cuda_i32),
+        torch::tensor({1, 2}, torch::kInt32).to(cuda_i32),
+        {CacheGroupType::SWA, CacheGroupType::FULL, CacheGroupType::FULL},
+        256);
+    EXPECT_NE(snapshot.data_ptr(), source.data_ptr());
+    source.zero_();
+    EXPECT_TRUE(torch::equal(snapshot.cpu(), original));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelPairAndFreshRows) {

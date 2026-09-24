@@ -55,7 +55,8 @@ import torch.distributed as _dist
 
 _TORCH_TESTED_MAJOR_MINOR = (2, 11)
 _torch_mm = tuple(int(x) for x in torch.__version__.split(".")[:2])
-if _torch_mm != _TORCH_TESTED_MAJOR_MINOR:
+_UE8M0_DTYPE = getattr(torch, "float8_e8m0fnu", None)
+if _UE8M0_DTYPE is not None and _torch_mm != _TORCH_TESTED_MAJOR_MINOR:
     logging.warning(
         "torch version %s is outside the validated %d.%d for the UE8M0 "
         "dist.broadcast compat shim. The shim is still installed (only "
@@ -66,7 +67,6 @@ if _torch_mm != _TORCH_TESTED_MAJOR_MINOR:
         *_TORCH_TESTED_MAJOR_MINOR,
     )
 
-_UE8M0_DTYPE = torch.float8_e8m0fnu
 _orig_broadcast = _dist.broadcast
 
 
@@ -76,4 +76,5 @@ def _ue8m0_broadcast(tensor, *args, **kwargs):
     return _orig_broadcast(tensor, *args, **kwargs)
 
 
-_dist.broadcast = _ue8m0_broadcast
+if _UE8M0_DTYPE is not None:
+    _dist.broadcast = _ue8m0_broadcast

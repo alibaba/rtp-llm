@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
+#include "rtp_llm/cpp/cache/LinearCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -641,6 +642,22 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
     const int   raw_seq_len  = malloc_info.incrSeqLen();
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
+    if (malloc_info.computed_prefix_len >= 0) {
+        // Keep the committed prefix state even when the next allocation fails.
+        for (int b = 0; b < batch_size; ++b) {
+            for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
+                const auto index = static_cast<size_t>(group_id);
+                if (config_.topology().groups()[index].policy.group_type == CacheGroupType::LINEAR) {
+                    const auto& tag = config_.groupTags()[index];
+                    auto& group = static_cast<LinearCacheManager&>(*kv_cache_groups_[index]);
+                    group.removeSkippedBlocksBefore(kv_resource->mutableBlockIds(b, tag),
+                                                    malloc_info.computed_prefix_len,
+                                                    malloc_info.reuse_cache);
+                }
+            }
+        }
+    }
+
     std::vector<std::vector<size_t>>              original_sizes(static_cast<size_t>(batch_size));
     std::vector<std::vector<std::vector<size_t>>> backfilled_positions(static_cast<size_t>(batch_size));
     for (int b = 0; b < batch_size; ++b) {
@@ -662,11 +679,20 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
             const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
-            if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
+            auto&       group           = kv_cache_groups_[static_cast<size_t>(group_id)];
+            const int   blocks_before   = static_cast<int>(block_ids.blocksNum());
+            // LINEAR must materialize the final state of this chunk, not only
+            // the admission-time prompt tail. Its malloc also tracks backfills.
+            const bool prepare_sparse_tail = malloc_info.prefill_chunk_start >= 0
+                                             && group->policy().group_type != CacheGroupType::LINEAR;
+            const bool  allocated       = prepare_sparse_tail ?
+                group->preparePrefillChunk(block_ids, group_seq_len, &filled_positions) :
+                group->malloc(block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions);
+            if (!allocated) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = group_id;
+                failed_need_blocks = group->needBlocksNum(group_seq_len, blocks_before, reserve_step);
                 break;
             }
         }
@@ -676,6 +702,18 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
     }
 
     if (all_success) {
+        if (malloc_info.prefill_chunk_start >= 0) {
+            for (int b = 0; b < batch_size; ++b) {
+                for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
+                    const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
+                    const int start = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag,
+                                                               malloc_info.prefill_chunk_start);
+                    kv_cache_groups_[static_cast<size_t>(group_id)]->releaseBeforePrefillChunk(
+                        kv_resource->mutableBlockIds(b, tag), start, malloc_info.reuse_cache);
+                }
+            }
+            return {true, 0};
+        }
         if (!malloc_info.enable_remove_skipped_blocks) {
             return {true, 0};
         }

@@ -61,6 +61,7 @@ class Expert(nn.Module):
         swiglu_limit: float = 0.0,
         storage: str = "fp8",
         expert_weights: Optional[Dict[str, torch.Tensor]] = None,
+        router_weight_after_w2: bool = True,
     ):
         """``expert_weights`` is a 6-key dict ``{"w1_w","w1_s","w2_w","w2_s",
         "w3_w","w3_s"}`` extracted by the caller from the layer's W tags
@@ -100,6 +101,7 @@ class Expert(nn.Module):
                 expert_weights.get("w3_s_gemm"),
             )
         self.swiglu_limit = swiglu_limit
+        self.router_weight_after_w2 = bool(router_weight_after_w2)
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
         """Route through CudaFp8DeepGEMMLinear (expects 2D input) or
@@ -129,7 +131,15 @@ class Expert(nn.Module):
                 up.contiguous(),
                 clamp_limit=self.swiglu_limit,
             )
-        if weights is not None:
+        if weights is not None and not self.router_weight_after_w2:
+            # Preserve the established Qwen NVFP4 path: its smoke goldens were
+            # captured with route weights included in W2 activation quantization.
             x = weights * x
         with record_function_range("moe.expert.w2"):
-            return self._apply_layer(self.w2, x.to(dtype))
+            down = self._apply_layer(self.w2, x.to(dtype))
+        if weights is not None and self.router_weight_after_w2:
+            # V4 routed weights belong to the expert output.  Applying them to
+            # the SwiGLU activation before W2 changes the activation seen by
+            # W4A4 quantization and is therefore not numerically equivalent.
+            return weights * down.float()
+        return down

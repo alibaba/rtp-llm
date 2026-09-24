@@ -1,5 +1,6 @@
 load("@pip_arm_torch//:requirements.bzl", requirement_arm = "requirement")
-
+load("@pip_ppu_torch//:requirements.bzl", requirement_ppu="requirement")
+load("@ppu_requirements//:requirements.bzl", "PPU_WHEEL_REQUIREMENTS")
 # to wrapper target relate with different system config
 load("@pip_cpu_torch//:requirements.bzl", requirement_cpu = "requirement")
 load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm = "requirement")
@@ -28,10 +29,12 @@ def requirement(names):
     for name in names:
         cuda13_x86_deps = [] if name in _CUDA13_X86_DEFERRED else [requirement_gpu_cuda13(name)]
         cuda13_arm_deps = [] if name in _CUDA13_ARM_DEFERRED else [requirement_cuda13_arm(name)]
+        ppu_deps = [] if name in ["xgrammar", "rtp-kernel", "fastsafetensors", "flashinfer-cubin", "flashinfer-jit-cache", "nvidia-cutlass-dsl", "tilelang"] else [requirement_ppu(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
                 deps = select({
+                    "@rtp_llm//:using_ppu": ppu_deps,
                     "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                     "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                     "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
@@ -43,6 +46,7 @@ def requirement(names):
         native.py_library(
             name = name,
             deps = select({
+                "@rtp_llm//:using_ppu": ppu_deps,
                 "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
@@ -82,6 +86,13 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
+        # Runtime JIT dependencies must be in wheel metadata, not only the
+        # developer environment. Keep this pair aligned with the PPU image gate.
+        "@rtp_llm//:using_ppu": PPU_WHEEL_REQUIREMENTS + [
+            "tilelang==0.1.13",
+            "apache-tvm-ffi==0.1.12",
+            "torch-c-dlpack-ext==0.1.5",
+        ],
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
@@ -148,6 +159,7 @@ def cuda13_x86_test_gpu():
 
 def torch_deps():
     deps = select({
+        "@rtp_llm//:using_ppu": ["@torch_2.9_py310_ppu//:torch_api", "@torch_2.9_py310_ppu//:torch", "@torch_2.9_py310_ppu//:torch_libs"],
         "@rtp_llm//:using_rocm": [
             "@torch_rocm//:torch_api",
             "@torch_rocm//:torch",
@@ -197,6 +209,7 @@ def cuda_register():
 
 def triton_deps(names):
     return select({
+        "@rtp_llm//:using_ppu": [requirement_ppu(name) for name in names],
         "//conditions:default": [],
     })
 
@@ -215,6 +228,7 @@ def jit_deps():
 
 def select_py_bindings():
     return select({
+        "@rtp_llm//:using_ppu": ["@rtp_llm//rtp_llm/models_py/bindings/ppu:ppu_bindings_register"],
         "@rtp_llm//:using_cuda12": [
             "@rtp_llm//rtp_llm/models_py/bindings/cuda:cuda_bindings_register",
         ],
@@ -229,6 +243,7 @@ def select_py_bindings():
 def no_block_copy_link_deps():
     """Deps for the cc_library that defines execNoBlockCopy / warmupNoBlockCopy (per device)."""
     return select({
+        "@rtp_llm//:using_ppu": ["@rtp_llm//rtp_llm/models_py/bindings/ppu:no_block_copy"],
         "@rtp_llm//:using_cuda12": [
             "@rtp_llm//rtp_llm/models_py/bindings/cuda:no_block_copy",
         ],

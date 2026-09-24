@@ -99,7 +99,8 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs,
+                                                          bool allow_deferred_device_metadata = false);
     torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
@@ -340,12 +341,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
-    auto py_initialize_method = py_model_.attr("initialize");
+    auto py_initialize_method =
+        py::module::import("rtp_llm.models_py.pluggable.lifecycle").attr("initialize_model");
     try {
-        py_init_result = py_initialize_method(init_resources);
+        py_init_result = py_initialize_method(py_model_, init_resources);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
+    }
+    if (!py_init_result.cast<bool>()) {
+        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
@@ -466,9 +471,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                          static_cast<int>(params.parallelism_config.tp_size),
                                                          static_cast<int>(params.parallelism_config.tp_rank));
         }
-        auto py_initialize_method = py_instance.attr("initialize");
+        RTP_LLM_CHECK_WITH_INFO(graph_runner != nullptr, "graph_runner_ can't be null");
         try {
-            py_init_result = py_initialize_method(init_resources);
+            py_init_result = py_initialize_method(py_model_, init_resources);
+            if (!py_init_result.cast<bool>()) {
+                throw std::runtime_error("PyWrappedModel constructor: Python model graph initialization failed.");
+            }
             // Python initialization/JIT can take a different amount of time on
             // each EP/TP rank. Synchronize immediately before capture so every
             // rank enters graph-held collectives in the same order.
@@ -578,11 +586,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
 #endif
-    }
-
-    auto py_init_success = py_init_result.cast<bool>();
-    if (!py_init_success) {
-        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
     cache_store_async_writer_ =

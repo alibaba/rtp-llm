@@ -161,13 +161,13 @@ class LayerProfilerRangeTest(unittest.TestCase):
             is_cuda_graph=False,
         )
         v4 = SimpleNamespace(
-            embed=lambda ids: torch.zeros((ids.numel(), 2)),
+            _embed=lambda ids: torch.zeros((ids.numel(), 2)),
             hc_mult=1,
             layers=[_DecodeLayer(0, events), _DecodeLayer(1, events)],
             capture_aux_hidden_layer_ids=(),
             _mtp_hidden_buffer=None,
             _hc_head_reduce=lambda hidden: hidden.squeeze(2),
-            norm=lambda hidden: hidden,
+            _norm=lambda hidden: hidden,
         )
 
         with patch.object(decode_forward._rt, "ENABLED", False), patch.object(
@@ -197,14 +197,14 @@ class LayerProfilerRangeTest(unittest.TestCase):
     def test_standalone_decode_and_prefill_wrap_each_layer(self):
         decode_events = []
         decode_model = SimpleNamespace(
-            embed=lambda ids: torch.zeros((*ids.shape, 2)),
+            _embed=lambda ids: torch.zeros((*ids.shape, 2)),
             hc_mult=1,
             layers=[
                 _DecodeLayer(0, decode_events),
                 _DecodeLayer(1, decode_events),
             ],
             _hc_head_reduce=lambda hidden: hidden.squeeze(2),
-            norm=lambda hidden: hidden,
+            _norm=lambda hidden: hidden,
             args=SimpleNamespace(dim=2),
         )
         meta = SimpleNamespace(batch_size=1, q_len_per_req=2)
@@ -223,7 +223,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
         prefill_events = []
         prefill_model = SimpleNamespace(
             args=SimpleNamespace(ep_size=1, dim=2),
-            embed=lambda ids: torch.zeros((*ids.shape, 2)),
+            _embed=lambda ids: torch.zeros((*ids.shape, 2)),
             hc_mult=1,
             layers=[
                 _PrefillLayer(0, prefill_events),
@@ -231,7 +231,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
             ],
             _propagate_cp_ctx=lambda _ctx: None,
             _hc_head_reduce=lambda hidden: hidden.squeeze(2),
-            norm=lambda hidden: hidden,
+            _norm=lambda hidden: hidden,
         )
         with patch.object(
             V4Transformer, "_propagate_cp_ctx", lambda _self, _ctx: None
@@ -263,7 +263,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
         proposal_events = []
         model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
         model.v4 = SimpleNamespace(
-            embed=lambda ids: torch.zeros((*ids.shape, 2)),
+            _embed=lambda ids: torch.zeros((*ids.shape, 2)),
             hc_mult=1,
             layers=[
                 _DecodeLayer(0, proposal_events),

@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
 #define private public
@@ -32,12 +33,28 @@
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 
 namespace rtp_llm {
 
 using namespace std;
 namespace spec = speculative;
+
+TEST(MtpExecutorPolicyTest, AcceptedHiddenStatesPreservePreHcBranches) {
+    const auto indices = torch::tensor({1, 0, 3}, torch::kInt64);
+    for (const auto& shape : std::vector<std::vector<int64_t>>{{12, 16}, {12, 4, 16}}) {
+        int64_t elements = 1;
+        for (auto dim : shape) {
+            elements *= dim;
+        }
+        auto hidden = torch::arange(elements, torch::kFloat32).reshape(shape);
+        auto selected = MtpExecutor::selectAcceptedHiddenStates(hidden, indices, 3, 4);
+        auto expected = torch::stack({hidden[1], hidden[4], hidden[11]});
+        EXPECT_EQ(selected.sizes(), expected.sizes());
+        EXPECT_TRUE(torch::equal(selected, expected));
+    }
+}
 
 TEST(MtpExecutorPolicyTest, DSparkPrefillCPRequiresPrefillRole) {
     PrefillCPConfig prefill_cp_config;
@@ -232,6 +249,8 @@ vector<T> catVectors(const vector<vector<T>>& vectors) {
 
 class FakeModel: public ModelBase {
 public:
+    std::function<void(GptModelInputs&)> forward_hook;
+
     FakeModel(const GptModelInitParams& params) {
         weights_  = params.weights;
         model_id_ = params.model_id;
@@ -239,6 +258,9 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         checkInputs(inputs);
+        if (forward_hook) {
+            forward_hook(const_cast<GptModelInputs&>(inputs));
+        }
         ++forward_count_;
         recordEvent("forward");
         return output_holder.get();
@@ -620,7 +642,6 @@ public:
         model_config.max_seq_len                           = test_config.max_seq_len;
         model_config.vocab_size                            = test_config.vocab_size;
         model_config.num_layers                            = test_config.num_layers;
-        model_config.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
         model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
         sp_config.type                                     = test_config.sp_type;
         sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
@@ -634,10 +655,13 @@ public:
                                                                             /*local_head_num_kv=*/128,
                                                                             /*size_per_head=*/256));
 
-        EngineInitParams params        = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-        params.sp_config               = sp_config;
-        params.pd_sep_config.role_type = test_config.role_type;
-        params.parallelism_config.role_type = test_config.role_type;
+        EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        // createEngineInitParams resets MM defaults; apply the requested style afterwards.
+        model_config.mm_model_config.mm_position_ids_style         = test_config.mm_position_ids_style;
+        params.model_config_.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
+        params.sp_config                                           = sp_config;
+        params.pd_sep_config.role_type                             = test_config.role_type;
+        params.parallelism_config.role_type                        = test_config.role_type;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
@@ -942,6 +966,92 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
+}
+
+TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
+    // Use the real CP splitter with fake model forwards and TP collectives.
+    for (const bool explicit_position_ids : {false, true}) {
+        for (const bool middle_chunk : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "explicit_position_ids=" << explicit_position_ids
+                                           << ", middle_chunk=" << middle_chunk);
+            MtpExecutorTestConfig test_config;
+            test_config.gen_num_per_cycle      = 2;
+            test_config.mm_position_ids_style  = explicit_position_ids ? MROPE : DEFAULT;
+            test_config.position_id_len_factor = explicit_position_ids ? 3 : 1;
+            auto  components = createMtpExecutorComponents(test_config);
+            auto& executor = *components.executor;
+            executor.parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+            executor.warm_up_ = true;  // Stop after draft forward, before draft sampling.
+
+            constexpr int prefix_len = 4;
+            constexpr int chunk_len  = 8;
+            const int     prompt_len = prefix_len + chunk_len + (middle_chunk ? 2 : 0);
+            vector<int> prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
+            prompt.resize(prompt_len);
+            auto stream = createContextStream(
+                components.model_config, components.runtime_config, components.resource_context, prompt);
+            stream->setReuseLength(prefix_len);
+            stream->setChunkSize(chunk_len);
+            stream->enableWarmupChunkWindow();
+            ASSERT_EQ(stream->isMiddleChunk(), middle_chunk);
+
+            torch::Tensor prompt_positions;
+            if (explicit_position_ids) {
+                prompt_positions = (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10
+                                    + torch::arange(3, torch::kInt32)).flatten();
+                stream->setContextPositionIds(prompt_positions);
+            }
+
+            GptModelInputs target_input;
+            target_input.combo_tokens      = torch::tensor({0, 1, 2, 3, 0, 1, 2, 3}, torch::kInt32);
+            target_input.input_lengths     = torch::tensor({chunk_len}, torch::kInt32);
+            target_input.prefix_lengths    = torch::tensor({prefix_len}, torch::kInt32);
+            target_input.lm_output_indexes = torch::tensor({chunk_len - 1}, torch::kInt32);
+            if (explicit_position_ids) {
+                target_input.combo_position_ids = prompt_positions.narrow(0, prefix_len * 3, chunk_len * 3);
+            }
+            GptModelOutputs target_output;
+            target_output.logits            = torch::zeros({1, 4});
+            target_output.all_hidden_states = torch::zeros({chunk_len / 2, 2});
+            components.fake_target_model->setInputs({target_input});
+            components.fake_target_model->setOutputs({target_output});
+            components.fake_target_model->forward_hook = [explicit_position_ids](GptModelInputs& input) {
+                ParallelismConfig cp_config;
+                cp_config.tp_size = 2;
+                cp_config.tp_rank = 0;
+                torch_ext::PyContextParallelParams cp_params;
+                ZigZagProcessor(cp_config).handleInputs(input, cp_params);
+                const int factor = explicit_position_ids ? 3 : 1;
+                EXPECT_EQ(input.combo_tokens.numel(), chunk_len / 2);
+                EXPECT_EQ(input.combo_position_ids.numel(), chunk_len / 2 * factor);
+                // Preserve the real rank-local shape, but give the old buggy
+                // memmove enough backing storage to fail assertions safely.
+                auto storage         = torch::full({chunk_len * factor}, -999, input.combo_position_ids.options());
+                auto local_positions = storage.narrow(0, 0, input.combo_position_ids.numel());
+                local_positions.copy_(input.combo_position_ids);
+                input.combo_position_ids = local_positions;
+            };
+
+            GptModelInputs draft_input = target_input;
+            draft_input.combo_tokens       = torch::tensor({1, 2, 3, 0, 1, 2, 3, middle_chunk ? 0 : 2}, torch::kInt32);
+            draft_input.last_hidden_states = target_output.all_hidden_states;
+            if (explicit_position_ids) {
+                auto tail = middle_chunk ? torch::tensor({120, 121, 122}, torch::kInt32) :
+                                           torch::tensor({112, 112, 112}, torch::kInt32);
+                draft_input.combo_position_ids = torch::cat(
+                    {prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
+            }
+            components.fake_draft_model->setInputs({draft_input});
+            components.fake_draft_model->setOutputs({GptModelOutputs{}});
+            components.fake_sampler->setInputs({SamplerInputs{target_output.logits}});
+            components.fake_sampler->setOutputs({SamplerOutput{torch::tensor({{2}}, torch::kInt32)}});
+            executor.setTargetModel(std::move(components.fake_target_model));
+            executor.setDraftModel(std::move(components.fake_draft_model));
+            executor.setSampler(std::move(components.fake_sampler));
+            MtpMetricsCollector metrics;
+            EXPECT_TRUE(executor.prefillStep({stream}, metrics, 0).ok());
+        }
+    }
 }
 
 TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
@@ -1837,6 +1947,101 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     EXPECT_TRUE(torch::allclose(output.all_probs[0][1].cpu(), expected_second_q));
 }
 
+#if USING_CUDA
+TEST_F(MtpExecutorTest, testGreedyRngElisionMatchesLegacyTokensAndGeneratorState) {
+    for (const int gamma : {1, 2, 3}) {
+        MtpExecutorTestConfig config;
+        config.gen_num_per_cycle = gamma;
+        config.vocab_size_override = 4;
+        auto components = createMtpExecutorComponents(config);
+        const int batch = gamma + 1;
+        const int width = gamma + 1;
+        for (const int sampling_mode : {0, 1, 2}) {  // greedy, mixed, stochastic
+            for (const bool force_first : {false, true}) {
+                for (const bool point_mass : {false, true}) {
+                    SCOPED_TRACE(::testing::Message() << "gamma=" << gamma << " sampling=" << sampling_mode
+                                 << " force=" << force_first << " point_mass=" << point_mass);
+                    std::list<GenerateStreamPtr> streams;
+                    std::vector<torch::Tensor> initial_states;
+                    auto target_ids = torch::ones({batch, width}, torch::kInt32);
+                    for (int row = 0; row < batch; ++row) {
+                        auto input = std::make_shared<GenerateInput>();
+                        input->input_ids = torch::tensor({0, 1}, torch::kInt32);
+                        input->generate_config = std::make_shared<GenerateConfig>();
+                        input->generate_config->random_seed = 123 + row;
+                        input->generate_config->do_sample = true;
+                        const bool stochastic = sampling_mode == 2 || (sampling_mode == 1 && row == 0);
+                        input->generate_config->top_k = stochastic ? 0 : 1;
+                        input->generate_config->force_sp_accept = force_first && row == 0;
+                        auto stream = std::make_shared<NormalGenerateStream>(
+                            input, components.model_config, components.runtime_config,
+                            components.resource_context, nullptr);
+                        ASSERT_FALSE(stream->hasError());
+                        initial_states.push_back(stream->getGenerator().get_state().clone());
+                        streams.push_back(stream);
+                        target_ids[row][gamma] = 2;
+                        if (row < gamma) {
+                            target_ids[row][row] = 3;  // each rejection position, plus one all-accept row
+                        }
+                    }
+                    SamplerOutput draft, target;
+                    draft.token_ids = torch::ones({batch, gamma}, torch::kInt32).to(torch::kCUDA);
+                    draft.token_ids_are_point_mass = point_mass;
+                    if (!point_mass) {
+                        draft.all_probs = torch::zeros({batch, gamma, 4},
+                            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                        draft.all_probs.select(2, 1).fill_(1.0f);
+                    }
+                    target.token_ids = target_ids.reshape({batch * width, 1}).to(torch::kCUDA);
+                    target.all_probs = torch::full({batch, width, 4}, 0.3f,
+                        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                    target.all_probs.select(2, 1).fill_(0.1f);
+                    auto global_generator = at::cuda::detail::getDefaultCUDAGenerator();
+                    auto global_initial = global_generator.get_state().clone();
+                    spec::SpeculativeSampler legacy(torch::Tensor(), gamma, false);
+                    auto reference = legacy.forward(streams, draft, target);
+                    reference.transfer_done_event->synchronize();
+                    auto global_after_legacy = global_generator.get_state().clone();
+                    std::vector<torch::Tensor> legacy_states;
+                    int row = 0;
+                    for (const auto& stream : streams) {
+                        auto generator = stream->getGenerator();
+                        legacy_states.push_back(generator.get_state().clone());
+                        EXPECT_FALSE(torch::equal(initial_states[row], legacy_states.back()));
+                        generator.set_state(initial_states[row++]);
+                    }
+                    global_generator.set_state(global_initial);
+                    spec::SpeculativeSampler optimized(torch::Tensor(), gamma, true);
+                    auto actual = optimized.forward(streams, draft, target);
+                    actual.transfer_done_event->synchronize();
+                    EXPECT_TRUE(torch::equal(actual.accept_tokens_cpu, reference.accept_tokens_cpu));
+                    EXPECT_TRUE(torch::equal(actual.accept_len_cpu, reference.accept_len_cpu));
+                    EXPECT_TRUE(torch::equal(global_generator.get_state(),
+                        sampling_mode == 0 ? global_initial : global_after_legacy));
+                    row = 0;
+                    for (const auto& stream : streams) {
+                        EXPECT_TRUE(torch::equal(stream->getGenerator().get_state(),
+                            sampling_mode == 0 ? initial_states[row] : legacy_states[row]));
+                        if (sampling_mode == 0) {
+                            const int accepted = force_first && row == 0 ? width : row + 1;
+                            EXPECT_EQ(actual.accept_len_cpu[row].item<int>(), accepted);
+                            for (int column = 0; column < width; ++column) {
+                                const int expected = column >= accepted ? 0 :
+                                    column == gamma ? 2 :
+                                    column == row && !(force_first && row == 0) ? 3 : 1;
+                                EXPECT_EQ(actual.accept_tokens_cpu[row][column].item<int>(), expected);
+                            }
+                        }
+                        ++row;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#endif
+
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
     size_t propose_step = 1;
     size_t vocab_size   = 4;
@@ -2011,6 +2216,11 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     next_draft_input.last_hidden_states =
         torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
+
+    // DSv4 exposes a dense pre-HC verify buffer. After stream 0 rejects,
+    // stream 1 must still consume rows 5..9, not the dense prefix rows 1..5.
+    // Exercise the real executor hand-off, not just the compaction helper.
+    components.fake_target_model->setMtpTargetHiddenStates(target_output.all_hidden_states);
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});

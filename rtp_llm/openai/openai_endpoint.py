@@ -249,6 +249,10 @@ class OpenaiEndpoint(object):
         # TODO(wangyin): implement this
         renderer = renderer or self.chat_renderer
         config = request.extra_configs or GenerateConfig()
+        explicit_thinking_budget = request.thinking_budget is not None or (
+            request.extra_configs is not None
+            and "max_thinking_tokens" in request.extra_configs.model_fields_set
+        )
         if request.extra_configs is not None and (
             config.response_format is not None
             or GrammarConstraint.collect_from_config(config)
@@ -343,6 +347,10 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
+        if config.thinking_mode != ThinkingMode.DISABLED and not explicit_thinking_budget:
+            model_budget = renderer.default_thinking_budget(config.max_new_tokens)
+            if model_budget is not None:
+                config.max_thinking_tokens = model_budget
         config.add_thinking_params(
             self.tokenizer,
             self.generate_env_config,

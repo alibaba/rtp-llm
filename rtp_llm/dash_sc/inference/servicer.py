@@ -582,6 +582,7 @@ class _ThinkRuntime:
     phase2_enabled: bool = False
     eos_token_id: Optional[int] = None
     max_token_id: Optional[int] = None
+    thinking_uses_output_budget: bool = False
 
 
 def build_think_runtime(
@@ -641,6 +642,7 @@ def build_think_runtime(
         phase2_enabled=phase2_enabled,
         eos_token_id=eos_tid,
         max_token_id=max_tid,
+        thinking_uses_output_budget=_normalized_model_type(model_type) == "deepseek_v4",
     )
 
 
@@ -743,6 +745,10 @@ def _apply_dash_sc_controls_to_generate_config(
     if request_max_think is not None:
         max_think = int(request_max_think)
         generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
+    elif runtime.thinking_uses_output_budget:
+        generate_config.max_thinking_tokens = max(
+            generate_config.max_thinking_tokens, generate_config.max_new_tokens
+        )
     if request_max_think == 0 or request_controls.enable_thinking is False:
         thinking_mode = ThinkingMode.DISABLED
     elif request_controls.enable_thinking is True or request_max_think is not None:
