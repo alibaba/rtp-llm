@@ -14,6 +14,7 @@ Key design decisions:
 """
 
 import math
+from collections.abc import Mapping
 from typing import Dict, Optional
 
 import torch
@@ -608,7 +609,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         (indexer not attached) so fmha_impl.forward gets a None and dense
         backends short-circuit; sparse backends require non-None.
         """
-        if self.indexer is None:
+        if self.indexer is None or kv_cache is None:
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
         return self.indexer(
@@ -624,9 +625,28 @@ class DeepSeekV32MlaAttention(RtpModule):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        fmha_impl: MlaImplBase,
-        kv_cache: Optional[LayerKVCache] = None,
+        fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
+        kv_cache: Optional[LayerKVCache] | Mapping[str, LayerKVCache] = None,
     ) -> torch.Tensor:
+        if self.indexer is not None:
+            required_tags = {"default", "indexer_kv"}
+            if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
+                raise RuntimeError(
+                    "sparse MLA requires exactly default and indexer_kv FMHA routes"
+                )
+            indexer_fmha_impl = fmha_impl["indexer_kv"]
+            fmha_impl = fmha_impl["default"]
+            if kv_cache is None:
+                indexer_kv_cache = None
+            elif isinstance(kv_cache, Mapping) and set(kv_cache) == required_tags:
+                indexer_kv_cache = kv_cache["indexer_kv"]
+                kv_cache = kv_cache["default"]
+            else:
+                raise RuntimeError(
+                    "sparse MLA requires exactly default and indexer_kv KV-cache routes"
+                )
+        elif isinstance(fmha_impl, Mapping) or isinstance(kv_cache, Mapping):
+            raise RuntimeError("dense MLA does not accept tagged cache routes")
         input_shape = hidden_states.shape[:-1]
         q_c = None
 
@@ -678,9 +698,11 @@ class DeepSeekV32MlaAttention(RtpModule):
 
         # Sparse Indexer (DSA) — runs only when self.indexer is attached
         # (DecoderLayer sets self.indexer when is_sparse=True).
-        topk_indices = self._run_sparse_indexer(
-            hidden_states, q_c, q_view, kv_cache, fmha_impl
-        )
+        topk_indices = None
+        if self.indexer is not None:
+            topk_indices = self._run_sparse_indexer(
+                hidden_states, q_c, q_view, indexer_kv_cache, indexer_fmha_impl
+            )
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
         )

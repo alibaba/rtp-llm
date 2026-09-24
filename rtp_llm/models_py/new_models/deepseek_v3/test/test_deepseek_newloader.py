@@ -399,6 +399,101 @@ def _uninitialized_model(model_type, *, layer_count=0, checkpoint_prefix=None):
 
 
 class DeepSeekNewloaderTest(unittest.TestCase):
+    def test_sparse_mla_uses_independent_cache_and_fmha_routes(self):
+        attention = DeepSeekV32MlaAttention(
+            hidden_size=8,
+            num_heads=2,
+            q_lora_rank=4,
+            kv_lora_rank=4,
+            nope_head_dim=2,
+            rope_head_dim=2,
+            v_head_dim=2,
+            layer_idx=0,
+            params_dtype=torch.float32,
+        )
+        for parameter in attention.parameters():
+            parameter.data.zero_()
+        attention.process_weights_after_loading()
+        calls = []
+
+        class Indexer(torch.nn.Module):
+            def forward(self, hidden, q, cache, params, inputs, **kwargs):
+                calls.append((cache, params, inputs))
+                return torch.tensor([[1]], dtype=torch.int32)
+
+        attention.indexer = Indexer()
+        main_cache, index_cache = object(), object()
+        dense = types.SimpleNamespace(forward=mock.Mock(return_value=torch.zeros(1, 4)))
+        index = types.SimpleNamespace(
+            fmha_params=object(),
+            attn_inputs=object(),
+            cp_params=None,
+            is_sparse=lambda: True,
+        )
+        routes = {"default": dense, "indexer_kv": index}
+        caches = {"indexer_kv": index_cache, "default": main_cache}
+        attention(torch.zeros(1, 8), routes, caches)
+        self.assertEqual(calls, [(index_cache, index.fmha_params, index.attn_inputs)])
+        self.assertIs(dense.forward.call_args.args[3], main_cache)
+        torch.testing.assert_close(
+            dense.forward.call_args.args[5], torch.tensor([[1]], dtype=torch.int32)
+        )
+        with self.assertRaisesRegex(RuntimeError, "KV-cache routes"):
+            attention(torch.zeros(1, 8), routes, {"default": main_cache})
+        # Cacheless warmup must not run the indexer against a missing pool.
+        calls.clear()
+        attention(torch.zeros(1, 8), routes, None)
+        self.assertEqual(calls, [])
+        self.assertIsNone(dense.forward.call_args.args[5])
+
+    def test_sparse_mla_runtime_layout_prepares_both_tagged_routes(self):
+        class RoutingModel(MlaRuntimeLayoutMixin, torch.nn.Module):
+            pass
+
+        model = RoutingModel()
+        model._is_sparse_mla = True
+        model._mla_kernel_layout = object()
+        model.config = object()
+        model.parallelism_config = object()
+        model.fmha_config = object()
+        main_cache = types.SimpleNamespace(tag="default")
+        index_cache = types.SimpleNamespace(tag="indexer_kv")
+        model.kv_cache = types.SimpleNamespace(
+            get_layer_cache_groups=lambda layer: [index_cache, main_cache]
+        )
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        inputs = types.SimpleNamespace(
+            attention_inputs={
+                "indexer_kv": PyAttentionInputs(),
+                "default": PyAttentionInputs(),
+            }
+        )
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_v3.language.AttnImplFactory.get_fmha_impl",
+            side_effect=lambda *args, **kwargs: args[3],
+        ) as factory:
+            routes = model.prepare_fmha_impl(inputs, True, "decode_graph")
+            self.assertEqual(factory.call_count, 2)
+            for call in factory.call_args_list:
+                self.assertIs(call.args[2], model._mla_kernel_layout)
+                self.assertEqual(
+                    call.kwargs["cuda_graph_selection_mode"], "decode_graph"
+                )
+            self.assertIs(routes["indexer_kv"], inputs.attention_inputs["indexer_kv"])
+        selected, caches = model._layer_attention_routes(routes, 0)
+        self.assertIs(selected, routes)
+        self.assertIs(caches["default"], main_cache)
+        self.assertIs(caches["indexer_kv"], index_cache)
+        for malformed in ({"default": PyAttentionInputs()}, PyAttentionInputs()):
+            with (
+                self.subTest(inputs=malformed),
+                self.assertRaisesRegex(RuntimeError, "attention input tags"),
+            ):
+                model.prepare_fmha_impl(
+                    types.SimpleNamespace(attention_inputs=malformed)
+                )
+
     @staticmethod
     def _runtime_preflight_indexer() -> DeepSeekV32Indexer:
         indexer = object.__new__(DeepSeekV32Indexer)
@@ -1076,7 +1171,11 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             with torch.device("cpu"):
                 model = DeepSeekV32MTPForCausalLM(
                     model_config,
-                    _load_config(),
+                    NewLoaderConfig(
+                        compute_dtype=torch.float32,
+                        device="cpu",
+                        parallelism_config=_single_rank_parallelism_config(),
+                    ),
                 )
 
         self.assertEqual(model._checkpoint_layer, 4)
