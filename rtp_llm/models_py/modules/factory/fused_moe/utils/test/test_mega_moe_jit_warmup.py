@@ -67,6 +67,8 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             max_tokens_per_rank=4096,
             moe_strategy="mega_moe",
         )
+        executor._activation = "swiglu"
+        executor._activation_kwargs = {}
         executor._input_packer = FusedMegaMoEInputPacker()
         executor.warmup_jit = mock.Mock(side_effect=RuntimeError("compile failed"))
         fake_deep_gemm = types.SimpleNamespace(get_num_sms=lambda: 148)

@@ -26,7 +26,10 @@ class MoEConfigAdapter:
         expert_activation: str = "swiglu",
         activation_beta: Optional[float] = None,
         activation_linear_beta: Optional[float] = None,
+        mega_moe_backend=None,
     ):
+        # Explicit per-model injection; ordinary models keep the installed backend.
+        self.mega_moe_backend = mega_moe_backend
         self.expert_activation = expert_activation
         self.activation_beta = activation_beta
         self.activation_linear_beta = activation_linear_beta

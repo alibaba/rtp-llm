@@ -166,6 +166,12 @@ def _get_validated_world_ep_group(cfg, dist):
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     supports_situ = True
 
+    def _get_backend(self):
+        backend = getattr(self.cfg, "mega_moe_backend", None)
+        if backend is None:
+            import deep_gemm as backend
+        return backend
+
     execute_empty_inputs = True
 
     @property
@@ -185,7 +191,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         checker.check(config.ep_size > 1)
         checker.check(config.world_size == config.ep_size)
         checker.check(config.world_rank == config.ep_rank)
-        checker.check(_mega_moe_available())
+        checker.check(_mega_moe_available(getattr(config, "mega_moe_backend", None)))
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
@@ -209,7 +215,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         transform's temporary allocations alive. Splitting keeps the live set
         to at most one input stack.
         """
-        import deep_gemm
+        deep_gemm = self._get_backend()
         import torch.distributed as dist
 
         from rtp_llm.utils.model_weight import W
@@ -242,13 +248,17 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.moe_w1_layout,
         )
         device = w13.device
-        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        s13_int = prepare_fp4_weight_scale_for_deepgemm(
+            s13_raw, 2 * inter, D, E, backend=deep_gemm
+        )
         del s13_raw
         torch.cuda.empty_cache()
 
         w2 = layer_weights.pop(W.moe_w2)
         s2_raw = layer_weights.pop(W.moe_s2)
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        s2_int = prepare_fp4_weight_scale_for_deepgemm(
+            s2_raw, D, inter, E, backend=deep_gemm
+        )
         del s2_raw
         torch.cuda.empty_cache()
 
@@ -290,6 +300,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             intermediate_hidden=inter,
             use_fp8_dispatch=True,
             activation=self._activation,
+            backend=getattr(cfg, "mega_moe_backend", None),
         )
         # Single-layer staging output. All MoE layers execute sequentially, so one
         # process-local buffer is enough and avoids O(layers) persistent memory.
@@ -331,7 +342,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 "MegaMoE JIT warmup must not run inside CUDA graph capture"
             )
 
-        import deep_gemm
+        deep_gemm = self._get_backend()
         import torch.distributed as dist
 
         cfg = self.cfg
@@ -357,6 +368,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             tuple(token_counts),
             self.supports_gate_pack,
         )
+        if getattr(cfg, "mega_moe_backend", None) is not None:
+            warmup_key = warmup_key + (deep_gemm,)
         if warmup_key in _MEGA_MOE_JIT_WARMED_KEYS:
             return
 
@@ -475,7 +488,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
-        import deep_gemm
+        deep_gemm = self._get_backend()
 
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(

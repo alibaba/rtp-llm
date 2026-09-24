@@ -13,6 +13,7 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import MoeConfig
 from .attention import linear
 from .router import KimiK3RouterProjection
+from .moe_backend import get_k3_moe_backend
 from .linear import KimiK3Bf16Linear, bf16_linear
 
 
@@ -78,6 +79,7 @@ class KimiK3LatentMoE(nn.Module):
             expert_activation="situ",
             activation_beta=self.beta,
             activation_linear_beta=self.linear_beta,
+            mega_moe_backend=get_k3_moe_backend(),
         )
         if cfg.moe_strategy not in ("auto", "mega_moe"):
             raise ValueError("K3 native MXFP4 requires the MegaMoE executor")
