@@ -30,7 +30,8 @@ int64_t estimateInitialNeedBlocks(const GenerateStreamPtr& stream) {
 }
 
 bool isAdmittedWaitingStream(const GenerateStreamPtr& stream) {
-    return stream->hasEvent(StreamEvents::CanRun) && stream->hasEvent(StreamEvents::LoadInitiated);
+    // Cache completion clears CanRun for fresh admission, not the existing KV ownership.
+    return stream->hasEvent(StreamEvents::LoadInitiated);
 }
 
 // Parse the decode_prefill_ratio string into the internal signed cadence step.
@@ -176,20 +177,23 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     if (!admission_peak_state_) {
         buildAdmissionPeakState();
     }
+    // Completed loads are already in the peak snapshot. They still need this round's mode/token
+    // admission, but counting their batch/KV cost again can prevent them from ever releasing KV.
+    const bool already_in_peak   = isAdmittedWaitingStream(new_stream);
     const auto in_flight_streams = admission_peak_state_->streams.size();
-    if (in_flight_streams + 1 > max_generate_batch_size_) {
+    if (!already_in_peak && in_flight_streams + 1 > max_generate_batch_size_) {
         return false;
     }
 
     size_t max_token_size = static_cast<size_t>(new_stream->contextLength());
     if (streams.empty() && max_token_size < max_seq_len_) {
-        return tryAdmitKVForPrefill(new_stream);
+        return already_in_peak || tryAdmitKVForPrefill(new_stream);
     }
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, static_cast<size_t>(stream->contextLength()));
     }
     return max_token_size * (streams.size() + 1) < max_batch_tokens_size_
-           && tryAdmitKVForPrefill(new_stream);
+           && (already_in_peak || tryAdmitKVForPrefill(new_stream));
 }
 
 bool PDFusionRatioScheduler::waitPredicate() {
@@ -219,9 +223,9 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
         const size_t prev_waiting_size = waiting_streams_.size();
         // Build once for this in-flight snapshot, then update for accepted candidates.
         admission_peak_state_.reset();
-        evaluateWaitingStreams(waiting_streams_);
+        const auto admitted_streams = evaluateWaitingStreams(waiting_streams_, /*include_running_mode=*/false);
         admission_peak_state_.reset();
-        made_progress |= evaluateAndUpdateStreams(waiting_streams_) > 0;
+        made_progress |= evaluateAndUpdateStreams(waiting_streams_, &admitted_streams) > 0;
         if (!new_streams_.empty()) {
             list<GenerateStreamPtr> prefill_batch(new_streams_.begin(), new_streams_.end());
             pending_decode_streams_.insert(pending_decode_streams_.end(), new_streams_.begin(), new_streams_.end());
@@ -308,10 +312,10 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
     auto&     state              = *admission_peak_state_;
     const int remaining_kv_steps = remainingKVAllocationSteps(new_stream);
     // Preserve the idle fast path, where the allocator reports an impossible standalone request.
-    const bool    enforce_capacity = !state.streams.empty();
+    const bool enforce_capacity = !state.streams.empty();
     // Device KV-cache matching happens later in the allocator. At scheduler admission time the actual prefix hit is
     // unknown, so use the conservative no-hit estimate here.
-    const int64_t initial_delta    = estimateInitialNeedBlocks(new_stream);
+    const int64_t initial_delta = estimateInitialNeedBlocks(new_stream);
 
     if (enforce_capacity
         && (state.initial_need_blocks + initial_delta > initial_capacity
@@ -319,7 +323,7 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
         return false;
     }
 
-    const auto insert_it = std::lower_bound(state.streams.begin(),
+    const auto insert_it      = std::lower_bound(state.streams.begin(),
                                             state.streams.end(),
                                             AdmissionStreamInfo{new_stream, remaining_kv_steps},
                                             longerLifetimeFirst);

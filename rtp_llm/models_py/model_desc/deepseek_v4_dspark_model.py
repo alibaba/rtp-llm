@@ -115,6 +115,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         )
 
         role_type = getattr(parallelism_config, "role_type", None)
+        self._disable_capture_context()
+
         self._commit_only_prefill = (
             role_type == RoleType.PREFILL
             or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"

@@ -1437,6 +1437,80 @@ TEST(CacheConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
     }
 }
 
+TEST(CacheConfigCreatorTest, HcaStateExplicitDescriptorIsNotOverwritten) {
+    auto              mc = makeProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.dsv4_hca_state_pool_blocks = 321;
+
+    auto config = CacheConfigCreator::createConfig(mc, pc, kv_cache_config);
+    EXPECT_EQ(config.group("hca_state").policy.explicit_block_num, 256u);
+    config.finalizeBlockNums(100, RuntimeConfig{});
+    for (const auto& group : config.groups()) {
+        EXPECT_EQ(group.block_num, group.tag == "hca_state" ? 256u : 100u) << group.tag;
+    }
+    EXPECT_EQ(test::explicitPoolReserveBytes(config), 256u * config.blockSizeBytesForGroup("hca_state"));
+}
+
+TEST(CacheConfigCreatorTest, HcaStateConfigValueFillsDefaultDescriptor) {
+    // Both an absent capacity policy and an unset/zero explicit count use the legacy fallback.
+    for (int capacity_mode : {0, 1, 2}) {
+        for (uint32_t fallback_blocks : {0u, 321u}) {
+            SCOPED_TRACE(testing::Message()
+                         << "capacity_mode=" << capacity_mode << " fallback_blocks=" << fallback_blocks);
+            auto mc = makeProModelConfig();
+            for (auto& descs : mc.kv_cache_spec_descs) {
+                for (auto& desc : descs) {
+                    if (desc.tag == "hca_state") {
+                        ASSERT_TRUE(desc.capacity.has_value());
+                        if (capacity_mode == 0) {
+                            desc.capacity.reset();
+                        } else if (capacity_mode == 1) {
+                            desc.capacity->explicit_block_num.reset();
+                        } else {
+                            desc.capacity->explicit_block_num = 0;
+                        }
+                    }
+                }
+            }
+            ParallelismConfig pc;
+            KVCacheConfig     kv_cache_config;
+            kv_cache_config.dsv4_hca_state_pool_blocks = fallback_blocks;
+            auto config                                = CacheConfigCreator::createConfig(mc, pc, kv_cache_config);
+            EXPECT_EQ(config.group("hca_state").policy.explicit_block_num, fallback_blocks);
+            config.finalizeBlockNums(100, RuntimeConfig{});
+            for (const auto& group : config.groups()) {
+                const bool has_fallback = group.tag == "hca_state" && fallback_blocks > 0;
+                EXPECT_EQ(group.block_num, has_fallback ? fallback_blocks : 100u) << group.tag;
+                EXPECT_EQ(group.policy.explicit_block_num, has_fallback ? fallback_blocks : 0u) << group.tag;
+            }
+            EXPECT_EQ(config.group("hca_state").policy.charge_to_paged_budget, capacity_mode != 0);
+            const size_t expected_reserve =
+                capacity_mode == 0 ? 0u : fallback_blocks * config.blockSizeBytesForGroup("hca_state");
+            EXPECT_EQ(test::explicitPoolReserveBytes(config), expected_reserve);
+        }
+    }
+}
+
+TEST(CacheConfigCreatorTest, HcaStateConfigValueIsIgnoredWithoutHcaStateGroup) {
+    auto              mc = makeHybridAttentionModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    auto              baseline                 = CacheConfigCreator::createConfig(mc, pc, kv_cache_config);
+    kv_cache_config.dsv4_hca_state_pool_blocks = 321;
+
+    auto config = CacheConfigCreator::createConfig(mc, pc, kv_cache_config);
+    EXPECT_EQ(config.groupTags(), baseline.groupTags());
+    config.finalizeBlockNums(100, RuntimeConfig{});
+    for (const auto& group : config.groups()) {
+        EXPECT_NE(group.tag, "hca_state");
+        EXPECT_TRUE(CacheConfig::samePolicy(group.policy, baseline.group(group.tag).policy));
+        EXPECT_EQ(group.policy.explicit_block_num, 0u);
+        EXPECT_EQ(group.block_num, 100u);
+    }
+    EXPECT_EQ(test::explicitPoolReserveBytes(config), 0u);
+}
+
 TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKernelBlockSize) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;

@@ -1,11 +1,15 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -32,6 +36,107 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(std::string              req
             /*server_context=*/nullptr,
             prefill_cp_size};
 }
+
+class HandoffTestEngine final: public EngineBase {
+public:
+    explicit HandoffTestEngine(bool multi_group): EngineBase(EngineInitParams()) {
+        auto config = multi_group ? test::makeSimpleHybridMhaCacheConfig(2, 8, 2, DataType::TYPE_FP16, 1) :
+                                    test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16);
+        resource_context_.cache_manager = std::make_shared<KVCacheManager>(config, false, nullptr);
+        EXPECT_TRUE(resource_context_.cache_manager->init());
+        resource_context_.role_type = RoleType::DECODE;
+    }
+
+    GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
+        ModelConfig config;
+        config.max_seq_len                  = 16;
+        config.vocab_size                   = 16;
+        config.attn_config.tokens_per_block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+        stream = std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, resource_context_, nullptr);
+        return stream;
+    }
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
+        auto result = makeStream(input);
+        enqueue(result);
+        return result;
+    }
+    void enqueue(GenerateStreamPtr& value) override {
+        ++enqueue_count;
+        // The RPC supplies token 4; only the model's next token is simulated here.
+        EXPECT_EQ(value->outputTokenLen(), 1);
+        value->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(value->moveToNext(), StreamState::RUNNING);
+        value->update({torch::tensor({{5}}, torch::kInt32), 1});
+        EXPECT_EQ(value->moveToNext(), StreamState::FINISHED);
+    }
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in decode handoff test");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+    GenerateStreamPtr stream;
+    int               enqueue_count = 0;
+};
+
+class TestDecodeRpcService final: public RpcService::Service {
+public:
+    TestDecodeRpcService() {
+        server_.meta_ = meta_;
+    }
+
+    grpc::Status RemoteGenerate(grpc::ServerContext*                                            context,
+                                grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* stream) override {
+        return server_.RemoteGenerate(context, stream);
+    }
+
+    EngineScheduleInfo scheduleInfo() const {
+        return meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    }
+
+    void configureHandoff(const std::shared_ptr<HandoffTestEngine>& engine, const std::string& address) {
+        server_.engine_ = engine;
+        // Use the remote-rank load path; no cache-store payload transfer is simulated.
+        server_.resource_.workers                                     = {"decode-0"};
+        server_.resource_.grpc_workers                                = {address};
+        server_.maga_init_params_.pd_sep_config.load_cache_timeout_ms = 1000;
+    }
+
+    grpc::Status RemoteLoad(grpc::ServerContext*,
+                            const BroadcastLoadRequestPB* request,
+                            BroadcastLoadResponsePB*      response) override {
+        const auto& topology = server_.engine_->getCacheManager()->cacheConfig().topology();
+        auto        groups   = topology.groups();
+        std::reverse(groups.begin(), groups.end());
+        auto        receiver_topology = CacheTopology::create(std::move(groups), topology.layers());
+        const auto  rows              = DecodeRpcServer::decodeGroupBlockIds(*request, *receiver_topology);
+        const auto& expected          = server_.engine_->resourceContext().cache_manager->cacheConfig().topology();
+        EXPECT_EQ(rows.orderedTags(), expected.groupTags());
+        if (rows.size() > 1) {
+            EXPECT_NE(receiver_topology->groupTags(), rows.orderedTags());
+        }
+        auto        engine   = std::static_pointer_cast<HandoffTestEngine>(server_.engine_);
+        const auto& resource = engine->stream->kvCachePtr()->cacheResource(0);
+        for (const auto& tag : expected.groupTags()) {
+            EXPECT_EQ(rows.blocks(tag), resource.groupBlockIds().blocks(tag));
+        }
+        EXPECT_EQ(request->request_id(), 42);
+        ++load_count;
+        response->set_done_time_us(currentTimeUs());
+        response->set_loaded_cache_block_count(1);
+        return grpc::Status::OK;
+    }
+
+    int load_count = 0;
+
+private:
+    std::shared_ptr<RpcServerRuntimeMeta> meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    DecodeRpcServer                       server_;
+};
 
 GroupBase makeRpcGroup(std::string tag) {
     auto spec = std::make_shared<MHAKVCacheSpec>(tag, 8, 8, 1);
@@ -108,6 +213,179 @@ TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) 
     context.setRequestTimeoutMs(-1);
     EXPECT_FALSE(context.request_deadline.has_value());
     EXPECT_FALSE(context.requestDeadlineExceeded());
+}
+
+TEST(DecodeRpcServerTest, invalidQueryUsesInvalidArgumentWithDetails) {
+    TestDecodeRpcService service;
+    int                  listen_port = 0;
+    grpc::ServerBuilder  builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
+    builder.RegisterService(&service);
+    auto grpc_server = builder.BuildAndStart();
+    ASSERT_NE(grpc_server, nullptr);
+    ASSERT_NE(listen_port, 0);
+
+    auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
+    auto stub    = RpcService::NewStub(channel);
+    grpc::ClientContext context;
+    auto                stream = stub->RemoteGenerate(&context);
+    GenerateRequestPB   request;
+    request.set_stage(RemoteStage::ALLOCATE);
+    request.set_client_id("test");
+    request.set_request_id(1);
+    request.mutable_input()->add_token_ids(0);
+    request.mutable_input()->mutable_generate_config()->set_max_new_tokens(-1);
+
+    EXPECT_TRUE(stream->Write(request));
+    stream->WritesDone();
+    GenerateOutputsPB response;
+    EXPECT_FALSE(stream->Read(&response));
+    const auto status = stream->Finish();
+    grpc_server->Shutdown();
+    grpc_server->Wait();
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(error_details.error_message().find("max_new_tokens"), std::string::npos);
+
+    const auto schedule_info = service.scheduleInfo();
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().request_id, 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().error_code,
+              static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+}
+
+TEST(DecodeRpcServerTest, zeroRequestIdWithInvalidStageReportsExactlyOnce) {
+    TestDecodeRpcService service;
+    int                  listen_port = 0;
+    grpc::ServerBuilder  builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
+    builder.RegisterService(&service);
+    auto grpc_server = builder.BuildAndStart();
+    ASSERT_NE(grpc_server, nullptr);
+    ASSERT_NE(listen_port, 0);
+
+    auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
+    auto stub    = RpcService::NewStub(channel);
+    grpc::ClientContext context;
+    auto                stream = stub->RemoteGenerate(&context);
+    GenerateRequestPB   request;
+    request.set_stage(RemoteStage::LOAD);
+    request.set_client_id("test");
+    request.set_request_id(0);
+
+    EXPECT_TRUE(stream->Write(request));
+    stream->WritesDone();
+    GenerateOutputsPB response;
+    EXPECT_FALSE(stream->Read(&response));
+    const auto status = stream->Finish();
+    grpc_server->Shutdown();
+    grpc_server->Wait();
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+
+    const auto schedule_info = service.scheduleInfo();
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().request_id, 0);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().error_code,
+              static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+}
+
+TEST(DecodeRpcServerTest, reportEarlyFinishTaskToleratesMissingRuntimeMeta) {
+    DecodeRpcServer              server;
+    DecodeRpcContext             rpc_context{nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    DecodeGenerateContext        decode_context(rpc_context, 0, &server_context, metrics_reporter, nullptr);
+    decode_context.request_id         = 1;
+    decode_context.request_id_present = true;
+    decode_context.error_info         = ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid parameters");
+    decode_context.error_status       = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "invalid parameters");
+
+    EXPECT_NO_THROW(server.reportEarlyFinishTask(decode_context));
+    EXPECT_FALSE(decode_context.early_finish_reported);
+}
+
+TEST(DecodeRpcServerTest, reportEarlyFinishTaskReportsSerializedErrorExactlyOnce) {
+    DecodeRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+
+    DecodeRpcContext             rpc_context{nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    DecodeGenerateContext        decode_context(rpc_context, 0, &server_context, metrics_reporter, server.meta_);
+    decode_context.request_id         = 42;
+    decode_context.request_id_present = true;
+    decode_context.request_key        = "test_request_id_42";
+
+    ErrorDetailsPB error_details;
+    error_details.set_error_code(static_cast<int>(ErrorCode::LOAD_CACHE_TIMEOUT));
+    error_details.set_error_message("load cache timeout");
+    std::string serialized_error_details;
+    ASSERT_TRUE(error_details.SerializeToString(&serialized_error_details));
+    decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "load failed", serialized_error_details);
+
+    server.reportEarlyFinishTask(decode_context);
+    server.reportEarlyFinishTask(decode_context);
+
+    const auto schedule_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().request_id, 42);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().error_code,
+              static_cast<int64_t>(ErrorCode::LOAD_CACHE_TIMEOUT));
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().error_message, "load cache timeout");
+}
+
+TEST(DecodeRpcServerTest, reportEarlyFinishTaskMapsBareGrpcErrorsExactlyOnce) {
+    DecodeRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+
+    struct TestCase {
+        int64_t          request_id;
+        grpc::StatusCode grpc_code;
+        const char*      message;
+        ErrorCode        expected_error_code;
+    };
+    const TestCase test_cases[] = {
+        {0, grpc::StatusCode::INTERNAL, "read failed", ErrorCode::EXECUTION_EXCEPTION},
+        {1, grpc::StatusCode::INTERNAL, "write failed", ErrorCode::EXECUTION_EXCEPTION},
+        {2, grpc::StatusCode::CANCELLED, "cancelled", ErrorCode::CANCELLED},
+        {3, grpc::StatusCode::DEADLINE_EXCEEDED, "timeout", ErrorCode::DEADLINE_EXCEEDED},
+    };
+
+    DecodeRpcContext             rpc_context{nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    {
+        DecodeGenerateContext missing_id_context(rpc_context, 0, &server_context, metrics_reporter, server.meta_);
+        missing_id_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "read failed before first frame");
+        server.reportEarlyFinishTask(missing_id_context);
+    }
+
+    for (const auto& test_case : test_cases) {
+        DecodeGenerateContext decode_context(rpc_context, 0, &server_context, metrics_reporter, server.meta_);
+        decode_context.request_id         = test_case.request_id;
+        decode_context.request_id_present = true;
+        decode_context.request_key        = "test_request_id_" + std::to_string(test_case.request_id);
+        decode_context.error_status       = grpc::Status(test_case.grpc_code, test_case.message);
+
+        server.reportEarlyFinishTask(decode_context);
+        server.reportEarlyFinishTask(decode_context);
+    }
+
+    const auto schedule_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), std::size(test_cases));
+    for (size_t i = 0; i < std::size(test_cases); ++i) {
+        EXPECT_EQ(schedule_info.finished_task_info_list[i].request_id, test_cases[i].request_id);
+        EXPECT_EQ(schedule_info.finished_task_info_list[i].error_code,
+                  static_cast<int64_t>(test_cases[i].expected_error_code));
+        EXPECT_EQ(schedule_info.finished_task_info_list[i].error_message, test_cases[i].message);
+    }
 }
 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
@@ -236,11 +514,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -265,11 +543,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -545,6 +823,84 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
 
+TEST_F(PrefillCompletionRpcTest, PositiveDecodeUsesTaggedHandoffAndGroupCountReuseOnSameRpc) {
+    for (bool multi_group : {false, true}) {
+        SCOPED_TRACE(multi_group);
+        auto                 engine = std::make_shared<HandoffTestEngine>(multi_group);
+        TestDecodeRpcService service;
+        grpc::ServerBuilder  builder;
+        int                  port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        const auto address = "127.0.0.1:" + std::to_string(port);
+        service.configureHandoff(engine, address);
+        auto stub = RpcService::NewStub(grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto rpc = stub->RemoteGenerate(&context);
+
+        GenerateRequestPB request;
+        request.set_stage(RemoteStage::ALLOCATE);
+        request.set_request_id(42);
+        request.set_client_id("prefill");
+        request.add_peer_addrs("prefill-0");
+        request.add_peer_addrs("prefill-1");
+        auto* input = request.mutable_input();
+        input->set_request_id(42);
+        for (int token : {1, 2, 3}) {
+            input->add_token_ids(token);
+        }
+        auto* config = input->mutable_generate_config();
+        config->set_max_new_tokens(2);
+        config->set_num_beams(1);
+        config->set_num_return_sequences(1);
+        config->set_timeout_ms(3000);
+        EXPECT_TRUE(rpc->Write(request));
+        GenerateOutputsPB response;
+        EXPECT_TRUE(rpc->Read(&response));
+        EXPECT_TRUE(response.supports_prefill_completion());
+
+        request.set_stage(RemoteStage::LOAD);
+        EXPECT_TRUE(rpc->Write(request));
+        EXPECT_TRUE(rpc->Read(&response));
+        EXPECT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+
+        request.set_stage(RemoteStage::GENERATE);
+        request.set_first_generate_token_id(4);
+        EXPECT_TRUE(rpc->Write(request));
+        rpc->WritesDone();
+        std::vector<int> output_tokens;
+        while (rpc->Read(&response)) {
+            auto tokens = QueryConverter::transTensor(response.flatten_output().output_ids());
+            if (tokens.defined()) {
+                const auto* data = tokens.data_ptr<int32_t>();
+                output_tokens.insert(output_tokens.end(), data, data + tokens.numel());
+            }
+        }
+        const auto status = rpc->Finish();
+        server->Shutdown();
+        server->Wait();
+        EXPECT_TRUE(status.ok()) << status.error_message();
+        EXPECT_EQ(service.load_count, 1);
+        EXPECT_EQ(engine->enqueue_count, 1);
+        EXPECT_EQ(output_tokens, (std::vector<int>{5}));
+        ASSERT_NE(engine->stream, nullptr);
+        EXPECT_EQ(engine->stream->outputTokenLen(), 2);
+        EXPECT_EQ(engine->stream->initialReuseLength(), multi_group ? 2 : 0);
+        EXPECT_FALSE(engine->stream->hasError());
+        EXPECT_TRUE(engine->stream->isFinished());
+        EXPECT_TRUE(engine->stream->streamCacheResource().isResourceReleased());
+        EXPECT_EQ(engine->stream->streamCacheResource().curBlocksNum(), 0);
+        const auto info = service.scheduleInfo();
+        EXPECT_TRUE(info.running_task_info_list.empty());
+        ASSERT_EQ(info.finished_task_info_list.size(), 1u);
+        EXPECT_EQ(info.finished_task_info_list.front().request_id, 42);
+        EXPECT_EQ(info.finished_task_info_list.front().error_code, 0);
+    }
+}
+
 TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailures) {
     class CompletionService final: public RpcService::Service {
     public:
@@ -553,7 +909,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             kmonitor::MetricsReporterPtr reporter;
             auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
             DecodeGenerateContext        context(rpc_context, 0, server_context, reporter, meta);
-            context.request_id = 42;
+            context.request_id         = 42;
+            context.request_id_present = true;
             context.allocate_request.set_client_id("prefill");
             auto cache = std::make_shared<KVCacheManager>(
                 test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16), false, nullptr);
@@ -565,7 +922,14 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             input->request_id       = 42;
             input->begin_time_us    = currentTimeUs();
             input->generate_config  = std::make_shared<GenerateConfig>();
-            input->input_ids        = torch::tensor({1, 2, 3}, torch::kInt32);
+            if (prefill_only) {
+                GenerateConfigPB wire_config;
+                wire_config.set_max_new_tokens(0);
+                wire_config.set_prefill_only(explicit_prefill_only);
+                input->generate_config = QueryConverter::transGenerateConfig(&wire_config);
+                EXPECT_TRUE(input->generate_config->isPrefillOnly());
+            }
+            input->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
             ModelConfig config;
             config.max_seq_len = 16;
             auto stream = std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, resources, nullptr);
@@ -582,14 +946,19 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
                 stream->reportError(ErrorCode::MALLOC_FAILED, "test allocation failure");
             }
             DecodeRpcServer server;
+            server.meta_ = meta;
             server.localGenerate(context);
-            status                  = context.error_status;
-            finished                = stream->isFinished();
-            had_error               = stream->hasError();
-            resource_released       = stream->stream_cache_resource_->isResourceReleased();
-            blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+            server.reportEarlyFinishTask(context);
+            server.reportEarlyFinishTask(context);
+            const auto terminal_error_code = context.finalErrorInfo().code();
+            status                         = context.error_status;
+            finished                       = stream->isFinished();
+            had_error                      = stream->hasError();
+            resource_released              = stream->stream_cache_resource_->isResourceReleased();
+            blocks_after_completion        = stream->stream_cache_resource_->curBlocksNum();
+            EXPECT_EQ(stream->outputTokenLen(), 0);
+            const auto timing = stream->getTimeInfo();
+            executed          = timing.running_started || timing.first_token_committed || timing.generation_done;
             RpcMetricsCollector metrics;
             context.collectBasicMetrics(metrics);
             error_qps = metrics.error_qps;
@@ -599,13 +968,22 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
                 stream->moveToNext();
             }
             context.stopStream();
-            error_after_cleanup = stream->hasError();
-            remaining_requests  = meta->getEngineScheduleInfo(-1).running_task_info_list.size();
+            error_after_cleanup      = stream->hasError();
+            const auto schedule_info = meta->getEngineScheduleInfo(-1);
+            remaining_requests       = schedule_info.running_task_info_list.size();
+            EXPECT_EQ(schedule_info.finished_task_info_list.size(), 1u);
+            if (!schedule_info.finished_task_info_list.empty()) {
+                EXPECT_EQ(schedule_info.finished_task_info_list.front().request_id, 42);
+                EXPECT_EQ(schedule_info.finished_task_info_list.front().error_code,
+                          static_cast<int64_t>(terminal_error_code));
+            }
             return status;
         }
-        bool         expired      = false;
-        bool         stream_error = false;
-        bool         running      = false;
+        bool         prefill_only          = false;
+        bool         explicit_prefill_only = true;
+        bool         expired               = false;
+        bool         stream_error          = false;
+        bool         running               = false;
         grpc::Status status;
         bool         finished = false, had_error = false, resource_released = false;
         bool         executed = false, error_qps = false, error_after_cleanup = false;
@@ -613,13 +991,26 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         size_t       blocks_after_completion = 1;
     };
 
-    for (const std::string mode :
-         {"complete", "eof", "wrong_request", "wrong_client", "wrong_stage", "expired", "stream_error", "running"}) {
+    for (const std::string mode : {"complete",
+                                   "prefill_only",
+                                   "prefill_only_generate",
+                                   "bare_zero_generate",
+                                   "eof",
+                                   "wrong_request",
+                                   "wrong_client",
+                                   "wrong_stage",
+                                   "unknown_stage",
+                                   "expired",
+                                   "stream_error",
+                                   "running"}) {
         SCOPED_TRACE(mode);
         CompletionService service;
-        service.expired      = mode == "expired";
-        service.stream_error = mode == "stream_error";
-        service.running      = mode == "running";
+        service.prefill_only =
+            mode == "prefill_only" || mode == "prefill_only_generate" || mode == "bare_zero_generate";
+        service.explicit_prefill_only = mode != "bare_zero_generate";
+        service.expired               = mode == "expired";
+        service.stream_error          = mode == "stream_error";
+        service.running               = mode == "running";
         grpc::ServerBuilder builder;
         int                 port = 0;
         builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
@@ -633,7 +1024,11 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         auto rpc = stub->RemoteGenerate(&context);
         if (mode != "eof") {
             GenerateRequestPB request;
-            request.set_stage(mode == "wrong_stage" ? RemoteStage::LOAD : RemoteStage::PREFILL_COMPLETE);
+            request.set_stage(mode == "unknown_stage" ? static_cast<RemoteStage>(123) :
+                              mode == "wrong_stage"   ? RemoteStage::LOAD :
+                              mode == "prefill_only_generate" || mode == "bare_zero_generate" ?
+                                                      RemoteStage::GENERATE :
+                                                      RemoteStage::PREFILL_COMPLETE);
             request.set_request_id(mode == "wrong_request" ? 43 : 42);
             request.set_client_id(mode == "wrong_client" ? "other" : "prefill");
             EXPECT_TRUE(rpc->Write(request));
@@ -644,7 +1039,7 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         server->Wait();
         EXPECT_EQ(service.remaining_requests, 0u);
         EXPECT_FALSE(service.executed);
-        if (mode == "complete") {
+        if (mode == "complete" || mode == "prefill_only") {
             EXPECT_TRUE(status.ok());
             EXPECT_TRUE(service.finished);
             EXPECT_TRUE(service.resource_released);
@@ -655,8 +1050,20 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         } else {
             EXPECT_FALSE(status.ok());
             EXPECT_TRUE(service.error_qps);
-            if (mode == "eof" || mode == "wrong_stage") {
+            if (mode == "eof") {
                 EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+            } else if (mode == "wrong_stage" || mode == "unknown_stage") {
+                EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+                ErrorDetailsPB details;
+                ASSERT_TRUE(details.ParseFromString(status.error_details()));
+                EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+                EXPECT_NE(details.error_message().find("RemoteStage::GENERATE"), std::string::npos);
+            } else if (mode == "prefill_only_generate" || mode == "bare_zero_generate") {
+                EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+                ErrorDetailsPB details;
+                ASSERT_TRUE(details.ParseFromString(status.error_details()));
+                EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+                EXPECT_NE(details.error_message().find("prefill-only"), std::string::npos);
             } else if (mode == "wrong_request" || mode == "wrong_client") {
                 EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
             } else if (mode == "expired") {

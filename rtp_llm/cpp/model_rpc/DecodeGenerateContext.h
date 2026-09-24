@@ -46,7 +46,8 @@ public:
                           grpc::ServerContext*                  server_context,
                           kmonitor::MetricsReporterPtr&         metrics_reporter,
                           std::shared_ptr<RpcServerRuntimeMeta> meta):
-        GenerateContext(0, timeout_ms, server_context, metrics_reporter, meta), rpc_context(rpc_context) {}
+        GenerateContext(0, timeout_ms, server_context, metrics_reporter, meta, /*request_id_present=*/false),
+        rpc_context(rpc_context) {}
     ~DecodeGenerateContext();
     void reportTime();
     struct TimeInfo {
@@ -65,10 +66,10 @@ public:
     };
 
 public:
-    DecodeRpcContext&        rpc_context;
-    std::vector<std::string>  peer_addrs;  // prefill worker addrs
-    GenerateRequestPB         allocate_request;
-    DecodeStatInfo            stat_info;
+    DecodeRpcContext&          rpc_context;
+    std::vector<std::string>   peer_addrs;  // prefill worker addrs
+    GenerateRequestPB          allocate_request;
+    DecodeStatInfo             stat_info;
     const std::atomic<size_t>* loading_cache_requests = nullptr;
     int32_t                    prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
     // Guards meta_->finishTask() early-failure reporting: at most once per request.
