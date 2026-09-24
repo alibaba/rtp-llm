@@ -69,10 +69,6 @@ from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     kimi_k3_pending_prompt_token_count,
     validate_kimi_k3_tool_history,
 )
-from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
-    KimiK3VisionProcessor,
-    preflight_kimi_k3_images_async,
-)
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_request_headers,
@@ -97,12 +93,13 @@ _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
 _KIMI_K3_IMAGE_PLACEHOLDER = "<|kimi_image_placeholder|>"
 _KIMI_K3_MEDIA_PAD = "<|media_pad|>"
+_KIMI_K3_MEDIA_BEGIN = "<|media_begin|>"
+_KIMI_K3_MEDIA_END = "<|media_end|>"
 
 
 def _build_mm_inputs(
     mm_parts: list,
     tensors: Optional[list[torch.Tensor]] = None,
-    skip_input_inspection: bool = False,
 ) -> list:
     """Build ``MultimodalInput`` list from parsed dash_sc multimodal parts.
 
@@ -146,7 +143,6 @@ def _build_mm_inputs(
                 -1,  # use VitConfig.mm_timeout_ms
                 part.max_long_side_pixel,
             ),
-            skip_input_inspection,
         )
         for part, tensor in zip(mm_parts, tensors)
     ]
@@ -176,9 +172,8 @@ async def _prepare_kimi_k3_multimodal_request(
     *,
     tokenizer: Any,
     vit_config: Optional[VitConfig] = None,
-    skip_input_inspection: bool = False,
 ) -> tuple[list[int], list]:
-    """Expand K3 chat-template placeholders and build backend multimodal inputs."""
+    """Normalize K3 image prompts to one ViT-owned placeholder per image."""
     mm_parts = parse_multimodal_parts_from_request(request)
     if not mm_parts:
         return input_ids_list, []
@@ -216,37 +211,44 @@ async def _prepare_kimi_k3_multimodal_request(
             f"{expanded_count} != {len(urls)}",
         )
 
-    try:
-        tensors, sizes = await preflight_kimi_k3_images_async(
-            urls, vit_config or VitConfig()
-        )
-    except ValueError as error:
-        raise FtRuntimeException(
-            ExceptionType.MM_WRONG_FORMAT_ERROR, str(error)
-        ) from error
-
-    expanded_ids = list(input_ids_list)
+    normalized_ids = list(input_ids_list)
     if placeholder_offsets:
-        expanded_ids = []
+        normalized_ids = []
         cursor = 0
-        for offset, (width, height) in zip(placeholder_offsets, sizes):
-            expanded_ids.extend(input_ids_list[cursor:offset])
-            image_prompt_ids = _encode_kimi_k3_prompt(
-                tokenizer,
-                KimiK3VisionProcessor.make_image_prompt(width, height),
-            )
-            if not image_prompt_ids:
+        for offset in placeholder_offsets:
+            normalized_ids.extend(input_ids_list[cursor:offset])
+            normalized_ids.extend(media_pad_ids)
+            cursor = offset + len(placeholder_ids)
+        normalized_ids.extend(input_ids_list[cursor:])
+    else:
+        # Some upstream DashScope callers already expanded the size-dependent
+        # K3 text. Collapse that entire image span before the ViT re-creates it;
+        # leaving the old text in place would duplicate the prompt embeddings.
+        begin_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_MEDIA_BEGIN)
+        end_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_MEDIA_END)
+        begins = _find_token_sequence_offsets(input_ids_list, begin_ids)
+        ends = _find_token_sequence_offsets(input_ids_list, end_ids)
+        pads = _find_token_sequence_offsets(input_ids_list, media_pad_ids)
+        if begins or ends:
+            if len(begins) != len(urls) or len(ends) != len(urls):
                 raise FtRuntimeException(
                     ExceptionType.MM_WRONG_FORMAT_ERROR,
-                    "Kimi K3 image prompt could not be tokenized",
+                    "Kimi K3 expanded image prompt boundaries do not match images",
                 )
-            expanded_ids.extend(image_prompt_ids)
-            cursor = offset + len(placeholder_ids)
-        expanded_ids.extend(input_ids_list[cursor:])
+            normalized_ids = []
+            cursor = 0
+            for begin, pad, end in zip(begins, pads, ends):
+                if not (cursor <= begin < pad < end):
+                    raise FtRuntimeException(
+                        ExceptionType.MM_WRONG_FORMAT_ERROR,
+                        "Kimi K3 expanded image prompt has invalid marker order",
+                    )
+                normalized_ids.extend(input_ids_list[cursor:begin])
+                normalized_ids.extend(media_pad_ids)
+                cursor = end + len(end_ids)
+            normalized_ids.extend(input_ids_list[cursor:])
 
-    return expanded_ids, _build_mm_inputs(
-        mm_parts, tensors, skip_input_inspection=skip_input_inspection
-    )
+    return normalized_ids, _build_mm_inputs(mm_parts)
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -759,7 +761,6 @@ async def iter_real_model_stream_infer(
                         input_ids_list,
                         tokenizer=tokenizer,
                         vit_config=vit_config,
-                        skip_input_inspection=other.skip_input_inspection,
                     )
                 )
             apply_kimi_k3_request_contract(
@@ -771,10 +772,7 @@ async def iter_real_model_stream_infer(
                 _hf_tokenizer(tokenizer), input_ids_list
             )
         elif mm_inputs is None:
-            mm_inputs = _build_mm_inputs(
-                parse_multimodal_parts_from_request(request),
-                skip_input_inspection=other.skip_input_inspection,
-            )
+            mm_inputs = _build_mm_inputs(parse_multimodal_parts_from_request(request))
 
         headers = dict(other.request_headers or {})
         headers.update(_headers_from_invocation_metadata(invocation_metadata))

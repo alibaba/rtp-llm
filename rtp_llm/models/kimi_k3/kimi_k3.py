@@ -192,6 +192,7 @@ class KimiK3(BaseModel):
         config.mm_related_params.config = {
             "vision_config": vision_config,
             "media_proc_cfg": load_kimi_k3_media_config(config.ckpt_path),
+            "ckpt_path": config.ckpt_path,
         }
         config.mm_related_params.special_token_ids.update(
             {"image_token_index": media_token_id}

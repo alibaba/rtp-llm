@@ -807,9 +807,7 @@ class MMProcessEngine:
 
         On a no-op provider, returns the inputs unchanged with no future/handle
         (and stamps a passing verdict on ``entry`` if provided)."""
-        if not self._greennet_enabled() or (
-            mm_inputs and all(item.skip_input_inspection for item in mm_inputs)
-        ):
+        if not self._greennet_enabled():
             if entry is not None:
                 entry.set_greennet_verdict(GreenNetVerdict(passed=True), checked=False)
             return mm_inputs, None, None
@@ -985,8 +983,7 @@ class MMProcessEngine:
                     if work_item.cache_entry is not None:
                         work_item.cache_entry.set_greennet_verdict(
                             verdict,
-                            checked=self._greennet_enabled()
-                            and not all(item.skip_input_inspection for item in mm_inputs),
+                            checked=self._greennet_enabled(),
                         )
                     if work_item.embedding_result is not None:
                         work_item.complete_cache(work_item.embedding_result, force=True)
@@ -1045,8 +1042,7 @@ class MMProcessEngine:
                     )
                 entry.set_greennet_verdict(
                     verdict,
-                    checked=self._greennet_enabled()
-                    and not all(item.skip_input_inspection for item in mm_inputs),
+                    checked=self._greennet_enabled(),
                 )
                 raw_result = work_items[0].embedding_result
                 if raw_result is None:
@@ -1103,7 +1099,6 @@ class MMProcessEngine:
                 mm_input
                 for mm_input in mm_inputs
                 if mm_input.url != ""
-                and not mm_input.skip_input_inspection
                 and not self._hash_key_cache.greennet_passed(mm_input.cache_key())
             ]
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
@@ -1175,24 +1170,18 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         model_name: str = "",
-        skip_input_inspection: Optional[List[bool]] = None,
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
         try:
-            if skip_input_inspection is None:
-                skip_input_inspection = [False] * len(urls)
-            if len(skip_input_inspection) != len(urls):
-                raise ValueError("skip_input_inspection length must match urls")
             mm_inputs = [
                 MultimodalInput(
                     url,
                     MMUrlType(url_type),
                     tensor,
                     MMPreprocessConfig(*config),
-                    bool(skip),
                 )
-                for url, url_type, tensor, config, skip in zip(
-                    urls, types, tensors, mm_preprocess_configs, skip_input_inspection
+                for url, url_type, tensor, config in zip(
+                    urls, types, tensors, mm_preprocess_configs
                 )
             ]
         except Exception as error:
@@ -1482,22 +1471,13 @@ class MMProcessEngine:
                 model_name=model_name,
             )
             results = []
-            skipped_cache_keys = {
-                mm_input.cache_key()
-                for mm_input in mm_inputs
-                if mm_input.skip_input_inspection
-            }
             for cache_key, entry in claims:
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
                 entry.wait_ready(
                     timeout=remaining, cancellation_event=cancellation_event
                 )
-                if (
-                    self._greennet_enabled()
-                    and cache_key not in skipped_cache_keys
-                    and not entry.greennet_passed
-                ):
+                if self._greennet_enabled() and not entry.greennet_passed:
                     raise FtRuntimeException(
                         ExceptionType.MM_PROCESS_ERROR,
                         "ViT embedding has no completed GreenNet inspection",
@@ -1994,8 +1974,7 @@ class MMProcessEngine:
             # entry. Publish approval synchronously before publishing hashes.
             entry.set_greennet_verdict(
                 verdict,
-                checked=self._greennet_enabled()
-                and not all(item.skip_input_inspection for item in mm_inputs),
+                checked=self._greennet_enabled(),
             )
             raw_result = work_items[0].embedding_result
             if raw_result is None:

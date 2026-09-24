@@ -1,6 +1,8 @@
 """Kimi-K3 MoonViT configuration and assembly."""
 
+import json
 import math
+import os
 import threading
 from io import BytesIO
 from typing import Any, List, Optional
@@ -8,8 +10,10 @@ from typing import Any, List, Optional
 import torch
 import torch.nn as nn
 from PIL import Image
+from transformers import AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
 
+from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     KimiK3VisionProcessor,
 )
@@ -160,6 +164,9 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
         self.vision_tower = MoonViT3dPretrainedModel(self.vision_config)
         self.mm_projector = KimiK3PatchMergerMLPV2(self.vision_config)
         self.image_processor = KimiK3VisionProcessor(config["media_proc_cfg"])
+        self._ckpt_path = config.get("ckpt_path")
+        self._tokenizer = None
+        self._word_embedding_weight = None
         self._rdma_max_slot_bytes = (
             int(vit_config.mm_rdma_max_slot_bytes)
             if vit_config is not None and vit_config.mm_transport_mode == "auto"
@@ -311,8 +318,8 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
         if mm_input.tensor.numel() > 0:
             if mm_input.tensor.dtype != torch.uint8 or mm_input.tensor.ndim != 1:
                 raise ValueError("Kimi-K3 image tensor must be a 1-D uint8 tensor")
-            # Third byte entry point: a direct model RPC call skips the renderer
-            # preflight, so the shared per-image cap has to be enforced here too.
+            # Direct model RPC callers can supply bytes rather than a URL, so
+            # enforce the same per-image cap on both input forms.
             if (
                 vit_config.mm_image_max_file_size_kb > 0
                 and mm_input.tensor.numel()
@@ -330,10 +337,16 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
                 vit_config.download_headers,
                 max_file_size_kb=vit_config.mm_image_max_file_size_kb,
             )
-        with Image.open(data) as image:
-            if image.format in ("HEIF", "HEIC"):
-                return Image.frombytes(image.mode, image.size, image.tobytes())
-            return image.copy()
+            # The URL cache can return a shared BytesIO to parallel requests.
+            # Decode from a private cursor so one request cannot seek another.
+            data = BytesIO(data.getbuffer())
+        try:
+            with Image.open(data) as image:
+                if image.format in ("HEIF", "HEIC"):
+                    return Image.frombytes(image.mode, image.size, image.tobytes())
+                return image.copy()
+        except Exception:
+            raise_mm(MMErr.IMG_OPEN)
 
     @torch.inference_mode()
     def image_embedding(self, images: List[Image.Image]) -> List[torch.Tensor]:
@@ -355,11 +368,71 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
         vision_outputs = self.vision_tower(pixel_values, grid_thws)
         return mm_projector_forward(self.mm_projector, vision_outputs)
 
+    def _ensure_text_embeddings(self) -> None:
+        if self._word_embedding_weight is not None:
+            return
+        if not self._ckpt_path:
+            raise ValueError("Kimi-K3 ViT needs ckpt_path for image prompt embeddings")
+
+        from safetensors import safe_open
+
+        key = "language_model.model.embed_tokens.weight"
+        index_path = os.path.join(self._ckpt_path, "model.safetensors.index.json")
+        if os.path.isfile(index_path):
+            with open(index_path, encoding="utf-8") as file:
+                weight_map = json.load(file)["weight_map"]
+            shard_path = os.path.join(self._ckpt_path, weight_map[key])
+        else:
+            shard_path = os.path.join(self._ckpt_path, "model.safetensors")
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            self._ckpt_path, trust_remote_code=True, verbose=False, use_fast=True
+        )
+        with safe_open(shard_path, framework="pt", device="cpu") as file:
+            word_embedding_weight = file.get_tensor(key)
+        if (
+            word_embedding_weight.ndim != 2
+            or word_embedding_weight.shape[1] != self.vision_config.text_hidden_size
+        ):
+            raise ValueError("Kimi-K3 ViT and text embedding hidden sizes disagree")
+        self._tokenizer = tokenizer
+        self._word_embedding_weight = word_embedding_weight
+
+    def _assemble_image(
+        self, image: Image.Image, vision_features: torch.Tensor
+    ) -> torch.Tensor:
+        """Reproduce the original full K3 image prompt in embedding space."""
+        self._ensure_text_embeddings()
+        prompt = self.image_processor.make_image_prompt(*image.size)
+        token_ids = list(self._tokenizer.encode(prompt))
+        pad_ids = list(self._tokenizer.encode("<|media_pad|>"))
+        if len(pad_ids) != 1 or token_ids.count(pad_ids[0]) != 1:
+            raise ValueError("Kimi-K3 image prompt must contain one media pad token")
+        pad_index = token_ids.index(pad_ids[0])
+
+        def text_embedding(ids: List[int]) -> torch.Tensor:
+            if not ids:
+                return vision_features.new_empty((0, vision_features.shape[1]))
+            return self._word_embedding_weight[ids].to(
+                device=vision_features.device, dtype=vision_features.dtype
+            )
+
+        return torch.cat(
+            [
+                text_embedding(token_ids[:pad_index]),
+                vision_features,
+                text_embedding(token_ids[pad_index + 1 :]),
+            ],
+            dim=0,
+        ).contiguous()
+
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
         """Single-image entry used by the multimodal processing engine."""
         with mm_lock:
-            features = self.image_embedding([data])[0].to(self._data_type).contiguous()
+            self._ensure_text_embeddings()
+            vision_features = self.image_embedding([data])[0].to(self._data_type)
+            features = self._assemble_image(data, vision_features)
         return features, None
 
     @torch.inference_mode()
@@ -367,8 +440,9 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
         """Batched entry: run the vision tower once over the whole batch."""
         del mm_types  # K3 only supports images; type is validated in preprocess.
         with mm_lock:
+            self._ensure_text_embeddings()
             embeddings = [
-                embedding.to(self._data_type).contiguous()
-                for embedding in self.image_embedding(data_list)
+                self._assemble_image(image, features.to(self._data_type))
+                for image, features in zip(data_list, self.image_embedding(data_list))
             ]
         return [(embedding, None) for embedding in embeddings]

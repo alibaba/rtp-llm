@@ -24,29 +24,26 @@ using namespace rtp_llm;
 void registerMultimodal(py::module& m) {
     m.def("get_multimodal_token_spans", &getMultimodalTokenSpans);
     pybind11::class_<MultimodalInput>(m, "MultimodalInput")
-        .def(pybind11::init<std::string, int32_t, torch::Tensor, MMPreprocessConfig, bool>(),
+        .def(pybind11::init<std::string, int32_t, torch::Tensor, MMPreprocessConfig>(),
              py::arg("url"),
              py::arg("mm_type"),
              py::arg("tensor"),
-             py::arg("mm_preprocess_config"),
-             py::arg("skip_input_inspection") = false)
+             py::arg("mm_preprocess_config"))
         .def_readwrite("url", &MultimodalInput::url)
         .def_readwrite("mm_type", &MultimodalInput::mm_type)
         .def_readwrite("tensor", &MultimodalInput::tensor)
         .def_readwrite("mm_preprocess_config", &MultimodalInput::mm_preprocess_config)
-        .def_readwrite("skip_input_inspection", &MultimodalInput::skip_input_inspection)
         .def("to_string", &MultimodalInput::to_string)
         .def("cache_key", &MultimodalInput::cache_key)
         .def(pybind11::pickle(
             [](const MultimodalInput& m) {  // __getstate__
-                return py::make_tuple(m.url, m.mm_type, m.tensor, m.mm_preprocess_config, m.skip_input_inspection);
+                return py::make_tuple(m.url, m.mm_type, m.tensor, m.mm_preprocess_config);
             },
             [](py::tuple t) {  // __setstate__
                 return MultimodalInput(t[0].cast<std::string>(),
                                        t[1].cast<int32_t>(),
                                        t[2].cast<torch::Tensor>(),
-                                       t[3].cast<MMPreprocessConfig>(),
-                                       t[4].cast<bool>());
+                                       t[3].cast<MMPreprocessConfig>());
             }));
     pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
         .def(pybind11::init<int32_t,

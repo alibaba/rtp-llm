@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional
 
-import torch
 from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -16,12 +15,6 @@ from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     apply_kimi_k3_request_contract,
     kimi_k3_pending_prompt_token_ids,
     validate_kimi_k3_tool_history,
-)
-from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
-    KimiK3VisionProcessor,
-    load_kimi_k3_media_config,
-    preflight_kimi_k3_images,
-    preflight_kimi_k3_images_async,
 )
 from rtp_llm.multimodal.multimodal_util import MMUrlType
 from rtp_llm.openai.api_datatype import (
@@ -233,11 +226,6 @@ class KimiK3Renderer(CustomChatRenderer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._image_processor = KimiK3VisionProcessor(
-            load_kimi_k3_media_config(
-                self.ckpt_path or self.model_config.checkpoint_path
-            )
-        )
         self.add_extra_stop_words(["<|end_of_msg|>"])
 
     _TOOLS_OPEN = "<|open|>tools<|sep|>"
@@ -1066,37 +1054,17 @@ class KimiK3Renderer(CustomChatRenderer):
             )
         return value
 
-    def _validate_visual_token_budget(
-        self,
-        token_ids: List[int],
-        metadata: List[tuple[int, int]],
-    ) -> None:
-        if not self.max_seq_len or not metadata:
-            return
-        visual_tokens = sum(
-            self._image_processor.resize_config_for_size(width, height)["num_tokens"]
-            for width, height in metadata
-        )
-        expanded_input_length = len(token_ids) - len(metadata) + visual_tokens
-        if expanded_input_length > self.max_seq_len:
-            raise ValueError(
-                "Kimi K3 expanded multimodal input exceeds max_seq_len: "
-                f"{expanded_input_length} > {self.max_seq_len}"
-            )
-
-    def _render_preflighted(
+    def _render_with_image_placeholders(
         self,
         options: K3RequestOptions,
         request_dict: Dict[str, Any],
         messages: List[Dict[str, Any]],
         mm_input: PromptWithMMInput,
-        tensors: List[torch.Tensor],
-        metadata: List[tuple[int, int]],
     ) -> RenderedInputs:
-        image_prompts = [
-            KimiK3VisionProcessor.make_image_prompt(width, height)
-            for width, height in metadata
-        ]
+        # The ViT owns image download, size-dependent prompt construction and
+        # the corresponding text embeddings. Keep one stable token per image in
+        # the frontend so URL-based ViT cache routing remains possible.
+        image_prompts = ["<|media_pad|>"] * len(mm_input.urls)
         tools = self._tools(request_dict)
         template_kwargs = self._template_kwargs(options, request_dict)
 
@@ -1109,7 +1077,6 @@ class KimiK3Renderer(CustomChatRenderer):
             **template_kwargs,
         )
         token_ids = self._as_token_ids(input_ids)
-        self._validate_visual_token_budget(token_ids, metadata)
         logging.debug("Kimi K3 rendered %d XTML prompt tokens", len(token_ids))
         # Leave rendered_prompt empty: both endpoints decode input_ids on demand
         # for debug output, avoiding a second expensive XTML template pass.
@@ -1117,7 +1084,6 @@ class KimiK3Renderer(CustomChatRenderer):
             input_ids=token_ids,
             input_urls=mm_input.urls,
             input_urls_type=mm_input.mm_types,
-            input_tensors=tensors,
         )
 
     @override
@@ -1126,14 +1092,8 @@ class KimiK3Renderer(CustomChatRenderer):
         options = K3RequestOptions.from_request(request)
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
-        tensors, metadata = preflight_kimi_k3_images(mm_input.urls, self.vit_config)
-        return self._render_preflighted(
-            options,
-            request_dict,
-            messages,
-            mm_input,
-            tensors,
-            metadata,
+        return self._render_with_image_placeholders(
+            options, request_dict, messages, mm_input
         )
 
     @override
@@ -1142,16 +1102,8 @@ class KimiK3Renderer(CustomChatRenderer):
         options = K3RequestOptions.from_request(request)
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
-        tensors, metadata = await preflight_kimi_k3_images_async(
-            mm_input.urls, self.vit_config
-        )
-        return self._render_preflighted(
-            options,
-            request_dict,
-            messages,
-            mm_input,
-            tensors,
-            metadata,
+        return self._render_with_image_placeholders(
+            options, request_dict, messages, mm_input
         )
 
     @override
