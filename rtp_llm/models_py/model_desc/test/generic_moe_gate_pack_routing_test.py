@@ -67,7 +67,9 @@ class _Backend(torch.nn.Module):
         return hidden_states
 
 
-def make_layer(strategy="mega_moe_fp8", *, real_pack=False, **overrides):
+def make_layer(
+    strategy="mega_moe_fp8", *, real_pack=False, chunk_tokens=0, **overrides
+):
     config = ModelConfig()
     config.hidden_size = 4096
     config.inter_size = 128
@@ -81,10 +83,17 @@ def make_layer(strategy="mega_moe_fp8", *, real_pack=False, **overrides):
         setattr(config, key, value)
     parallel = SimpleNamespace(ep_size=4, get_ffn_tp_size=lambda: 1)
     backend = _Backend(real_pack)
+    backend.fused_experts = SimpleNamespace(
+        gated_shared_expert_requested=False,
+        uses_shared_expert_gates=False,
+        _mega_group=object(),
+    )
     prefix = "rtp_llm.models_py.model_desc.generic_moe."
     with patch(
         prefix + "LinearFactory.create_linear_from_weights", return_value=Mock()
     ), patch(prefix + "MoEConfigAdapter"), patch(prefix + "FusedMoeFactory") as factory:
+        generic_moe.MoEConfigAdapter.return_value.mega_moe_chunk_tokens = chunk_tokens
+        generic_moe.MoEConfigAdapter.return_value.max_tokens_per_rank = chunk_tokens
         factory.return_value.create_fused_moe.return_value = backend
         layer = generic_moe.GenericMoeLayer(
             config,
@@ -93,6 +102,141 @@ def make_layer(strategy="mega_moe_fp8", *, real_pack=False, **overrides):
             SimpleNamespace(moe_strategy=strategy, fake_balance_expert=False),
         )
     return layer, backend
+
+
+class _ChunkBackend(_Backend):
+    def __init__(self, capacity, shared):
+        super().__init__()
+        self.scratch = torch.empty(capacity, 2)
+        self.fused_experts = SimpleNamespace(uses_shared_expert_gates=shared)
+        self.inputs = []
+        self.routing = []
+
+    def _compute(self, x, extra_expert_args):
+        n = x.shape[0]
+        self.inputs.append(x.clone())
+        self.scratch[:n].copy_(x * 2)
+        if extra_expert_args is not None:
+            gates = extra_expert_args["shared_expert_gates"]
+            torch.testing.assert_close(gates, torch.sigmoid(x[:, 0]))
+            self.scratch[:n].add_(gates[:, None])
+        return self.scratch[:n]
+
+    def forward_gate_pack(self, hidden_states, gate_payload, **kwargs):
+        self.calls.append("fused")
+        assert gate_payload.scores.shape[0] == hidden_states.shape[0]
+        return self._compute(hidden_states, kwargs.get("extra_expert_args"))
+
+    def forward(self, hidden_states, topk_ids, topk_weights, **kwargs):
+        self.calls.append("separate")
+        assert topk_ids.shape[0] == topk_weights.shape[0] == hidden_states.shape[0]
+        self.routing.append((topk_weights.clone(), topk_ids.clone()))
+        return self._compute(hidden_states, kwargs.get("extra_expert_args"))
+
+
+class GenericMoeChunkIntegrationTest(TestCase):
+    def test_single_launch_keeps_gate_pack_and_graph_path(self):
+        with patch.object(generic_moe, "SelectTopk"):
+            layer, backend = make_layer(chunk_tokens=4)
+        layer.gate = Mock(return_value=torch.zeros(3, 512))
+        x = torch.ones(3, 2)
+        module = "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.chunking"
+        for capture in (False, True):
+            with patch(module + "._capturing", return_value=capture), patch.object(
+                layer._mega_moe_chunker, "max_tokens", return_value=3
+            ), patch.object(layer, "_prepare_mega_moe_chunks") as prepare:
+                torch.testing.assert_close(layer(x), x)
+                prepare.assert_not_called()
+        self.assertEqual(backend.calls, ["fused", "fused"])
+
+    def test_standalone_shared_gate_is_precomputed_once(self):
+        with patch.object(generic_moe, "SelectTopk"):
+            layer, _ = make_layer(chunk_tokens=4)
+        layer.fused_moe = _ChunkBackend(4, False)
+        layer.gate = Mock(side_effect=lambda x: torch.zeros(x.shape[0], 512))
+        layer.shared_expert = Mock(side_effect=lambda x, **kwargs: x + 3)
+        layer.shared_expert_gate = Mock(side_effect=lambda x: x[:, :1])
+        layer.sigmoid_gate_scale_add = Mock(
+            side_effect=lambda gate, shared, routed: routed.add_(
+                torch.sigmoid(gate) * shared
+            )
+        )
+        x = torch.arange(18).reshape(9, 2).float() / 10
+        with patch.object(layer._mega_moe_chunker, "max_tokens", return_value=17):
+            y = layer(x)
+        torch.testing.assert_close(y, x * 2 + torch.sigmoid(x[:, :1]) * (x + 3))
+        layer.gate.assert_called_once()
+        layer.shared_expert_gate.assert_called_once()
+        self.assertEqual(layer.select_topk.call_count, 1)
+        self.assertEqual(layer.shared_expert.call_count, 3)
+        self.assertEqual(len(layer.fused_moe.calls), 5)
+
+    def test_empty_rounds_skip_only_local_shared_expert(self):
+        with patch.object(generic_moe, "SelectTopk"):
+            layer, _ = make_layer(chunk_tokens=4)
+        backend = _ChunkBackend(4, False)
+        layer.fused_moe = backend
+        layer.gate = Mock(side_effect=lambda x: torch.zeros(x.shape[0], 512))
+        layer.shared_expert = Mock(side_effect=lambda x, **kwargs: x + 3)
+        x = torch.ones(3, 2)
+        with patch.object(layer._mega_moe_chunker, "max_tokens", return_value=9):
+            y = layer(x)
+        torch.testing.assert_close(y, x * 3 + 3)
+        self.assertEqual(len(backend.calls), 3)
+        layer.shared_expert.assert_called_once()
+
+    def test_chunked_gate_paths_shared_gates_and_workspace_ownership(self):
+        for shared in (False, True):
+            for tokens in (0, 3, 8201):
+                with self.subTest(shared=shared, tokens=tokens), patch.object(
+                    generic_moe, "SelectTopk"
+                ):
+                    layer, _ = make_layer(
+                        "mega_moe_fp8_se" if shared else "mega_moe_fp8",
+                        chunk_tokens=4097,
+                    )
+
+                    def select(scores, ids, weights):
+                        rows = torch.arange(scores.shape[0])[:, None]
+                        ids.copy_(rows.expand_as(ids) % 512)
+                        weights.copy_(rows.expand_as(weights).float() / 10000)
+
+                    layer.select_topk.side_effect = select
+                    backend = _ChunkBackend(4097, shared)
+                    layer.fused_moe = backend
+                    layer.gate = Mock(
+                        side_effect=lambda x: torch.zeros(x.shape[0], 512)
+                    )
+                    layer.shared_expert_gate = Mock(side_effect=lambda x: x[:, :1])
+                    self.assertEqual(layer._mega_moe_chunker.chunk_tokens, 4097)
+                    x = torch.linspace(-2, 2, tokens * 2).reshape(tokens, 2)
+                    with patch.object(
+                        layer._mega_moe_chunker, "max_tokens", return_value=8201
+                    ), patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs.shared_expert_sigmoid",
+                        side_effect=lambda logits: torch.sigmoid(logits[:, 0]),
+                    ) as sigmoid:
+                        y = layer(x)
+                    expected = x * 2
+                    if shared:
+                        expected = expected + torch.sigmoid(x[:, :1])
+                    torch.testing.assert_close(y, expected)
+                    self.assertEqual(len(backend.calls), 3)
+                    torch.testing.assert_close(torch.cat(backend.inputs), x)
+                    self.assertEqual(backend.calls, ["separate"] * 3)
+                    self.assertEqual(layer.gate.call_count, int(tokens > 0))
+                    self.assertEqual(layer.select_topk.call_count, int(tokens > 0))
+                    self.assertEqual(
+                        layer.shared_expert_gate.call_count, int(shared and tokens > 0)
+                    )
+                    self.assertEqual(sigmoid.call_count, int(shared))
+                    all_weights = torch.cat([r[0] for r in backend.routing])
+                    all_ids = torch.cat([r[1] for r in backend.routing])
+                    rows = torch.arange(tokens)[:, None]
+                    torch.testing.assert_close(all_ids, rows.expand(tokens, 10) % 512)
+                    torch.testing.assert_close(
+                        all_weights, rows.expand(tokens, 10).float() / 10000
+                    )
 
 
 class GenericMoeGatePackRoutingTest(TestCase):
@@ -130,7 +274,10 @@ class GenericMoeGatePackRoutingTest(TestCase):
                         self.assertEqual(
                             backend.calls[-1], "separate" if separate else "fused"
                         )
-                        self.assertEqual(select.return_value.call_count, int(separate))
+                        # Empty ranks still launch experts but need no local top-k.
+                        self.assertEqual(
+                            select.return_value.call_count, int(separate and n > 0)
+                        )
 
     def test_opt_out_disables_topk_and_bf16_cast_fusion(self):
         for strategy in ("mega_moe_fp8", "mega_moe_fp8_se"):
@@ -204,7 +351,9 @@ class GenericMoeGatePackRoutingTest(TestCase):
                                 wraps=layer.select_topk.forward,
                             ) as topk:
                                 output = layer(x)
-                                self.assertEqual(topk.call_count, int(separate))
+                                self.assertEqual(
+                                    topk.call_count, int(separate and n > 0)
+                                )
                             self.assertIs(output, x)
                             self.assertEqual(
                                 backend.calls[-1],

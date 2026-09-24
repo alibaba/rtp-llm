@@ -113,3 +113,10 @@ py_test(
     ],
     target_compatible_with = _CUDA13_ONLY,
 )
+
+py_test(
+    name = "test_mega_moe_chunking",
+    srcs = ["test_mega_moe_chunking.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    target_compatible_with = _CUDA13_ONLY,
+)

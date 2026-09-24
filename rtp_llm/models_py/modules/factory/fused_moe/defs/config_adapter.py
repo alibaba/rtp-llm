@@ -4,6 +4,7 @@ This allows Router and Executor classes to work with specific config objects.
 """
 
 import logging
+import os
 from typing import Optional
 
 from rtp_llm.config.model_config import ModelConfig
@@ -135,6 +136,22 @@ class MoEConfigAdapter:
             is_decode_role=is_decode_role,
             max_generate_batch_size=max_generate_batch_size,
         )
+        self.mega_moe_chunk_tokens = 0
+        if (
+            self.moe_config.moe_strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
+            and not is_decode_role
+        ):
+            chunk_tokens = int(os.environ.get("RTP_MEGAMOE_CHUNK_TOKENS", "8192"))
+            if chunk_tokens < 0:
+                raise ValueError("RTP_MEGAMOE_CHUNK_TOKENS must be non-negative")
+            self.mega_moe_chunk_tokens = chunk_tokens
+            if chunk_tokens:
+                self.max_tokens_per_rank = max(
+                    min(self.prefill_max_tokens_per_rank, chunk_tokens),
+                    self.decode_max_tokens_per_rank,
+                    int(max_generate_batch_size or 0),
+                    1,
+                )
         if (
             is_decode_role
             and self.prefill_max_tokens_per_rank > self.max_tokens_per_rank
@@ -148,9 +165,7 @@ class MoEConfigAdapter:
                 int(max_generate_batch_size or 0),
                 self.prefill_max_tokens_per_rank,
             )
-        # Generic execution is not chunked, so JIT warmup only needs the
-        # request-visible bucket representatives rather than the capacity cap.
-        self.warmup_include_capacity = False
+        self.warmup_include_capacity = bool(self.mega_moe_chunk_tokens)
         effective_quant_config = (
             quant_config if quant_config is not None else model_config.quant_config
         )

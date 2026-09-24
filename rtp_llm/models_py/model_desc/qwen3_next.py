@@ -28,6 +28,9 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.chunking import (
+    mega_moe_chunk_plan,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.snapshot import (
     mega_moe_prefill_snapshot,
 )
@@ -1731,6 +1734,7 @@ class Qwen3NextModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
 
         with (
+            mega_moe_chunk_plan(self.layers, hidden_states),
             mega_moe_prefill_snapshot(
                 attention_inputs.is_prefill and not is_target_verify
             ),
