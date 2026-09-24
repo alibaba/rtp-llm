@@ -16,6 +16,10 @@ from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.collectives import reduce_scatter
 from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
 from rtp_llm.models_py.modules.kimi_k3.native_gated_norm import KimiK3GatedNorm
+from rtp_llm.models_py.modules.kimi_k3.native_mla_ops import (
+    fused_q_kv_rmsnorm,
+    gate_sigmoid_mul,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -121,16 +125,26 @@ class KimiK3MLA(nn.Module):
             [self.q_rank, self.kv_rank + self.suffix_dim, self.heads * self.v_dim],
             dim=-1,
         )
-        q = self.q_b(self.q_norm(q.contiguous())).reshape(-1, self.heads, self.q_dim)
         latent, suffix = kv.split([self.kv_rank, self.suffix_dim], dim=-1)
-        output = fmha.forward(
-            q, self.kv_norm(latent.contiguous()), suffix, cache, self.layer_idx, None
-        )
+        if q.is_cuda:
+            q, latent = fused_q_kv_rmsnorm(
+                q,
+                latent,
+                self.q_norm.weight,
+                self.kv_norm.weight,
+                self.q_norm.variance_epsilon,
+            )
+        else:
+            q, latent = self.q_norm(q.contiguous()), self.kv_norm(latent.contiguous())
+        q = self.q_b(q).reshape(-1, self.heads, self.q_dim)
+        output = fmha.forward(q, latent, suffix, cache, self.layer_idx, None)
         if output is None:
             raise RuntimeError("K3 MLA backend returned no attention output")
         output = output.reshape(-1, self.heads * self.v_dim)
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:
             output = torch.where(valid_mask[:, None], output, 0)
-        output = self.output(output * gate.sigmoid())
+        output = self.output(
+            gate_sigmoid_mul(output, gate) if output.is_cuda else output * gate.sigmoid()
+        )
         return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
