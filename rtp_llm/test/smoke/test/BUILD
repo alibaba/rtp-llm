@@ -18,3 +18,12 @@ py_test(
     legacy_create_init = 0,
     deps = SMOKE_FRAMEWORK_DEPS,
 )
+
+py_test(
+    name = "case_runner_test",
+    srcs = ["case_runner_test.py"],
+    data = ["//rtp_llm/test/smoke:smoke_framework_srcs"],
+    imports = ["../.."],
+    legacy_create_init = 0,
+    deps = SMOKE_FRAMEWORK_DEPS,
+)
