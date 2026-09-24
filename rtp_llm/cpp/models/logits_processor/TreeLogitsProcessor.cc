@@ -53,14 +53,14 @@ std::optional<ErrorInfo> TreeLogitsProcessor::updateStatus(const torch::Tensor& 
         if (!info.in_tree_mode)
             continue;
 
-        auto offset = info.is_beam_search ? (info.current_output_length + info.input_length) : 0;
-
-        if (!info.is_beam_search) {
-            RTP_LLM_CHECK(num_new_tokens == new_tokens.size(1));
-        }
+        // Beam dispatch also sends compact [batch, num_new_tokens] rows.
+        // Retain support for legacy callers providing the full token history.
+        const int64_t stride = new_tokens.size(1);
+        const int64_t offset = stride > num_new_tokens ? (info.current_output_length + info.input_length) : 0;
+        RTP_LLM_CHECK(num_new_tokens >= 0 && offset + num_new_tokens <= stride);
 
         for (size_t j = 0; j < num_new_tokens; ++j) {
-            auto current_token_id = new_tokens.data_ptr<int>()[i * new_tokens.size(1) + j + offset];
+            auto current_token_id = new_tokens.data_ptr<int>()[i * stride + j + offset];
             info.dfa_ptr->next(current_token_id);
             if (info.dfa_ptr->hasError()) {
                 break;

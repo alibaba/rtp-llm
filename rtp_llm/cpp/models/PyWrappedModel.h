@@ -96,6 +96,7 @@ public:
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
+    static void rejectContextParallelInputEmbeddings(const ExecProperties& device_props, const GptModelInputs& inputs);
 
 private:
     friend struct test::PyWrappedModelTestPeer;

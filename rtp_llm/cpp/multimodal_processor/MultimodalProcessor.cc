@@ -3,10 +3,12 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
 #include <cstring>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <torch/python.h>
 #include "absl/status/statusor.h"
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
@@ -17,6 +19,90 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 namespace {
+
+ErrorInfo remapInputEmbeddingLocsAfterMultimodalExpansion(std::shared_ptr<rtp_llm::GenerateInput>&        input,
+                                                          const std::vector<std::pair<int32_t, int32_t>>& source_locs,
+                                                          const std::vector<torch::Tensor>& multimodal_features,
+                                                          int64_t                           original_token_count,
+                                                          int64_t                           expanded_token_count) {
+    if (!input->input_embeddings.has_value() || input->input_embeddings->empty()) {
+        return ErrorInfo::OkStatus();
+    }
+    if (!input->input_embeddings_locs.has_value()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "input_embeddings_locs must be set");
+    }
+    auto status = validateAndNormalizeInputEmbeddings(
+        input->input_embeddings.value(), input->input_embeddings_locs.value(), original_token_count);
+    if (!status.ok()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, status.ToString());
+    }
+
+    auto&   locs   = input->input_embeddings_locs.value();
+    size_t  mm_idx = 0;
+    int64_t shift  = 0;
+    for (size_t emb_idx = 0; emb_idx < input->input_embeddings->size(); ++emb_idx) {
+        int64_t loc     = locs[emb_idx];
+        int64_t emb_len = input->input_embeddings->at(emb_idx).size(0);
+        int64_t emb_end = loc + emb_len;
+        while (mm_idx < source_locs.size()) {
+            const int64_t tag_start   = source_locs[mm_idx].first;
+            const int64_t tag_end     = source_locs[mm_idx].second;
+            const int64_t tag_len     = tag_end - tag_start;
+            const int64_t feature_len = multimodal_features[mm_idx].size(0);
+            if (emb_end <= tag_start) {
+                break;
+            }
+            if (loc >= tag_end) {
+                shift += feature_len - tag_len;
+                ++mm_idx;
+                continue;
+            }
+            std::stringstream error_msg;
+            error_msg << "input_embeddings interval [" << loc << ", " << emb_end
+                      << ") overlaps multimodal tag interval [" << tag_start << ", " << tag_end << ")";
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, error_msg.str());
+        }
+        locs[emb_idx] = loc + shift;
+    }
+
+    status = validateAndNormalizeInputEmbeddings(
+        input->input_embeddings.value(), input->input_embeddings_locs.value(), expanded_token_count);
+    if (!status.ok()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, status.ToString());
+    }
+    return ErrorInfo::OkStatus();
+}
+
+// Prepared layouts do not pass through placeholder expansion. Validate their
+// final coordinates too, before either injector can overwrite the other's rows.
+ErrorInfo validateInputEmbeddingTextRows(GenerateInput& input, const torch::Tensor& text_mask) {
+    if (!input.input_embeddings || input.input_embeddings->empty()) {
+        return ErrorInfo::OkStatus();
+    }
+    if (!input.input_embeddings_locs) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "input_embeddings_locs must be set");
+    }
+    if (!text_mask.defined() || !text_mask.device().is_cpu() || text_mask.scalar_type() != torch::kInt32
+        || text_mask.dim() != 1) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                         "input_embeddings requires a defined CPU int32 text mask after multimodal expansion");
+    }
+    auto status =
+        validateAndNormalizeInputEmbeddings(*input.input_embeddings, *input.input_embeddings_locs, text_mask.numel());
+    if (!status.ok()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, status.ToString());
+    }
+    auto        mask = text_mask.contiguous();
+    const auto* rows = mask.data_ptr<int32_t>();
+    for (size_t i = 0; i < input.input_embeddings->size(); ++i) {
+        const int64_t start = input.input_embeddings_locs->at(i);
+        const int64_t end   = start + input.input_embeddings->at(i).size(0);
+        if (std::any_of(rows + start, rows + end, [](int32_t value) { return value == 0; })) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "input_embeddings overlaps multimodal feature rows");
+        }
+    }
+    return ErrorInfo::OkStatus();
+}
 
 ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name) {
 #if USING_CUDA
@@ -140,8 +226,11 @@ MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>&           
                token_type_ids.data_ptr<int32_t>() + old_loc_idx,
                sizeof(int32_t) * (expanded_ids.size(0) - new_loc_idx));
     }
-    return ExpandedOutput(
-        std::move(expanded_ids), std::move(expanded_token_type_ids), std::move(token_masks), std::move(new_locs));
+    return ExpandedOutput(std::move(expanded_ids),
+                          std::move(expanded_token_type_ids),
+                          std::move(token_masks),
+                          std::move(new_locs),
+                          std::move(locs));
 }
 
 ErrorResult<std::vector<std::pair<int32_t, int32_t>>>
@@ -322,6 +411,8 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                 return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "V4.1 image spans do not cover token metadata");
             }
         }
+        auto text_mask = image_mask.logical_not().to(torch::kInt32);
+        RETURN_IF_STATUS_ERROR(validateInputEmbeddingTextRows(*input, text_mask));
         std::vector<torch::Tensor> features;
         if (!prepared.images.empty()) {
             int64_t timeout_ms = 0;
@@ -347,11 +438,12 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
             locs.data_ptr<int32_t>()[index] = prepared.images[index].start;
         }
         input->multimodal_features = std::move(features);
-        input->text_tokens_mask    = prepared.image_mask.logical_not().to(torch::kInt32);
+        input->text_tokens_mask    = std::move(text_mask);
         input->mm_locs             = std::move(locs);
         input->mm_position_ids.reset();
         return ErrorInfo::OkStatus();
     }
+    const int64_t original_token_count = input->input_ids.size(0);
     CHECK_AND_RETURN_REF(
         mm_embedding_res,
         MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context));
@@ -369,6 +461,12 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                                             {},
                                             mm_embedding_res.mm_feature_hashes));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
+    RETURN_IF_STATUS_ERROR(remapInputEmbeddingLocsAfterMultimodalExpansion(input,
+                                                                           expanded_ids.source_locs,
+                                                                           mm_features,
+                                                                           original_token_count,
+                                                                           expanded_ids.expanded_ids.size(0)));
+    RETURN_IF_STATUS_ERROR(validateInputEmbeddingTextRows(*input, expanded_ids.text_tokens_mask));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
     input->multimodal_features = std::move(mm_features);
@@ -384,6 +482,12 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
                                                         const std::string&                           vit_role_addr,
                                                         grpc::ServerContext*                         server_context) {
+    if (input->input_embeddings.has_value()) {
+        return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR,
+                         "input_embeddings cannot be combined with multimodal_inputs in embedding engine: "
+                         "embedding engine input_embeddings is a full-sequence tensor and cannot be remapped across "
+                         "multimodal token expansion");
+    }
     CHECK_AND_RETURN_REF(mm_embedding_res,
                          MultimodalEmbedding(mm_inputs, vit_role_addr, input->request_id, server_context));
     MultimodalFeature mm_features;
