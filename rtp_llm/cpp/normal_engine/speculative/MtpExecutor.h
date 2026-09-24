@@ -237,6 +237,10 @@ protected:
 
 private:
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
+    static torch::Tensor selectAcceptedHiddenStates(const torch::Tensor& hidden_states,
+                                                    const torch::Tensor& hidden_indices,
+                                                    int64_t batch_size,
+                                                    int64_t verify_width);
 
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 

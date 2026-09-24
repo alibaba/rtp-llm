@@ -19,6 +19,52 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, testMtpHandoffDefaultsToLegacyDense) {
+    EXPECT_TRUE(QueryConverter::useLegacyDenseMtpHandoff(nullptr));
+    EXPECT_TRUE(QueryConverter::useLegacyDenseMtpHandoff(""));
+    EXPECT_TRUE(QueryConverter::useLegacyDenseMtpHandoff("1"));
+    EXPECT_TRUE(QueryConverter::useLegacyDenseMtpHandoff("invalid"));
+    EXPECT_FALSE(QueryConverter::useLegacyDenseMtpHandoff("0"));
+}
+
+TEST_F(QueryConverterTest, testMtpProposalWireModesAndReceiverMatrix) {
+    SpeculativeExecutorStreamOutput output;
+    output.tokens = torch::tensor({{3, 1}}, torch::kInt32);
+    output.token_ids_are_point_mass = true;
+    GenerateRequestPB request;
+    QueryConverter::transMtpProposal(&request, output, 4, false);
+    EXPECT_TRUE(request.proposal_is_point_mass());
+    EXPECT_FALSE(request.has_propose_probs());
+    EXPECT_FALSE(QueryConverter::transMtpProposalProbs(request).defined());
+    // fcbb549e0's marker-aware receiver accepts only mutually exclusive modes.
+    EXPECT_TRUE(!request.proposal_is_point_mass() || !request.has_propose_probs());
+
+    QueryConverter::transMtpProposal(&request, output, 4, true);
+    GenerateRequestPB received;
+    ASSERT_TRUE(received.ParseFromString(request.SerializeAsString()));
+    EXPECT_FALSE(received.proposal_is_point_mass());
+    ASSERT_TRUE(received.has_propose_probs());
+    // Legacy readers do not know the marker and consume only the dense tensor.
+    auto legacy_probs = QueryConverter::transTensor(received.propose_probs());
+    EXPECT_TRUE(torch::equal(legacy_probs, torch::tensor({{0.0f, 1.0f, 0.0f, 0.0f}})));
+    EXPECT_TRUE(torch::equal(QueryConverter::transMtpProposalProbs(received), legacy_probs));
+
+    output.draft_to_target_map = torch::tensor({3, 1}, torch::kInt64);
+    QueryConverter::transMtpProposal(&request, output, 4, true);
+    EXPECT_TRUE(torch::equal(QueryConverter::transMtpProposalProbs(request), torch::tensor({{0.0f, 1.0f}})));
+    output.token_ids_are_point_mass = false;
+    output.all_probs = torch::tensor({{0.25f, 0.75f}});
+    QueryConverter::transMtpProposal(&request, output, 4, false);
+    EXPECT_TRUE(torch::equal(QueryConverter::transMtpProposalProbs(request), output.all_probs));
+
+    // The 9b12 sender attached both fields; the new reader still accepts it.
+    request.set_proposal_is_point_mass(true);
+    EXPECT_FALSE(QueryConverter::transMtpProposalProbs(request).defined());
+    request.set_proposal_is_point_mass(false);
+    request.clear_propose_probs();
+    EXPECT_THROW(QueryConverter::transMtpProposalProbs(request), std::runtime_error);
+}
+
 TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_TRUE(GenerateConfig().enable_disk_cache);
 

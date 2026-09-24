@@ -2213,6 +2213,67 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillInitSkipsSparseCleanupAndPr
     EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ChunkPrefillStateSlotLifecycle) {
+    auto config      = makeTinyHybridConfig();
+    // Independent pools: two requests use five full and at most three linear slots each.
+    setGroupBlockCounts(config, 7, 11);
+    auto allocator   = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    const auto                           free_before = allocator->freeBlocksNum();
+    std::vector<BatchKVCacheResourcePtr> resources;
+    std::vector<MallocInfo>              infos;
+    auto                                 tokens = makeCompleteTokenIds(1, 18, 4);
+    for (int request = 0; request < 2; ++request) {
+        resources.push_back(makeBatchResource(1, config, CacheKeysType{}));
+        infos.push_back(MallocInfo{resources.back(), tokens});
+        infos.back().reuse_cache                  = false;
+        infos.back().enable_cache_lookup          = false;
+        infos.back().enable_remove_skipped_blocks = false;
+        ASSERT_TRUE(allocator->malloc(infos.back()).success);
+        ASSERT_TRUE(isNullBlockIdx(resources.back()->blocks(0, "linear")[0]));
+    }
+    const auto full0 = resources[0]->blocks(0, "full1");
+    const auto full1 = resources[1]->blocks(0, "full1");
+    // Block size 4 keeps this allocator test small; GPU coverage uses 64/128/130.
+    int prefix_len = 0;
+    for (int end : {4, 12, 16, 18}) {
+        for (int request : {1, 0}) {
+            auto expected                        = resources[request]->blocks(0, "linear");
+            infos[request].incr_seq_len_override = end;
+            infos[request].computed_prefix_len   = prefix_len;
+            infos[request].prefill_chunk_start   = prefix_len;
+            ASSERT_TRUE(allocator->malloc(infos[request]).success);
+            const auto&  after    = resources[request]->blocks(0, "linear");
+            const size_t boundary = (end - 1) / 4;
+            ASSERT_EQ(after.size(), expected.size());
+            ASSERT_LT(boundary, after.size());
+            ASSERT_FALSE(isNullBlockIdx(after[boundary]));
+            // Only obsolete states and the newly materialized boundary may change.
+            if (prefix_len > 0) {
+                std::fill(expected.begin(), expected.begin() + (prefix_len - 1) / 4, NULL_BLOCK_IDX);
+            }
+            if (isNullBlockIdx(expected[boundary])) {
+                expected[boundary] = after[boundary];
+            }
+            EXPECT_EQ(after, expected);
+            for (auto slot : resources[1 - request]->blocks(0, "linear")) {
+                EXPECT_NE(after[boundary], slot);
+            }
+        }
+        if (end == 12) {
+            // The next chunk must reclaim obsolete states before allocating its boundary.
+            EXPECT_EQ(poolForTag(*allocator, "linear")->freeBlocksNum(), 0u);
+        }
+        prefix_len = end;
+    }
+    EXPECT_EQ(resources[0]->blocks(0, "full1"), full0);
+    EXPECT_EQ(resources[1]->blocks(0, "full1"), full1);
+    for (int request : {0, 1}) {
+        allocator->free(FreeInfo{resources[request], tokens});
+    }
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
 // Decode path (StreamCacheResource::incrKVBlock sets enable_remove_skipped_blocks=true).
 // The allocator is invoked on an already-populated resource, so malloc() dispatches directly
 // to incrMalloc(). Sparse cleanup must prune non-step blocks while preserving step hits and

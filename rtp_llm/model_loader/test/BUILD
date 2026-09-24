@@ -12,6 +12,7 @@ py_test(
 py_test(
     name = "test_pure_tp_preshard",
     srcs = ["test_pure_tp_preshard.py"],
+    data = ["//rtp_llm/platforms:ppu_sources"],
     # auto_model: this test imports rtp_llm.models weight infos.
     deps = ["//rtp_llm/models_py/standalone:auto_model"],
     # Accelerator hooks, FP8 device copies, and handle recycling need a GPU target.

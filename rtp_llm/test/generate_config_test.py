@@ -3,6 +3,7 @@ import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from transformers import AutoTokenizer
 
@@ -30,6 +31,7 @@ from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
 from rtp_llm.openai.api_datatype import ResponseFormat as OpenAIResponseFormat
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
+from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
 
@@ -606,6 +608,27 @@ class OpenaiGenerateConfigTest(TestCase):
         request = ChatCompletionRequest(messages=[], max_completion_tokens=-1)
         config = self._extract_openai_generation_config(request)
         self.assertEqual(config.max_new_tokens, 32000)
+
+    def test_dsv4_long_output_thinking_budget_and_explicit_overrides(self):
+        cases = [
+            ({}, 384000),
+            ({"max_completion_tokens": 262144}, 262144),
+            ({"thinking_budget": 1024}, 1024),
+            ({"extra_configs": GenerateConfig(max_thinking_tokens=2048)}, 2048),
+            ({"extra_configs": GenerateConfig(top_k=5)}, 384000),
+            ({"enable_thinking": False}, 0),
+        ]
+        with patch.object(
+            CustomChatRenderer, "default_thinking_budget",
+            DeepseekV4Renderer.default_thinking_budget,
+        ):
+            for overrides, expected in cases:
+                with self.subTest(overrides=overrides):
+                    params = dict(messages=[], max_tokens=384000, enable_thinking=True)
+                    params.update(overrides)
+                    config = self._extract_openai_generation_config(ChatCompletionRequest(**params))
+                    self.assertEqual(config.max_thinking_tokens, expected)
+                    self.assertEqual(config.max_new_tokens, overrides.get("max_completion_tokens", 384000))
 
     def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):
         generate_env_config = GenerateEnvConfig()

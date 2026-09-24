@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <c10/core/ScalarType.h>
 #include <c10/util/Half.h>
 #include <cstring>
@@ -23,6 +24,9 @@ namespace W = rtp_llm::W;
 
 namespace rtp_llm {
 
+// token count, first-row prefix length, row count
+using ForwardShape = std::array<int64_t, 3>;
+
 // Mock model that returns random logits for testing NormalEngine without Python
 class MockModel: public ModelBase {
 public:
@@ -30,6 +34,16 @@ public:
 
     MockModel(size_t vocab_size, ForwardHook forward_hook = {}):
         vocab_size_(vocab_size), forward_hook_(std::move(forward_hook)) {}
+
+    MockModel(size_t vocab_size, std::shared_ptr<std::vector<ForwardShape>> forward_shapes):
+        MockModel(vocab_size, [forward_shapes](const GptModelInputs& inputs) {
+            if (forward_shapes) {
+                const int64_t prefix = inputs.prefix_lengths.defined() && inputs.prefix_lengths.numel() > 0 ?
+                                           inputs.prefix_lengths.data_ptr<int32_t>()[0] :
+                                           -1;
+                forward_shapes->push_back({inputs.combo_tokens.numel(), prefix, inputs.input_lengths.numel()});
+            }
+        }) {}
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         if (forward_hook_) {
@@ -49,15 +63,20 @@ private:
 };
 
 struct CustomConfig {
-    bool                                    reuse_cache         = false;
-    bool                                    enable_device_cache = true;
-    DataType                                kv_cache_data_type  = DataType::TYPE_FP16;
-    std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
-    bool                                    prefill_cp_enabled             = false;
-    bool                                    speculative_enabled            = false;
-    bool                                    warm_up_with_loss              = false;
-    int                                     output_dispatcher_worker_count = 0;
+    bool                                       reuse_cache         = false;
+    bool                                       enable_device_cache = true;
+    bool                                       warm_up             = false;
+    bool                                       warm_up_with_loss   = false;
+    int                                        prefill_chunk_size  = 0;
+    int                                        prefill_chunk_batch_tokens = 0;
+    int64_t                                    max_context_batch_size = 128;
+    DataType                                   kv_cache_data_type  = DataType::TYPE_FP16;
+    std::map<std::string, std::vector<int>>    multi_task_prompt_tokens;
+    std::vector<int64_t>                       output_vocab_ids;  // non-empty enables output-vocab pruning
+    bool                                       prefill_cp_enabled   = false;
+    bool                                       speculative_enabled = false;
+    std::shared_ptr<std::vector<ForwardShape>> forward_shapes;
+    int                                        output_dispatcher_worker_count = 0;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -82,8 +101,12 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     kv_cache_config.enable_device_cache                         = config.enable_device_cache;
     kv_cache_config.multi_task_prompt_tokens                    = config.multi_task_prompt_tokens;
     runtime_config.max_generate_batch_size                      = 128;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = config.max_context_batch_size;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 4096;
+    runtime_config.fifo_scheduler_config.prefill_chunk_size     = config.prefill_chunk_size;
+    runtime_config.fifo_scheduler_config.prefill_chunk_batch_tokens = config.prefill_chunk_batch_tokens;
+    runtime_config.warm_up                                      = config.warm_up;
+    runtime_config.warm_up_with_loss                            = config.warm_up_with_loss;
     model_config.attn_config.kv_cache_dtype =
         config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE;
     model_config.special_tokens.eos_token_id = -1;  // never eos
@@ -198,8 +221,8 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     EngineInitParams rtp_llm_params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     // Set test model factory before engine construction so the model is available during startLoop()
     size_t vocab                       = model_config.vocab_size;
-    NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
-        return std::make_unique<MockModel>(vocab);
+    NormalExecutor::test_model_factory = [vocab, forward_shapes = config.forward_shapes](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab, forward_shapes);
     };
     struct FactoryResetGuard {
         ~FactoryResetGuard() {

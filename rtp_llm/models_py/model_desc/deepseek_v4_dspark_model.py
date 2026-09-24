@@ -734,7 +734,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         tokens_per_block: int,
         graph_metadata: Any,
     ) -> torch.Tensor:
-        hidden = self.v4.embed(query_ids)
+        hidden = self.v4._embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
         # The hyper-connection choreography lives in Block.forward_decode;
@@ -805,7 +805,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         dim = int(self._v4_args.dim)
 
         head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
-        return self.v4.norm(head_hidden)
+        return self.v4._norm(head_hidden)
 
     def _forward_device(self) -> torch.device:
         if self.v4 is None:

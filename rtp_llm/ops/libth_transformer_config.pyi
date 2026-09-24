@@ -401,6 +401,8 @@ class FIFOSchedulerConfig:
     max_context_batch_size: int
     max_inited_kv_cache_streams: int
     pdfusion_scheduler_mode: str
+    prefill_chunk_size: int
+    prefill_chunk_batch_tokens: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1037,6 +1039,7 @@ class KVCacheSpecDesc:
     explicit_entry_count: int
     compression_ratio: int
     state_ring_overlap: int
+    state_ring_entry_alignment: int
     state_ring_include_gen_num_per_cycle: bool
     block_stride_bytes_override: int
     block_stride_bytes_alignment: int

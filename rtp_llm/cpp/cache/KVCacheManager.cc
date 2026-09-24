@@ -397,7 +397,10 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
             initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
             keys_initialized_now = true;
         }
-    } else {
+    } else if (malloc_info.prefill_chunk_start < 0) {
+        // Preparing a chunk only changes sparse state ownership. The prompt is
+        // unchanged, including its partial final block key needed by PD. The
+        // decode update below would drop that key before P publishes the tail.
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
     reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);

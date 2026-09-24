@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import logging
 from collections.abc import Mapping
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
@@ -12,8 +13,9 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
 )
+# Attention implementations are priority-ordered. Initialize the factory while
+# descriptors load so later platform discovery cannot change CUDA numerics.
 from rtp_llm.models_py.modules import AttnImplFactory
-from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -22,6 +24,10 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from torch import nn
+
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 
 
 class GptModelBase(nn.Module):
@@ -86,6 +92,9 @@ class GptModelBase(nn.Module):
                 f"layer0_scale_groups={layer0_scale_count}, "
             )
         return True
+
+    def get_execution_capabilities(self):
+        return {"graph_requires_kv_cache_layout": False}
 
     def prepare_fmha_impl(
         self,
