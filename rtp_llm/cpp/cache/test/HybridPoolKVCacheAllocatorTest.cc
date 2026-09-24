@@ -799,8 +799,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AvailableCapacityAggregatesCanonicalPerPo
     const size_t tokens_before               = allocator->availableTokensNum();
     const auto   capacity_before             = allocator->tokenCapacity(config.seq_size_per_block);
     auto         expected_available_capacity = [&]() {
-        return std::min(pools[0]->availableBlocksNum() * config.seqSizePerBlockForGroup(0),
-                        pools[1]->availableBlocksNum() * config.seqSizePerBlockForGroup(1));
+        return full_pool->availableBlocksNum() * config.seqSizePerBlockForGroup(1);
     };
 
     const std::optional<BlockIdxType> block = full_pool->malloc();
@@ -826,7 +825,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AvailableCapacityAggregatesCanonicalPerPo
     const DeviceBlockPoolPtr&         linear_pool  = pools[0];
     const std::optional<BlockIdxType> linear_block = linear_pool->malloc();
     ASSERT_TRUE(linear_block.has_value());
-    EXPECT_LT(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
     EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, expected_available_capacity());
     linear_pool->incTreeRef(*linear_block, BlockTreeRefType::CACHE);
     EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
@@ -836,7 +835,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AvailableCapacityAggregatesCanonicalPerPo
     EXPECT_EQ(allocator->availableBlocksNum(), total_available);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScopes) {
+TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsPreferFullGroups) {
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     // Token capacity aggregators use FULL groups first: 7 blocks * 4 tokens.
     auto allocator = makeAllocator(config);
@@ -845,6 +844,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 28u);
     EXPECT_EQ(allocator->availableTokensNum(), 28u);
     EXPECT_EQ(allocator->totalTokensNum(), 28u);
+    const auto capacity = allocator->tokenCapacity(config.seq_size_per_block);
+    EXPECT_EQ(capacity.total_tokens, 28u);
+    EXPECT_EQ(capacity.available_tokens, 28u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
@@ -859,6 +861,45 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForF
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
+    const auto capacity = allocator->tokenCapacity(config.seq_size_per_block);
+    EXPECT_EQ(capacity.total_tokens, 7u * 8u);
+    EXPECT_EQ(capacity.available_tokens, 7u * 8u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, TokenCapacityFallsBackToAllGroupsWithoutFullGroups) {
+    const auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/6, /*swa_block_num=*/8);
+    auto       allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    auto capacity = allocator->tokenCapacity(config.seq_size_per_block);
+    EXPECT_EQ(capacity.total_tokens, 5u * 4u);
+    EXPECT_EQ(capacity.available_tokens, 5u * 4u);
+
+    const auto& pool  = allocator->groupBlockPools()[0];
+    const auto  block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incRef(*block);
+    capacity = allocator->tokenCapacity(config.seq_size_per_block);
+    EXPECT_EQ(capacity.total_tokens, 5u * 4u);
+    EXPECT_EQ(capacity.available_tokens, 4u * 4u);
+    pool->decRef(*block);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, 5u * 4u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, TokenCapacityDoesNotFallBackWhenFullPoolIsExhausted) {
+    const auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto       allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    const auto& pool   = allocator->groupBlockPools()[1];
+    const auto  blocks = pool->malloc(7);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+    const auto capacity = allocator->tokenCapacity(config.seq_size_per_block);
+    EXPECT_EQ(capacity.total_tokens, 7u * 4u);
+    EXPECT_EQ(capacity.available_tokens, 0u);
+    EXPECT_EQ(allocator->groupBlockPools()[0]->availableBlocksNum(), 5u);
+    pool->decRef(*blocks);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsFallBackToGlobalSeqSize) {
