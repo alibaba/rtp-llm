@@ -9,6 +9,19 @@ filegroup(
 )
 
 py_test(
+    name = "jit_cache_remote_e2e_test",
+    size = "large",
+    srcs = ["jit_cache_remote_e2e_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     size = "large",
     srcs = ["jit_cache_manager_test.py"],

@@ -835,6 +835,15 @@ def start_backend_server(
 
     manager = None
     try:
+        # Validate explicit storage before the remote-cache fail-open boundary.
+        # Repeated setup with the same argument is memoized and does not probe again.
+        if (
+            py_env_configs.jit_config.manage_jit_cache
+            and py_env_configs.jit_config.local_jit_dir.strip()
+        ):
+            from rtp_llm.utils.jit_cache_manager import setup_jit_cache_env
+
+            setup_jit_cache_env(py_env_configs.jit_config.local_jit_dir)
         try:
             from rtp_llm.utils.jit_cache_manager import start_from_config
 
