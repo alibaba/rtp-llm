@@ -763,82 +763,88 @@ class BackendRPCServerVisitor:
             attempt_input = input
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             first_exc: Optional[BaseException] = None
-            while True:
-                yielded_output = False
-                stream = None
-                try:
-                    stream = await route_and_enqueue(attempt_input)
-                    if is_streaming:
-                        async for output in stream:
+            try:
+                while True:
+                    yielded_output = False
+                    stream = None
+                    try:
+                        stream = await route_and_enqueue(attempt_input)
+                        if is_streaming:
+                            async for output in stream:
+                                yielded_output = True
+                                yield output
+                        else:
+                            buffered_outputs = []
+                            async for output in stream:
+                                buffered_outputs.append(output)
                             yielded_output = True
-                            yield output
-                    else:
-                        buffered_outputs = []
-                        async for output in stream:
-                            buffered_outputs.append(output)
-                        yielded_output = True
-                        for output in buffered_outputs:
-                            yield output
-                    return
-                except BaseException as e:
-                    set_aux_info(e)
-                    if first_exc is None:
-                        first_exc = e
-                    if (
-                        yielded_output
-                        or attempt >= self.pd_route_retry_on_unavailable
-                        or not self._is_retryable_route_rpc_error(e)
-                    ):
-                        # After retries, re-raise the ORIGINAL exception to
-                        # preserve its error category (e.g. CAPACITY->429 from
-                        # the first route failure).  A later attempt may have
-                        # hit a different error (e.g. a model-RPC
-                        # INTERNAL->500) whose category does not reflect the
-                        # root cause; the caller should see the original
-                        # exception so that servicer/frontend maps it to the
-                        # correct HTTP status code.
-                        # A later terminal admission decision is authoritative;
-                        # do not hide it behind an earlier retryable transport
-                        # or legacy capacity failure.
-                        is_terminal_route_decision = (
-                            isinstance(e, FtRuntimeException)
-                            and e.exception_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
-                        )
+                            for output in buffered_outputs:
+                                yield output
+                        return
+                    except BaseException as e:
+                        set_aux_info(e)
+                        if first_exc is None:
+                            first_exc = e
                         if (
-                            first_exc is not None
-                            and first_exc is not e
-                            and not is_terminal_route_decision
+                            yielded_output
+                            or attempt >= self.pd_route_retry_on_unavailable
+                            or not self._is_retryable_route_rpc_error(e)
                         ):
-                            raise first_exc
-                        raise
-                    request_id_factory = getattr(self, "request_id_factory", None)
-                    if request_id_factory is None:
-                        raise
-                    attempt += 1
-                    attempt_input = replace(
-                        input,
-                        request_id=request_id_factory(),
-                        generate_config=input.generate_config.model_copy(
-                            update={"role_addrs": []}
-                        ),
-                        enqueued_by_master=False,
-                    )
-                    route_logger.warning(
-                        "retrying PD route after retryable RPC error, "
-                        "request_id=%s, attempt=%s/%s, error=%s",
-                        attempt_input.request_id,
-                        attempt,
-                        self.pd_route_retry_on_unavailable,
-                        e,
-                    )
-                    await asyncio.sleep(min(0.2, 0.05 * attempt))
-                finally:
-                    # A bridge may stop after yielding partial output. Closing
-                    # this wrapper must reach model_rpc_client's cancellation
-                    # cleanup even when it is suspended at a yield.
-                    close = getattr(stream, "aclose", None)
-                    if close is not None:
-                        await close()
+                            # After retries, re-raise the ORIGINAL exception to
+                            # preserve its error category (e.g. CAPACITY->429 from
+                            # the first route failure).  A later attempt may have
+                            # hit a different error (e.g. a model-RPC
+                            # INTERNAL->500) whose category does not reflect the
+                            # root cause; the caller should see the original
+                            # exception so that servicer/frontend maps it to the
+                            # correct HTTP status code.
+                            # A later terminal admission decision is authoritative;
+                            # do not hide it behind an earlier retryable transport
+                            # or legacy capacity failure.
+                            is_terminal_route_decision = (
+                                isinstance(e, FtRuntimeException)
+                                and e.exception_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
+                            )
+                            if (
+                                first_exc is not None
+                                and first_exc is not e
+                                and not is_terminal_route_decision
+                            ):
+                                raise first_exc
+                            raise
+                        request_id_factory = getattr(self, "request_id_factory", None)
+                        if request_id_factory is None:
+                            raise
+                        attempt += 1
+                        attempt_input = replace(
+                            input,
+                            request_id=request_id_factory(),
+                            generate_config=input.generate_config.model_copy(
+                                update={"role_addrs": []}
+                            ),
+                            enqueued_by_master=False,
+                        )
+                        route_logger.warning(
+                            "retrying PD route after retryable RPC error, "
+                            "request_id=%s, attempt=%s/%s, error=%s",
+                            attempt_input.request_id,
+                            attempt,
+                            self.pd_route_retry_on_unavailable,
+                            e,
+                        )
+                        await asyncio.sleep(min(0.2, 0.05 * attempt))
+                    finally:
+                        # A bridge may stop after yielding partial output. Closing
+                        # this wrapper must reach model_rpc_client's cancellation
+                        # cleanup even when it is suspended at a yield.
+                        close = getattr(stream, "aclose", None)
+                        if close is not None:
+                            await close()
+            finally:
+                # An exception owns this generator's traceback. Keeping it in
+                # first_exc forms a cycle retaining the request's image tensors
+                # and serialized RPC payloads until cyclic GC runs.
+                first_exc = None
 
         return stream_with_aux_info()
 

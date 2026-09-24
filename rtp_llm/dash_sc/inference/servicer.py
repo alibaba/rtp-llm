@@ -1695,6 +1695,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
         emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
         exc: Optional[BaseException] = None
+        response_stream = None
         try:
             try:
                 invocation_metadata = context.invocation_metadata()
@@ -1849,7 +1850,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         yield resp
                     return
                 else:
-                    async for resp, stats in iter_real_model_stream_infer(
+                    response_stream = iter_real_model_stream_infer(
                         request,
                         input_ids,
                         sampling,
@@ -1867,7 +1868,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         yield_access_stats=True,
                         v41_processor_config=self._v41_processor_config,
                         max_seq_len=self._max_seq_len,
-                    ):
+                    )
+                    async for resp, stats in response_stream:
                         (
                             delta_len,
                             finished,
@@ -1895,18 +1897,27 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             exc = e
             raise
         finally:
-            end_ts = record.resolve_status(context, exc)
-            # Log first, metrics second — a kmonitor hiccup must never delay or
-            # drop the access record (user-mandated ordering).
-            emit_access_log(
-                record,
-                rank_id=self._rank_id,
-                server_id=self._server_id,
-                end_ts=end_ts,
-            )
-            report_frontend_rpc_done(
-                record,
-                rank_id=self._rank_id,
-                server_id=self._server_id,
-                status=record.status,
-            )
+            try:
+                if response_stream is not None:
+                    await response_stream.aclose()
+            finally:
+                try:
+                    end_ts = record.resolve_status(context, exc)
+                    # Log first so a metrics failure cannot drop the access record.
+                    emit_access_log(
+                        record,
+                        rank_id=self._rank_id,
+                        server_id=self._server_id,
+                        end_ts=end_ts,
+                    )
+                    report_frontend_rpc_done(
+                        record,
+                        rank_id=self._rank_id,
+                        server_id=self._server_id,
+                        status=record.status,
+                    )
+                finally:
+                    # Do not retain this frame through exc.__traceback__ after
+                    # status/logging have consumed the exception.
+                    exc = None
+                    response_stream = None

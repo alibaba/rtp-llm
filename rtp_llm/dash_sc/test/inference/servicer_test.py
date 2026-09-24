@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import io
 import json
 import logging
 import struct
 import threading
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -2558,6 +2560,71 @@ class _FakeGrpcContext:
 
 
 class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_exception_does_not_retain_request_iterator(self):
+        class RequestIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise asyncio.CancelledError()
+
+        async def run(log_failure=False):
+            iterator = RequestIterator()
+            ref = weakref.ref(iterator)
+            servicer = DashScInferenceServicer(backend_visitor=None)
+            try:
+                async for _ in servicer.ModelStreamInfer(iterator, _FakeGrpcContext()):
+                    pass
+            except asyncio.CancelledError:
+                self.assertFalse(log_failure)
+            except RuntimeError as error:
+                self.assertTrue(log_failure)
+                self.assertEqual(str(error), "report failed")
+            return ref
+
+        def fail_report(*args, **kwargs):
+            raise RuntimeError("report failed")
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            ref = await run()
+            self.assertIsNone(ref())
+            for name in ("emit_access_log", "report_frontend_rpc_done"):
+                with self.subTest(name=name), patch(
+                    "rtp_llm.dash_sc.inference.servicer." + name, fail_report
+                ):
+                    ref = await run(log_failure=True)
+                    self.assertIsNone(ref())
+        finally:
+            if enabled:
+                gc.enable()
+            gc.collect()
+
+    async def test_client_close_reaches_inner_stream_immediately(self):
+        closed = []
+
+        async def responses(*args, **kwargs):
+            try:
+                yield (
+                    predict_v2_pb2.ModelStreamInferResponse(),
+                    (1, False, LLMFinishReason.STREAMING, 1, 0, (42,)),
+                )
+            finally:
+                closed.append(True)
+
+        servicer = DashScInferenceServicer(backend_visitor=object())
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.iter_real_model_stream_infer",
+            responses,
+        ):
+            stream = servicer.ModelStreamInfer(
+                _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
+            )
+            await stream.__anext__()
+            await stream.aclose()
+            self.assertEqual(closed, [True])
+
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
         req.id = "srv-1"
@@ -3477,6 +3544,64 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
 
 class V41ImageInferenceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_rejected_image_request_releases_prepared_tensors_on_close(self):
+        refs = []
+
+        class Visitor:
+            async def enqueue(self, request):
+                from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
+
+                refs.extend(
+                    weakref.ref(image.patches) for image in request.v41_inputs.images
+                )
+                input_pb = trans_input(request)
+                assert input_pb.ByteSize() > 0
+                raise FtRuntimeException(
+                    ExceptionType.MASTER_NO_AVAILABLE_WORKER, "capacity"
+                )
+
+        async def run(early_close):
+            request = self._request()
+            _add_input_tensor(
+                request,
+                "input_ids",
+                "INT32",
+                [len(self.ids)],
+                struct.pack("<%di" % len(self.ids), *self.ids),
+            )
+            servicer = DashScInferenceServicer(
+                backend_visitor=Visitor(),
+                model_type="deepseek_v4",
+                v41_processor_config=self.config,
+            )
+            stream = servicer.ModelStreamInfer(
+                _areq_iter([request]), _FakeGrpcContext()
+            )
+            try:
+                response = await stream.__anext__()
+                self.assertEqual(
+                    _finish_reason(response), DASH_ERROR_CAPACITY.finish_reason
+                )
+                if not early_close:
+                    async for _ in stream:
+                        pass
+            finally:
+                await stream.aclose()
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for early_close in (False, True):
+                with self.subTest(early_close=early_close):
+                    await run(early_close)
+                    await asyncio.sleep(0)
+                    self.assertTrue(refs)
+                    self.assertTrue(all(ref() is None for ref in refs))
+        finally:
+            if enabled:
+                gc.enable()
+            gc.collect()
+
     def setUp(self):
         self.config = V41ImageProcessorConfig(
             vision_patch_size=2,

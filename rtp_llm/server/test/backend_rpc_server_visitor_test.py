@@ -1,4 +1,7 @@
+import asyncio
+import gc
 import unittest
+import weakref
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -481,6 +484,115 @@ class _CapacityThenBatchSloExpiredModelRpcClient:
 
 
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_close_failure_releases_failed_request_without_cyclic_gc(self):
+        class Stream:
+            def __init__(self, request, partial):
+                self.request = request
+                self.partial = partial
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.partial:
+                    return self.request.token_ids
+                raise RuntimeError("iteration failed")
+
+            async def aclose(self):
+                raise RuntimeError("close failed")
+
+        class Client:
+            def __init__(self, partial):
+                self.partial = partial
+
+            def enqueue(self, request):
+                return Stream(request, self.partial)
+
+        async def run(partial):
+            request = _FakeInput(is_streaming=True, token_ids=torch.zeros(32))
+            ref = weakref.ref(request.token_ids)
+            stream = await self._visitor(Client(partial)).enqueue(request)
+            try:
+                await stream.__anext__()
+                await stream.aclose()
+            except RuntimeError as error:
+                self.assertEqual(str(error), "close failed")
+            else:
+                self.fail("close failure must propagate")
+            return ref
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for partial in (False, True):
+                with self.subTest(partial=partial):
+                    ref = await run(partial)
+                    self.assertIsNone(ref())
+        finally:
+            if enabled:
+                gc.enable()
+            gc.collect()
+
+    async def test_completed_requests_release_tensors_without_cyclic_gc(self):
+        async def run(mode, is_streaming):
+            class Client:
+                attempts = 0
+
+                async def enqueue(self, request):
+                    self.attempts += 1
+                    try:
+                        if mode.startswith("retry") and self.attempts == 1:
+                            raise FtRuntimeException(
+                                ExceptionType.MASTER_NO_AVAILABLE_WORKER, "capacity"
+                            )
+                        if mode in ("error", "retry_error"):
+                            raise RuntimeError("failed")
+                        if mode in ("cancel", "retry_cancel"):
+                            raise asyncio.CancelledError()
+                        yield request.token_ids
+                    finally:
+                        if mode == "close_error":
+                            raise RuntimeError("close failed")
+
+            client = Client()
+            visitor = self._visitor(client)
+            visitor.request_id_factory = lambda: 456
+            request = _FakeInput(is_streaming=is_streaming, token_ids=torch.zeros(32))
+            refs = [weakref.ref(request), weakref.ref(request.token_ids)]
+            stream = await visitor.enqueue(request)
+            try:
+                async for output in stream:
+                    del output
+                    if mode == "early_close":
+                        break
+            except (RuntimeError, FtRuntimeException, asyncio.CancelledError):
+                pass
+            finally:
+                await stream.aclose()
+            return refs
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for mode in (
+                "success",
+                "error",
+                "retry_success",
+                "retry_error",
+                "cancel",
+                "retry_cancel",
+                "close_error",
+                "early_close",
+            ):
+                for is_streaming in (False, True):
+                    with self.subTest(mode=mode, is_streaming=is_streaming):
+                        refs = await run(mode, is_streaming)
+                        self.assertTrue(all(ref() is None for ref in refs))
+        finally:
+            if enabled:
+                gc.enable()
+            gc.collect()
+
     async def test_close_after_partial_output_closes_model_rpc(self):
         closed = []
 
