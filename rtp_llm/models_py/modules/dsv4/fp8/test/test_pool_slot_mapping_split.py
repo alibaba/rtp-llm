@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4.decode.forward import build_paged_pool_specs
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV, SWA_KV
+from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     pool_physical_tokens_per_block,
     require_pool_tokens_per_block,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
     translate_local_to_global_slots,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
     compute_kv_pool_slot_mapping,
 )
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV, SWA_KV
 
 
 class _FakeTagKVCache:
@@ -98,8 +99,12 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             owner_tokens_per_block=256,
         )
 
-        torch.testing.assert_close(rank0, torch.tensor([640, -1, -1, -1], dtype=torch.int64))
-        torch.testing.assert_close(rank3, torch.tensor([-1, -1, -1, 832], dtype=torch.int64))
+        torch.testing.assert_close(
+            rank0, torch.tensor([640, -1, -1, -1], dtype=torch.int64)
+        )
+        torch.testing.assert_close(
+            rank3, torch.tensor([-1, -1, -1, 832], dtype=torch.int64)
+        )
 
     def test_build_paged_pool_specs_uses_dsv4_pool_tokens(self) -> None:
         cache = _FakeTagKVCache(
@@ -108,26 +113,30 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             kernel_seq_size_per_block={HCA_KV: 128, SWA_KV: 128},
         )
 
+        layer_entries = [{SWA_KV: 32}, {HCA_KV: 1, SWA_KV: 32}]
+        cache.get_layer_cache_groups = lambda layer_id: [
+            SimpleNamespace(tag=tag) for tag in layer_entries[layer_id]
+        ]
+
         class FakeAttn:
             _kv_cache = None
 
+            def __init__(self, layer_id: int) -> None:
+                self.layer_id = layer_id
+
             def _pool_entries_per_block(self, tag: str) -> int:
-                if tag == HCA_KV:
-                    return 1
-                if tag == SWA_KV:
-                    return 32
-                return 0
+                # The native topology aborts on non-owned tags, not RuntimeError.
+                assert tag in layer_entries[self.layer_id]
+                assert self._kv_cache is cache
+                return layer_entries[self.layer_id][tag]
 
-        class FakeLayer:
-            attn = FakeAttn()
+        v4 = SimpleNamespace(
+            layers=[SimpleNamespace(attn=FakeAttn(i)) for i in range(2)]
+        )
+        specs = build_paged_pool_specs(cache, v4, max_seq_len=256)
 
-        class FakeV4:
-            layers = [FakeLayer()]
-
-        specs = build_paged_pool_specs(cache, FakeV4(), max_seq_len=256)
-
-        self.assertEqual(specs[HCA_KV][1], 128)
-        self.assertEqual(specs[SWA_KV][1], 128)
+        self.assertEqual(specs, {HCA_KV: (1, 128, 3), SWA_KV: (32, 128, 3)})
+        self.assertTrue(all(layer.attn._kv_cache is None for layer in v4.layers))
 
     def test_require_pool_tokens_per_block_rejects_unknown_tag(self) -> None:
         cache = _FakeTagKVCache(
