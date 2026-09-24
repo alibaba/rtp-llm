@@ -1,4 +1,10 @@
 filegroup(
+    name = "qwen2_testdata",
+    srcs = glob(["testdata/qwen2_tokenizer/*"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "testdata",
     srcs = glob([
         "testdata/**/*",
