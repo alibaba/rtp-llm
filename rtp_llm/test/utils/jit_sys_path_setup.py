@@ -238,7 +238,9 @@ def setup_jit_cache(cache_dir=None, packages=None):
     bootstrap_remote_jit_dir()
 
     if cache_dir is None:
-        cache_dir = Path.home() / ".cache"
+        # Isolated worktrees can keep copied Bazel packages in their own cache,
+        # without changing HOME or importing a previous run's user-wide copy.
+        cache_dir = os.environ.get("RTP_JIT_PACKAGE_CACHE_DIR", Path.home() / ".cache")
     cache_dir = Path(cache_dir).expanduser().resolve()
 
     # DeepGEMM's NVCC compiler changes into the JIT tmp directory before
