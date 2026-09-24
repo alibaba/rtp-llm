@@ -1027,6 +1027,26 @@ class CustomChatRenderer:
     ) -> bool:
         return True
 
+    def _release_think_tail(self, text: str) -> str:
+        """Drop only the tail that could still have grown into a think tag.
+
+        ``_split_reasoning_text_and_content`` parks reasoning text whose tail
+        may turn out to be the start of ``think_end_tag`` (or of a new
+        ``think_start_tag``). Once generation has stopped nothing can complete
+        that tag any more, so everything in front of the tail is ordinary
+        reasoning text and has to be released; the tail itself is a partial tag
+        and stays dropped, like the streaming reasoning parser does with its
+        own buffer. Both tags are checked, so the same fragment that made the
+        state machine park the text is the fragment that gets dropped here.
+        """
+        for cut in range(len(text)):
+            tail = text[cut:]
+            if self.think_end_tag.startswith(tail) or self.think_start_tag.startswith(
+                tail
+            ):
+                return text[:cut]
+        return text
+
     async def _flush_buffer(
         self,
         buffer_list: List[StreamStatus],
@@ -1059,7 +1079,20 @@ class CustomChatRenderer:
                     multimodal_lengths=aux_info.multimodal_lengths,
                 )
             )
-        return await self._generate_stream_response(output_items, think_status_list)
+        response = await self._generate_stream_response(output_items, think_status_list)
+        for choice, think_status in zip(response.choices, think_status_list):
+            if think_status.in_think_mode and think_status.think_buffer:
+                # This was the last chunk, so whatever the state machine still
+                # parks can no longer grow into a think tag. Release the
+                # reasoning text in front of the partial tag instead of losing
+                # it with the buffer; the tag fragment itself stays dropped.
+                released = self._release_think_tail(think_status.think_buffer)
+                think_status.think_buffer = ""
+                if released:
+                    choice.delta.reasoning_content = (
+                        choice.delta.reasoning_content or ""
+                    ) + released
+        return response
 
     async def _generate_final(
         self,
