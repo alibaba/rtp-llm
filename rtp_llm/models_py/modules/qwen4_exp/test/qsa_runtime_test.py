@@ -965,6 +965,52 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                 self.assertTrue(bool(torch.all(valid < prefix + local_idx + 1)))
             offset += length
 
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_mtp_draft_prefix_reuse_accepts_local_cu_kv_coordinates(self):
+        device = torch.device("cuda")
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        kv_base = torch.zeros(16, 2 * self.D * 2, dtype=torch.uint8, device=device)
+        state_base = torch.zeros(
+            16, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+        )
+        context = self._draft_incremental_context(
+            kv_base,
+            state_base,
+            prefixes=[8],
+            lengths=[8],
+            is_mtp_draft=True,
+        )
+        local_cu_kv = torch.tensor([0, 8], dtype=torch.int32, device=device)
+        for inputs in (
+            context.main_inputs,
+            context.indexer_kv_inputs,
+            context.indexer_state_inputs,
+        ):
+            inputs.cu_kv_seqlens_device = local_cu_kv
+
+        q = torch.randn(8, 2, self.D, dtype=torch.bfloat16, device=device)
+        raw = torch.randn(8, self.D, dtype=torch.bfloat16, device=device)
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=lambda q, weight, pool, table, lengths, **kwargs: torch.zeros(
+                q.shape[1], kwargs["max_ctx_len"], dtype=torch.float32, device=device
+            ),
+        ):
+            selected = context.select_draft_prefix_reuse_prefill_tokens(
+                q,
+                raw,
+                indexer=indexer,
+                rope_config=self._base_rope_config(3),
+            )
+
+        self.assertEqual(selected.shape, (8, 8 + self.RATIO - 1))
+        for row, visible in enumerate(range(9, 17)):
+            valid = selected[row][selected[row] >= 0]
+            self.assertTrue(bool(torch.all(valid < visible)))
+
     def test_decode_completes_prefill_tail_then_scores_same_projection(self):
         prefill_raw = torch.randn(7, self.D, dtype=torch.bfloat16)
         decode_raw = torch.randn(1, self.D, dtype=torch.bfloat16)

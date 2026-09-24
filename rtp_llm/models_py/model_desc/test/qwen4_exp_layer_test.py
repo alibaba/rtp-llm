@@ -514,6 +514,18 @@ class Qwen4ExpQSAConstructionTest(TestCase):
                     device=q.device,
                 )
 
+            def select_draft_prefix_reuse_prefill_tokens(
+                runtime_self, q, raw_keys, **kwargs
+            ):
+                runtime_self.draft_prefix_reuse_q = q
+                runtime_self.raw_keys = raw_keys
+                return torch.zeros(
+                    q.shape[0],
+                    attention.qsa_indexer.max_selected,
+                    dtype=torch.int32,
+                    device=q.device,
+                )
+
         return _Runtime()
 
     def test_ragged_prefill_hands_packed_indexer_selection_to_sparse_fmha(self):
@@ -697,6 +709,43 @@ class Qwen4ExpQSAConstructionTest(TestCase):
         self.assertTrue(fmha.is_mtp_draft)
         self.assertEqual(runtime.draft_q.shape, (5, 4, 8))
         self.assertEqual(runtime.raw_keys.shape, (5, 8))
+        self.assertEqual(fmha.selected.shape, (5, 11))
+
+    def test_mtp_draft_long_prefix_reuse_uses_the_warm_prefill_path(self):
+        class _SparseFmha(_QsaMainCachePhase):
+            def __init__(self):
+                self.is_mtp_draft = False
+                self.selected = None
+
+            def set_mtp_draft_mode(self, enabled):
+                self.is_mtp_draft = enabled
+
+            def set_selected_indices(self, selected):
+                self.selected = selected
+
+            def forward(self, qkv, kv_cache, layer_idx):
+                return qkv
+
+        attention = self._attention(is_mtp=True)
+        fmha = _SparseFmha()
+        inputs = self._prefill_inputs()
+        inputs.input_lengths = torch.tensor([5], dtype=torch.int32)
+        inputs.prefix_lengths = torch.tensor([8], dtype=torch.int32)
+        inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
+        inputs.combo_position_ids = torch.tensor(
+            [[position, position, position] for position in range(8, 13)],
+            dtype=torch.int32,
+        ).reshape(-1)
+        runtime = self._runtime(attention, inputs)
+
+        output = attention(
+            torch.randn(5, 16), fmha, None, inputs, qsa_runtime=runtime
+        )
+
+        self.assertEqual(output.shape, (5, 16))
+        self.assertTrue(fmha.is_mtp_draft)
+        self.assertEqual(runtime.draft_prefix_reuse_q.shape, (5, 4, 8))
+        self.assertFalse(hasattr(runtime, "draft_q"))
         self.assertEqual(fmha.selected.shape, (5, 11))
 
     def test_target_verify_validation_fails_before_projection_and_main_writer(self):
