@@ -26,6 +26,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr size_t kSmallBeamSearchV1MaxBeamWidth = 8;  // Keep in sync with trt_beam_search kMaxBeamWidthForV1.
+
 std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, size_t output_vocab_size) {
     if (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f) {
         return "output vocabulary pruning does not support active repetition, presence, or frequency penalties";
@@ -40,8 +42,33 @@ std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, si
         || config.calculate_loss != 0 || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
         return "output vocabulary pruning does not support full-vocabulary logits, probabilities, labels, or loss";
     }
-    if (config.hasNumBeams() && output_vocab_size <= 2 * static_cast<size_t>(config.maxNumBeams())) {
-        return "output vocabulary size must be greater than twice the maximum beam width";
+    if (config.hasNumBeams()) {
+        const size_t max_num_beams = static_cast<size_t>(config.maxNumBeams());
+        if (output_vocab_size < max_num_beams) {
+            return "output vocabulary size must be at least the maximum beam width";
+        }
+        // Equal small widths select V1, even in a variable-beam schedule.
+        // Check every transition, including the repeated final width.
+        size_t     previous_width = 1;
+        const auto validate_width = [&](size_t width) {
+            return previous_width == width && width > 1 && width <= kSmallBeamSearchV1MaxBeamWidth
+                   && output_vocab_size <= 2 * width;
+        };
+        if (config.variable_num_beams.empty()) {
+            if (max_num_beams <= kSmallBeamSearchV1MaxBeamWidth && output_vocab_size <= 2 * max_num_beams) {
+                return "output vocabulary size must be greater than twice the beam width for small-beam search";
+            }
+        } else {
+            for (const int width : config.variable_num_beams) {
+                if (validate_width(static_cast<size_t>(width))) {
+                    return "output vocabulary size must be greater than twice the beam width for small-beam search";
+                }
+                previous_width = static_cast<size_t>(width);
+            }
+            if (validate_width(previous_width)) {
+                return "output vocabulary size must be greater than twice the beam width for small-beam search";
+            }
+        }
     }
     return std::nullopt;
 }
@@ -87,9 +114,13 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         RTP_LLM_LOG_WARNING("beam search does not support PERF_TEST for now");
     }
 
-    // Note it is invalid to use currentBatchSize here, because currentBatchSize depends on complete_token_ids_,
-    // which has not been initialized yet
+    // currentBatchSize/nextBatchSize depend on complete_token_ids_, which is not initialized yet.
     const size_t init_batch_size = batchSize(0);
+    const size_t next_batch_size = batchSize(1);
+    // Non-beam num_return_sequences expands after prefill. Logits processing happens after
+    // sampler tiling, so initialize its state with the expanded sampler batch size.
+    const size_t logits_processor_init_batch_size =
+        init_batch_size != next_batch_size && !hasNumBeams() ? next_batch_size : init_batch_size;
 
     begin_time_us_ = input->begin_time_us;
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
@@ -107,7 +138,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -134,7 +165,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), processor_eos_token_id);
+        generate_input_, logits_processor_init_batch_size, maxBatchSize(), processor_eos_token_id);
     if (processors_result.ok()) {
         auto processors = std::move(processors_result.value());
         if (output_vocab_size_ > 0) {
@@ -335,7 +366,7 @@ int GenerateStream::batchSize(int output_len) const {
     if (generate_input_->generate_config->hasNumBeams()) {
         return numBeams(output_len);
     } else {
-        return std::max(numReturnSequences(), 1);
+        return output_len == 0 && !perf_test_ ? 1 : std::max(numReturnSequences(), 1);
     }
 }
 
@@ -488,6 +519,20 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
+    // Cap reuseLength so it doesn't exceed any input_embeddings location.
+    // Only needed during prefill; on decode/speculative paths the KV cache
+    // already incorporates the custom embeddings.
+    if (*is_context_stream_ && generate_input_->input_embeddings_locs) {
+        for (int32_t loc : generate_input_->input_embeddings_locs.value()) {
+            if (reuse_length_ > loc) {
+                reuse_length_ = loc;
+            }
+        }
+    }
+}
+
+void GenerateStream::setHandoffReuseLength(int reuse_length) {
+    reuse_length_ = reuse_length;
 }
 
 void GenerateStream::setLocalReuseLength(int length) {
@@ -624,6 +669,21 @@ torch::Tensor GenerateStream::multimodalLocations() const {
         return torch::Tensor();
     }
     return generate_input_->mm_locs.value();
+}
+
+bool GenerateStream::hasInputEmbeddings() const {
+    return (generate_input_->input_embeddings.has_value() && !generate_input_->input_embeddings->empty())
+           || (generate_input_->input_embeddings_locs.has_value() && !generate_input_->input_embeddings_locs->empty());
+}
+
+const std::vector<torch::Tensor>& GenerateStream::inputEmbeddings() const {
+    static const std::vector<torch::Tensor> empty;
+    return generate_input_->input_embeddings.has_value() ? generate_input_->input_embeddings.value() : empty;
+}
+
+const std::vector<int32_t>& GenerateStream::inputEmbeddingsLocs() const {
+    static const std::vector<int32_t> empty;
+    return generate_input_->input_embeddings_locs.has_value() ? generate_input_->input_embeddings_locs.value() : empty;
 }
 
 vector<int> GenerateStream::textTokensMask() const {
@@ -1218,7 +1278,8 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      vocab_size_,
                                      usesBeamSearchTokenLayoutForCurrentStep(),
                                      streamId(),
-                                     error_token_id)) {
+                                     error_token_id,
+                                     update_info.src_batch_indices)) {
         reportEventWithoutLock(StreamEvents::Error,
                                ErrorCode::OUT_OF_VOCAB_RANGE,
                                "output token id:" + std::to_string(error_token_id)
@@ -1295,7 +1356,7 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch:
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (!src_batch_indices.defined() || !hasNumBeams()) {
+    if (!src_batch_indices.defined()) {
         return;
     }
 

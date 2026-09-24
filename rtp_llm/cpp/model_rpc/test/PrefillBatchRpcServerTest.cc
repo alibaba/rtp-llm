@@ -2095,4 +2095,28 @@ TEST_F(PrefillBatchTraceTest, FetchNotFoundCreatesRealServerSpanWithTransportSta
 }
 
 }  // namespace
+
+TEST(PrefillBatchRpcServerTest, NonRetryableInputDoesNotRetryOrSkipSiblingCleanup) {
+    PrefillBatchRpcServer server;
+    server.meta_                                               = std::make_shared<RpcServerRuntimeMeta>();
+    server.maga_init_params_.pd_sep_config.prefill_retry_times = 3;
+    server.prepare_resource_worker_pool_ = std::make_shared<autil::LockFreeThreadPool>(2, 8, nullptr, "PolicyTest");
+    ASSERT_TRUE(server.prepare_resource_worker_pool_->start());
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready;
+    buildReadySlots(server, {981, 982}, slots, ready);
+    // The first slot fails capability validation. The token-only sibling fails
+    // a retryable missing-host lookup and exhausts its own independent budget.
+    slots[0].deferred->context->generate_input->input_embeddings =
+        std::vector<torch::Tensor>{torch::ones({1, 1}, torch::kFloat32)};
+    slots[0].deferred->context->generate_input->input_embeddings_locs = std::vector<int32_t>{0};
+    auto results                                                      = server.prepareGroup(slots);
+    ASSERT_EQ(results.size(), 2);
+    EXPECT_FALSE(results[0].prepared);
+    EXPECT_FALSE(results[1].prepared);
+    EXPECT_EQ(slots[0].deferred->context->retry_times, 1);
+    EXPECT_EQ(slots[1].deferred->context->retry_times, 4);
+    EXPECT_FALSE(slots[0].deferred->context->shouldRetry());
+}
+
 }  // namespace rtp_llm

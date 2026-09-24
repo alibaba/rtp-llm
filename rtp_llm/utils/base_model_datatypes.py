@@ -52,6 +52,26 @@ class VitParameters:
     eval_model_size = None
 
 
+@dataclass
+class InputEmbeddings:
+    """Embedding spans owned by the caller until RPC serialization completes.
+
+    CUDA writes must be visible to the calling thread's current stream on each
+    tensor's device before enqueue. When producing on another stream, establish
+    that dependency with current_stream(device).wait_stream(producer) or an
+    event before calling the client. A Tensor does not retain its producer stream.
+    Do not mutate its storage while a request is in flight.
+    """
+
+    embeddings: List[torch.Tensor]
+    embedding_locs: List[int]
+
+
+def has_input_embeddings(input: "GenerateInput") -> bool:
+    embeddings = getattr(input, "input_embeddings", None)
+    return embeddings is not None and bool(embeddings.embeddings)
+
+
 # single batch prompt input
 @dataclass
 class RequestInfo:
@@ -76,6 +96,7 @@ class GenerateInput:
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    input_embeddings: Optional[InputEmbeddings] = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -91,6 +112,10 @@ class GenerateInput:
     def update_prefix(self, prefix_tokens: torch.Tensor):
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
+        if self.input_embeddings is not None:
+            self.input_embeddings.embedding_locs = [
+                loc + self.prefix_length for loc in self.input_embeddings.embedding_locs
+            ]
 
 
 @dataclass

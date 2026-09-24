@@ -26,6 +26,9 @@ struct BeamSearchConfig {
     size_t mByteSharedMemoryStage1      = 0;
     size_t mByteSharedMemoryStage3      = 0;
     size_t mWorkspaceSize               = 0;
+    size_t mStage1TopK                  = 0;
+    size_t mStage2TopK                  = 0;
+    size_t mStage2InputLen              = 0;
     bool   mVBWS                        = false;
     bool   mV2                          = false;
 };
