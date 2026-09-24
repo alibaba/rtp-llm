@@ -7,3 +7,6 @@ ci_suites:
   - cache_churn::lru_affinity
   - engine_fault_recovery::generation_bump
   - master_lifecycle::kill_single
+  performance:
+  - master_performance::flash_frozen_mock
+  - cache_scale_in::step
