@@ -14,7 +14,7 @@ import json
 import logging
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Dict, Optional
 
 import torch
@@ -22,6 +22,10 @@ import torch.nn as nn
 
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.norm import RMSResNorm
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_layer_caches_for_groups,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
@@ -73,6 +77,30 @@ def build_mla_runtime_layout(
 
 class MlaRuntimeLayoutMixin:
     """Shared MLA runtime-layout lifecycle for score and MTP models."""
+
+    _is_sparse_mla = False
+
+    def _layer_attention_routes(self, fmha_impl, layer_idx):
+        if not self._is_sparse_mla:
+            return (
+                select_fmha_impl_for_layer(fmha_impl, self.kv_cache, layer_idx),
+                self.kv_cache.get_layer_cache(layer_idx) if self.kv_cache else None,
+            )
+        if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != {
+            "default",
+            "indexer_kv",
+        }:
+            raise RuntimeError(
+                "sparse MLA requires exactly default and indexer_kv FMHA routes"
+            )
+        caches = (
+            get_layer_caches_for_groups(
+                self.kv_cache, layer_idx, ("default", "indexer_kv")
+            )
+            if self.kv_cache is not None
+            else None
+        )
+        return fmha_impl, caches
 
     def _apply(self, fn, recurse: bool = True):
         if not getattr(self, "use_mla", True):
@@ -155,15 +183,37 @@ class MlaRuntimeLayoutMixin:
                 cuda_graph_selection_mode=cuda_graph_selection_mode,
             )
         self._ensure_mla_kernel_layout()
-        return AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self._mla_kernel_layout,
-            inputs.attention_inputs,
-            self.fmha_config,
-            is_cuda_graph,
-            cuda_graph_selection_mode=cuda_graph_selection_mode,
-        )
+        attention_inputs = get_attention_inputs_value(inputs)
+        if self._is_sparse_mla:
+            if not isinstance(attention_inputs, Mapping) and self.kv_cache is None:
+                # Cacheless warmup shares the input; attention skips the indexer.
+                attention_inputs = {
+                    "default": attention_inputs,
+                    "indexer_kv": attention_inputs,
+                }
+            if (
+                not isinstance(attention_inputs, Mapping)
+                or len(list(attention_inputs)) != 2
+                or set(attention_inputs) != {"default", "indexer_kv"}
+            ):
+                raise RuntimeError(
+                    "sparse MLA requires exactly default and indexer_kv attention input tags"
+                )
+
+        def prepare(group_inputs):
+            return AttnImplFactory.get_fmha_impl(
+                self.config,
+                self.parallelism_config,
+                self._mla_kernel_layout,
+                group_inputs,
+                self.fmha_config,
+                is_cuda_graph,
+                cuda_graph_selection_mode=cuda_graph_selection_mode,
+            )
+
+        if isinstance(attention_inputs, Mapping):
+            return {tag: prepare(value) for tag, value in attention_inputs.items()}
+        return prepare(attention_inputs)
 
 
 # ------------------------------------------------------------------ #
@@ -910,6 +960,7 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             )
 
         cfg = extract_config_values(model_config, load_config, config_json)
+        self._is_sparse_mla = cfg["is_sparse"]
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
 
         # --- RoPE cache: read config.json directly for full rope fields ---
@@ -1003,14 +1054,12 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, layer in enumerate(self.layers):
-            layer_fmha_impl = select_fmha_impl_for_layer(
-                fmha_impl, self.kv_cache, i
-            )
+            layer_fmha_impl, layer_kv_cache = self._layer_attention_routes(fmha_impl, i)
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_kv_cache,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states)
