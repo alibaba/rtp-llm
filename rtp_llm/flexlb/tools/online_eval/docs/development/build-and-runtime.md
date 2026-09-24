@@ -70,3 +70,4 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 - 只有 `dry-run` 或 `list-json` 产物：这只是计划验证，不代表服务启动或测试通过。
 
 继续阅读对应 runbook：[压测](stress.md)、[功能测试](functional.md)、[场景测试](scenario.md)。
+使用历史 jar 与当前 Mock 做版本对照时，另见[老版本 Master 接入](legacy-master.md)。

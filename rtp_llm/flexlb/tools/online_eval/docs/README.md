@@ -13,6 +13,7 @@
 ## 开发与运行
 
 - [编译与运行底座](development/build-and-runtime.md)
+- [老版本 Master 接入](development/legacy-master.md)：配置方言翻译、发现适配与版本对照自检。
 - [功能测试](development/functional.md)与[场景测试](development/scenario.md)
 - [压测](development/stress.md)与[性能门禁](development/performance-gate.md)
 - [播放调节与复现](development/playback-controls.md)
