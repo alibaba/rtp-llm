@@ -378,6 +378,7 @@ class Qwen4ExpQSARuntimeContext:
         device: torch.device,
         rope_config: Any,
         draft: bool = True,
+        draft_prefix_reuse: bool = False,
     ) -> dict[str, Any]:
         """Validate one incremental prefill build without side effects.
 
@@ -388,7 +389,15 @@ class Qwen4ExpQSARuntimeContext:
         by the side pool, and the writer seals complete blocks exactly as the
         draft path does.
         """
-        label = "draft incremental prefill" if draft else "prefix-reuse prefill"
+        if draft_prefix_reuse:
+            if draft or not self.is_mtp_draft:
+                raise RuntimeError(
+                    "qwen4_exp QSA draft prefix-reuse requires an explicit MTP "
+                    "draft context"
+                )
+            label = "MTP draft prefix-reuse prefill"
+        else:
+            label = "draft incremental prefill" if draft else "prefix-reuse prefill"
         lengths = self._validate_mode_and_metadata(
             expect_prefill=True,
             allow_draft_incremental=draft,
@@ -492,12 +501,24 @@ class Qwen4ExpQSARuntimeContext:
             cu_kv_seqlens.dim() != 1
             or cu_kv_seqlens.dtype != torch.int32
             or cu_kv_seqlens.device != device
-            or not bool(torch.equal(cu_kv_seqlens, expected_cu_kv))
         ):
             raise RuntimeError(
                 "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
-                "match prefix+input lengths"
+                "provide device int32 [B + 1] metadata"
             )
+        if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
+            if not draft_prefix_reuse:
+                raise RuntimeError(
+                    "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
+                    "match prefix+input lengths"
+                )
+            if int(cu_kv_seqlens.numel()) != batch_size + 1 or bool(
+                torch.any(cu_kv_seqlens[1:] < cu_kv_seqlens[:-1]).item()
+            ):
+                raise RuntimeError(
+                    "qwen4_exp QSA MTP draft prefix-reuse has invalid local "
+                    "cu_kv_seqlens metadata"
+                )
 
         logical_positions = torch.cat(
             [
@@ -1117,6 +1138,30 @@ class Qwen4ExpQSARuntimeContext:
             q, raw_keys, indexer=indexer, rope_config=rope_config, draft=False
         )
 
+    def select_draft_prefix_reuse_prefill_tokens(
+        self,
+        q: torch.Tensor,
+        raw_keys: torch.Tensor,
+        *,
+        indexer: Any,
+        rope_config: Any,
+    ) -> torch.Tensor:
+        """Serve a draft-model prefix hit before bounded MTP continuation.
+
+        MTP hands this prefill to the draft model with local cu_kv coordinates,
+        while prefix_lengths and the paged cache tables still describe the
+        absolute target cache rows. QSA must score/write by the latter, then
+        subsequent accepted-token commits use bounded draft incremental mode.
+        """
+        return self._incremental_prefill_selection(
+            q,
+            raw_keys,
+            indexer=indexer,
+            rope_config=rope_config,
+            draft=False,
+            draft_prefix_reuse=True,
+        )
+
     def _incremental_prefill_selection(
         self,
         q: torch.Tensor,
@@ -1125,6 +1170,7 @@ class Qwen4ExpQSARuntimeContext:
         indexer: Any,
         rope_config: Any,
         draft: bool,
+        draft_prefix_reuse: bool = False,
     ) -> torch.Tensor:
         """Shared paged selection for incremental prefill builds.
 
@@ -1144,6 +1190,7 @@ class Qwen4ExpQSARuntimeContext:
             device=raw_keys.device,
             rope_config=rope_config,
             draft=draft,
+            draft_prefix_reuse=draft_prefix_reuse,
         )
         head_num = int(plan["head_num"])
         head_dim = int(plan["head_dim"])
