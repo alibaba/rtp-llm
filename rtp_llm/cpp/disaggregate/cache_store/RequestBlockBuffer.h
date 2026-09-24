@@ -2,7 +2,9 @@
 
 #include <torch/all.h>
 
+#include <chrono>
 #include <shared_mutex>
+#include <condition_variable>
 #include <unordered_map>
 #include <memory>
 #include <vector>
@@ -44,6 +46,13 @@ public:
     size_t                                                        getBlocksCount() const;
     size_t                                                        getBlocksSize() const;
 
+    // Serialize publication for one model/layer/tag/CP rank of this request.
+    // The caller must finish the publication after its store callback, including failure.
+    // A missing callback must not block a later chunk or request shutdown forever.
+    size_t beginPublication(const std::string&        cache_namespace,
+                            std::chrono::milliseconds timeout = std::chrono::seconds(30));
+    void   finishPublication(const std::string& cache_namespace, bool success, size_t complete_block_count);
+
     void addBlock(const std::shared_ptr<BlockBuffer>& block);
     void addBlock(const std::string& key, const std::shared_ptr<void>& addr, uint32_t len, bool gpu_mem, bool adopted);
     void addBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
@@ -61,6 +70,11 @@ private:
     void triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&);
 
 private:
+    struct PublicationState {
+        size_t published_block_count = 0;
+        bool   pending               = false;
+    };
+
     std::string requestid_;
     std::string request_key_;
 
@@ -69,6 +83,9 @@ private:
     mutable std::shared_mutex                                     blocks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> blocks_;
     size_t                                                        blocks_size_ = 0;
+    std::unordered_map<std::string, PublicationState>             publication_states_;
+    std::condition_variable_any                                   publication_cv_;
+    bool                                                          publication_cancelled_{false};
 
     mutable std::shared_mutex watch_func_mutex_;
     std::vector<WatchFunc>    watch_funcs_;

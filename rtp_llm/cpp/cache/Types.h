@@ -72,6 +72,8 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Valid prefix state to preserve for chunk prefill; -1 keeps ordinary cleanup.
+    int computed_prefix_len = -1;
 
     int incrSeqLen() const;
 };

@@ -12,9 +12,13 @@
 #endif
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <future>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -42,6 +46,43 @@ public:
     bool                     duplicate_store_callback = false;
     bool                     load_success             = true;
     CacheStoreErrorCode      load_error               = CacheStoreErrorCode::None;
+    bool                     delay_store_callback      = false;
+    std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_buffers;
+
+    std::shared_ptr<RequestBlockBuffer> getOrCreateRequestBlockBuffer(const std::string& request_id) override {
+        std::lock_guard<std::mutex> lock(request_buffers_mutex_);
+        ++publication_lookups_;
+        publication_lookup_cv_.notify_all();
+        auto& buffer = request_buffers[request_id];
+        if (!buffer) {
+            buffer = std::make_shared<RequestBlockBuffer>(request_id);
+        }
+        return buffer;
+    }
+
+    bool waitForPublicationLookups(size_t count) const {
+        std::unique_lock<std::mutex> lock(request_buffers_mutex_);
+        return publication_lookup_cv_.wait_for(
+            lock, std::chrono::seconds(5), [&] { return publication_lookups_ >= count; });
+    }
+
+    void completeNextPendingStore(bool success = true) {
+        std::pair<std::shared_ptr<RequestBlockBuffer>, CacheStoreStoreDoneCallback> pending;
+        {
+            std::lock_guard<std::mutex> lock(request_buffers_mutex_);
+            if (pending_stores_.empty()) {
+                throw std::runtime_error("no pending store");
+            }
+            pending = std::move(pending_stores_.front());
+            pending_stores_.erase(pending_stores_.begin());
+            if (success) {
+                addStoredBlocks(pending.first);
+            }
+        }
+        if (pending.second) {
+            pending.second(success, success ? CacheStoreErrorCode::None : CacheStoreErrorCode::StoreFailed);
+        }
+    }
 
     void store(const std::shared_ptr<rtp_llm::RequestBlockBuffer>& buf,
                rtp_llm::CacheStoreStoreDoneCallback                cb) override {
@@ -55,6 +96,16 @@ public:
         records.push_back(std::move(record));
         if (throw_on_store) {
             throw std::runtime_error("synchronous store failure");
+        }
+        {
+            std::lock_guard<std::mutex> lock(request_buffers_mutex_);
+            if (delay_store_callback) {
+                pending_stores_.emplace_back(buf, std::move(cb));
+                return;
+            }
+            if (store_success) {
+                addStoredBlocks(buf);
+            }
         }
         if (cb) {
             cb(store_success, store_error);
@@ -115,6 +166,20 @@ public:
     void debugInfo() override {}
 
 private:
+    void addStoredBlocks(const std::shared_ptr<RequestBlockBuffer>& buf) {
+        auto& stored = request_buffers[buf->getRequestId()];
+        if (!stored) {
+            stored = std::make_shared<RequestBlockBuffer>(buf->getRequestId());
+        }
+        for (const auto& [key, block] : buf->getBlocks()) {
+            stored->addBlock(block);
+        }
+    }
+
+    mutable std::mutex                         request_buffers_mutex_;
+    mutable std::condition_variable            publication_lookup_cv_;
+    mutable size_t                             publication_lookups_{0};
+    std::vector<std::pair<std::shared_ptr<RequestBlockBuffer>, CacheStoreStoreDoneCallback>> pending_stores_;
     std::shared_ptr<rtp_llm::MemoryUtil> null_util_;
 };
 
@@ -450,6 +515,197 @@ TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsCopiesBackToNonContiguousInp
             }
         }
     }
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreChunkedPublication) {
+    // The first chunk must include P's reused prefix. Later chunks must not
+    // submit it again, including when FULL is one group of a hybrid model.
+    for (bool mla : {false, true}) {
+        for (bool hybrid : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "mla=" << mla << " hybrid=" << hybrid);
+            auto store  = std::make_shared<MockCacheStore>();
+            auto inputs = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/6);
+            auto config = makeCacheConfig(2, 64, 0, 6, "full", 1,
+                                          defaultCacheGroupPolicy(CacheGroupType::FULL), hybrid, mla);
+            torch_ext::LayerKVCache layer;
+            layer.kv_cache_base = torch::zeros({6, 64}, torch::kUInt8);
+            layer.layer_id     = 1;
+            layer.tag          = "full";
+            const size_t parts = mla || hybrid ? 1 : 2;
+            const std::string key_prefix = mla || hybrid ? "kv_" : "k_";
+
+            struct Chunk {
+                int prefix;
+                int length;
+                std::vector<size_t> expected_blocks;
+            };
+            for (const auto& chunk : std::vector<Chunk>{{2, 4, {0, 1, 2}}, {6, 4, {3, 4}}, {10, 1, {5}}}) {
+                inputs.prefix_lengths_host.fill_(chunk.prefix);
+                inputs.input_lengths_host.fill_(chunk.length);
+                const auto previous_count = store->records.size();
+                runtimeWriteCacheStore(inputs, layer, config, store, 0, 0, 1, nullptr);
+                ASSERT_EQ(store->records.size(), previous_count + 1);
+                const auto& record = store->records.back();
+                EXPECT_EQ(record.block_count, chunk.expected_blocks.size() * parts);
+                for (const auto block : chunk.expected_blocks) {
+                    EXPECT_EQ(record.blocks.count(key_prefix + cacheKeyAt(inputs, block, 1, "full")), 1u);
+                }
+            }
+            // A different request must publish its own reused prefix.
+            inputs.request_id.fill_(43);
+            runtimeWriteCacheStore(inputs, layer, config, store, 0, 0, 1, nullptr);
+            EXPECT_EQ(store->records.back().block_count, 6 * parts);
+        }
+    }
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreChunkedPublicationAvoidsPendingDuplicates) {
+    auto store                  = std::make_shared<MockCacheStore>();
+    store->delay_store_callback = true;
+    auto inputs = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/4);
+    auto config = makeCacheConfig(2, 64, 0, 4, "default", 0,
+                                  defaultCacheGroupPolicy(CacheGroupType::FULL), false, true);
+    torch_ext::LayerKVCache layer;
+    layer.kv_cache_base = torch::zeros({4, 64}, torch::kUInt8);
+    layer.layer_id      = 0;
+    layer.tag           = "default";
+
+    inputs.input_lengths_host.fill_(4);
+    runtimeWriteCacheStore(inputs, layer, config, store, 0, 0, 1, nullptr);
+    ASSERT_EQ(store->records.size(), 1u);
+    EXPECT_EQ(store->records.front().block_count, 2u);
+
+    auto second_inputs = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/4);
+    second_inputs.input_lengths_host.fill_(4);
+    second_inputs.prefix_lengths_host.fill_(4);
+    auto second_write = std::async(std::launch::async, [&] {
+        runtimeWriteCacheStore(second_inputs, layer, config, store, 0, 0, 1, nullptr);
+    });
+    const bool second_reached_publication_lookup = store->waitForPublicationLookups(2);
+    store->completeNextPendingStore();
+    EXPECT_TRUE(second_reached_publication_lookup);
+    second_write.get();
+
+    ASSERT_EQ(store->records.size(), 2u);
+    const auto& second = store->records.back();
+    EXPECT_EQ(second.block_count, 2u);
+    EXPECT_EQ(second.blocks.count("kv_" + cacheKeyAt(second_inputs, 0, 0)), 0u);
+    EXPECT_EQ(second.blocks.count("kv_" + cacheKeyAt(second_inputs, 1, 0)), 0u);
+    EXPECT_EQ(second.blocks.count("kv_" + cacheKeyAt(second_inputs, 2, 0)), 1u);
+    EXPECT_EQ(second.blocks.count("kv_" + cacheKeyAt(second_inputs, 3, 0)), 1u);
+    store->completeNextPendingStore();
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreChunkedPublicationTimesOutWithoutCallback) {
+    auto store                  = std::make_shared<MockCacheStore>();
+    store->delay_store_callback = true;
+    auto inputs = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/4);
+    auto config = makeCacheConfig(2, 64, 0, 4, "default", 0,
+                                  defaultCacheGroupPolicy(CacheGroupType::FULL), false, true);
+    torch_ext::LayerKVCache layer;
+    layer.kv_cache_base = torch::zeros({4, 64}, torch::kUInt8);
+    layer.layer_id      = 0;
+    layer.tag           = "default";
+
+    inputs.input_lengths_host.fill_(4);
+    runtimeWriteCacheStore(inputs, layer, config, store, 0, 0, 1, nullptr);
+    ASSERT_EQ(store->records.size(), 1u);
+
+    inputs.prefix_lengths_host.fill_(4);
+    auto second_write = std::async(std::launch::async, [&] {
+        try {
+            runtimeWriteCacheStore(
+                inputs, layer, config, store, 0, 0, 1, nullptr, nullptr, std::chrono::milliseconds(20));
+            return std::string{};
+        } catch (const std::exception& e) {
+            return std::string(e.what());
+        }
+    });
+    const auto status = second_write.wait_for(std::chrono::seconds(1));
+    if (status != std::future_status::ready) {
+        store->completeNextPendingStore();  // Let the old implementation exit so this test cannot hang.
+    }
+    const auto error = second_write.get();
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_NE(error.find("timed out"), std::string::npos) << error;
+    EXPECT_EQ(store->records.size(), 1u);
+    store->completeNextPendingStore();
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreChunkedPublicationRetriesFailedPendingStore) {
+    auto store                  = std::make_shared<MockCacheStore>();
+    store->delay_store_callback = true;
+    auto inputs = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/4);
+    auto config = makeCacheConfig(2, 64, 0, 4, "default", 0,
+                                  defaultCacheGroupPolicy(CacheGroupType::FULL), false, true);
+    torch_ext::LayerKVCache layer;
+    layer.kv_cache_base = torch::zeros({4, 64}, torch::kUInt8);
+    layer.layer_id      = 0;
+    layer.tag           = "default";
+
+    inputs.input_lengths_host.fill_(4);
+    runtimeWriteCacheStore(inputs, layer, config, store, 0, 0, 1, nullptr);
+
+    auto second_inputs = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/4);
+    second_inputs.input_lengths_host.fill_(4);
+    second_inputs.prefix_lengths_host.fill_(4);
+    auto second_write = std::async(std::launch::async, [&] {
+        runtimeWriteCacheStore(second_inputs, layer, config, store, 0, 0, 1, nullptr);
+    });
+    const bool second_reached_publication_lookup = store->waitForPublicationLookups(2);
+    store->completeNextPendingStore(/*success=*/false);
+    EXPECT_TRUE(second_reached_publication_lookup);
+    second_write.get();
+
+    ASSERT_EQ(store->records.size(), 2u);
+    const auto& second = store->records.back();
+    EXPECT_EQ(second.block_count, 4u);
+    for (size_t block = 0; block < 4; ++block) {
+        EXPECT_EQ(second.blocks.count("kv_" + cacheKeyAt(second_inputs, block, 0)), 1u);
+    }
+    store->completeNextPendingStore();
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreChunkedPublicationRetriesUncommittedBlocks) {
+    auto store  = std::make_shared<MockCacheStore>();
+    auto inputs = makePyCacheStoreInputs(2, 4);
+    auto config = makeCacheConfig(2, 64, 0, 4, "default", 0,
+                                  defaultCacheGroupPolicy(CacheGroupType::FULL), false, true);
+    torch_ext::LayerKVCache layer;
+    layer.kv_cache_base = torch::zeros({4, 64}, torch::kUInt8);
+    layer.layer_id     = 0;
+    layer.tag          = "default";
+    const auto write = [&]() { runtimeWriteCacheStore(inputs, layer, config, store, 0, 0, 1, nullptr); };
+
+    inputs.input_lengths_host.fill_(2);
+    write();  // block 0 succeeds
+    inputs.prefix_lengths_host.fill_(2);
+    inputs.input_lengths_host.fill_(2);
+    store->store_success = false;
+    write();  // block 1 fails
+    store->store_success = true;
+    inputs.prefix_lengths_host.fill_(4);
+    inputs.input_lengths_host.fill_(1);
+    write();  // retry block 1; publish the partial block 2
+    EXPECT_EQ(store->records.back().block_count, 2u);
+    EXPECT_EQ(store->records.back().blocks.count("kv_" + cacheKeyAt(inputs, 1, 0)), 1u);
+    EXPECT_EQ(store->records.back().blocks.count("kv_" + cacheKeyAt(inputs, 2, 0)), 1u);
+
+    // Completing a previously partial block must publish that block again.
+    inputs.input_lengths_host.fill_(2);
+    write();
+    EXPECT_EQ(store->records.back().block_count, 1u);
+    EXPECT_EQ(store->records.back().blocks.count("kv_" + cacheKeyAt(inputs, 2, 0)), 1u);
+
+    // Releasing a request also discards its publication progress.
+    store->request_buffers.clear();
+    inputs.input_lengths_host.fill_(4);
+    inputs.host_kv_cache_offset[0][1] = -1;
+    write();  // blocks 0, 2, 3; the missing block must not be considered published
+    inputs.host_kv_cache_offset[0][1] = 1;
+    write();
+    EXPECT_EQ(store->records.back().block_count, 3u);
+    EXPECT_EQ(store->records.back().blocks.count("kv_" + cacheKeyAt(inputs, 1, 0)), 1u);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {

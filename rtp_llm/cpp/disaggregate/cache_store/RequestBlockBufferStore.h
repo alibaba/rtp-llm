@@ -26,6 +26,7 @@ public:
     bool setRequestBlockBufferWatchFunc(const std::string& requestid, RequestBlockBuffer::WatchFunc&& func);
 
     std::shared_ptr<BlockBuffer> getBlockBuffer(const std::string& requestid, const std::string& blockid) const;
+    std::shared_ptr<RequestBlockBuffer> getOrInsertRequestBlockBuffer(const std::string& requestid);
 
     void delRequestBlockBuffer(const std::string& requestid);
 
@@ -43,7 +44,6 @@ public:
 
 private:
     std::shared_ptr<RequestBlockBuffer> getRequestBlockBuffer(const std::string& requestid) const;
-    std::shared_ptr<RequestBlockBuffer> getOrInsertRequestBlockBuffer(const std::string& requestid);
     bool                                isValidBlock(const std::shared_ptr<BlockBuffer>& block);
     // Stages every block into one pinned host allocation with a single batched copy.
     std::vector<std::shared_ptr<BlockBuffer>> makeValidBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
