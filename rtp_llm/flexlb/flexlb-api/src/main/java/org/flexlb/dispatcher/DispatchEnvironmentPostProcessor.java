@@ -16,7 +16,7 @@ public class DispatchEnvironmentPostProcessor implements EnvironmentPostProcesso
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
         Map<String, Object> properties = new HashMap<>();
-        // Credentials are loaded separately; only the supported deployment settings enter Spring properties.
+        // Only the supported deployment settings enter Spring properties.
         for (String name : List.of("fe-pool-service-id", "sub-batch", "pre-assign-be", "batch-timeout-ms", "probe-path")) {
             String value = System.getenv("DISPATCH_" + name.toUpperCase(Locale.ROOT).replace('-', '_'));
             if (value != null) {

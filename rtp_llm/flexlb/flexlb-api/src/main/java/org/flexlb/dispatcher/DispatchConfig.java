@@ -18,12 +18,6 @@ public class DispatchConfig {
 
     private boolean preAssignBe = true;
 
-    /**
-     * Required on dispatcher and receiving FEs for BE preassignment; loaded only from DISPATCH_ROUTING_TOKEN.
-     */
-    @Getter(onMethod_ = @JsonIgnore)
-    private String trustedRoutingToken = "";
-
     /** Derived at startup, not a configuration property. */
     @Getter(onMethod_ = @JsonIgnore)
     private SubBatchSpec subBatchSpec;

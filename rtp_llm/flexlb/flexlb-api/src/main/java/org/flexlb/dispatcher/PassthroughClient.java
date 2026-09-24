@@ -55,7 +55,7 @@ public class PassthroughClient {
                         .flatMap(host -> webClient.method(request.method())
                                 .uri(URI.create(host + fePath + (query == null ? "" : "?" + query)))
                                 .headers(h -> DispatcherHeaders.copyEndToEnd(
-                                        request.headers().asHttpHeaders(), h, DispatcherHeaders.TO_FE_SKIP))
+                                        request.headers().asHttpHeaders(), h, DispatcherHeaders.HOP_BY_HOP))
                                 .body(body).exchangeToMono(response -> {
                     exchange.getResponse().setRawStatusCode(response.rawStatusCode());
                     DispatcherHeaders.copyEndToEnd(response.headers().asHttpHeaders(),

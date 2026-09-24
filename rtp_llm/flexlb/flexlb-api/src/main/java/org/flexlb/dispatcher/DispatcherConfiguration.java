@@ -61,7 +61,6 @@ public class DispatcherConfiguration {
         DispatchConfig config = new DispatchConfig();
         // Binder throws on conversion errors; BindResult represents binding presence, not deferred failures.
         Binder.get(environment).bind("dispatch", Bindable.ofInstance(config));
-        config.setTrustedRoutingToken(System.getenv().getOrDefault("DISPATCH_ROUTING_TOKEN", "").trim());
         validate(config);
         return config;
     }
@@ -74,8 +73,6 @@ public class DispatcherConfiguration {
         Assert.isTrue(c.getBatchTimeoutMs() > 0, "dispatch.batch-timeout-ms must be > 0");
         Assert.isTrue(!c.isPreAssignBe() || c.getFePoolServiceId().isBlank(),
                 "BE preassignment uses colocated worker HTTP endpoints; set DISPATCH_PRE_ASSIGN_BE=false for an FE pool override");
-        Assert.isTrue(!c.isPreAssignBe() || !c.getTrustedRoutingToken().isBlank(),
-                "DISPATCH_ROUTING_TOKEN must be non-blank when preAssignBe is enabled");
         c.setSubBatchSpec(SubBatchSpec.parse(c.getSubBatch()));
     }
 
@@ -120,7 +117,7 @@ public class DispatcherConfiguration {
     @Bean
     public RouterFunction<ServerResponse> dispatcherRoutes(ConfigService configService,
                                                            ObjectProvider<DispatchRouter> router) {
-        // Inspect the typed config before creating HTTP clients, discovery tasks or validating credentials.
+        // Inspect the typed config before creating HTTP clients or discovery tasks.
         return configService.loadBalanceConfig().getHttpDispatcher().isEnabled()
                 ? router.getObject().routes() : request -> Mono.empty();
     }

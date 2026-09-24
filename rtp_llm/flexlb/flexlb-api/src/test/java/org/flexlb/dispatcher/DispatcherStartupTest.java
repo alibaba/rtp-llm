@@ -84,7 +84,6 @@ class DispatcherStartupTest {
                    {"address":"be","protocol":"%s","path":"/"}}],
                  "hosts":{"be":["127.0.0.1:%d"],"fe":["127.0.0.1:%d"]}}
                 """.formatted(protocol, frontend.getPort() + (protocol.equals("grpc") ? 1 : 0), frontend.getPort()));
-        builder.environment().put("DISPATCH_ROUTING_TOKEN", enabled ? "startup-test-secret" : "");
         builder.environment().put("DISPATCH_PRE_ASSIGN_BE", separateFe ? "false" : "true");
         if (separateFe) {
             builder.environment().put("DISPATCH_FE_POOL_SERVICE_ID", "fe");
@@ -115,7 +114,6 @@ class DispatcherStartupTest {
                 var preview = new ObjectMapper().readTree(response.body());
                 assertEquals(override ? 2 : 3, preview.get("chunk_count").asInt());
                 assertEquals(override ? 2 : 1, preview.get("chunks").get(0).get("prompt_batch").size());
-                assertFalse(response.body().contains("startup-test-secret"));
                 var echo = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/dispatcher/startup_echo"))
                         .timeout(Duration.ofSeconds(5)).POST(HttpRequest.BodyPublishers.ofString("hello")).build();
                 HttpResponse<String> echoed = client.send(echo, HttpResponse.BodyHandlers.ofString());
@@ -142,7 +140,6 @@ class DispatcherStartupTest {
                 process.destroyForcibly().waitFor();
             }
         }
-        assertFalse(Files.readString(directory.resolve("flexlb.log")).contains("startup-test-secret"));
         if (!enabled) {
             assertFalse(Files.readString(directory.resolve("flexlb.log")).contains("dispatcher enabled:"));
             assertEquals(0, delivered.get());

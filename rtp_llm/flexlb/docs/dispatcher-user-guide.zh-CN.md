@@ -32,17 +32,17 @@ DISPATCH_ENABLED=true
 
 设为 `false` 关闭拆批入口；不配置时沿用平台配置中的值，代码默认关闭。只接受 `true` 或 `false`，不区分大小写，允许首尾空格；空值或拼写错误会导致启动失败。
 
-### 2. 选择是否预分配 BE
+### 2. 按部署形态选择 BE 预分配
 
-只需要拆批、分发给 FE，再由 FE 按原流程选择 BE 时，设置：
+单 role PDFUSION、FE/BE 同机部署保持默认 `DISPATCH_PRE_ASSIGN_BE=true`，每个子批使用一个同机 FE/BE 目标，无需额外配置。
+
+独立 FE、PD 分离，或希望由 FE 按原流程选择 BE 时，设置：
 
 ```text
 DISPATCH_PRE_ASSIGN_BE=false
 ```
 
-这样即可使用拆批，无需配置路由 token。代码默认值是 `true`，采用此方式时要显式设为 `false`。
-
-如果希望每个子批直接使用一个同机 FE/PDFUSION BE 目标，可以开启预分配，见「BE 预分配」。
+适用条件见「BE 预分配」。
 
 ### 3. 确定 FE 入口
 
@@ -74,7 +74,7 @@ FE 健康接口默认 `/frontend_health`；使用其他探针路径时配置 `DI
 
 保存配置并在 Whale 发布生效后，调用 `_dryrun` 检查拆批，再发送真实推理请求。调用示例见「客户端集成」和「诊断端点」。
 
-**最小配置**：单 role 同机 FE 场景，在 Master 高级设置中增加 `DISPATCH_ENABLED=true` 和 `DISPATCH_PRE_ASSIGN_BE=false`，其余拆批参数可使用默认值。
+**最小配置**：单 role PDFUSION、FE/BE 同机场景，在 Master 高级设置中增加 `DISPATCH_ENABLED=true`，默认开启 BE 预分配。独立 FE 或 PD 分离还需设置 `DISPATCH_PRE_ASSIGN_BE=false` 和 FE 服务发现名。
 
 ## 配置参考
 
@@ -88,9 +88,8 @@ FE 健康接口默认 `/frontend_health`；使用其他探针路径时配置 `DI
 | `DISPATCH_BATCH_TIMEOUT_MS` | `30000` | 子批响应读取空闲超时；非流式请求要覆盖生成期间不返回数据的时间 |
 | `DISPATCH_PROBE_PATH` | `/frontend_health` | FE 健康探针路径；vLLM 通常使用 `/health` |
 | `DISPATCH_PRE_ASSIGN_BE` | `true` | 为适用的文本生成子批预分配同机 FE/BE 目标 |
-| `DISPATCH_ROUTING_TOKEN` | 空 | 开启预分配时必填，Master 与接收请求的 FE 配同值 |
 
-以上参数都可在 Master 高级设置中用环境变量配置。开启预分配时，token 还需同时配置在接收请求的 FE 所在 role，不放进公用模板。
+以上参数都可在 Master 高级设置中用环境变量配置。
 
 ### 拆批策略
 
@@ -109,7 +108,7 @@ FE 健康接口默认 `/frontend_health`；使用其他探针路径时配置 `DI
 | 已注册批量端点的输入 body | 默认 5 MB，通过 `spring.codec.max-in-memory-size` 调整 |
 | 单个成功 FE 子批响应 | 16 MiB |
 | 聚合请求 / 聚合响应 | 各 128 MiB；请求预算包含每个 chunk 重复的公共字段 |
-| 单请求并行子批数 | 最多 8 个，其余排队 |
+| 单请求并行子批数 | 最多 64 个，其余排队 |
 | 单个 FE 子调用整体期限 | `DISPATCH_BATCH_TIMEOUT_MS + 30000` 毫秒 |
 | FE 服务发现返回空列表 | 保留最近非空池最多 5 分钟，期间继续探活 |
 
@@ -278,8 +277,7 @@ curl -X POST http://<master>:7001/dispatcher/_dryrun/batch_infer \
 这是拆批的可选功能。单 role PDFUSION、FE/BE 同机部署需要开启时：
 
 1. 在 Master 高级设置中，将 `DISPATCH_PRE_ASSIGN_BE` 设为 `true`，`DISPATCH_FE_POOL_SERVICE_ID` 留空。
-2. 在 Master 和接收请求的 Inference role 高级设置中，配置相同的非空 `DISPATCH_ROUTING_TOKEN`。
-3. 发布两侧配置后，用真实批量请求验证。
+2. 发布配置后，用真实批量请求验证。
 
 `DISPATCH_PRE_ASSIGN_BE=true` 时，对适用的 `/`、`/batch_infer` 子批，每个 chunk 轮询选一个 FE/PDFUSION BE 同机 worker：HTTP 请求发给该 worker 的 FE，BE 地址写入 `generate_config.role_addrs`，FE 直接使用该地址。
 
@@ -288,7 +286,6 @@ curl -X POST http://<master>:7001/dispatcher/_dryrun/batch_infer \
 前提与约束：
 
 - 仅适用于单阶段 PDFUSION 同机部署，不支持独立 FE 或 PD 分离预分配。
-- Master 和 FE 配置相同的非空 `DISPATCH_ROUTING_TOKEN`。开启预分配却未配 token，Master 启动失败。
 - 显式填写 FE 池服务名与开启预分配不能同时使用，否则启动失败。
 - 不做容量准入、任务预留或记账。需要这些能力时关闭预分配，让 FE 走普通 Master 调度。
 - 分组路由或 `EMBEDDING` 引擎自动跳过 BE 预分配；其他端点只分配 FE。
@@ -302,14 +299,13 @@ curl -X POST http://<master>:7001/dispatcher/_dryrun/batch_infer \
 |---|---|
 | `/dispatcher/**` 未启用或 404 | 检查 `DISPATCH_ENABLED=true` 是否已发布生效；只填 FE 服务名不会启用 |
 | 开启后配置未生效 | 检查 Master role 的实际环境变量和 Whale 发布状态 |
-| 启动报 token 必填 | Master/FE 配相同 token，或设 `DISPATCH_PRE_ASSIGN_BE=false` |
 | 配 FE 服务名后启动失败 | 显式 FE 池必须关闭预分配 |
 | 503 `batch_schedule_failed` | 核对 Leader、FE 池及 BE 可用性；此阶段还未发送推理 |
 | 400 `batch_schedule_failed` | 核对 role、分组路由及参数；PD 分离关闭预分配 |
 | 全失败，原因含 `fe_unavailable` | 核对 FE HTTP 地址、连通性及子批超时 |
 | FE 池为空 | 查看 `app.dispatcher.fepool.size` 和发现日志，核对服务名 |
 | FE 探针失败 | 查看 `app.dispatcher.fepool.alive`；从 Master 访问 `<fe_url><probe_path>` 复现 |
-| FE 拒绝预分配请求 | 核对 FE 版本和两侧 token |
+| FE 拒绝预分配请求 | 核对 FE 版本、PDFUSION 部署形态和预分配地址 |
 | 非流式大批频繁超时 | 调整子批大小和 `DISPATCH_BATCH_TIMEOUT_MS`，检查客户端总超时 |
 | 返回 413 | 区分输入、单 FE 响应、聚合预算和子批数量限制 |
 | `_dryrun` 成功但推理失败 | 继续检查选址、FE 健康和真实推理日志 |

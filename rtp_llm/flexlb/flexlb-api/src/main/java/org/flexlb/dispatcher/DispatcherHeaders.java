@@ -8,10 +8,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
-/** Relay end-to-end headers, excluding framing, hop-by-hop fields and caller routing credentials. */
+/** Relay end-to-end headers, excluding framing and hop-by-hop fields. */
 final class DispatcherHeaders {
-
-    static final String TRUSTED_ROUTING_HEADER = "X-Rtp-Llm-Dispatcher-Routing-Token";
 
     private DispatcherHeaders() {
     }
@@ -21,13 +19,9 @@ final class DispatcherHeaders {
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
             "transfer-encoding", "upgrade", "host", "content-length");
 
-    /** Caller-controlled copies of the internal trust header must never cross into FE. */
-    static final Set<String> TO_FE_SKIP = caseInsensitiveSet(
-            HOP_BY_HOP, TRUSTED_ROUTING_HEADER);
-
     /** Fanout rebuilds JSON bodies; raw response bytes must not be compressed by the FE. */
     static final Set<String> FANOUT_SKIP = caseInsensitiveSet(
-            TO_FE_SKIP, "content-type", "accept-encoding");
+            HOP_BY_HOP, "content-type", "accept-encoding");
 
     /** Also exclude headers nominated by Connection, beyond the fixed hop-by-hop list. */
     static void copyEndToEnd(HttpHeaders source, HttpHeaders sink, Set<String> skip) {

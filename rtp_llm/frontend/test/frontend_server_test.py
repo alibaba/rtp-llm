@@ -456,73 +456,48 @@ class FrontendServerTest(TestCase):
                 logger.log_exception_access.assert_called_once()
                 logger.log_success_access.assert_not_called()
 
-    def test_routing_credentials_are_required_only_on_configured_frontends(self):
+    def test_preassigned_routing_uses_existing_frontend_request_path(self):
         server = self.frontend_server
         for batch in (False, True):
             for key in ("generate_config", "generation_config"):
-                for expected, provided in (
-                    ("", ""),
-                    ("trusted-secret", ""),
-                    ("trusted-secret", "wrong"),
-                    ("trusted-secret", "trusted-secret"),
-                ):
-                    with self.subTest(
-                        batch=batch, key=key, expected=expected, provided=provided
-                    ):
-                        server._dispatcher_routing_token = expected
-                        config = {
-                            "role_addrs": [
-                                {
-                                    "role": "PDFUSION",
-                                    "ip": "be",
-                                    "http_port": 80,
-                                    "grpc_port": 81,
-                                }
-                            ]
-                        }
-                        request = {
-                            key: config,
-                            **(
-                                {"prompt_batch": ["hello"]}
-                                if batch
-                                else {"prompt": "hello"}
-                            ),
-                        }
-                        headers = {
-                            "X-Rtp-Llm-Dispatcher-Routing-Token": provided,
-                            "X-Request-ID": "trace",
-                            "ignored": "secret",
-                        }
-                        with patch.object(
-                            server._frontend_worker,
-                            "inference",
-                            wraps=server._frontend_worker.inference,
-                        ) as infer:
-                            response = asyncio.run(
-                                server.inference(
-                                    request, FakeRawRequest(headers), batch=batch
-                                )
-                            )
-                            if not expected or provided == expected:
-                                self.assertEqual(
-                                    200, response.status_code, response.body
-                                )
-                                infer.assert_called_once()
-                                self.assertEqual(batch, infer.call_args.args[0])
-                                self.assertEqual(config, infer.call_args.kwargs[key])
-                                self.assertEqual(
-                                    {"x-request-id": "trace"},
-                                    infer.call_args.kwargs["headers"],
-                                )
-                            else:
-                                infer.assert_not_called()
-                                self.assertEqual(
-                                    ExceptionType.INVALID_PARAMS.value,
-                                    json.loads(response.body)["error_code"],
-                                )
-                            self.assertEqual(
-                                0, server._global_controller.current_concurrency.value
-                            )
+                with self.subTest(batch=batch, key=key):
+                    config = {
+                        "role_addrs": [
+                            {
+                                "role": "PDFUSION",
+                                "ip": "be",
+                                "http_port": 80,
+                                "grpc_port": 81,
+                            }
+                        ]
+                    }
+                    request = {
+                        key: config,
+                        **(
+                            {"prompt_batch": ["hello"]}
+                            if batch
+                            else {"prompt": "hello"}
+                        ),
+                    }
+                    headers = {"X-Request-ID": "trace", "ignored": "value"}
+                    with patch.object(
+                        server._frontend_worker,
+                        "inference",
+                        wraps=server._frontend_worker.inference,
+                    ) as infer:
+                        response = asyncio.run(
+                            server.inference(request, FakeRawRequest(headers), batch=batch)
+                        )
+                        self.assertEqual(200, response.status_code, response.body)
+                        infer.assert_called_once()
+                        self.assertEqual(batch, infer.call_args.args[0])
+                        self.assertEqual(config, infer.call_args.kwargs[key])
+                        self.assertEqual(
+                            {"x-request-id": "trace"}, infer.call_args.kwargs["headers"]
+                        )
+                        self.assertEqual(
+                            0, server._global_controller.current_concurrency.value
+                        )
 
     def test_response_chunk_event_is_streaming_only(self):
         try:

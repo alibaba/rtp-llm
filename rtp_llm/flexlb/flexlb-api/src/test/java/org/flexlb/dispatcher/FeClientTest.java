@@ -31,24 +31,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Timeout(15)
 class FeClientTest {
     @Test
-    void fanoutHeadersUseDispatcherCredentialAndCorrectWireFraming() throws Exception {
+    void fanoutPreservesCallerHeadersAndCorrectWireFraming() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setBody("{}"));
             HttpHeaders headers = new HttpHeaders();
             headers.set("Authorization", "caller");
             headers.set("Accept-Encoding", "gzip");
             headers.set("Content-Type", "text/plain");
-            headers.set(DispatcherHeaders.TRUSTED_ROUTING_HEADER, "forged");
             DispatchConfig cfg = new DispatchConfig();
             cfg.setPreAssignBe(true);
-            cfg.setTrustedRoutingToken("secret");
             FeClient client = new FeClient(WebClient.builder(), ConnectionProvider.newConnection(), cfg);
             assertNotNull(client.postBytes(server.url("/").toString().replaceAll("/$", ""), "/batch_infer",
                     "{}".getBytes(), headers, "q=a%2Fb", new AtomicByteBudget(FeClient.MAX_RESPONSE_BYTES).newReservation()).block());
             var sent = server.takeRequest(2, TimeUnit.SECONDS);
             assertEquals("/batch_infer?q=a%2Fb", sent.getPath());
             assertEquals("caller", sent.getHeader("Authorization"));
-            assertEquals("secret", sent.getHeader(DispatcherHeaders.TRUSTED_ROUTING_HEADER));
             assertEquals("application/json", sent.getHeader("Content-Type"));
             assertNull(sent.getHeader("Accept-Encoding"));
         }

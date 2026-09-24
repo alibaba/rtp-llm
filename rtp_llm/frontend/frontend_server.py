@@ -1,8 +1,6 @@
 import asyncio
-import hmac
 import json
 import logging
-import os
 import threading
 import time
 from typing import Any, Callable, Dict, Union
@@ -13,7 +11,6 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -43,8 +40,6 @@ from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
-DISPATCHER_ROUTING_HEADER = "x-rtp-llm-dispatcher-routing-token"
-DISPATCHER_ROUTING_TOKEN_ENV = "DISPATCH_ROUTING_TOKEN"
 
 
 def _field(value: Any, name: str) -> Any:
@@ -162,35 +157,7 @@ class FrontendServer(object):
         self._global_controller = get_global_controller()
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
-        self._dispatcher_routing_token = os.environ.get(
-            DISPATCHER_ROUTING_TOKEN_ENV, ""
-        ).strip()
         kmonitor.init()
-
-    @staticmethod
-    def _contains_preassigned_role_addrs(req: Dict[Any, Any]) -> bool:
-        if req.get("role_addrs"):
-            return True
-        for key in ("generate_config", "generation_config"):
-            config = req.get(key)
-            if isinstance(config, dict) and config.get("role_addrs"):
-                return True
-        return False
-
-    def _validate_dispatcher_routing_context(
-        self, req: Dict[Any, Any], raw_request: RawRequest
-    ) -> None:
-        # Configuring the token opts this FE into trusted dispatcher routing.
-        expected = self._dispatcher_routing_token
-        if not expected or not self._contains_preassigned_role_addrs(req):
-            return
-        headers = getattr(raw_request, "headers", None)
-        provided = headers.get(DISPATCHER_ROUTING_HEADER, "") if headers else ""
-        if not provided or not hmac.compare_digest(expected, str(provided)):
-            raise FtRuntimeException(
-                ExceptionType.INVALID_PARAMS,
-                "role_addrs is reserved for authenticated dispatcher routing",
-            )
 
     def start(self):
         if (
@@ -418,7 +385,6 @@ class FrontendServer(object):
             return self._handle_exception(req, e)
 
         def generate_call():
-            self._validate_dispatcher_routing_context(req, raw_request)
             assert self._frontend_worker is not None
             if request_headers:
                 return self._frontend_worker.inference(

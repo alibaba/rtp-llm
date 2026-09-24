@@ -22,7 +22,8 @@ public class FanoutService {
     /** Independent per-batch ceilings for outbound requests and retained FE responses. */
     static final long MAX_AGGREGATE_BYTES = 128L * 1024 * 1024;
 
-    private static final int FANOUT_CONCURRENCY = (int) (MAX_AGGREGATE_BYTES / FeClient.MAX_RESPONSE_BYTES);
+    /** Preserve the original parallelism limit; aggregate byte budgets are enforced independently. */
+    private static final int FANOUT_CONCURRENCY = 64;
 
     private final FeClient feClient;
     private final DispatcherMetricsReporter metricsReporter;

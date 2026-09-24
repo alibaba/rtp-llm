@@ -309,7 +309,6 @@ class DispatcherE2ETest {
     @Test
     void allocationFailureContactsNoFe() {
         allocationFails = true;
-        cfg.setTrustedRoutingToken("dryrun-secret");
         startDispatcher(2);
         assertFalse(preview("/v1/batch/chat/completions", "{\"requests\":[{},{}]}", "split", 1).toJSONString().contains("dryrun-secret"));
         client.get().uri("/dispatcher/_dryrun").exchange().expectStatus().isBadRequest();

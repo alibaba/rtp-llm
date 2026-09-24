@@ -67,7 +67,6 @@ class PassthroughClientTest {
         http(proxy(List.of(fe.url("/").toString().replaceAll("/$", "")))).post()
                 .uri(java.net.URI.create("/dispatcher/?q=a%2Fb")).header("Authorization", "Bearer caller")
                 .header("Connection", "x-PRIVATE").header("X-Private", "secret")
-                .header(DispatcherHeaders.TRUSTED_ROUTING_HEADER, "forged")
                 .bodyValue("unchanged request").exchange().expectStatus().isEqualTo(status)
                 .expectHeader().valueEquals("X-Trace", "response")
                 .expectHeader().doesNotExist("X-Private").expectBody(String.class).isEqualTo("exact 中文 body");
@@ -77,7 +76,6 @@ class PassthroughClientTest {
         assertEquals("unchanged request", request.getBody().readUtf8());
         assertEquals("Bearer caller", request.getHeader("Authorization"));
         assertNull(request.getHeader("X-Private"));
-        assertNull(request.getHeader(DispatcherHeaders.TRUSTED_ROUTING_HEADER));
         verify(metrics).reportRequest(eq("passthrough"), eq("/"), eq(status), anyLong());
     }
 

@@ -1,6 +1,5 @@
 package org.flexlb.dispatcher;
 
-import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -22,18 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @ExtendWith(SystemStubsExtension.class)
 class DispatchConfigTest {
     @SystemStub
-    private EnvironmentVariables credentials = new EnvironmentVariables("DISPATCH_ROUTING_TOKEN", "");
+    private EnvironmentVariables variables = new EnvironmentVariables();
 
     @Test
     void dispatcherEnvironmentUsesExistingBindingAndValidation() {
-        credentials.set("DISPATCH_FE_POOL_SERVICE_ID", "fe");
-        credentials.set("DISPATCH_SUB_BATCH", "size:7");
-        credentials.set("DISPATCH_PRE_ASSIGN_BE", "false");
-        credentials.set("DISPATCH_BATCH_TIMEOUT_MS", "1234");
-        credentials.set("DISPATCH_PROBE_PATH", "/health");
-        credentials.set("DISPATCH_ROUTING_TOKEN", "secret");
-        credentials.set("DISPATCH_CONFIG", "{\"subBatch\":\"count:99\"}");
-        credentials.set("SERVER_PORT", "12345");
+        variables.set("DISPATCH_FE_POOL_SERVICE_ID", "fe");
+        variables.set("DISPATCH_SUB_BATCH", "size:7");
+        variables.set("DISPATCH_PRE_ASSIGN_BE", "false");
+        variables.set("DISPATCH_BATCH_TIMEOUT_MS", "1234");
+        variables.set("DISPATCH_PROBE_PATH", "/health");
+        variables.set("DISPATCH_CONFIG", "{\"subBatch\":\"count:99\"}");
+        variables.set("SERVER_PORT", "12345");
         MockEnvironment env = environment();
         DispatchConfig cfg = DispatcherConfiguration.loadAndValidate(env);
         assertEquals("fe", cfg.getFePoolServiceId());
@@ -41,14 +39,11 @@ class DispatchConfigTest {
         assertFalse(cfg.isPreAssignBe());
         assertEquals(1234, cfg.getBatchTimeoutMs());
         assertEquals("/health", cfg.getProbePath());
-        assertEquals("secret", cfg.getTrustedRoutingToken());
-        assertFalse(env.containsProperty("dispatch.routing-token"));
         assertFalse(env.containsProperty("dispatch.config"));
         assertFalse(env.containsProperty("server.port"));
-        assertFalse(JsonUtils.toString(cfg).contains("secret"));
-        credentials.set("DISPATCH_BATCH_TIMEOUT_MS", "not-a-number");
+        variables.set("DISPATCH_BATCH_TIMEOUT_MS", "not-a-number");
         assertThrows(RuntimeException.class, () -> DispatcherConfiguration.loadAndValidate(environment()));
-        credentials.set("DISPATCH_BATCH_TIMEOUT_MS", "0");
+        variables.set("DISPATCH_BATCH_TIMEOUT_MS", "0");
         assertThrows(IllegalArgumentException.class, () -> DispatcherConfiguration.loadAndValidate(environment()));
     }
 
@@ -61,29 +56,21 @@ class DispatchConfigTest {
     }
 
     @Test
-    void nativePropertiesAndEnvironmentCredentialUseOneValidatedConfiguration() {
-        assertTrue(assertThrows(IllegalArgumentException.class,
-                () -> load(Map.of()))
-                .getMessage().contains("DISPATCH_ROUTING_TOKEN"));
-        credentials.set("DISPATCH_ROUTING_TOKEN", "secret");
+    void defaultsEnablePreassignmentWithoutAdditionalConfiguration() {
         DispatchConfig defaults = load(Map.of());
         assertEquals("", defaults.getFePoolServiceId());
         assertEquals("count:5", defaults.getSubBatch());
         assertTrue(defaults.isPreAssignBe());
         assertEquals("/frontend_health", defaults.getProbePath());
-        assertEquals("secret", defaults.getTrustedRoutingToken());
-        assertFalse(JsonUtils.toString(defaults).contains("secret"));
         assertTrue(assertThrows(IllegalArgumentException.class,
                 () -> load(Map.of("dispatch.fe-pool-service-id", "independent-fe")))
                 .getMessage().contains("DISPATCH_PRE_ASSIGN_BE=false"));
-        credentials.set("DISPATCH_ROUTING_TOKEN", "");
         DispatchConfig cfg = load(Map.of(
                 "dispatch.fe-pool-service-id", "fe", "dispatch.sub-batch", "size:7",
                 "dispatch.pre-assign-be", "false"));
         assertEquals("fe", cfg.getFePoolServiceId());
         assertEquals(new SubBatchSpec(SubBatchSpec.Mode.SIZE, 7), cfg.getSubBatchSpec());
         assertFalse(cfg.isPreAssignBe());
-        assertEquals("", cfg.getTrustedRoutingToken());
     }
 
     @ParameterizedTest

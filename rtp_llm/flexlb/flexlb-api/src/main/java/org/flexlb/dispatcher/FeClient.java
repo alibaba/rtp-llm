@@ -37,7 +37,6 @@ public class FeClient {
 
     private final WebClient webClient;
     private final Duration overallTimeout;
-    private final String trustedRoutingToken;
 
     // Avoid URI template parsing per chunk; bound the cache across discovery changes.
     private static final int URI_CACHE_MAX = 2048;
@@ -54,7 +53,6 @@ public class FeClient {
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .build();
         this.overallTimeout = Duration.ofMillis(cfg.getBatchTimeoutMs() + BODY_READ_MARGIN_MS);
-        this.trustedRoutingToken = cfg.isPreAssignBe() ? cfg.getTrustedRoutingToken() : "";
     }
 
     /** Reserve the shared response budget before copying each network buffer. */
@@ -65,13 +63,8 @@ public class FeClient {
             AtomicBoolean retained = new AtomicBoolean(false);
             return webClient.post()
                     .uri(resolveUri(feBaseUrl, fePath, rawQuery))
-                    .headers(h -> {
-                        DispatcherHeaders.copyEndToEnd(
-                                inboundHeaders, h, DispatcherHeaders.FANOUT_SKIP);
-                        if (!trustedRoutingToken.isBlank()) {
-                            h.set(DispatcherHeaders.TRUSTED_ROUTING_HEADER, trustedRoutingToken);
-                        }
-                    })
+                    .headers(h -> DispatcherHeaders.copyEndToEnd(
+                            inboundHeaders, h, DispatcherHeaders.FANOUT_SKIP))
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(body)
                     .exchangeToMono(response -> {
