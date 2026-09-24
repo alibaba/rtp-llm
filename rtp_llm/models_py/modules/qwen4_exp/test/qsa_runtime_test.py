@@ -1039,7 +1039,11 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         )
         observed = {}
 
-        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+        def _score(
+            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
             observed.update(
                 q=q,
                 weight=weight,
@@ -1138,7 +1142,11 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             position_ids=[[7, 7, 7]],
         )
 
-        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+        def _score(
+            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
             return torch.zeros((1, max_ctx_len), dtype=torch.float32)
 
         with patch(
@@ -1225,7 +1233,11 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         raw = torch.randn(1, self.D, dtype=torch.bfloat16)
         rotated_queries = []
 
-        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+        def _score(
+            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
             rotated_queries.append(q.clone())
             return torch.zeros((1, 1), dtype=torch.float32)
 

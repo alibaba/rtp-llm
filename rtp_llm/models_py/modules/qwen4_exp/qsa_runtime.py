@@ -1474,6 +1474,9 @@ class Qwen4ExpQSARuntimeContext:
             kv_table,
             compressed_lengths.unsqueeze(1),
             block_size=kv_entries_per_block,
+            # _validate_required_blocks checked every visible physical ID;
+            # the score kernel also masks invalid IDs before reading the pool.
+            validate_block_table=False,
             max_ctx_len=(
                 int(compressed_lengths.max().item())
                 if int(compressed_lengths.numel())

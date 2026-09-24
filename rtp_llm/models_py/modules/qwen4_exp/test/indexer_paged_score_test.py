@@ -78,6 +78,20 @@ class PagedScoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside kv_pool capacity"):
             qsa_paged_indexer_score(q, w, pool, bt, ctx, block_size=1, max_ctx_len=1)
 
+        # The runtime validates required blocks before scoring.  Its fast path
+        # must still prevent a bad ID from becoming an out-of-bounds pool read.
+        logits = qsa_paged_indexer_score(
+            q,
+            w,
+            pool,
+            bt,
+            ctx,
+            block_size=1,
+            max_ctx_len=1,
+            validate_block_table=False,
+        )
+        self.assertTrue(torch.isneginf(logits).all())
+
     def test_matches_torch_reference(self):
         torch.manual_seed(0)
         B, next_n = 3, 1
@@ -99,8 +113,19 @@ class PagedScoreTest(unittest.TestCase):
             block_size=bs,
             max_ctx_len=int(ctx.max()),
         )
+        fast = qsa_paged_indexer_score(
+            q,
+            w,
+            pool,
+            bt,
+            ctx,
+            block_size=bs,
+            max_ctx_len=int(ctx.max()),
+            validate_block_table=False,
+        )
         ref = _ref(q.reshape(-1, _H, _D), w, pool, bt, ctx, bs)
         torch.testing.assert_close(paged, ref, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(fast, paged)
 
     def test_next_n_rows_reuse_their_batch_block_table(self):
         torch.manual_seed(1)

@@ -116,6 +116,7 @@ def qsa_paged_indexer_score(
     block_size: int,
     max_ctx_len: Optional[int] = None,
     block_n: int = _BLOCK_N,
+    validate_block_table: bool = True,
 ) -> torch.Tensor:
     """Score one decode step against the paged indexer KV pool.
 
@@ -131,6 +132,10 @@ def qsa_paged_indexer_score(
             shape with ratio=4 and kernel_block=256, block_size=64.
         max_ctx_len: output column count.  Defaults to ``context_lens.max()``
             (requires synchronisation).
+        validate_block_table: Check every physical block ID on the host.  The
+            QSA runtime already validates its required blocks before scoring
+            and can disable this redundant device-to-host synchronization.
+            The kernel still masks out-of-range IDs to prevent invalid reads.
 
     Returns:
         ``[B * next_n, max_ctx_len]`` fp32 logits; -inf past the per-row
@@ -172,15 +177,13 @@ def qsa_paged_indexer_score(
         )
 
     pool_blocks = kv_pool.shape[0] // block_size
-    # This synchronization is intentional on the experimental correctness-first
-    # path.  Without it a corrupt physical block ID could trigger an OOB device
-    # read; silently masking it would hide a cache-manager contract violation.
-    max_physical_block = int(block_table.max().item()) if block_table.numel() else 0
-    if max_physical_block >= pool_blocks:
-        raise ValueError(
-            f"block_table physical block id {max_physical_block} is outside "
-            f"kv_pool capacity [0, {pool_blocks})"
-        )
+    if validate_block_table:
+        max_physical_block = int(block_table.max().item()) if block_table.numel() else 0
+        if max_physical_block >= pool_blocks:
+            raise ValueError(
+                f"block_table physical block id {max_physical_block} is outside "
+                f"kv_pool capacity [0, {pool_blocks})"
+            )
 
     q_bf16 = q_bf16.contiguous()
     weight = weight.contiguous()
