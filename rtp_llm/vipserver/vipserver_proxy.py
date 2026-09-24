@@ -10,6 +10,14 @@ from rtp_llm.vipserver.netutil import NetUtils
 from rtp_llm.vipserver.update_thread import UpdateThread
 
 
+def _request_options():
+    # Native PG joins its discovery workers before unloading the pybind owner.
+    # Its child opts into finite VIP HTTP waits; other server modes retain the
+    # existing requests defaults.
+    raw = os.getenv("PG_NATIVE_VIP_HTTP_TIMEOUT_SECONDS")
+    return {"timeout": float(raw)} if raw else {}
+
+
 def get_address_server_params():
     environments = get_environments()
     labels = ""
@@ -68,7 +76,7 @@ class VIPServerProxy:
         jmenv_url = f"http://{self.jmenv}/vipserver/serverlist?nofix=1&{query_string}"
 
         try:
-            resp = requests.get(jmenv_url, timeout=3).text
+            resp = requests.get(jmenv_url, **_request_options()).text
             srv_lst = []
             for srv in resp.split("\n"):
                 if srv.strip() == "":
@@ -105,7 +113,7 @@ class VIPServerProxy:
                 try:
                     resp = requests.get(
                         f"http://{srv}:80/vipserver/api/{api}?{get_query_string(req_params)}",
-                        timeout=3,
+                        **_request_options(),
                     )
                     resp_json = resp.json()
                     return resp_json

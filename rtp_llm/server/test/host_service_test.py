@@ -2,12 +2,14 @@
 Unit tests for MasterService: VIP discovery and heartbeat probes are mocked.
 """
 
+import os
 import unittest
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
 from rtp_llm.server.host_service import FlexlbHeartbeatInfo, MasterService
 from rtp_llm.vipserver.host import Host
+from rtp_llm.vipserver.vipserver_proxy import VIPServerProxy
 
 
 def _json_response(payload: dict, status_code: int = 200):
@@ -18,10 +20,22 @@ def _json_response(payload: dict, status_code: int = 200):
 
 
 class TestMasterService(unittest.TestCase):
+    def test_close_joins_refresh_and_preserves_immutable_pair(self):
+        vip = MagicMock()
+        vip.domain = ""
+        svc = MasterService(vip)
+        pair = svc.get_route_snapshot()
+        self.assertIsNone(pair.master_addr)
+        self.assertIsNone(pair.slave_addr)
+        svc.close()
+        self.assertFalse(svc.backend_refresh_thread.is_alive())
+        svc.close()
+
     def _make_service(self, vip: MagicMock):
         with patch("rtp_llm.server.host_service.threading.Thread") as mock_thread_cls:
             mock_thread_cls.return_value.start = MagicMock()
             svc = MasterService(vip)
+        self.addCleanup(svc.close)
         return svc, {}
 
     def _refresh(
@@ -259,6 +273,24 @@ class TestMasterService(unittest.TestCase):
 
         self.assertNotIn("10.0.0.1:8000", svc.get_host_health_status())
         self.assertIsNone(svc.get_master_addr())
+
+
+class TestNativeVipTimeout(unittest.TestCase):
+    def test_opt_in_timeout_bounds_joined_discovery_http(self):
+        proxy = VIPServerProxy()
+        proxy.srv_hosts = ["127.0.0.1"]
+        response = MagicMock()
+        response.json.return_value = {"hosts": []}
+        with patch.dict(
+            os.environ, {"PG_NATIVE_VIP_HTTP_TIMEOUT_SECONDS": "0.25"}
+        ), patch(
+            "rtp_llm.vipserver.vipserver_proxy.requests.get", return_value=response
+        ) as get, patch(
+            "rtp_llm.vipserver.vipserver_proxy.get_address_server_params",
+            return_value={},
+        ):
+            proxy.req_api("srvIPXT", {"dom": "example"})
+        self.assertEqual(get.call_args.kwargs["timeout"], 0.25)
 
 
 if __name__ == "__main__":
