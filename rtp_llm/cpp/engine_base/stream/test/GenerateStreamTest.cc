@@ -1152,6 +1152,9 @@ TEST_F(GenerateStreamTest, testNonStreamingFinalOutputReturnsCachedAllHiddenStat
                                     2});
     ASSERT_FALSE(stream->hasOutput());
 
+    // The dispatcher may reuse its backing buffer before the final response.
+    first_all_hidden_states.fill_(42.0f);
+
     stream->step();
     stream->update(StreamUpdateInfo{torch::tensor({11}, torch::kInt32).reshape({1, 1}),
                                     1,
@@ -1172,7 +1175,8 @@ TEST_F(GenerateStreamTest, testNonStreamingFinalOutputReturnsCachedAllHiddenStat
     const auto& generate_output = output.value().generate_outputs[0];
     ASSERT_TRUE(generate_output.finished);
     ASSERT_TRUE(generate_output.all_hidden_states.has_value());
-    ASSERT_TRUE(torch::equal(generate_output.all_hidden_states.value(), first_all_hidden_states));
+    ASSERT_TRUE(torch::equal(generate_output.all_hidden_states.value(),
+                             torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2})));
     ASSERT_EQ(generate_output.shared_all_hidden_states_length, 2);
 }
 

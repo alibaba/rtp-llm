@@ -260,7 +260,13 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // Never retain a later decode token as the prompt for the final response.
     if (!isStreaming() && iter_count_ == 1 && generate_input_->generate_config->return_all_hidden_states
         && update_info.all_hidden_states.defined() && !all_hidden_states_.defined()) {
-        all_hidden_states_               = update_info.all_hidden_states;
+        // The dispatcher supplies a view into its reusable output buffer.
+        // Keep an independent host snapshot until the non-streaming final output.
+        if (update_info.all_hidden_states.is_cuda()) {
+            all_hidden_states_ = update_info.all_hidden_states.cpu();
+        } else {
+            all_hidden_states_ = update_info.all_hidden_states.clone();
+        }
         shared_all_hidden_states_length_ = update_info.shared_all_hidden_states_length;
     }
 

@@ -104,6 +104,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_incremental       = config_proto->return_incremental();
     generate_config->return_hidden_states     = config_proto->return_hidden_states();
     generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
+    generate_config->accept_compact_output    = config_proto->accept_compact_output();
     generate_config->hidden_states_cut_dim    = config_proto->hidden_states_cut_dim();
     generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
     generate_config->calculate_loss           = config_proto->calculate_loss();
@@ -433,12 +434,25 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                                    const GenerateOutputs* responses,
                                    bool                   dump_aux_info,
                                    const std::string&     aux_string,
-                                   const int32_t          eos_token_id) {
+                                   const int32_t          eos_token_id,
+                                   bool                   accept_compact_output) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
     const auto& source_outputs = responses->generate_outputs;
     if (source_outputs.empty()) {
         return;
+    }
+    const auto& first_probs = source_outputs.front().aux_info.softmax_probs;
+    bool        aggregate_softmax =
+        accept_compact_output && dump_aux_info && first_probs.has_value() && first_probs->numel() > 0;
+    if (aggregate_softmax) {
+        for (const auto& response : source_outputs) {
+            const auto& probs = response.aux_info.softmax_probs;
+            if (!probs.has_value() || probs->sizes() != first_probs->sizes()) {
+                aggregate_softmax = false;
+                break;
+            }
+        }
     }
     FlattenOutputPB* flatten_output = outputs->mutable_flatten_output();
     for (const auto& response : source_outputs) {
@@ -482,7 +496,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value());
             }
-            if (response.aux_info.softmax_probs.has_value()) {
+            if (!aggregate_softmax && response.aux_info.softmax_probs.has_value()) {
                 transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value());
             }
         }
@@ -507,21 +521,21 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 
-    if (dump_aux_info) {
-        // Keep writing the per-output AuxInfo field for rolling-upgrade compatibility.
-        // New clients consume this aggregate tensor and avoid deserializing one TensorPB per beam/output.
-        stackBuffersToTensorPB(flatten_output->mutable_all_softmax_probs(), source_outputs, [](const auto& r) {
-            return r.aux_info.softmax_probs;
-        });
+    if (aggregate_softmax) {
+        // Opted-in, equal-length outputs share one [num_outputs, output_length] tensor.
+        // Unequal lengths retain the original per-output AuxInfo tensors above.
+        // Keep per-output AuxInfo scalars, but do not duplicate probability payloads.
+        stackBuffersToTensorPB(flatten_output->mutable_aux_info(0)->mutable_softmax_probs(),
+                               source_outputs,
+                               [](const auto& r) { return r.aux_info.softmax_probs; });
     }
 
     stackBuffersToTensorPB(flatten_output->mutable_loss(), source_outputs, [](const auto& r) { return r.loss; });
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
-    // Prompt states are shared by every beam/output of this request. Preserve
-    // the output dimension, but transmit a singleton row instead of N copies.
-    {
+    if (accept_compact_output) {
+        // Share prompt states across the outputs of this request: [1, T, H].
         torch::Tensor all_hidden_states;
         for (const auto& resp : source_outputs) {
             if (resp.all_hidden_states.has_value()) {
@@ -535,6 +549,11 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         if (all_hidden_states.defined()) {
             transTensorPB(flatten_output->mutable_all_hidden_states(), all_hidden_states.unsqueeze(0).contiguous());
         }
+    } else {
+        // Preserve the frontend's per-output wire format and conversion contract.
+        stackBuffersToTensorPB(flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) {
+            return r.all_hidden_states;
+        });
     }
 
     if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {

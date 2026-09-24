@@ -226,7 +226,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       &(result.value()),
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
-                                      stream->specialTokens().eos_token_id);
+                                      stream->specialTokens().eos_token_id,
+                                      stream->generateConfig()->accept_compact_output);
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
@@ -512,7 +513,8 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                           &last_outputs,
                                           inputs[i]->generate_config->aux_info,
                                           maga_init_params_.misc_config.aux_string,
-                                          streams[i]->specialTokens().eos_token_id);
+                                          streams[i]->specialTokens().eos_token_id,
+                                          inputs[i]->generate_config->accept_compact_output);
         }
     }
 

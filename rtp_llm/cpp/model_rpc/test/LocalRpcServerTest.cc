@@ -666,6 +666,95 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_FALSE(normal_stream->hasOutput());
 }
 
+TEST(LocalRpcServerTest, PollUsesRequestCompactOutputAcceptance) {
+    // Alternate request formats on the same server; no deployment flag is involved.
+    TestLocalRpcServer server;
+    for (const bool enabled : {false, true, false}) {
+        SCOPED_TRACE(testing::Message() << "accept_compact_output=" << enabled);
+        RecordingWriter                 writer;
+        auto                            normal_stream   = createNormalStream();
+        std::shared_ptr<GenerateStream> stream          = normal_stream;
+        stream->generateConfig()->aux_info              = true;
+        stream->generateConfig()->accept_compact_output = enabled;
+        normal_stream->generate_status_->status.store(StreamState::RUNNING);
+        {
+            std::lock_guard<std::mutex> lock(*normal_stream->mutex_);
+            GenerateOutputs             outputs;
+            for (int i = 0; i < 2; ++i) {
+                GenerateOutput output;
+                output.finished               = true;
+                output.all_hidden_states      = torch::ones({3, 2}, torch::kFloat32);
+                output.aux_info.softmax_probs = torch::tensor({0.25f, 0.75f}, torch::kFloat32);
+                outputs.generate_outputs.push_back(std::move(output));
+            }
+            normal_stream->enqueueGenerateOutput(std::move(outputs));
+            normal_stream->reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+        }
+        EXPECT_TRUE(server.poll(&writer, stream).ok());
+        ASSERT_EQ(writer.outputs_.size(), 1);
+        const auto& flat = writer.outputs_[0].flatten_output();
+        EXPECT_EQ(flat.all_hidden_states().shape(0), enabled ? 1 : 2);
+        ASSERT_EQ(flat.aux_info_size(), 2);
+        EXPECT_EQ(flat.aux_info(0).softmax_probs().shape_size(), enabled ? 2 : 1);
+        EXPECT_EQ(flat.aux_info(1).has_softmax_probs(), !enabled);
+    }
+}
+
+TEST(LocalRpcServerTest, BatchUsesEachRequestsCompactOutputAcceptance) {
+    class BatchEngine: public RuntimePolicyEngine {
+    public:
+        BatchEngine(): RuntimePolicyEngine(false) {}
+        std::vector<GenerateStreamPtr> streams;
+        std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+        enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&) override {
+            return {std::vector<bool>(streams.size(), true), streams};
+        }
+    };
+    auto               engine = std::make_shared<BatchEngine>();
+    TestLocalRpcServer server;
+    server.setEngineForRuntimePolicyTest(engine);
+    BatchGenerateInputPB request;
+    for (int i = 0; i < 4; ++i) {
+        auto* input = request.add_inputs();
+        *input      = makeRuntimePolicyInputPb(false);
+        input->set_request_id(i);
+        auto* config = input->mutable_generate_config();
+        config->set_num_beams(2);
+        config->set_num_return_sequences(1);
+        config->set_accept_compact_output(i & 1);
+        ModelConfig model_config;
+        model_config.max_seq_len = 8;
+        auto stream =
+            std::make_shared<MockGenerateStream>(QueryConverter::transQuery(input), model_config, RuntimeConfig{});
+        GenerateOutputs outputs;
+        outputs.request_id = i;
+        for (int j = 0; j < 2; ++j) {
+            GenerateOutput output;
+            output.finished               = true;
+            output.all_hidden_states      = torch::ones({3, 2}, torch::kFloat32);
+            output.aux_info.softmax_probs = torch::tensor({0.25f, 0.75f}, torch::kFloat32);
+            outputs.generate_outputs.push_back(std::move(output));
+        }
+        EXPECT_CALL(*stream, nextOutput(_))
+            .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
+            .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
+        engine->streams.push_back(stream);
+    }
+    BatchGenerateOutputsPB response;
+    ASSERT_TRUE(server.BatchGenerateCall(nullptr, &request, &response).ok());
+    ASSERT_EQ(response.results_size(), 4);
+    for (int i = 0; i < 4; ++i) {
+        const auto& result = response.results(i);
+        ASSERT_FALSE(result.has_error_info());
+        EXPECT_EQ(result.final_output().request_id(), i);
+        const auto& flat = result.final_output().flatten_output();
+        EXPECT_EQ(flat.all_hidden_states().shape(0), (i & 1) ? 1 : 2);
+        ASSERT_EQ(flat.aux_info_size(), 2);
+        EXPECT_EQ(flat.aux_info(0).softmax_probs().shape_size(), (i & 1) ? 2 : 1);
+        EXPECT_EQ(flat.aux_info(1).has_softmax_probs(), !(i & 1));
+    }
+}
+
 TEST(LocalRpcServerTest, InputEmbeddingRequestPolicyRejectsBeforeInference) {
     TestLocalRpcServer server;
     server.maga_init_params_.model_supports_input_embeddings = true;
