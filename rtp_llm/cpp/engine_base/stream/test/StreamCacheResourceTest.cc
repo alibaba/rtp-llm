@@ -1399,4 +1399,20 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadCompletesOnlyAfterTransfersSett
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
 }
 
+TEST_F(StreamCacheResourceTest, PrefillIntegrityFailureCannotFallBackToSharedTargets) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setReuseLength(2);
+    stream_->setInitialReuseLength(2);
+    stream_->setLocalReuseLength(2);
+    resource.allocator_load_context_ =
+        std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, "injected CRC mismatch"));
+    const auto status = resource.pollAllocatorLoad();
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(status->code(), absl::StatusCode::kDataLoss);
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(stream_->initialReuseLength(), 0);
+}
+
 }  // namespace rtp_llm

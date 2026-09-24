@@ -3357,5 +3357,44 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
     unreferenceDeviceBlocksForTest(*group, device_set, BlockTreeRefType::CACHE);
 }
 
+TEST(BlockTreeEvictorAsyncTest, ProtectedHostFailureQuarantinesThenDropsWithoutRetryingMigration) {
+    MultiGroupAsyncEvictionEnvironment environment;
+    ASSERT_TRUE(environment.init());
+    const auto& group = environment.groups_[0];
+    group->initialize(group->groupSetId(), group->topologyPtr(), group->groupIds(), /*enable_crc=*/true);
+    const auto path = environment.insertParentDeviceChildHost();
+    ASSERT_EQ(path.size(), 2u);
+    TreeNode* child = path[1];
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::HOST, 1).async_submitted);
+    ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(1, std::chrono::seconds(2)));
+    ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(0, false));
+    environment.task_pool_->waitForIdle();
+    EXPECT_TRUE(child->group_set_resources[0].integrity_quarantined);
+    EXPECT_FALSE(child->group_set_resources[0].isMatchUsable());
+    EXPECT_TRUE(child->group_set_resources[0].hasTier(Tier::HOST));
+    EXPECT_EQ(environment.pendingReleaseCount(), 0u);
+    const auto dropped = environment.evictor_->batchEvictLocked(0, Tier::HOST, 1);
+    EXPECT_TRUE(dropped.direct_progress);
+    EXPECT_FALSE(dropped.async_submitted);
+    EXPECT_TRUE(environment.transfer_engine_->batchDescriptors(1).empty());
+    EXPECT_FALSE(environment.host_pools_[0]->isAllocated(environment.host_sources_[0]));
+}
+
+TEST(BlockTreeEvictorAsyncTest, ProtectedDeviceStoreFailureDoesNotQuarantineDeviceSource) {
+    MultiGroupAsyncEvictionEnvironment environment;
+    ASSERT_TRUE(environment.init());
+    const auto& group = environment.groups_[0];
+    group->initialize(group->groupSetId(), group->topologyPtr(), group->groupIds(), /*enable_crc=*/true);
+    TreeNode* node = environment.insertDeviceNode();
+    ASSERT_NE(node, nullptr);
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::DEVICE, 1).async_submitted);
+    ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(1, std::chrono::seconds(2)));
+    ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(0, false));
+    environment.task_pool_->waitForIdle();
+    EXPECT_FALSE(node->group_set_resources[0].integrity_quarantined);
+    EXPECT_TRUE(node->group_set_resources[0].isMatchUsable());
+    EXPECT_TRUE(node->group_set_resources[0].hasTier(Tier::DEVICE));
+}
+
 }  // namespace
 }  // namespace rtp_llm

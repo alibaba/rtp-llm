@@ -911,5 +911,141 @@ TEST(LoadAsyncContextTest, CoordinatorShutdownWaitsForDeferredAllocatorCallback)
     EXPECT_EQ(aborts, 1u);
 }
 
+TEST(LoadAsyncContextTest, IntegrityFailureWaitsForBackendAndPropagatesToTwoJoiners) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    auto   block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    TransferDescriptor local;
+    local.source_tier = Tier::HOST;
+    auto owner        = coordinator->create({local, local}, {false, false}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(owner));
+    owner->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+    std::vector<std::shared_ptr<LoadAsyncContext>> joiners;
+    size_t                                         joined_callbacks = 0;
+    for (int i = 0; i < 2; ++i) {
+        auto joined = coordinator->create({local}, {true}, 0);
+        ASSERT_TRUE(coordinator->registerContext(joined));
+        joined->startJoinWait(1);
+        ASSERT_TRUE(joined->commit());
+        joined->onDone([&](ErrorInfo error) {
+            EXPECT_EQ(error.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+            ++joined_callbacks;
+        });
+        joiners.push_back(joined);
+    }
+    size_t settlements = 0;
+    owner->setSettlementReadyCallback([&](const std::shared_ptr<LoadAsyncContext>& current) {
+        ++settlements;
+        EXPECT_FALSE(backend->readPending());
+        EXPECT_EQ(pool->refCount(block), 1u);
+        for (const auto& joined : joiners) {
+            bool    complete = false;
+            int64_t latency  = 0;
+            EXPECT_TRUE(joined->completeJoinedOne(current->errorInfo(), complete, latency));
+            EXPECT_TRUE(complete);
+        }
+        EXPECT_TRUE(current->settle(false));
+    });
+    owner->startBackendMatch();
+    backend->completeMatch(1);
+    ASSERT_TRUE(backend->readPending());
+    ASSERT_EQ(pool->refCount(block), 2u);
+    EXPECT_TRUE(owner->completeTransfers(1, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "earlier generic failure")));
+    EXPECT_TRUE(owner->completeTransfers(1, ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, "CRC mismatch")));
+    EXPECT_FALSE(owner->done());
+    EXPECT_EQ(settlements, 0u);
+    EXPECT_EQ(joined_callbacks, 0u);
+    EXPECT_EQ(pool->refCount(block), 2u);
+    for (const auto& joined : joiners)
+        EXPECT_FALSE(joined->done());
+    backend->completeRead();
+    EXPECT_EQ(settlements, 1u);
+    EXPECT_EQ(joined_callbacks, 2u);
+    EXPECT_EQ(owner->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    EXPECT_TRUE(owner->done());
+    EXPECT_FALSE(owner->success());
+    size_t late_callbacks = 0;
+    owner->onDone([&](ErrorInfo error) {
+        EXPECT_EQ(error.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        ++late_callbacks;
+    });
+    EXPECT_EQ(late_callbacks, 1u);
+    for (const auto& joined : joiners) {
+        EXPECT_FALSE(joined->success());
+        EXPECT_EQ(joined->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    }
+    pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, ProtectedLoadConvertsGenericFailureAndWaitsForOtherTransfers) {
+    size_t             commits     = 0;
+    size_t             aborts      = 0;
+    auto               coordinator = makeCoordinator(commits, aborts);
+    TransferDescriptor local;
+    local.source_tier = Tier::HOST;
+    auto context      = coordinator->create({local, local}, {false, false}, 0);
+    context->requireIntegritySuccess();
+    ASSERT_TRUE(coordinator->registerContext(context));
+    ASSERT_TRUE(context->commit());
+    EXPECT_TRUE(context->completeTransfers(1, false));
+    EXPECT_FALSE(context->done());
+    EXPECT_TRUE(context->completeTransfers(1, true));
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    EXPECT_FALSE(context->success());
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, IntegrityPolicyUpgradesBackendFailureBeforeCommit) {
+    size_t     commits     = 0;
+    size_t     aborts      = 0;
+    auto       coordinator = makeCoordinator(commits, aborts);
+    auto       backend     = std::make_shared<ManualBackend>();
+    auto       pool        = std::make_shared<TestBlockPool>();
+    const auto block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(0, 0, block);
+        return true;  // Deliberately postpone commit until after backend completion.
+    });
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    backend->failNextRead();
+    backend->completeRead();
+    EXPECT_FALSE(context->done());
+    context->requireIntegritySuccess();
+    ASSERT_TRUE(context->commit());
+    EXPECT_TRUE(context->done());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    context->onDone([](ErrorInfo error) { EXPECT_EQ(error.code(), ErrorCode::CACHE_INTEGRITY_ERROR); });
+    pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, ProtectedSettlementFailureSynthesizesTypedError) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   context     = coordinator->create({}, {}, 0);
+    context->requireIntegritySuccess();
+    context->setSettlementReadyCallback([](const auto& ready) { EXPECT_TRUE(ready->settle(false)); });
+    ASSERT_TRUE(coordinator->registerContext(context));
+    ASSERT_TRUE(context->commit());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    context->onDone([](ErrorInfo error) { EXPECT_EQ(error.code(), ErrorCode::CACHE_INTEGRITY_ERROR); });
+    coordinator->shutdown();
+}
+
 }  // namespace
 }  // namespace rtp_llm

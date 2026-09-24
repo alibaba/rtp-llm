@@ -127,13 +127,16 @@ makeBroadcastManager(const std::vector<MultiRankBlockTransferRpcConfig>&        
     return broadcast_manager;
 }
 
-static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager) {
+static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager,
+                                                          bool                                     enable_crc = false) {
     DeviceBlockPoolPtr            device_pool = makeDevicePool({{256, 0}}, 8, "multi_rank_engine_device");
     std::shared_ptr<FullGroupSet> full =
-        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, makeHostPool(256, 8), nullptr);
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool},
+                                       block_transfer_engine_test::makeHostPool(256, 8, enable_crc),
+                                       nullptr);
     auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(0, topology, {0});
+    full->initialize(0, topology, {0}, enable_crc);
     std::vector<GroupSetPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(groups),
                                      BlockTreeCacheConfig{},
@@ -747,7 +750,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
 class ScopedRpcResponseRelease {
 public:
     explicit ScopedRpcResponseRelease(std::shared_ptr<std::promise<void>> release): release_(std::move(release)) {}
-    ~ScopedRpcResponseRelease() { release(); }
+    ~ScopedRpcResponseRelease() {
+        release();
+    }
     void release() {
         if (release_) {
             release_->set_value();
@@ -765,9 +770,9 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
         auto                                  state = std::make_shared<MultiRankBlockTransferRpcState>();
         const MemoryOperationResponsePB::Code second_response =
             transfer_success ? MemoryOperationResponsePB::OK : MemoryOperationResponsePB::FAILED;
-        auto release_promise = std::make_shared<std::promise<void>>();
-        auto response_release = release_promise->get_future().share();
-        const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        auto                                               release_promise  = std::make_shared<std::promise<void>>();
+        auto                                               response_release = release_promise->get_future().share();
+        const std::vector<MultiRankBlockTransferRpcConfig> configs          = {
             {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state, /*sleep_millis=*/0, response_release},
             {true, second_response, grpc::Status::OK, state, /*sleep_millis=*/0, response_release},
         };
@@ -805,17 +810,17 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
 
         // On a regression timeout the worker retains its cache and RPC servers.
         // std::async would still block in the future destructor after an early return.
-        auto started = std::make_shared<std::promise<void>>();
-        auto cache_destroyed = std::make_shared<std::promise<void>>();
-        auto started_future = started->get_future();
-        auto destroyed_future = cache_destroyed->get_future();
-        BoundedThread<void> destroy([cache = std::move(cache), servers = std::move(servers),
-                                     started, cache_destroyed]() mutable {
-            started->set_value();
-            cache.reset();
-            cache_destroyed->set_value();
-            servers.clear();
-        });
+        auto                started          = std::make_shared<std::promise<void>>();
+        auto                cache_destroyed  = std::make_shared<std::promise<void>>();
+        auto                started_future   = started->get_future();
+        auto                destroyed_future = cache_destroyed->get_future();
+        BoundedThread<void> destroy(
+            [cache = std::move(cache), servers = std::move(servers), started, cache_destroyed]() mutable {
+                started->set_value();
+                cache.reset();
+                cache_destroyed->set_value();
+                servers.clear();
+            });
         ASSERT_EQ(started_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
         // Check cache destruction itself; server shutdown must not mask an early return.
         EXPECT_EQ(destroyed_future.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
@@ -1046,6 +1051,70 @@ TEST_F(MultiRankBlockTransferEngineTest, EncodeTransferRequestIncludesMultipleDe
     EXPECT_EQ(request.copy_items(1).mem_block(), 5);
     EXPECT_EQ(request.copy_items(1).disk_block(), 6);
     EXPECT_EQ(request.copy_items(1).group_set_id(), 1u);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, IntegrityFailureDominatesGenericRankAndWaitsForSlowRank) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::CACHE_INTEGRITY_ERROR, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, /*sleep_millis=*/300},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    auto       cache   = makeBroadcastCache(broadcast_manager);
+    const auto start   = std::chrono::steady_clock::now();
+    auto       context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+        TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(5000)));
+    ASSERT_NE(context, nullptr);
+    context->waitDone();
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count(),
+              250);
+    size_t callbacks = 0;
+    context->onDone([&](ErrorInfo error) {
+        EXPECT_EQ(error.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        ++callbacks;
+    });
+    EXPECT_EQ(callbacks, 1u);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, ProtectedTransferFailsClosedWhenOldWorkerRejectsDirection) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
+        {false, MemoryOperationResponsePB::CODE_UNSPECIFIED, grpc::Status::OK},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(manager, nullptr);
+    auto cache   = makeBroadcastCache(manager, /*enable_crc=*/true);
+    auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+        TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(5000)));
+    ASSERT_NE(context, nullptr);
+    context->waitDone();
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+}
+
+static void protectedBroadcastLosesCompletion() {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "lost completion")},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto                                                          manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(manager, nullptr);
+    auto cache = makeBroadcastCache(manager, /*enable_crc=*/true);
+    disableCoreDump();
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    std::fprintf(stderr, "protected broadcast setup complete; losing completion\n");
+    (void)executeAndWait(*cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), 5000);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, ProtectedTransferFailStopsWithoutDumpOptionOnAmbiguousCompletion) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    EXPECT_EXIT(protectedBroadcastLosesCompletion(),
+                ::testing::KilledBySignal(SIGABRT),
+                "protected broadcast setup complete; losing completion");
 }
 
 }  // namespace

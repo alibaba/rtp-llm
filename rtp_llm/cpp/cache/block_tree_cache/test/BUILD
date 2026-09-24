@@ -65,6 +65,7 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
         "//rtp_llm/cpp/cache:kv_cache_allocator",
         "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings:crc_block_copy_hdr",
     ],
     env = {},
 )

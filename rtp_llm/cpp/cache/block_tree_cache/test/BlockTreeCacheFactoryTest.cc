@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <limits>
 #include <memory>
@@ -24,6 +25,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
@@ -1918,6 +1920,11 @@ TEST_F(BlockTreeCacheFactoryTest, DerivesEachLocalTierFromItsOwnSwitch) {
                     ASSERT_NE(group_set, nullptr);
                     EXPECT_EQ(group_set->hostPool() != nullptr, host_on);
                     EXPECT_EQ(group_set->diskPool() != nullptr, disk_on);
+                    const bool expected_crc = CrcBlockCopyBatch::available() && (host_on || disk_on);
+                    EXPECT_EQ(group_set->crcEnabled(), expected_crc);
+                    EXPECT_EQ(group_set->storageBytes(),
+                              expected_crc ? CrcBlockCopyBatch::encodedBytes(group_set->payloadBytes()) :
+                                             group_set->payloadBytes());
                 }
             }
         }
@@ -2095,6 +2102,145 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
         group->hostPool()->decTreeRef(host_block, BlockTreeRefType::STORE);
         group->diskPool()->decTreeRef(disk_block, BlockTreeRefType::STORE);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DefaultCrcAtPageBoundaryUsesEncodedStrideInLocalTierBudgets) {
+    const auto config        = test::makeSimpleMhaCacheConfig(2, 8, 64, DataType::TYPE_FP16, 1, 8);
+    const bool crc_available = CrcBlockCopyBatch::available();
+    for (const auto& tiers : {std::pair<bool, bool>{true, false}, {false, true}, {true, true}}) {
+        const auto [host_on, disk_on] = tiers;
+        SCOPED_TRACE("host=" + std::to_string(host_on) + " disk=" + std::to_string(disk_on));
+        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_default_crc_budget");
+        KVCacheConfig                            options;
+        options.enable_memory_cache    = host_on;
+        options.memory_cache_size_mb   = 1;
+        options.enable_disk_cache      = disk_on;
+        options.disk_cache_size_mb     = 1;
+        options.disk_cache_paths       = disk_dir.path;
+        options.disk_cache_buffered_io = true;
+        auto cache                     = createBlockTreeCache(config, options, allocator);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        const auto& group = cache->groupSets().front();
+        ASSERT_EQ(group->payloadBytes(), 4096u);
+        EXPECT_EQ(group->crcEnabled(), crc_available);
+        EXPECT_EQ(group->storageBytes(), crc_available ? 4112u : 4096u);
+        const size_t expected_stride = crc_available ? 8192u : 4096u;
+        // Each lower tier has its own 1 MiB budget, including one reserved block.
+        const size_t expected_usable = (1024u * 1024u) / expected_stride - 1;
+        ASSERT_EQ(group->hostPool() != nullptr, host_on);
+        ASSERT_EQ(group->diskPool() != nullptr, disk_on);
+        if (host_on) {
+            EXPECT_EQ(group->hostPool()->payloadBytes(), 4096u);
+            EXPECT_EQ(group->hostPool()->strideBytes(), expected_stride);
+            EXPECT_EQ(group->hostPool()->totalBlocksNum(), expected_usable);
+            EXPECT_EQ(group->hostPool()->freeBlocksNum(), expected_usable);
+        }
+        if (disk_on) {
+            EXPECT_EQ(group->diskPool()->payloadBytes(), 4096u);
+            EXPECT_EQ(group->diskPool()->strideBytes(), expected_stride);
+            EXPECT_EQ(group->diskPool()->totalBlocksNum(), expected_usable);
+            EXPECT_EQ(group->diskPool()->freeBlocksNum(), expected_usable);
+        }
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DefaultLocalTierTransfersUseAvailableIntegrityProtection) {
+    const auto config        = makeSingleConfig();
+    const bool crc_available = CrcBlockCopyBatch::available();
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tier == Tier::HOST ? "host-only" : "disk-only");
+        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_default_crc_transfer");
+        KVCacheConfig                            options;
+        options.enable_memory_cache    = tier == Tier::HOST;
+        options.memory_cache_size_mb   = 1;
+        options.enable_disk_cache      = tier == Tier::DISK;
+        options.disk_cache_size_mb     = 1;
+        options.disk_cache_paths       = disk_dir.path;
+        options.disk_cache_buffered_io = true;
+        auto cache                     = createBlockTreeCache(config, options, allocator);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        const auto& group = cache->groupSets().front();
+        EXPECT_EQ(group->crcEnabled(), crc_available);
+        const auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1);
+        ASSERT_EQ(device_blocks.size(), 1u);
+        ASSERT_EQ(device_blocks.front().size(), 1u);
+        const BlockIdxType lower_block = group->allocateSingleBlock(tier, BlockTreeRefType::STORE);
+        ASSERT_NE(lower_block, NULL_BLOCK_IDX);
+        const auto   device_block = device_blocks.front().front();
+        const auto   target_group = allocator->cacheGroups().front();
+        const size_t layer_bytes  = target_group->config().kv_block_stride_bytes;
+        auto*        first_layer  = static_cast<uint8_t*>(target_group->convertIndexToAddr(0, device_block).kv_addr);
+        auto*        second_layer = static_cast<uint8_t*>(target_group->convertIndexToAddr(1, device_block).kv_addr);
+        writeDevicePattern(first_layer, layer_bytes, 0x35);
+        writeDevicePattern(second_layer, layer_bytes, 0x79);
+        const auto store =
+            tier == Tier::HOST ?
+                TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks.front(), lower_block) :
+                TransferDescriptor::deviceToDisk(group->groupSetId(), device_blocks.front(), lower_block);
+        const auto load =
+            tier == Tier::HOST ?
+                TransferDescriptor::hostToDevice(group->groupSetId(), lower_block, device_blocks.front()) :
+                TransferDescriptor::diskToDevice(group->groupSetId(), lower_block, device_blocks.front());
+        ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({store})));
+
+        std::vector<uint8_t> record(group->storageBytes());
+        if (tier == Tier::HOST) {
+            std::memcpy(record.data(), group->hostPool()->blockBuffer(lower_block).addr, record.size());
+        } else {
+            ASSERT_EQ(group->diskPool()->read(lower_block, record.data(), record.size()), BlockIOStatus::OK);
+        }
+        ASSERT_EQ(record.front(), 0x35);
+        record.front() ^= 0xff;
+        const auto writeRecord = [&] {
+            if (tier == Tier::HOST) {
+                std::memcpy(group->hostPool()->blockBuffer(lower_block).addr, record.data(), record.size());
+            } else {
+                ASSERT_EQ(group->diskPool()->write(lower_block, record.data(), record.size()), BlockIOStatus::OK);
+            }
+        };
+        ASSERT_NO_FATAL_FAILURE(writeRecord());
+        writeDevicePattern(first_layer, layer_bytes, 0);
+        writeDevicePattern(second_layer, layer_bytes, 0);
+        const auto result = cache->executeTransferWithError(block_transfer_engine_test::makeTransferTask({load}));
+        if (crc_available) {
+            EXPECT_EQ(result.code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+            expectDevicePattern(first_layer, layer_bytes, 0);
+            expectDevicePattern(second_layer, layer_bytes, 0);
+        } else {
+            // Unsupported builds retain the ordinary copy path and do not interpret a footer.
+            EXPECT_TRUE(result.ok());
+            expectDevicePattern(first_layer, 1, 0xca);
+            expectDevicePattern(first_layer + 1, layer_bytes - 1, 0x35);
+            expectDevicePattern(second_layer, layer_bytes, 0x79);
+        }
+        record.front() ^= 0xff;
+        ASSERT_NO_FATAL_FAILURE(writeRecord());
+        ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({load})));
+        expectDevicePattern(first_layer, layer_bytes, 0x35);
+        expectDevicePattern(second_layer, layer_bytes, 0x79);
+        group->releaseSingleBlock(tier, lower_block, BlockTreeRefType::STORE);
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DeviceOnlyDoesNotCreateEncodedStorage) {
+    const auto    config    = makeSingleConfig();
+    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    KVCacheConfig options;
+    options.enable_memory_cache = false;
+    options.enable_disk_cache   = false;
+    auto cache                  = createBlockTreeCache(config, options, allocator);
+    ASSERT_NE(cache, nullptr);
+    for (const auto& group : cache->groupSets()) {
+        EXPECT_FALSE(group->crcEnabled());
+        EXPECT_EQ(group->storageBytes(), group->payloadBytes());
+        EXPECT_EQ(group->hostPool(), nullptr);
+        EXPECT_EQ(group->diskPool(), nullptr);
     }
 }
 

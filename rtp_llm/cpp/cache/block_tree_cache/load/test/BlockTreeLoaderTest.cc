@@ -11,6 +11,8 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
@@ -138,13 +140,12 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     auto  entered_future  = entered_promise->get_future();
     auto* task_pool       = environment->cache->task_pool_.get();
     for (size_t worker = 0; worker < worker_count; ++worker) {
-        if (!task_pool->submit(BlockTreeTaskClass::BACKGROUND,
-                               [release_future, entered_count, entered_promise]() {
-                                   if (entered_count->fetch_add(1) + 1 == worker_count) {
-                                       entered_promise->set_value();
-                                   }
-                                   release_future.wait();
-                               })) {
+        if (!task_pool->submit(BlockTreeTaskClass::BACKGROUND, [release_future, entered_count, entered_promise]() {
+                if (entered_count->fetch_add(1) + 1 == worker_count) {
+                    entered_promise->set_value();
+                }
+                release_future.wait();
+            })) {
             FAIL() << "failed to submit background task";
         }
     }
@@ -198,7 +199,6 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     environment->expectFullyReclaimed();
     EXPECT_EQ(environment->cache->task_pool_->pending_tasks_.load(), 0);
 }
-
 
 TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
     constexpr size_t path_length = 4;
@@ -391,6 +391,110 @@ TEST(BlockTreeLoaderTest, ChangeTransferStateDoesNotOverwriteForeignTransferStat
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
 
     resource.transfer_state = GroupSetTransferState::IDLE;
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
+class GatedIntegrityFailureEngine final: public PerRankBlockTransferEngine {
+public:
+    GatedIntegrityFailureEngine(const std::vector<GroupSetPtr>& groups, std::shared_future<void> release):
+        PerRankBlockTransferEngine(groups), release_(std::move(release)) {}
+    std::shared_ptr<AsyncContext> execute(TransferTask) override {
+        release_.wait();
+        return std::make_shared<CompletedAsyncContext>(
+            ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, "injected backing CRC mismatch"));
+    }
+
+private:
+    std::shared_future<void> release_;
+};
+
+TEST(BlockTreeLoaderTest, IntegrityFailureQuarantinesSourcesAndFailsOwnerAndTwoJoiners) {
+    if (!cudaAvailable())
+        GTEST_SKIP() << "CUDA not available";
+    FullSWAEnvironmentOptions options;
+    options.path_length = 2;
+    options.enable_disk = true;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    environment->demoteAll(Tier::DEVICE);
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
+
+    auto release = std::make_shared<std::promise<void>>();
+    auto once    = std::make_shared<std::once_flag>();
+    auto unblock = [release, once] { std::call_once(*once, [&] { release->set_value(); }); };
+    block_tree_cache_detail::ScopeRollback release_guard(unblock);
+    environment->cache->transfer_dispatcher_->per_rank_engine_ =
+        std::make_shared<GatedIntegrityFailureEngine>(environment->groups, release->get_future().share());
+    auto result = environment->cache->match(environment->keys);
+    auto owner  = result.async_context;
+    ASSERT_NE(owner, nullptr);
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> targets;
+    for (size_t i = 0; i < owner->loadDescs().size(); ++i) {
+        const auto&               desc = owner->loadDescs()[i];
+        std::vector<BlockIdxType> blocks;
+        for (const auto& pool : environment->groups[desc.group_set_id]->devicePools()) {
+            const auto ids = pool->malloc(1).value();
+            pool->incRef(ids);
+            blocks.push_back(ids.front());
+            targets.emplace_back(pool, ids.front());
+        }
+        owner->setTargetBlocks(i, std::move(blocks));
+    }
+    ASSERT_TRUE(owner->commit());
+    std::vector<std::shared_ptr<LoadAsyncContext>> joiners;
+    for (int i = 0; i < 2; ++i) {
+        auto joined = environment->cache->match(environment->keys).async_context;
+        ASSERT_NE(joined, nullptr);
+        ASSERT_TRUE(std::all_of(joined->joinedLoads().begin(), joined->joinedLoads().end(), [](bool x) { return x; }));
+        ASSERT_TRUE(joined->commit());
+        joiners.push_back(joined);
+    }
+    EXPECT_FALSE(owner->done());
+    for (const auto& joined : joiners)
+        EXPECT_FALSE(joined->done());
+    for (const auto& entry : targets)
+        EXPECT_EQ(entry.first->refCount(entry.second), 4u);
+    unblock();
+    owner->waitDone();
+    for (const auto& joined : joiners) {
+        joined->waitDone();
+        EXPECT_EQ(joined->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+        EXPECT_FALSE(joined->success());
+    }
+    EXPECT_EQ(owner->errorInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+    for (const auto& entry : targets)
+        EXPECT_EQ(entry.first->refCount(entry.second), 3u);
+    for (size_t index = 0; index < options.path_length; ++index) {
+        for (const auto& resource : environment->resourcesForPathNode(index)) {
+            EXPECT_TRUE(resource.integrity_quarantined);
+            EXPECT_FALSE(resource.isMatchUsable());
+            EXPECT_TRUE(resource.hasTier(Tier::HOST));
+            EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+        }
+    }
+    auto retry = environment->cache->match(environment->keys);
+    EXPECT_EQ(retry.matched_device_blocks, 0u);
+    EXPECT_TRUE(retry.async_context == nullptr || retry.async_context->empty());
+
+    // Even though DISK is enabled, a poisoned HOST candidate must use the
+    // existing drop/prune path, never a new transfer of the corrupt bytes.
+    {
+        std::lock_guard<std::mutex> lock(environment->cache->mutex_);
+        auto dropped = environment->cache->evictor_.batchEvictLocked(0, Tier::HOST, options.path_length);
+        EXPECT_TRUE(dropped.direct_progress);
+        EXPECT_FALSE(dropped.async_submitted);
+    }
+    for (const auto& entry : targets) {
+        entry.first->decRef(entry.second);  // owner request
+        entry.first->decRef(entry.second);  // first joiner request
+        entry.first->decRef(entry.second);  // second joiner request
+    }
+    joiners.clear();
+    owner.reset();
+    result.async_context.reset();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }

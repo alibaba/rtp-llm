@@ -454,5 +454,36 @@ TEST(BlockTransferRequestConverterTest, RejectsMixedDirections) {
     EXPECT_FALSE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask(descriptors), groupSets()));
 }
 
+TEST(BlockTransferRequestConverterTest, CrcDirectionsRoundTripAndRejectMismatchedWorkerMode) {
+    auto protected_groups = makeGroupSets();
+    for (const auto& group : protected_groups) {
+        group->initialize(group->groupSetId(), group->topologyPtr(), group->groupIds(), true);
+    }
+    const std::vector<TransferDescriptor> inputs{
+        TransferDescriptor::hostToDevice(0, 2, {1}),
+        TransferDescriptor::deviceToHost(0, {1}, 2),
+        TransferDescriptor::hostToDisk(0, 1, 2),
+        TransferDescriptor::diskToHost(0, 1, 2),
+        TransferDescriptor::deviceToDisk(0, {1}, 2),
+        TransferDescriptor::diskToDevice(0, 2, {1}),
+    };
+    for (size_t index = 0; index < inputs.size(); ++index) {
+        MemoryOperationRequestPB request;
+        ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+            request, makeTransferTask({inputs[index]}), protected_groups));
+        EXPECT_EQ(static_cast<int>(request.copy_direction()), index + 6);
+        std::vector<TransferDescriptor> decoded;
+        EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, decoded, groupSets()));
+        ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, protected_groups));
+        ASSERT_EQ(decoded.size(), 1);
+        EXPECT_EQ(decoded.front().source_tier, inputs[index].source_tier);
+        EXPECT_EQ(decoded.front().target_tier, inputs[index].target_tier);
+        // A CRC-enabled worker must also reject an unprotected request.
+        request.set_copy_direction(static_cast<MemoryOperationRequestPB::CopyDirection>(index));
+        decoded.clear();
+        EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, decoded, protected_groups));
+    }
+}
+
 }  // namespace
 }  // namespace rtp_llm

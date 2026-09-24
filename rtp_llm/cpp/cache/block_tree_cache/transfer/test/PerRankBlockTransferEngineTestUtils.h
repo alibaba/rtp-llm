@@ -32,14 +32,15 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
                              std::vector<size_t>                  group_ids,
                              std::vector<DeviceBlockPoolPtr>      device_pools,
-                             std::shared_ptr<HostBlockPool>       host_pool = nullptr,
-                             BlockTreeDiskBlockPoolPtr            disk_pool = nullptr);
+                             std::shared_ptr<HostBlockPool>       host_pool  = nullptr,
+                             BlockTreeDiskBlockPoolPtr            disk_pool  = nullptr,
+                             bool                                 enable_crc = false);
 
 DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
                                       size_t                                        usable_count,
                                       const std::string&                            pool_name);
 
-std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count);
+std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_crc = false);
 
 class TempDirGuard {
 public:
@@ -57,7 +58,8 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
                                                      const std::string&           work_dir,
                                                      std::unique_ptr<DiskBlockIO> io = nullptr,
                                                      const std::string& pool_name    = "per_rank_transfer_engine_disk",
-                                                     bool               buffered_io  = true);
+                                                     bool               buffered_io  = true,
+                                                     bool               enable_crc   = false);
 
 class StatusDiskBlockIO: public DiskBlockIO {
 public:

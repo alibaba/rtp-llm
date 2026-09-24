@@ -138,3 +138,13 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
 )
+
+cc_test(
+    name = "per_rank_transfer_engine_crc_test",
+    exec_properties = {"gpu": "L20D_TEST"},
+    testonly = True,
+    srcs = ["PerRankBlockTransferEngineCrcTest.cc"],
+    copts = test_copts,
+    tags = ["exclusive-if-local"],
+    deps = test_deps + [":block_transfer_engine_test_utils"],
+)
