@@ -74,7 +74,17 @@ _test() {
 
 listen_signal
 do_start
+failed_checks=0
 while true; do
-    # TODO: check process alive
+    if ss -H -ltn 'sport = :7001' | grep -q .; then
+        failed_checks=0
+    else
+        failed_checks=$((failed_checks + 1))
+        echo "Java port 7001 is not listening ($failed_checks/3)" >&2
+        if [ "$failed_checks" -ge 3 ]; then
+            echo "Java port 7001 failed 3 consecutive checks, exiting" >&2
+            exit 1
+        fi
+    fi
     sleep 1
 done
