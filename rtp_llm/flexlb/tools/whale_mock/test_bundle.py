@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,14 @@ class BundleConfigurationTest(unittest.TestCase):
 
     def test_default_performance_remains_file_based(self):
         command, performance = self.launch_to_process_boundary({})
-        self.assertIsNone(performance)
+        self.assertEqual(performance["calibration_id"], "dsv4_l20_legacy_mock")
+        calibration = bundle.ROOT.parent / "online_eval/config/mock_calibrations/dsv4_l20.json"
+        self.assertEqual(performance["calibration_sha256"],
+                         hashlib.sha256(calibration.read_bytes()).hexdigest())
+        self.assertEqual(set(performance["decode"]),
+                         {"scale", "step_base_ms", "step_per_running_ms", "tokens_per_step"})
+        self.assertEqual(command[command.index("--performance") + 1],
+                         str(Path(command[command.index("--master-config") + 1]).parent / "performance.json"))
         self.assertEqual(command[command.index("--block-size") + 1], "1024")
         self.assertEqual(command[command.index("--auto-fetch") + 1], "true")
         self.assertEqual(command[command.index("--unique-engine-ips") + 1], "true")

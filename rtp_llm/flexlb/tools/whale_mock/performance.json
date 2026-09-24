@@ -6,9 +6,7 @@
     "scale": 1
   },
   "decode": {
-    "scale": 1,
-    "tokens_per_step": 2.6,
-    "step_base_ms": 19.5,
-    "step_per_running_ms": 0.175
-  }
+    "scale": 1
+  },
+  "calibration": "../online_eval/config/mock_calibrations/dsv4_l20.json"
 }

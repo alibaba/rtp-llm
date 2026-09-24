@@ -7,12 +7,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -82,12 +90,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -154,12 +170,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -226,12 +250,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -301,13 +333,21 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0,
         "max_waiting_batches": 16
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {
@@ -380,13 +420,21 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0,
         "max_waiting_batches": 16
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {
@@ -456,13 +504,21 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0,
         "max_waiting_batches": 16
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {
@@ -532,13 +588,21 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0,
         "max_waiting_batches": 16
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {
@@ -611,12 +675,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -686,12 +758,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -758,12 +838,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -830,12 +918,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -905,8 +1001,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -979,8 +1083,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -1053,8 +1165,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -1127,8 +1247,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -1201,8 +1329,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -1269,8 +1405,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -1337,8 +1481,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -1405,8 +1557,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -1473,8 +1633,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -1549,8 +1717,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -1625,8 +1801,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -1701,8 +1885,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -1777,8 +1969,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -1855,8 +2055,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -1930,8 +2138,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -2005,8 +2221,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -2080,8 +2304,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -2148,8 +2380,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -2216,8 +2456,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -2284,8 +2532,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -2352,8 +2608,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -2421,8 +2685,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -2490,8 +2762,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -2559,8 +2839,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -2628,8 +2916,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -2705,8 +3001,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -2782,8 +3086,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -2859,8 +3171,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -2936,8 +3256,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -3010,8 +3338,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -3084,8 +3420,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -3158,8 +3502,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -3232,8 +3584,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -3309,8 +3669,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -3383,8 +3751,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -3457,8 +3833,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -3531,8 +3915,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -3599,8 +3991,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -3667,8 +4067,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -3735,8 +4143,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -3803,8 +4219,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -3877,8 +4301,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -3951,8 +4383,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -4025,8 +4465,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -4099,8 +4547,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -4170,8 +4626,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -4241,8 +4705,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -4312,8 +4784,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -4383,8 +4863,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -4452,8 +4940,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -4521,8 +5017,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -4590,8 +5094,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -4659,8 +5171,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -4736,8 +5256,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -4813,8 +5341,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -4890,8 +5426,16 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
-      }
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},
@@ -4967,12 +5511,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "batch-window",
     "master_env": {},
@@ -5042,12 +5594,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-batch",
     "master_env": {},
@@ -5114,12 +5674,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "single-nonbatch",
     "master_env": {},
@@ -5186,12 +5754,20 @@
       "block_size": 1024,
       "sleep_scale": 1.0,
       "decode": {
-        "scale": 1.0
+        "scale": 1.0,
+        "step_base_ms": 19.5,
+        "step_per_running_ms": 0.175,
+        "tokens_per_step": 2.6
       },
       "prefill": {
         "fixed_ms": 100.0,
         "scale": 1.0
-      }
+      },
+      "calibration_id": "dsv4_l20_legacy_mock",
+      "calibration_model": "DSv4",
+      "calibration_hardware": "L20",
+      "calibration_status": "legacy_unverified",
+      "calibration_sha256": "5826c04b02d72ee9bfb5d9140a1885fb320f42182e7de30dad81c085445509bd"
     },
     "master_profile": "window-nonbatch",
     "master_env": {},

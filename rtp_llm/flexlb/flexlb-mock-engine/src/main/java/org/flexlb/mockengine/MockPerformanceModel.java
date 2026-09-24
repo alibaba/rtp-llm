@@ -10,14 +10,19 @@ import org.flexlb.engine.grpc.EngineRpcService;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final AtomicBoolean CALIBRATION_LOGGED = new AtomicBoolean();
 
     /**
      * Default cap on queued (not running) prefill batches per engine, JSON
@@ -69,32 +74,6 @@ final class MockPerformanceModel {
     static final int DEFAULT_MAX_BATCH_REQUESTS = 32;
 
     /**
-     * Default per-step decode latency intercept, JSON "decode.step_base_ms":
-     * the production DSv4 fit step_ms = 19.5 + 0.175 x running (task #68
-     * measurement, R^2 = 0.82 on the step caliber). Code default mirrors the
-     * prefill fallback pattern: absent config boots on the production fit,
-     * explicit JSON overrides it.
-     */
-    static final double DEFAULT_DECODE_STEP_BASE_MS = 19.5;
-
-    /**
-     * Default per-step decode latency slope per running stream, JSON
-     * "decode.step_per_running_ms" (production fit, task #68).
-     */
-    static final double DEFAULT_DECODE_STEP_PER_RUNNING_MS = 0.175;
-
-    /**
-     * Default MTP acceptance fold, JSON "decode.tokens_per_step": tokens
-     * produced per running stream per decode step. Production DSv4 accepts
-     * 2.54-2.88 tokens/step (slightly lower at full batch; task #68), so the
-     * per-step model advances each stream by this many tokens per step --
-     * per-token pricing overstated low-batch latency ~5.5x and full-batch
-     * ~2.8x because the fixed per_token_ms caliber ignored both MTP folding
-     * and batch amortisation. Must be > 0.
-     */
-    static final double DEFAULT_TOKENS_PER_STEP = 2.6;
-
-    /**
      * Default decode KV reserve-step window in TOKENS, JSON
      * "decode.reserve_step" (0 = disabled, the non-speculative production
      * default). Production reference (Zola forensics): the speculative
@@ -110,42 +89,45 @@ final class MockPerformanceModel {
      */
     static final int DEFAULT_DECODE_RESERVE_STEP = 0;
 
-    /**
-     * Production DSv4 prefill execution-time fit, verbatim from the
-     * FormulaEstimatorConfig.DEFAULT_EXPRESSION constant as it existed on
-     * the intake3 test line (commit 6980b3d508..91498cfa4f, where it briefly
-     * served as the production code default; the upstream RoutingConfig
-     * schema has since replaced FormulaEstimatorConfig with
-     * ExecutionTimeEstimatorConfig + EstimatorType and dropped that
-     * constant, so the fit is frozen here verbatim). The mock is a test
-     * process, not bound by the production default: it keeps the production
-     * fit as its own built-in fallback so a master config that omits the
-     * estimator still boots on realistic prefill durations. Explicit FORMULA
-     * expressions in the master config (harness.py and
-     * data/config/master_fixed_window.json inject this same expression)
-     * always win over this fallback.
-     */
-    private static final String DSV4_PREFILL_FIT_EXPRESSION =
-            "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + "
-            + "0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + "
-            + "0.0517623430739831 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0395308136993267 * "
-            + "sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens / 1024. * "
-            + "hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 "
-            + "* max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) "
-            + "+ 2.15779213792494 * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * "
-            + "max(sum(hitCacheTokens / 1024.) - 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) "
-            + "- 0.427317020061895 * max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * "
-            + "max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, "
-            + "0) + 2.30134977837751 * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - "
-            + "11.3438560779984 * max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + "
-            + "0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 * sum(max(computeTokens "
-            + "/ 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. - 2, 0)) + 0.305819761192588 * "
-            + "sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens / 1024. - 8, 0)) + "
-            + "0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize - 8, "
-            + "0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / "
-            + "1024.) - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 "
-            + "* max(batchSize - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * "
-            + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
+    private record Calibration(JsonNode data, String sha256) {}
+
+    /** The file is packaged from the same audited calibration read by online_eval. */
+    private static Calibration loadCalibration() throws IOException {
+        try (var stream = MockPerformanceModel.class.getClassLoader()
+                .getResourceAsStream("mock_calibrations/dsv4_l20.json")) {
+            if (stream == null) {
+                throw new IOException("missing packaged mock calibration: mock_calibrations/dsv4_l20.json");
+            }
+            byte[] bytes = stream.readAllBytes();
+            JsonNode data = MAPPER.readTree(bytes);
+            JsonNode decode = data.path("decode");
+            if (data.path("schema_version").asInt() != 1
+                    || !"dsv4_l20_legacy_mock".equals(data.path("id").asText())
+                    || !"legacy_unverified".equals(data.path("status").asText())
+                    || data.path("model").asText().isBlank()
+                    || data.path("hardware").asText().isBlank()
+                    || data.path("source").asText().isBlank()
+                    || data.path("prefill_expression").asText().isBlank()
+                    || !decode.path("step_base_ms").isNumber()
+                    || !decode.path("step_per_running_ms").isNumber()
+                    || !decode.path("tokens_per_step").isNumber()
+                    || !Double.isFinite(decode.path("step_base_ms").asDouble())
+                    || !Double.isFinite(decode.path("step_per_running_ms").asDouble())
+                    || !Double.isFinite(decode.path("tokens_per_step").asDouble())
+                    || decode.path("step_base_ms").asDouble() < 0
+                    || decode.path("step_per_running_ms").asDouble() < 0
+                    || decode.path("tokens_per_step").asDouble() <= 0) {
+                throw new IOException("invalid packaged mock calibration");
+            }
+            try {
+                String sha256 = HexFormat.of().formatHex(
+                        MessageDigest.getInstance("SHA-256").digest(bytes));
+                return new Calibration(data, sha256);
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("SHA-256 is unavailable", e);
+            }
+        }
+    }
 
     private volatile int blockSize;
     private MockEosModel eosModel;
@@ -185,14 +167,14 @@ final class MockPerformanceModel {
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
     //     declared channel, kept for suites that price steps themselves), or
     //   - the linear production fit stepBaseMs + stepPerRunningMs * running
-    //     (decodePoints empty; coefficients default to the production DSv4
-    //     fit, JSON-declared values override).
+    //     (decodePoints empty; coefficients come from the packaged calibration
+    //     unless the performance JSON declares them).
     // The runtime override (setOverrideDecodeStepMs) beats both.
     private final List<DecodePoint> decodePoints;
     private final double stepBaseMs;
     private final double stepPerRunningMs;
     // MTP acceptance fold: tokens advanced per running stream per step
-    // (JSON "decode.tokens_per_step", default DEFAULT_TOKENS_PER_STEP).
+    // (JSON "decode.tokens_per_step", default from packaged calibration).
     private final double tokensPerStep;
     // Decode KV reserve-step window in tokens (JSON "decode.reserve_step",
     // default DEFAULT_DECODE_RESERVE_STEP = 0 = disabled): see the constant's
@@ -344,7 +326,21 @@ final class MockPerformanceModel {
     }
 
     static MockPerformanceModel load(String performanceFile, String masterConfigFile) throws IOException {
+        Calibration calibration = loadCalibration();
+        JsonNode defaultDecode = calibration.data().path("decode");
         JsonNode performance = MAPPER.readTree(Path.of(performanceFile).toFile());
+        if (performance.has("calibration_sha256")
+                && !calibration.sha256().equals(performance.path("calibration_sha256").asText())) {
+            throw new IllegalStateException("Performance JSON '" + performanceFile
+                    + "': calibration_sha256 disagrees with packaged mock calibration");
+        }
+        if (CALIBRATION_LOGGED.compareAndSet(false, true)) {
+            System.out.printf("mock calibration available: id=%s model=%s hardware=%s status=%s sha256=%s%n",
+                    calibration.data().path("id").asText(),
+                    calibration.data().path("model").asText(),
+                    calibration.data().path("hardware").asText(),
+                    calibration.data().path("status").asText(), calibration.sha256());
+        }
         int blockSize = performance.path("block_size").asInt(1024);
         double sleepScale = performance.path("sleep_scale").asDouble(1.0);
         JsonNode prefill = performance.path("prefill");
@@ -364,7 +360,8 @@ final class MockPerformanceModel {
         int maxBatchRequests = prefill.path("max_batch_requests")
                 .asInt(DEFAULT_MAX_BATCH_REQUESTS);
 
-        String prefillExpression = loadPrefillExpression(masterConfigFile);
+        String prefillExpression = loadPrefillExpression(masterConfigFile,
+                calibration.data().path("prefill_expression").asText());
         PrefillTimeFormula formula = PrefillTimeFormula.parse(prefillExpression);
 
         JsonNode decode = performance.path("decode");
@@ -376,11 +373,8 @@ final class MockPerformanceModel {
         if (decode.has("per_token_ms")) {
             throw new IllegalStateException("Performance JSON '" + performanceFile
                     + "': decode.per_token_ms is removed — decode is now priced per STEP"
-                    + " (production fit step_base_ms=" + DEFAULT_DECODE_STEP_BASE_MS
-                    + " + step_per_running_ms=" + DEFAULT_DECODE_STEP_PER_RUNNING_MS
-                    + " × running, " + DEFAULT_TOKENS_PER_STEP + " tokens/step by default)."
-                    + " Remove per_token_ms to get the production-fit defaults, or declare"
-                    + " decode.step_ms_by_batch / decode.step_base_ms explicitly.");
+                    + ". Remove per_token_ms and declare decode step timing in the"
+                    + " performance file, or use the packaged mock calibration.");
         }
         boolean reportQueuedAsKvAllocated =
                 decode.path("report_queued_as_kv_allocated").asBoolean(false);
@@ -399,16 +393,14 @@ final class MockPerformanceModel {
                     + " are mutually exclusive — declare exactly one step-latency source.");
         }
         points.sort(Comparator.comparingInt(DecodePoint::batchSize));
-        // No decode latency declaration at all -> the linear production fit
-        // (same pattern as the prefill fallback: the code default IS the
-        // production DSv4 fit, so an absent decode section boots on real
-        // numbers instead of the former fail-fast). An explicit curve
-        // overrides the linear fit; explicit coefficients override its
-        // default intercept/slope.
-        double stepBaseMs = decode.path("step_base_ms").asDouble(DEFAULT_DECODE_STEP_BASE_MS);
+        // A missing decode declaration uses the identified calibration packed
+        // into this jar. Explicit curves or coefficients override it.
+        double stepBaseMs = decode.path("step_base_ms")
+                .asDouble(defaultDecode.path("step_base_ms").asDouble());
         double stepPerRunningMs = decode.path("step_per_running_ms")
-                .asDouble(DEFAULT_DECODE_STEP_PER_RUNNING_MS);
-        double tokensPerStep = decode.path("tokens_per_step").asDouble(DEFAULT_TOKENS_PER_STEP);
+                .asDouble(defaultDecode.path("step_per_running_ms").asDouble());
+        double tokensPerStep = decode.path("tokens_per_step")
+                .asDouble(defaultDecode.path("tokens_per_step").asDouble());
         if (tokensPerStep <= 0) {
             throw new IllegalStateException("Performance JSON '" + performanceFile
                     + "': decode.tokens_per_step must be > 0 (got " + tokensPerStep + ")");
@@ -489,17 +481,17 @@ final class MockPerformanceModel {
      * <ol>
      *   <li>an explicit FORMULA estimator in the master config's FLEXLB_CONFIG
      *       (blank expression = misconfiguration, fail fast);</li>
-     *   <li>otherwise {@link #DSV4_PREFILL_FIT_EXPRESSION} — the production
-     *       DSv4 fit the mock keeps as its own built-in default, and the
-     *       static approximation for a LEARNING estimator the mock cannot
+     *   <li>otherwise the packaged, legacy-unverified DSv4 mock calibration.
+     *       It is a static approximation for LEARNING, which this mock cannot
      *       replay.</li>
      * </ol>
-     * This keeps mock execution time and master routing predictions on the
-     * same expression; the legacy silent fixed_ms / 300 ms fallbacks are gone
+     * Explicit FORMULA keeps mock execution time and master predictions on
+     * the same expression; the legacy silent fixed_ms / 300 ms fallbacks are gone
      * (an explicit performance-JSON "prefill.fixed_ms" declaration still
      * wins over the formula — see prefillMs).
      */
-    private static String loadPrefillExpression(String masterConfigFile) throws IOException {
+    private static String loadPrefillExpression(String masterConfigFile,
+                                               String defaultExpression) throws IOException {
         JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
         JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
         for (JsonNode item : envs) {
@@ -515,14 +507,14 @@ final class MockPerformanceModel {
                         throw new IllegalStateException("Master config " + masterConfigFile
                                 + ": router.roles.prefill.executionTimeEstimator is FORMULA"
                                 + " with a blank expression — set the expression explicitly or"
-                                + " omit the estimator to use the FlexLB formula default");
+                                + " omit the estimator to use the packaged mock calibration");
                     }
                     return expression;
                 }
-                break;  // LEARNING estimator: fall through to the production-fit default
+                break;  // LEARNING uses the file-backed mock approximation.
             }
         }
-        return DSV4_PREFILL_FIT_EXPRESSION;
+        return defaultExpression;
     }
 
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
@@ -602,7 +594,7 @@ final class MockPerformanceModel {
             latency = configuredFixedPrefillMs;
         } else {
             // The only prefill source: the expression resolved in
-            // loadPrefillExpression (explicit FORMULA or the production fit).
+            // loadPrefillExpression (explicit FORMULA or the packaged calibration).
             double[] batchVars = new double[10];
             batchVars[0] = requests.size();
             List<double[]> itemVars = new ArrayList<>(requests.size());

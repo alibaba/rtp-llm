@@ -62,7 +62,7 @@ API_JAR = Path(os.environ.get(
 # of truth for every FLEXLB_CONFIG document this repo produces: the four
 # functional profile axes, the stress-na130 render profile (the retired
 # data/config/master_fixed_window.json), the strict schema-v2 builders
-# and the ConfigOverride layering.  It lives on sys.path in every
+# and the ConfigOverride layering. The measured fit itself is file-backed.  It lives on sys.path in every
 # supported entrypoint (scripts/commands/list_cases.py, tests,
 # and runtime.stress) — the insert below makes the bare
 # import robust regardless of how runtime.harness itself was imported.
@@ -143,24 +143,12 @@ from monitoring.metrics import parse_prometheus_samples
 
 
 def default_perf() -> dict:
-    """Standard smoke perf config (run_matrix_smoke.sh / run_cancel_smoke.sh).
+    """Return the synthetic smoke preset with its named mock calibration.
 
-    Prefill duration is deliberately NOT configured here: the mock engine
-    resolves it from the master-config FORMULA expression (or the
-    production-fit code default when the estimator is omitted), so mock
-    execution time and master routing predictions always share one formula.
-    The legacy silent ``prefill.fixed_ms`` fallback was removed.
-
-    Decode timing is likewise NOT configured: the mock prices
-    decode per STEP with the production DSv4 fit — step_ms = 19.5 +
-    0.175 x running, 2.6 tokens/step (MTP acceptance fold) — as the code
-    default, aligning throughput/queueing economics with production
-    (low-batch ~515 tok/s at running=4, full-batch ~7900 tok/s at 128).
-    The former explicit ``step_ms_by_batch`` curve approximated the same
-    step latencies but without the MTP fold, overstating decode duration
-    ~2.6x; it was removed so all flexlb_test_framework cases run on the production
-    caliber. Suites that need custom step pricing still declare
-    ``step_ms_by_batch`` / ``step_base_ms`` explicitly.
+    The preset loads the legacy-unverified DSv4 test scale from a file. The
+    materialized decode coefficients are saved with the run performance JSON;
+    master routing receives the same file's prefill expression through
+    flexlb_cfg unless the scenario declares a model-specific override.
     """
     from runtime.perf_presets import load_preset
     return load_preset("default")[0]
@@ -931,7 +919,7 @@ class EnvSpec:
 # ---------------------------------------------------------------------------
 #
 # The profile axes (PROFILES / PROFILE_SPECS / PROFILE_CAPS), the DSv4
-# prefill fit (DSV4_PREFILL_EXPRESSION), the strict schema-v2 builders
+# prefill fit loaded from the mock calibration, the strict schema-v2 builders
 # (_build_preemption_cfg / _build_ordering_cfg / build_flexlb_config) and
 # the render layer (render_env / render_process_config / ConfigOverride)
 # moved to flexlb_cfg.py — the single source of truth for every

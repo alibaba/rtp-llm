@@ -1,9 +1,11 @@
 {
   "default": {
-    "performance": "data/performance/synthetic_baseline.json"
+    "performance": "data/performance/synthetic_baseline.json",
+    "calibration": "mock_calibrations/dsv4_l20.json"
   },
   "fault_env": {
-    "performance": "data/performance/synthetic_prefill_100ms.json"
+    "performance": "data/performance/synthetic_prefill_100ms.json",
+    "calibration": "mock_calibrations/dsv4_l20.json"
   },
   "glm_5_3_l20d": {
     "performance": "data/performance/glm_5_3_l20d.json",

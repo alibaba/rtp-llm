@@ -51,6 +51,12 @@
     </profiles>
 
     <build>
+        <resources>
+            <resource>
+                <directory>../tools/online_eval/config</directory>
+                <includes><include>mock_calibrations/dsv4_l20.json</include></includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

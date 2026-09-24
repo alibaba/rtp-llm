@@ -1,36 +1,39 @@
 """Profile data for FLEXLB_CONFIG rendering.
 
-This module owns workload-specific defaults and the stress-na130 document.
-The DSv4 fit below is the sole runtime definition; both profile families
-refer to it. flexlb_cfg.py owns schema validation and rendering.
+This module owns workload policy defaults and the stress-na130 document.
+The DSv4 test calibration lives in config/mock_calibrations/dsv4_l20.json;
+flexlb_cfg.py owns schema validation and rendering.
 """
 
-# Single authoritative runtime definition of the DSv4 prefill fit.
-DSV4_PREFILL_EXPRESSION = (
-    "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 *"
-    " batchSize + 0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 *"
-    " sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens / 1024. * computeTokens /"
-    " 1024.) + 0.0395308136993267 * sum(hitCacheTokens / 1024. * computeTokens / 1024.) +"
-    " 0.0104363634681015 * sum(hitCacheTokens / 1024. * hitCacheTokens / 1024.) + 0.575522710053703 *"
-    " max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 * max(sum(computeTokens / 1024.) -"
-    " 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) + 2.15779213792494 *"
-    " max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * max(sum(hitCacheTokens / 1024.) -"
-    " 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) - 0.427317020061895 *"
-    " max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * max(sum(hitCacheTokens / 1024.)"
-    " - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, 0) + 2.30134977837751 *"
-    " max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - 11.3438560779984 *"
-    " max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) +"
-    " 0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 *"
-    " sum(max(computeTokens / 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. -"
-    " 2, 0)) + 0.305819761192588 * sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 *"
-    " sum(max(hitCacheTokens / 1024. - 8, 0)) + 0.191310200712013 * sum(max(hitCacheTokens / 1024. -"
-    " 12, 0)) + 0.0130251644478961 * max(batchSize - 8, 0) * sum(hitCacheTokens / 1024.) +"
-    " 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / 1024.) - 0.0299132587297009"
-    " * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 * max(batchSize -"
-    " 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) *"
-    " sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens /"
-    " 1024.))))"
-)
+import json
+import math
+from pathlib import Path
+
+_CALIBRATION_PATH = Path(__file__).resolve().parent / "config/mock_calibrations/dsv4_l20.json"
+
+
+def load_mock_calibration(path=_CALIBRATION_PATH):
+    """Read the auditable test calibration; no measured values live in code."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if (data.get("schema_version") != 1 or data.get("id") != "dsv4_l20_legacy_mock"
+            or data.get("status") != "legacy_unverified"
+            or not isinstance(data.get("model"), str) or not data["model"].strip()
+            or not isinstance(data.get("hardware"), str) or not data["hardware"].strip()
+            or not isinstance(data.get("source"), str) or not data["source"].strip()
+            or not isinstance(data.get("prefill_expression"), str)
+            or not data["prefill_expression"].strip()):
+        raise ValueError(f"invalid mock calibration: {path}")
+    decode = data.get("decode")
+    if (not isinstance(decode, dict)
+            or set(decode) != {"step_base_ms", "step_per_running_ms", "tokens_per_step"}
+            or any(type(value) not in (int, float) or not math.isfinite(value)
+                   or value < 0 for value in decode.values())
+            or decode["tokens_per_step"] == 0):
+        raise ValueError(f"invalid mock decode calibration: {path}")
+    return data
+
+
+DSV4_PREFILL_EXPRESSION = load_mock_calibration()["prefill_expression"]
 
 # ===========================================================================
 # Profiles

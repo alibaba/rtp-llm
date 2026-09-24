@@ -18,6 +18,36 @@ def preset_names():
     return tuple(_registry())
 
 
+def resolve_performance_calibration(performance, source_path):
+    """Materialize a named test calibration without altering capture records."""
+    reference = performance.get("calibration")
+    if reference is None:
+        return performance
+    if not isinstance(reference, str) or not reference or Path(reference).is_absolute():
+        raise ValueError("performance calibration must be a relative file path")
+    target = (Path(source_path).resolve().parent / reference).resolve()
+    calibration_root = (ROOT / "config/mock_calibrations").resolve()
+    if target.parent != calibration_root or not target.is_file():
+        raise ValueError(f"missing registered mock calibration: {target}")
+    from flexlb_profile_data import load_mock_calibration
+
+    calibration = load_mock_calibration(target)
+    decode = performance.setdefault("decode", {})
+    if not isinstance(decode, dict):
+        raise ValueError("performance.decode must be a mapping")
+    for key, value in calibration["decode"].items():
+        if key in decode and decode[key] != value:
+            raise ValueError(f"performance.decode.{key} disagrees with {target}")
+        decode[key] = value
+    performance.pop("calibration")
+    performance["calibration_id"] = calibration["id"]
+    performance["calibration_model"] = calibration["model"]
+    performance["calibration_hardware"] = calibration["hardware"]
+    performance["calibration_status"] = calibration["status"]
+    performance["calibration_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+    return performance
+
+
 def load_performance_bundle(path):
     """Validate one Engine/Master record, then project its paired components."""
     document = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -48,6 +78,7 @@ def load_performance_bundle(path):
         if provenance.get("status") not in {"verified", "legacy_unverified"} or not provenance.get("source"):
             raise ValueError("paired master requires provenance status and source")
         ConfigOverride(**overrides)
+    resolve_performance_calibration(document, path)
     return document, capture, master
 
 
@@ -82,7 +113,11 @@ def load_preset(name):
     if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
         raise ValueError(f"perf_preset {name!r} has missing performance file: {path}")
     performance, capture, master = load_performance_bundle(path)
-    runtime = {key: value for key, value in entry.items() if key != "performance"}
+    if "calibration" in entry:
+        performance["calibration"] = entry["calibration"]
+        resolve_performance_calibration(performance, INDEX)
+    runtime = {key: value for key, value in entry.items()
+               if key not in {"performance", "calibration"}}
     if set(runtime) - {"mock_heap", "mock_extra_args"}:
         raise ValueError(f"perf_preset {name!r} has unknown runtime options: {set(runtime)}")
     if "mock_heap" in runtime and not isinstance(runtime["mock_heap"], str):
