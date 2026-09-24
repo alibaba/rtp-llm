@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -17,6 +19,26 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+namespace {
+
+bool shouldUseCudaMallocHostMemoryCache() {
+    const char* value = std::getenv("RTP_LLM_MEMORY_CACHE_USE_CUDA_MALLOC_HOST");
+    if (value == nullptr) {
+        return true;
+    }
+    const std::string flag(value);
+    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+std::shared_ptr<BlockPool> createMemoryCacheBlockPool(const BlockPoolConfig& pool_config) {
+    return std::make_shared<BlockPool>(pool_config,
+                                       AllocationType::HOST,
+                                       /*use_pinned_cpu_backing=*/false,
+                                       /*use_cuda_malloc_backing=*/shouldUseCudaMallocHostMemoryCache());
+}
+
+}  // namespace
+
 // When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
 // This legacy SM-copy path is only used for non typed layer-region layouts.
 static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const CacheConfig& cfg, MultiCopyParams& out) {
@@ -304,7 +326,7 @@ void KVCacheMemoryConnector::initBlockPool() {
         auto make_pool = [](size_t block_size, size_t block_num) -> std::shared_ptr<BlockPool> {
             const auto pool_config = BlockPoolConfigHelper::createConfig(
                 /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), TYPE_INT8);
-            auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+            auto pool = createMemoryCacheBlockPool(pool_config);
             RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block size: %zu", block_size);
             return pool;
         };
@@ -371,7 +393,7 @@ void KVCacheMemoryConnector::initBlockPool() {
         RTP_LLM_LOG_INFO("create memory block pool, block num: %zu, block size: %zu", block_num, block_size);
         const auto pool_config = BlockPoolConfigHelper::createConfig(
             /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), rtp_llm::TYPE_INT8);
-        auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+        auto pool = createMemoryCacheBlockPool(pool_config);
         RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block size: %zu", block_size);
         return pool;
     };
@@ -2979,7 +3001,7 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_
                      block_size);
     const auto pool_config = BlockPoolConfigHelper::createConfig(
         /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), rtp_llm::TYPE_INT8);
-    auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+    auto pool = createMemoryCacheBlockPool(pool_config);
     RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block size: %zu", block_size);
     return pool;
 }

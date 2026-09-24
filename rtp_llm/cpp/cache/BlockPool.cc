@@ -84,7 +84,13 @@ const char* memoryTypeName(MemoryType memory_type) {
 const char*
 requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing, bool use_cuda_malloc_backing) {
     if (allocation_type == AllocationType::HOST) {
-        return shouldPinHostBlockPool() ? "CPU_PINNED_OR_CPU_FALLBACK" : "CPU";
+        if (!shouldPinHostBlockPool()) {
+            return "CPU";
+        }
+        if (use_cuda_malloc_backing) {
+            return "CPU_CUDA_MALLOC_HOST";
+        }
+        return "CPU_PINNED_OR_CPU_FALLBACK";
     }
     if (use_cuda_malloc_backing) {
         return "GPU_CUDA_MALLOC";
@@ -254,30 +260,38 @@ void BlockPool::initializeCacheBuffer() {
                                 external_device_backing_.numel());
         cache_aligned_buffer_ = external_device_backing_;
     } else if (allocation_type_ == AllocationType::HOST) {
-        auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-        if (shouldPinHostBlockPool()) {
-            const auto pin_start = std::chrono::steady_clock::now();
-            try {
-                cache_aligned_buffer_ = cpu_buffer.pin_memory();
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING(
-                    "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
+#if USING_CUDA
+        if (shouldPinHostBlockPool() && use_cuda_malloc_backing_) {
+            initializeCudaMallocHostBuffer();
+        } else
+#endif
+        {
+            auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+            if (shouldPinHostBlockPool()) {
+                const auto pin_start = std::chrono::steady_clock::now();
+                try {
+                    cache_aligned_buffer_ = cpu_buffer.pin_memory();
+                } catch (const std::exception& e) {
+                    RTP_LLM_LOG_WARNING(
+                        "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
+                        config_.total_size_bytes,
+                        e.what());
+                    cache_aligned_buffer_ = std::move(cpu_buffer);
+                }
+                const double pin_seconds =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - pin_start).count();
+                RTP_LLM_LOG_INFO(
+                    "pinned memory allocation took %.3fs, pool_name=%s, total_size=%zu bytes, is_pinned=%d",
+                    pin_seconds,
+                    config_.pool_name.c_str(),
                     config_.total_size_bytes,
-                    e.what());
+                    cache_aligned_buffer_.is_pinned());
+            } else {
+                RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
+                                 config_.total_size_bytes);
                 cache_aligned_buffer_ = std::move(cpu_buffer);
             }
-            const double pin_seconds =
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - pin_start).count();
-            RTP_LLM_LOG_INFO("pinned memory allocation took %.3fs, pool_name=%s, total_size=%zu bytes, is_pinned=%d",
-                             pin_seconds,
-                             config_.pool_name.c_str(),
-                             config_.total_size_bytes,
-                             cache_aligned_buffer_.is_pinned());
-        } else {
-            RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
-                             config_.total_size_bytes);
-            cache_aligned_buffer_ = std::move(cpu_buffer);
         }
         RTP_LLM_LOG_INFO("mark host block pool dont dump, ptr=%p, size=%zu",
                          cache_aligned_buffer_.data_ptr(),
@@ -293,7 +307,7 @@ void BlockPool::initializeCacheBuffer() {
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
     const bool is_cuda   = cache_aligned_buffer_.is_cuda();
-    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    const bool is_pinned = where() == MemoryType::MEMORY_CPU_PINNED;
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
@@ -309,6 +323,44 @@ void BlockPool::initializeCacheBuffer() {
                      static_cast<double>(config_.total_size_bytes) / kBytesPerMB,
                      config_.block_num,
                      config_.memory_layouts.size());
+}
+
+void BlockPool::initializeCudaMallocHostBuffer() {
+#if USING_CUDA
+    RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::HOST,
+                            "cudaMallocHost block pool backing requires HOST allocation");
+    RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes > 0, "cudaMallocHost block pool total_size_bytes must be > 0");
+
+    const auto allocation_start = std::chrono::steady_clock::now();
+    void*      ptr              = nullptr;
+    const auto err              = cudaMallocHost(&ptr, config_.total_size_bytes);
+    RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
+                            "cudaMallocHost block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
+                            config_.pool_name.c_str(),
+                            config_.total_size_bytes,
+                            cudaGetErrorString(err));
+
+    auto deleter = [](void* p) {
+        if (p != nullptr) {
+            (void)cudaFreeHost(p);
+        }
+    };
+    cache_aligned_buffer_ = torch::from_blob(ptr,
+                                             {static_cast<int64_t>(config_.total_size_bytes)},
+                                             std::move(deleter),
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+    is_cuda_malloc_host_backing_ = true;
+    const double allocation_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - allocation_start).count();
+    RTP_LLM_LOG_INFO("cudaMallocHost block pool backing allocated in %.3fs, pool_name=%s, ptr=%p, "
+                     "total_size=%zu bytes",
+                     allocation_seconds,
+                     config_.pool_name.c_str(),
+                     ptr,
+                     config_.total_size_bytes);
+#else
+    RTP_LLM_FAIL("cudaMallocHost block pool backing requested but this binary was not built with CUDA");
+#endif
 }
 
 void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
@@ -569,15 +621,20 @@ void BlockPool::releaseHostBuffer() {
     global_layer_kv_scale_tensors_.clear();
     global_layer_to_local_.clear();
     block_cache_          = std::make_shared<BlockCache>();
-    cache_base_ptr_       = nullptr;
-    cache_aligned_buffer_ = torch::Tensor();
-    // The buffer was allocated via torch's CachingHostAllocator (pin_memory()); dropping
-    // the tensor only returns the block to torch's pinned-memory *cache*, NOT to the OS.
-    // Flush that cache so the pinned pages are actually cudaHostFree'd and RAM is reclaimed
-    // (the whole point of discarding the memory cache on sleep). Only frees unused blocks.
+    cache_base_ptr_ = nullptr;
+#if USING_CUDA
+    const bool was_cuda_malloc_host_backing = is_cuda_malloc_host_backing_;
+#endif
+    cache_aligned_buffer_        = torch::Tensor();
+    is_cuda_malloc_host_backing_ = false;
+    // cudaMallocHost memory is returned directly by the tensor deleter. A buffer allocated
+    // through torch's CachingHostAllocator is only returned to its pinned-memory cache, so
+    // flush that cache to reclaim RAM on sleep. Only unused blocks are freed.
 #if USING_CUDA
     // This entry point is also available in the CUDA 12 build's PyTorch 2.6.
-    at::cuda::CachingHostAllocator_emptyCache();
+    if (!was_cuda_malloc_host_backing) {
+        at::cuda::CachingHostAllocator_emptyCache();
+    }
 #endif
     host_released_ = true;
     const double release_seconds =
@@ -969,7 +1026,8 @@ MemoryType BlockPool::where() const {
     if (cache_aligned_buffer_.is_cuda()) {
         return MemoryType::MEMORY_GPU;
     }
-    return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
+    return is_cuda_malloc_host_backing_ || cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED
+                                                                             : MemoryType::MEMORY_CPU;
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {

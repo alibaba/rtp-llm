@@ -74,7 +74,8 @@ public:
 
     // Sleep/wake_up: host memory-cache tier discard / reallocate.
     // Only valid for AllocationType::HOST pools (the pinned host KV offload tier).
-    // releaseHostBuffer() drops the pinned host buffer (torch::empty(...).pin_memory())
+    // releaseHostBuffer() drops the pinned host buffer (cudaMallocHost or
+    // torch::empty(...).pin_memory())
     // and all tensors that view into it, returning the ~memory_cache_size_mb of pinned
     // RAM to the OS on sleep; it also empties free_block_ids_ so malloc() cannot hand
     // out blocks while released. reallocateHostBuffer() re-allocates the buffer and
@@ -116,6 +117,7 @@ private:
     void validateConfig() const;
     void initializeCacheBuffer();
     void initializePinnedCpuBuffer(const char* log_context);
+    void initializeCudaMallocHostBuffer();
     void initializeCudaMallocBuffer();
     void initializeLayerMappings();
     void initializeLayoutStrategies();
@@ -163,6 +165,7 @@ private:
     AllocationType allocation_type_;
     bool           use_pinned_cpu_backing_;
     bool           use_cuda_malloc_backing_;
+    bool           is_cuda_malloc_host_backing_ = false;
     torch::Tensor  external_device_backing_;
 
     BlockCachePtr block_cache_;

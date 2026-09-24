@@ -13,6 +13,10 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
+
 namespace rtp_llm {
 namespace test {
 
@@ -92,6 +96,30 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     EXPECT_TRUE(init_result);
 
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
+}
+
+TEST_F(BlockPoolTest, CudaMallocHostBacking) {
+#if USING_CUDA
+    auto config = createTestConfig();
+    block_pool_ = std::make_shared<BlockPool>(config,
+                                              AllocationType::HOST,
+                                              /*use_pinned_cpu_backing=*/false,
+                                              /*use_cuda_malloc_backing=*/true);
+    ASSERT_TRUE(block_pool_->init());
+    ASSERT_NE(block_pool_->getBaseAddress(), nullptr);
+    EXPECT_EQ(block_pool_->where(), MemoryType::MEMORY_CPU_PINNED);
+
+    unsigned int flags = 0;
+    EXPECT_EQ(cudaHostGetFlags(&flags, block_pool_->getBaseAddress()), cudaSuccess);
+
+    block_pool_->releaseHostBuffer();
+    block_pool_->reallocateHostBuffer();
+    ASSERT_NE(block_pool_->getBaseAddress(), nullptr);
+    EXPECT_EQ(block_pool_->where(), MemoryType::MEMORY_CPU_PINNED);
+    EXPECT_EQ(cudaHostGetFlags(&flags, block_pool_->getBaseAddress()), cudaSuccess);
+#else
+    GTEST_SKIP() << "CUDA is required for cudaMallocHost backing";
+#endif
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
