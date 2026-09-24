@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
@@ -82,6 +83,41 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                     compress_ratio=4,
                     token_budget=4,
                 )
+
+    @skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_fused_required_block_validation_handles_strides_and_fallback(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa_validation_triton import (
+            is_supported,
+            required_blocks_are_valid,
+        )
+
+        table = torch.tensor(
+            [[1, 2, 3], [1, 2, 3]], dtype=torch.int32, device="cuda"
+        ).T
+        required = torch.tensor(
+            [2, 0, 2, 0, 2, 0], dtype=torch.int32, device="cuda"
+        )[::2]
+        self.assertTrue(is_supported(table, required))
+        self.assertTrue(required_blocks_are_valid(table, required, pool_blocks=4))
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_CACHE_VALIDATE": "1"}):
+            _validate_required_blocks(
+                table, required, pool_blocks=4, tag=INDEXER_KV_TAG
+            )
+            table[1, 1] = 4
+            self.assertFalse(required_blocks_are_valid(table, required, pool_blocks=4))
+            with self.assertRaisesRegex(RuntimeError, "out-of-range"):
+                _validate_required_blocks(
+                    table, required, pool_blocks=4, tag=INDEXER_KV_TAG
+                )
+
+            wide_table = torch.ones(1, 4097, dtype=torch.int32, device="cuda")
+            self.assertFalse(is_supported(wide_table, required[:1]))
+            _validate_required_blocks(
+                wide_table,
+                required[:1],
+                pool_blocks=4,
+                tag=INDEXER_KV_TAG,
+            )
 
     def setUp(self):
         torch.manual_seed(17)
