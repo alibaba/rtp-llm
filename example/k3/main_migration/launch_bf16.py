@@ -1,4 +1,4 @@
-"""Launch one full-model BF16 PD endpoint after local preflight.
+"""Launch one BF16 PD endpoint; four-layer debugging requires an explicit flag.
 
 Run as luohaocheng.lhc in a verified, same-image RDMA runtime container after
 a fresh same-cluster fleet selection. Compile independently inside lhc_GPU.
@@ -23,8 +23,16 @@ def launch_config(args):
     draft = Path(args.draft_checkpoint).resolve(strict=True)
     config = json.loads((checkpoint / "config.json").read_text())
     text = config.get("text_config", config)
-    if text.get("num_hidden_layers") != 93:
-        raise ValueError("Formal BF16 profile requires all 93 target layers")
+    debug_four_layer = getattr(args, "debug_four_layer", False)
+    expected_layers = 4 if debug_four_layer else 93
+    if text.get("num_hidden_layers") != expected_layers:
+        raise ValueError(f"Selected BF16 profile requires {expected_layers} target layers")
+    if debug_four_layer:
+        linear = text.get("linear_attn_config", {})
+        if linear.get("kda_layers") != [1, 2, 3] or linear.get("full_attn_layers") != [4]:
+            raise ValueError("Four-layer debug profile requires the original first three KDA layers and fourth MLA layer")
+        if text.get("attn_res_block_size") != 12:
+            raise ValueError("Four-layer debug profile must preserve the original AttnRes block size")
     for port in (args.start_port, args.peer_port):
         if port < 1024 or port + 8 * 9 > 65535:
             raise ValueError("Invalid eight-rank service port range")
@@ -218,6 +226,8 @@ def require_gpu_capacity(run, allow_shared_accuracy=False, min_free_gib=250):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
+    parser.add_argument("--debug-four-layer", action="store_true",
+                        help="Use a four-layer diagnostic checkpoint; never counts as full-model acceptance")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--draft-checkpoint", required=True)
     parser.add_argument("--peer-ip", required=True)
@@ -302,7 +312,9 @@ def main():
     (run / "launch.json").write_text(
         json.dumps(
             {
-                "profile": "bf16-full93-tp8-ep8-sp-mtp3-rdma",
+                "profile": ("bf16-debug4-tp8-ep8-sp-mtp3-rdma" if args.debug_four_layer
+                            else "bf16-full93-tp8-ep8-sp-mtp3-rdma"),
+                "full_model_acceptance_eligible": not args.debug_four_layer,
                 "environment": environment,
                 "command": command,
                 "pid": os.getpid(),

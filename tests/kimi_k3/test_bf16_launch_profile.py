@@ -139,3 +139,36 @@ def test_explicit_bond_hcas_exclude_other_visible_devices():
             launcher.validate_rdma_hcas(invalid, devices, links)
     with pytest.raises(ValueError):
         launcher.validate_rdma_hcas('mlx5_bond_0', devices, links.replace('ACTIVE', 'DOWN'))
+
+
+@pytest.mark.parametrize("role", ["PREFILL", "DECODE"])
+def test_explicit_four_layer_keeps_execution_contract(tmp_path, role):
+    args = arguments(tmp_path, role, layers=4)
+    args.debug_four_layer = True
+    path = Path(args.checkpoint) / "config.json"
+    config = {"num_hidden_layers": 4, "attn_res_block_size": 12,
+              "linear_attn_config": {"kda_layers": [1, 2, 3], "full_attn_layers": [4]}}
+    path.write_text(json.dumps(config))
+    environment, command = launcher.launch_config(args)
+    options = dict(zip(command[1::2], command[2::2]))
+    assert environment["GEN_NUM_PER_CIRCLE"] == "3"
+    assert environment["ACT_TYPE"] == environment["SP_ACT_TYPE"] == "BF16"
+    for key in ("tp_size", "ep_size", "ffn_sp_size"):
+        assert options["--" + key] == "8"
+    assert options["--enable_cuda_graph"] == str(int(role == "DECODE"))
+    assert options["--cache_store_rdma_mode"] == "1"
+    config["attn_res_block_size"] = 4
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="AttnRes"):
+        launcher.launch_config(args)
+    config["attn_res_block_size"] = 12
+    config["linear_attn_config"]["full_attn_layers"] = []
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="MLA"):
+        launcher.launch_config(args)
+
+def test_four_layer_flag_rejects_full_checkpoint(tmp_path):
+    args = arguments(tmp_path)
+    args.debug_four_layer = True
+    with pytest.raises(ValueError, match="4 target layers"):
+        launcher.launch_config(args)
