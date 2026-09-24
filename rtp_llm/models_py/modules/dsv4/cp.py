@@ -131,11 +131,22 @@ class CPContext:
     # Approximate decoder replay only: SWA may not read rows before this
     # fresh-input offset. Global KV visibility retains absolute positions.
     swa_replay_start: Optional[int] = None
+    # B>1 replay offsets relative to each request's original fresh-input domain.
+    swa_replay_starts_host: Optional[Tuple[int, ...]] = None
     # CSA, HCA, and the nested indexer consume identical full-sequence
     # positions during one forward. Cache the tensors after the first build.
     _full_prefill_positions_cache: Optional[
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
     ] = field(default=None, init=False, repr=False, compare=False)
+
+
+def cp_swa_replay_starts(cp_ctx) -> Optional[Tuple[int, ...]]:
+    """Return per-request fresh offsets, including legacy single-request replay."""
+    starts = getattr(cp_ctx, "swa_replay_starts_host", None)
+    if starts is not None:
+        return starts
+    start = getattr(cp_ctx, "swa_replay_start", None)
+    return (start,) if start is not None else None
 
 
 @dataclass
@@ -853,19 +864,32 @@ def cp_all_gather_full_varlen(
     treats this as a single virtual sequence (matching the existing
     non-CP B>1 behaviour documented in
     ``prefill/forward.py::forward_layers``).
-    ``replay_only`` keeps the bounded decoder's canonical 128-row KV domain
-    compact. Its caller must slice write slots and retain absolute positions.
+    ``replay_only`` keeps each request's final min(length, 128) KV rows compact.
+    Its caller must select original write slots and retain absolute positions.
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
-    if replay_only and (
-        cp_ctx.swa_replay_start is None
-        or cp_ctx.gather_restore_positions is None
-        or cp_ctx.seq_len_full - cp_ctx.swa_replay_start != 128
-        or cp_ctx.unpad_restore.numel() != 128
-    ):
-        raise ValueError("compact KV gather requires a complete bounded replay domain")
+    if replay_only:
+        starts = cp_swa_replay_starts(cp_ctx)
+        lengths = getattr(cp_ctx, "input_lengths_global_host", None)
+        if lengths is None and starts is not None and len(starts) == 1:
+            lengths = (cp_ctx.seq_len_full,)
+        positions = getattr(cp_ctx, "gather_restore_positions", None)
+        if (
+            starts is None
+            or lengths is None
+            or len(starts) != len(lengths)
+            or not lengths
+            or sum(lengths) != cp_ctx.seq_len_full
+            or any(n <= 0 or s != max(0, n - 128) for n, s in zip(lengths, starts))
+            or positions is None
+            or positions.numel() != sum(min(n, 128) for n in lengths)
+            or cp_ctx.unpad_restore.numel() != positions.numel()
+        ):
+            raise ValueError(
+                "compact KV gather requires a complete bounded replay domain"
+            )
     with record_function_range(f"{profile_name}.launch"):
         gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):

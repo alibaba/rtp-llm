@@ -111,6 +111,7 @@ def _prefill_x_group_plan(x, cp_ctx):
         or len(chunks) != len(lengths)
         or getattr(cp_ctx, "gather_restore_positions", None) is not None
         or getattr(cp_ctx, "swa_replay_start", None) is not None
+        or getattr(cp_ctx, "swa_replay_starts_host", None) is not None
         or x.ndim != 2
         or x.dtype != torch.bfloat16
         or not x.is_contiguous()
@@ -752,19 +753,36 @@ class AttentionV41FP8(AttentionFP8):
             )
 
     def _prefill_write_swa_fp8_paged(self, common, kv_full, *, fresh_out=None):
+        from rtp_llm.models_py.modules.dsv4.cp import cp_swa_replay_starts
+
         meta = common.swa_meta
         if meta is None or meta.slot_mapping is None:
             return
         kv = kv_full.reshape(-1, self.head_dim).to(torch.bfloat16)
         slots, compaction = meta.slot_mapping, meta.slot_compaction
         replay_start = getattr(common.cp_ctx, "swa_replay_start", None)
-        if replay_start is not None:
+        if (
+            replay_start is not None
+            and getattr(common.cp_ctx, "swa_replay_starts_host", None) is None
+        ):
             if kv.shape[0] != self.window_size:
-                raise ValueError("bounded decoder KV must contain exactly 128 rows")
+                raise ValueError(
+                    "bounded decoder KV must contain exactly 128 rows; "
+                    "selected replay rows mismatch"
+                )
             slots = slots[replay_start:]
             if compaction is not None:
                 compaction = compaction._replace(
                     compact_slots=compaction.compact_slots[replay_start:]
+                )
+        elif cp_swa_replay_starts(common.cp_ctx) is not None:
+            positions = common.cp_ctx.gather_restore_positions
+            if positions is None or kv.shape[0] != positions.numel():
+                raise ValueError("bounded decoder KV must match selected replay rows")
+            slots = slots.index_select(0, positions)
+            if compaction is not None:
+                compaction = compaction._replace(
+                    compact_slots=compaction.compact_slots.index_select(0, positions)
                 )
         if self._swa_cp_byte_sliced():
             raw = self._pool_raw_u8(SWA_KV)
@@ -1992,6 +2010,7 @@ class AttentionV41FP8(AttentionFP8):
             or not common.any_cont
             or not common.cp_on
             or getattr(common.cp_ctx, "swa_replay_start", None) is not None
+            or getattr(common.cp_ctx, "swa_replay_starts_host", None) is not None
             or meta is None
             or meta.slot_mapping is None
             or meta.cache_slot_mapping is None
@@ -2012,6 +2031,8 @@ class AttentionV41FP8(AttentionFP8):
 
     def _swa_prefill_workspace(self, qkv, common, *, fuse_cache_write=False):
         """Return BF16 [request, prefix tail + new tokens] for sparse prefill."""
+        from rtp_llm.models_py.modules.dsv4.cp import cp_swa_replay_starts
+
         lengths_host = self._host_prefill_lengths(common)
         if self.swa_bounded_replay:
             prefixes = self._host_prefill_prefixes(common)
@@ -2021,11 +2042,24 @@ class AttentionV41FP8(AttentionFP8):
                 raise ValueError(
                     "bounded replay cache reuse must leave 128 fresh tokens"
                 )
-            replay_start = getattr(common.cp_ctx, "swa_replay_start", None)
-            if replay_start is not None:
-                if qkv.kv_full.shape[0] != self.window_size:
-                    raise ValueError("bounded decoder KV must contain exactly 128 rows")
-                return [qkv.kv_full], [prefixes[0] + replay_start]
+            replay_starts = cp_swa_replay_starts(common.cp_ctx)
+            if replay_starts is not None:
+                sizes = [min(n, self.window_size) for n in lengths_host]
+                if (
+                    len(replay_starts) != len(sizes)
+                    or len(prefixes) != len(sizes)
+                    or any(
+                        s != n - size
+                        for n, size, s in zip(lengths_host, sizes, replay_starts)
+                    )
+                    or qkv.kv_full.shape[0] != sum(sizes)
+                ):
+                    raise ValueError(
+                        "bounded decoder KV must match per-request replay rows"
+                    )
+                return list(qkv.kv_full.split(sizes)), [
+                    p + s for p, s in zip(prefixes, replay_starts)
+                ]
             # Non-compacted paths recompute the fresh suffix. They must never
             # consume decoder state from a previous request's approximate cache.
             # Native prefix matching leaves at least one complete SWA window.
@@ -2117,19 +2151,26 @@ class AttentionV41FP8(AttentionFP8):
                 sizes = device_values(global_sizes)
                 starts_d = device_values(swa_starts)
             else:
+                from rtp_llm.models_py.modules.dsv4.cp import cp_swa_replay_starts
+
                 from ._v41_prefill_metadata import try_chunk_metadata
 
-                meta = try_chunk_metadata(
-                    common.prefix_lengths,
-                    (
-                        common.cp_ctx.input_lengths_global
-                        if common.cp_on
-                        else common.input_lengths
-                    ),
-                    req_ids,
-                    self.compress_ratio,
-                    self.window_size,
-                    self.swa_bounded_replay,
+                compact_replay = cp_swa_replay_starts(common.cp_ctx) is not None
+                meta = (
+                    None
+                    if compact_replay
+                    else try_chunk_metadata(
+                        common.prefix_lengths,
+                        (
+                            common.cp_ctx.input_lengths_global
+                            if common.cp_on
+                            else common.input_lengths
+                        ),
+                        req_ids,
+                        self.compress_ratio,
+                        self.window_size,
+                        self.swa_bounded_replay,
+                    )
                 )
                 if meta is not None:
                     shared["prefill_chunk_meta"] = meta
@@ -2146,9 +2187,16 @@ class AttentionV41FP8(AttentionFP8):
                     else prefixes.clamp(max=self.window_size - 1)
                 )
                 sizes = (prefixes + lengths) // self.compress_ratio
-                chunk_sizes = sizes + lengths + tails
+                swa_lengths = (
+                    lengths.clamp(max=self.window_size) if compact_replay else lengths
+                )
+                chunk_sizes = sizes + swa_lengths + tails
                 offsets_d = chunk_sizes.cumsum(0) - chunk_sizes
-                starts_d = prefixes - tails
+                starts_d = (
+                    prefixes + lengths - swa_lengths
+                    if compact_replay
+                    else prefixes - tails
+                )
             meta = (
                 offsets_d[req_ids, None],
                 sizes[req_ids, None],

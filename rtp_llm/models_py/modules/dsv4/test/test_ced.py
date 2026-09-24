@@ -104,6 +104,8 @@ def _swa_owner(bounded):
     ]
     assert {n.name for n in methods} == names
     namespace = {
+        "__name__": "rtp_llm.models_py.modules.dsv4.fp8.attention_v41",
+        "__package__": "rtp_llm.models_py.modules.dsv4.fp8",
         "torch": torch,
         "F": F,
         "_use_small_cp_x_gather": lambda ctx: False,
@@ -128,6 +130,7 @@ def _swa_owner(bounded):
         _swa_prefill_concat=mock.Mock(
             side_effect=AssertionError("unexpected cached prefix read")
         ),
+        _can_fuse_swa_fresh=mock.Mock(return_value=False),
         _prefill_write_swa_fp8_paged=mock.Mock(),
         _prefill_sparse_attention=mock.Mock(),
     )
@@ -294,7 +297,52 @@ def _compact_oracle(full, selected, rank):
     return padded.index_select(0, positions[rank].to(full.device))
 
 
+def _batch_cp4_layout(lengths):
+    """Build engine request-wise padding/inverse maps independently of CED."""
+    rank_positions = [[] for _ in range(4)]
+    masks, chunks = [], []
+    offset = 0
+    for length in lengths:
+        positions, info = _cp4_layout(length)
+        for rank in range(4):
+            rank_positions[rank].append(positions[rank] + offset)
+        masks.append(info.prefill_qkv_padding_mask)
+        chunks.append(len(positions[0]))
+        offset += len(info.prefill_qkv_padding_mask)
+    ranks = [torch.cat(parts) for parts in rank_positions]
+    info = types.SimpleNamespace(
+        prefill_qkv_padding_mask=torch.cat(masks),
+        prefill_qkv_restore_indice=torch.argsort(torch.cat(ranks)).int(),
+        prefill_actual_input_lengths_cpu=torch.tensor(lengths, dtype=torch.int32),
+        prefill_cp_chunk_lengths=torch.tensor(chunks, dtype=torch.int32),
+    )
+    return ranks, info
+
+
+def _batch_compact_oracle(full, lengths, rank):
+    outputs, offset = [], 0
+    for length in lengths:
+        selected = torch.arange(max(0, length - 128), length)
+        outputs.append(_compact_oracle(full[offset : offset + length], selected, rank))
+        offset += length
+    return torch.cat(outputs)
+
+
 class _SingleThreadTest(unittest.TestCase):
+    def setUp(self):
+        # Runtime imports inside the extracted attention methods resolve the
+        # already loaded helper, without importing native package initializers.
+        metadata = types.ModuleType(
+            "rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_metadata"
+        )
+        metadata.try_chunk_metadata = mock.Mock(return_value=None)
+        for name, module in ((_CP.__name__, _CP), (metadata.__name__, metadata)):
+            if name in sys.modules:
+                self.addCleanup(sys.modules.__setitem__, name, sys.modules[name])
+            else:
+                self.addCleanup(sys.modules.pop, name, None)
+            sys.modules[name] = module
+
     @classmethod
     def setUpClass(cls):
         cls.old_threads = torch.get_num_threads()
@@ -725,6 +773,259 @@ class CedCreationTest(_SingleThreadTest):
         model.capture_aux_hidden_layer_ids = ()
         model._mtp_hidden_buffer = torch.empty(1)
         self.assertFalse(_CED._supported_model(model))
+
+
+class CedBatchedBoundedReplayTest(_SingleThreadTest):
+    # Only admission's CUDA/process-group checks are mocked. Layout and every
+    # payload transformation execute the production CPU tensor implementation.
+    setUp = CedCreationTest.setUp
+
+    @staticmethod
+    def cases():
+        return (
+            ((257,), (16387,)),
+            ((17, 513), (0, 30723)),
+            ((2048,) * 32, (30720,) * 32),
+            (
+                (1, 7, 17, 127, 128, 129, 513, 2049) * 4,
+                tuple(0 if i % 8 < 4 else 16387 + 513 * i for i in range(32)),
+            ),
+        )
+
+    def plans(self, lengths, prefixes):
+        ranks, info = _batch_cp4_layout(lengths)
+        plans = []
+        for rank in range(4):
+            self.rank = rank
+            ctx = _CP.build_cp_context(
+                info,
+                cp_size=4,
+                cp_rank=rank,
+                chunk_length=len(ranks[rank]),
+                device=torch.device("cpu"),
+                position_offset=torch.tensor(prefixes, dtype=torch.int64),
+                kv_cache_sharded=True,
+            )
+            attn, cache = _cache_fixture(
+                max(lengths), max(prefixes), region=_CED.DECODER_SWA_KV
+            )
+            attn.kv_cache_block_id_host = attn.kv_cache_block_id_host.expand(
+                -1, len(lengths), -1
+            ).clone()
+            plan = _CED.CEDPlan.create(_model(), ctx, attn, cache, bounded_replay=True)
+            self.assertIsNotNone(plan, f"bounded replay fell back for B={len(lengths)}")
+            plans.append(plan)
+        return plans, ranks, info
+
+    def test_b1_b2_b32_create_actual_per_request_tail_and_keep_write_geometry(self):
+        for lengths, prefixes in self.cases():
+            with self.subTest(lengths=lengths, prefixes=prefixes):
+                plans, _, _ = self.plans(lengths, prefixes)
+                starts = tuple(max(0, n - 128) for n in lengths)
+                selected, absolute, request_ids, offset = [], [], [], 0
+                for req, (length, prefix) in enumerate(zip(lengths, prefixes)):
+                    tail = torch.arange(starts[req], length)
+                    selected.append(tail + offset)
+                    absolute.append(torch.arange(length) + prefix)
+                    request_ids.append(torch.full((length,), req, dtype=torch.int32))
+                    offset += length
+                selected = torch.cat(selected)
+                local_lengths = tuple(((min(n, 128) + 7) // 8) * 2 for n in lengths)
+                local_cu = [0]
+                for n in local_lengths:
+                    local_cu.append(local_cu[-1] + n)
+                for rank, plan in enumerate(plans):
+                    ctx, original = plan.context, plan.original_context
+                    self.assertLess(ctx.chunk_length, original.chunk_length)
+                    self.assertEqual(ctx.chunk_lengths_per_req, local_lengths)
+                    self.assertEqual(plan.cu_seqlens.tolist(), local_cu)
+                    self.assertEqual(ctx.padded_seq_len, 4 * local_cu[-1])
+                    self.assertEqual(ctx.input_lengths_global_host, lengths)
+                    self.assertEqual(ctx.prefix_lengths_host, prefixes)
+                    self.assertEqual(ctx.seq_len_full, sum(lengths))
+                    self.assertEqual(
+                        ctx.seq_len_total, max(p + n for p, n in zip(prefixes, lengths))
+                    )
+                    for name in (
+                        "cp_info",
+                        "input_lengths_global",
+                        "cu_seqlens_global",
+                        "prefix_lengths",
+                    ):
+                        self.assertIs(getattr(ctx, name), getattr(original, name))
+                    torch.testing.assert_close(ctx.gather_restore_positions, selected)
+                    self.assertEqual(_CP.cp_swa_replay_starts(ctx), starts)
+                    self.assertEqual(
+                        ctx.swa_replay_start, starts[0] if len(lengths) == 1 else None
+                    )
+                    self.assertIsNone(original.swa_replay_start)
+                    self.assertIsNone(original.swa_replay_starts_host)
+                    expected_absolute = _batch_compact_oracle(
+                        torch.cat(absolute), lengths, rank
+                    )
+                    expected_requests = _batch_compact_oracle(
+                        torch.cat(request_ids), lengths, rank
+                    )
+                    real = ctx.local_is_real
+                    torch.testing.assert_close(
+                        ctx.global_positions[real], expected_absolute[real]
+                    )
+                    torch.testing.assert_close(
+                        ctx.req_id_per_token[real], expected_requests[real]
+                    )
+                    for req, (lo, hi) in enumerate(zip(local_cu, local_cu[1:])):
+                        self.assertTrue((ctx.req_id_per_token[lo:hi] == req).all())
+                        self.assertTrue(
+                            (
+                                ctx.global_positions[lo:hi]
+                                >= prefixes[req] + starts[req]
+                            ).all()
+                        )
+                        self.assertTrue(
+                            (
+                                ctx.global_positions[lo:hi]
+                                < prefixes[req] + lengths[req]
+                            ).all()
+                        )
+                self.assertEqual(
+                    sum(int(p.context.local_is_real.sum()) for p in plans),
+                    len(selected),
+                )
+                if lengths == (2048,) * 32:
+                    self.assertEqual(plans[0].context.chunk_length, 1024)
+                    self.assertEqual(plans[0].original_context.chunk_length, 16384)
+
+    def test_batched_transport_is_bijection_and_compact_restore_payloads(self):
+        for lengths, prefixes in self.cases():
+            with self.subTest(lengths=lengths):
+                plans, ranks, info = self.plans(lengths, prefixes)
+                full = torch.arange(sum(lengths) * 3).reshape(-1, 3)
+                padded = torch.full((len(info.prefill_qkv_padding_mask), 3), -919)
+                padded[info.prefill_qkv_padding_mask.bool()] = full
+                local = [padded[rows] for rows in ranks]
+                expected = [_batch_compact_oracle(full, lengths, r) for r in range(4)]
+                sends = [
+                    x.index_select(0, p.exchange.send_indices)
+                    for x, p in zip(local, plans)
+                ]
+                compact = []
+                for rank, plan in enumerate(plans):
+                    ex = plan.exchange
+                    received = []
+                    for peer, peer_plan in enumerate(plans):
+                        sizes = peer_plan.exchange.send_sizes
+                        self.assertEqual(sizes[rank], ex.receive_sizes[peer])
+                        start = sum(sizes[:rank])
+                        received.append(sends[peer][start : start + sizes[rank]])
+
+                    def receive(out, send, **kwargs):
+                        torch.testing.assert_close(send, sends[rank])
+                        self.assertEqual(
+                            kwargs["input_split_sizes"], list(ex.send_sizes)
+                        )
+                        self.assertEqual(
+                            kwargs["output_split_sizes"], list(ex.receive_sizes)
+                        )
+                        out.copy_(torch.cat(received))
+
+                    with mock.patch.object(
+                        torch.distributed, "all_to_all_single", side_effect=receive
+                    ):
+                        actual = ex.compact(local[rank])
+                    torch.testing.assert_close(actual, expected[rank], rtol=0, atol=0)
+                    compact.append(actual)
+                restored = torch.zeros_like(full)
+                selected = plans[0].context.gather_restore_positions
+                restored[selected] = full[selected]
+                torch.testing.assert_close(
+                    _CP._cp_restore_gathered_full_2d(
+                        torch.cat(compact), plans[0].context
+                    ),
+                    restored,
+                    rtol=0,
+                    atol=0,
+                )
+                inverse_sends = [
+                    x[p.exchange.receive_positions] for x, p in zip(compact, plans)
+                ]
+                for rank, plan in enumerate(plans):
+                    received = []
+                    for peer, peer_plan in enumerate(plans):
+                        sizes = peer_plan.exchange.receive_sizes
+                        start = sum(sizes[:rank])
+                        received.append(
+                            inverse_sends[peer][start : start + sizes[rank]]
+                        )
+
+                    def restore_receive(out, send, **kwargs):
+                        torch.testing.assert_close(send, inverse_sends[rank])
+                        self.assertEqual(
+                            kwargs["input_split_sizes"],
+                            list(plan.exchange.receive_sizes),
+                        )
+                        self.assertEqual(
+                            kwargs["output_split_sizes"], list(plan.exchange.send_sizes)
+                        )
+                        out.copy_(torch.cat(received))
+
+                    expected_local = torch.zeros_like(local[rank])
+                    expected_local[plan.exchange.send_indices] = local[rank][
+                        plan.exchange.send_indices
+                    ]
+                    with mock.patch.object(
+                        torch.distributed,
+                        "all_to_all_single",
+                        side_effect=restore_receive,
+                    ):
+                        actual = plan.exchange.restore(compact[rank])
+                    torch.testing.assert_close(actual, expected_local, rtol=0, atol=0)
+
+    def test_batched_candidate_and_indexer_rows_keep_original_owner_identity(self):
+        for lengths, prefixes in self.cases():
+            with self.subTest(lengths=lengths):
+                plans, _, info = self.plans(lengths, prefixes)
+                selected = plans[0].context.gather_restore_positions
+                original_rows = plans[0].original_context.chunk_length
+                source = info.prefill_qkv_restore_indice[
+                    info.prefill_qkv_padding_mask.bool()
+                ].long()[selected]
+                full = (
+                    torch.arange(sum(lengths) * 3, dtype=torch.float64).reshape(-1, 3)
+                    / 16
+                )
+                weight = torch.tensor(
+                    [[1.0, 2.0, 4.0], [-2.0, 0.0, 1.0]], dtype=torch.float64
+                )
+                projected = F.linear(full, weight)
+                for rank, plan in enumerate(plans):
+                    expected_rows = tuple(
+                        sorted(
+                            (
+                                source[source // original_rows == rank] % original_rows
+                            ).tolist()
+                        )
+                    )
+                    self.assertEqual(plan.exchange.candidate_rows_host, expected_rows)
+                    with plan.candidate_publication(shared := {}):
+                        self.assertEqual(shared["ced_candidate_rows"], expected_rows)
+                    self.assertNotIn("ced_candidate_rows", shared)
+                    compact = _batch_compact_oracle(full, lengths, rank)
+                    with mock.patch.object(_CED.F, "linear", wraps=F.linear) as linear:
+                        actual = plan.project_indexer_weights(compact, weight)
+                    torch.testing.assert_close(
+                        actual,
+                        _batch_compact_oracle(projected, lengths, rank),
+                        rtol=0,
+                        atol=0,
+                    )
+                    self.assertEqual(linear.call_count, len(plan.indexer_groups))
+                    for call in linear.call_args_list:
+                        self.assertEqual(call.args[0].shape, (original_rows, 3))
+                    destinations = torch.cat([dst for dst, _ in plan.indexer_groups])
+                    self.assertEqual(
+                        len(destinations.unique()),
+                        int(plan.context.local_is_real.sum()),
+                    )
 
 
 class CedLayoutTest(_SingleThreadTest):
@@ -1463,6 +1764,74 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 }
                 self.assertEqual(observed_m, expected_m)
 
+    def test_router_preserves_independent_gate_chunks_inside_original_moe_chunks(self):
+        linear = F.linear
+
+        def m_sensitive_linear(x, weight):
+            return linear(x, weight) + x.shape[0] / 16
+
+        for original_m, moe_rows, gate_rows in (
+            (32800, 65536, 32768),
+            (32856, 65536, 32768),
+            (70002, 47003, 32768),
+        ):
+            with self.subTest(original_m=original_m, moe_rows=moe_rows):
+                length = original_m * 4
+                owners, _ = _cp4_layout(length)
+                nested_spans, outer_spans = [], []
+                for outer in range(0, original_m, moe_rows):
+                    outer_stop = min(outer + moe_rows, original_m)
+                    outer_spans.append((outer, outer_stop))
+                    for start in range(outer, outer_stop, gate_rows):
+                        nested_spans.append((start, min(start + gate_rows, outer_stop)))
+                rows = sorted(
+                    {row for start, stop in nested_spans for row in (start, stop - 1)}
+                )
+                selected = torch.cat([owner[rows] for owner in owners]).sort().values
+                for dtype, spans in (
+                    (torch.bfloat16, nested_spans),
+                    (torch.float32, outer_spans),
+                ):
+                    full = (
+                        (torch.arange(length * 5).reshape(length, 5) % 127) / 128
+                    ).to(dtype)
+                    weight = self._gate().weight.to(dtype)
+                    expected = torch.empty(length, 3, dtype=dtype)
+                    for owner in owners:
+                        for start, stop in spans:
+                            expected[owner[start:stop]] = m_sensitive_linear(
+                                full[owner[start:stop]], weight
+                            )
+                    observed = set()
+                    for rank in range(4):
+                        plan, _ = _plan(
+                            length, rank, selected, candidate_publication=True
+                        )
+                        plan._compacted = True
+                        gate = self._gate()
+                        gate._prefill_gate_chunk_rows = gate_rows
+                        ffn = self._ffn(gate, moe_rows)
+                        plan._prepare_router_projection(ffn)
+                        with torch.inference_mode(), mock.patch.object(
+                            torch.Tensor, "is_cuda", new=property(lambda t: True)
+                        ), plan.router_projection(ffn), mock.patch.object(
+                            _CED.F, "linear", side_effect=m_sensitive_linear
+                        ) as project:
+                            actual = gate._project_scores(
+                                _compact_oracle(full, selected, rank), weight
+                            )
+                        observed.update(
+                            call.args[0].shape[0] for call in project.call_args_list
+                        )
+                        torch.testing.assert_close(
+                            actual,
+                            _compact_oracle(expected, selected, rank),
+                            rtol=0,
+                            atol=0,
+                        )
+                        self.assertFalse(hasattr(gate, "_ced_row_projection"))
+                    self.assertEqual(observed, {stop - start for start, stop in spans})
+
     def test_router_scope_follows_actual_moe_chunk_policy(self):
         path = Path(_CED.__file__).parent.parent / "moe/moe_layer.py"
         cls = next(
@@ -1924,7 +2293,8 @@ class CedL20SplitTest(_SingleThreadTest):
         owner._prefill_compute_qkv = mock.Mock(return_value=qkv)
         old_prefix = torch.full((127, 2), 7.0)
 
-        def snapshot(qkv, common):
+        def snapshot(qkv, common, *, fuse_cache_write=False):
+            self.assertFalse(fuse_cache_write)
             events.append("read-prefix")
             return [torch.cat((old_prefix, qkv.kv_full))], [16384 - 127]
 
@@ -2252,7 +2622,10 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
                 slot_mapping=slots, slot_compaction=Compaction(blocks, compact_slots)
             )
             cp = types.SimpleNamespace(
-                swa_replay_start=length - 128, cp_rank=2, cp_size=4
+                swa_replay_start=length - 128,
+                cp_rank=2,
+                cp_size=4,
+                gather_restore_positions=torch.arange(length - 128, length),
             )
             common = types.SimpleNamespace(cp_ctx=cp, swa_meta=meta)
             kv = torch.arange(256).reshape(128, 2).bfloat16()
@@ -2271,7 +2644,7 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
             )
             self.assertIs(meta.slot_mapping, slots)
             self.assertIs(meta.slot_compaction.compact_slots, compact_slots)
-            with self.assertRaisesRegex(ValueError, "exactly 128"):
+            with self.assertRaisesRegex(ValueError, "selected replay rows"):
                 namespace[method.name](owner, common, kv[:-1])
 
     def fixture(self, *, length=385, prefix=16387, compact=True, bounded=True):
@@ -2307,7 +2680,7 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
         buffers, starts = owner._swa_prefill_workspace(qkv, common)
         self.assertEqual(starts, [16387 + 385 - 128])
         self.assertEqual(buffers[0].shape, (128, 2))
-        self.assertIs(buffers[0], qkv.kv_full)
+        self.assertEqual(buffers[0].data_ptr(), qkv.kv_full.data_ptr())
         self.assertTrue(torch.isfinite(buffers[0]).all())
         owner._swa_prefill_concat.assert_not_called()
 
@@ -2381,7 +2754,9 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
         buffers, starts = owner._swa_prefill_workspace(qkv, common)
         self.assertEqual(starts, [prefix - 127])
         self.assertEqual(buffers[0].shape[0], 385 + 127)
-        owner._swa_prefill_concat.assert_called_once_with(qkv, common)
+        owner._swa_prefill_concat.assert_called_once_with(
+            qkv, common, fuse_cache_write=False
+        )
         cold, common, qkv = self.fixture(prefix=0, compact=False, bounded=False)
         buffers, starts = cold._swa_prefill_workspace(qkv, common)
         self.assertEqual(starts, [0])
@@ -2709,6 +3084,111 @@ def _exercise_l20_transport(rank, device, group):
         assert heartbeat.item() == 10
 
 
+def _exercise_batched_transport(rank, group, device="cpu"):
+    device = torch.device(device)
+    results = []
+    for lengths, prefixes in CedBatchedBoundedReplayTest.cases():
+        ranks, info = _batch_cp4_layout(lengths)
+        original = _CP.build_cp_context(
+            info,
+            cp_size=4,
+            cp_rank=rank,
+            chunk_length=len(ranks[rank]),
+            device=torch.device("cpu"),
+            position_offset=torch.tensor(prefixes),
+            kv_cache_sharded=True,
+        )
+        selected, offset = [], 0
+        for length in lengths:
+            selected.append(torch.arange(max(0, length - 128), length) + offset)
+            offset += length
+        selected = torch.cat(selected)
+        starts = tuple(max(0, length - 128) for length in lengths)
+        if device.type == "cuda":
+            original = replace(
+                original,
+                **{
+                    f.name: getattr(original, f.name).to(device)
+                    for f in fields(original)
+                    if f.init and isinstance(getattr(original, f.name), torch.Tensor)
+                },
+            )
+            attn, cache = _cache_fixture(
+                max(lengths), max(prefixes), region=_CED.DECODER_SWA_KV
+            )
+            attn.kv_cache_block_id_host = attn.kv_cache_block_id_host.expand(
+                -1, len(lengths), -1
+            ).clone()
+            with mock.patch.object(_COLLECTIVE, "_get_group", return_value=group):
+                plan = _CED.CEDPlan.create(
+                    _model(), original, attn, cache, bounded_replay=True
+                )
+            assert plan is not None, "real CUDA batched create fell back"
+            context, exchange = plan.context, plan.exchange
+        else:
+            context, exchange, _ = _CED._query_layout(
+                original, selected, group, keep_candidate_rows=True
+            )
+            context = replace(
+                context,
+                swa_replay_start=starts[0] if len(starts) == 1 else None,
+                swa_replay_starts_host=starts if len(starts) > 1 else None,
+            )
+        mask = info.prefill_qkv_padding_mask.to(device).bool()
+        for dtype in (torch.int64, torch.bfloat16):
+            full = (
+                torch.arange(sum(lengths) * 3, device=device).reshape(-1, 3) % 127
+            ).to(dtype)
+            padded = torch.full((len(mask), 3), -919, dtype=dtype, device=device)
+            padded[mask] = full
+            rank_rows = ranks[rank].to(device)
+            local = padded[rank_rows]
+            compact = exchange.compact(local)
+            torch.testing.assert_close(
+                compact, _batch_compact_oracle(full, lengths, rank), rtol=0, atol=0
+            )
+            restored = exchange.restore(compact)
+            expected = torch.zeros_like(full)
+            selected_device = selected.to(device)
+            expected[selected_device] = full[selected_device]
+            padded.zero_()
+            padded[mask] = expected
+            torch.testing.assert_close(restored, padded[rank_rows], rtol=0, atol=0)
+            gathered = torch.empty(
+                context.padded_seq_len, 3, dtype=dtype, device=device
+            )
+            torch.distributed.all_gather_into_tensor(gathered, compact, group=group)
+            torch.testing.assert_close(
+                _CP._cp_restore_gathered_full_2d(gathered, context),
+                expected,
+                rtol=0,
+                atol=0,
+            )
+            with mock.patch.object(_COLLECTIVE, "_get_group", return_value=group):
+                replay = _CP.cp_all_gather_full_varlen(
+                    compact, context, replay_only=True
+                )
+            torch.testing.assert_close(replay, full[selected_device], rtol=0, atol=0)
+            assert replay.shape == (sum(min(n, 128) for n in lengths), 3)
+            assert (
+                replay.untyped_storage().nbytes()
+                == replay.numel() * replay.element_size()
+            )
+        results.append(
+            dict(
+                batch=len(lengths),
+                lengths=lengths,
+                prefixes=prefixes,
+                original_rows=original.chunk_length,
+                compact_rows=context.chunk_length,
+                selected=len(selected),
+                send_sizes=exchange.send_sizes,
+                receive_sizes=exchange.receive_sizes,
+            )
+        )
+    return results
+
+
 def _gloo_worker(rank, rendezvous):
     torch.set_num_threads(1)
     torch.distributed.init_process_group(
@@ -2723,6 +3203,7 @@ def _gloo_worker(rank, rendezvous):
         _exercise_l20_transport(
             rank, torch.device("cpu"), torch.distributed.group.WORLD
         )
+        _exercise_batched_transport(rank, torch.distributed.group.WORLD)
     finally:
         torch.distributed.destroy_process_group()
 

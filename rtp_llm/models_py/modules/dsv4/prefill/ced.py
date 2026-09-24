@@ -27,7 +27,7 @@ import torch.nn.functional as F
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.dsv4.attn_type import DECODER_SWA_KV, SWA_KV
-from rtp_llm.models_py.modules.dsv4.cp import CPContext
+from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_swa_replay_starts
 
 _CP_SIZE = 4
 _TAIL_TOKENS = 3072
@@ -183,13 +183,56 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     """Derive transport from the actual engine inverse map, not rank0 ownership."""
     device = original.global_positions.device
     cp, rank = original.cp_size, original.cp_rank
-    count = selected.numel()
-    padded = ((count + 2 * cp - 1) // (2 * cp)) * (2 * cp)
-    rows, half = padded // cp, padded // (2 * cp)
-    canonical = torch.arange(count, dtype=torch.int64)
-    pair = canonical // half
-    owners = torch.where(pair < cp, pair, 2 * cp - 1 - pair)
-    local = canonical % half + torch.where(pair < cp, 0, half)
+    lengths = original.input_lengths_global_host or (original.seq_len_full,)
+    prefixes = original.prefix_lengths_host or (original.prefix_length,)
+    original_chunks = original.chunk_lengths_per_req or (original.chunk_length,)
+    if (
+        len(lengths) != len(prefixes)
+        or len(lengths) != len(original_chunks)
+        or sum(lengths) != original.seq_len_full
+        or selected.ndim != 1
+        or selected.numel() == 0
+        or selected[0] < 0
+        or selected[-1] >= original.seq_len_full
+        or (selected[1:] <= selected[:-1]).any()
+    ):
+        raise ValueError("invalid per-request CED selection")
+    owners, local, local_positions, absolute_positions, request_ids = [], [], [], [], []
+    local_real, chunks = [], []
+    original_start, padded_start, local_start = 0, 0, 0
+    for request, (length, prefix, original_chunk) in enumerate(
+        zip(lengths, prefixes, original_chunks)
+    ):
+        chosen = selected[
+            (selected >= original_start) & (selected < original_start + length)
+        ]
+        count = chosen.numel()
+        if count == 0:
+            raise ValueError("CED must preserve the end of every request")
+        padded = ((count + 2 * cp - 1) // (2 * cp)) * (2 * cp)
+        chunk, half = padded // cp, padded // (2 * cp)
+        canonical = torch.arange(count, dtype=torch.int64)
+        pair = canonical // half
+        owner = torch.where(pair < cp, pair, 2 * cp - 1 - pair)
+        row = canonical % half + torch.where(pair < cp, 0, half)
+        own = owner == rank
+        positions = torch.full((chunk,), length - 1, dtype=torch.int64)
+        positions[row[own]] = chosen[own] - original_start
+        real = torch.zeros(chunk, dtype=torch.bool)
+        real[row[own]] = True
+        owners.append(owner)
+        local.append(row + local_start)
+        local_positions.append(positions + padded_start)
+        absolute_positions.append(positions + prefix)
+        request_ids.append(torch.full((chunk,), request, dtype=torch.int32))
+        local_real.append(real)
+        chunks.append(chunk)
+        original_start += length
+        padded_start += original_chunk * cp
+        local_start += chunk
+    owners, local = torch.cat(owners), torch.cat(local)
+    rows = sum(chunks)
+    padded = rows * cp
     info = original.cp_info
     restore = info.prefill_qkv_restore_indice.detach().cpu().long()
     mask = info.prefill_qkv_padding_mask.detach().cpu().bool()
@@ -199,10 +242,6 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     source_owners = source_flat // original.chunk_length
     source_rows = source_flat % original.chunk_length
     own = owners == rank
-    local_positions = torch.full((rows,), original.seq_len_full - 1, dtype=torch.int64)
-    local_positions[local[own]] = selected[own]
-    local_real = torch.zeros(rows, dtype=torch.bool)
-    local_real[local[own]] = True
     sends, receives, send_sizes, receive_sizes, indexer_groups = [], [], [], [], []
     projection_groups_host = []
     for peer in range(cp):
@@ -251,13 +290,13 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
         original,
         chunk_length=rows,
         padded_seq_len=padded,
-        relative_positions=local_positions.to(device),
-        global_positions=(local_positions + original.prefix_length).to(device),
-        local_is_real=local_real.to(device),
+        relative_positions=torch.cat(local_positions).to(device),
+        global_positions=torch.cat(absolute_positions).to(device),
+        local_is_real=torch.cat(local_real).to(device),
         unpad_restore=(owners * rows + local).to(device),
         unpad_restore_is_prefix=False,
-        chunk_lengths_per_req=(rows,),
-        req_id_per_token=torch.zeros(rows, dtype=torch.int32, device=device),
+        chunk_lengths_per_req=tuple(chunks),
+        req_id_per_token=torch.cat(request_ids).to(device),
         gather_restore_positions=selected.to(device),
     )
     return context, exchange, tuple(indexer_groups)
@@ -277,6 +316,8 @@ class CEDPlan:
     _aux_restored: bool = field(default=False, init=False)
     _router_groups: Optional[Tuple] = field(default=None, init=False)
     _router_chunk_rows: Optional[int] = field(default=None, init=False)
+    _router_gate_groups: Optional[Tuple] = field(default=None, init=False)
+    _router_gate_rows: int = field(default=0, init=False)
 
     @classmethod
     @torch.inference_mode()
@@ -297,9 +338,6 @@ class CEDPlan:
             or cp_ctx.cp_size != _CP_SIZE
             or not cp_ctx.kv_cache_sharded
             or cp_ctx.seq_len_full < (128 if bounded_replay else _MIN_TOKENS)
-            or cp_ctx.input_lengths_global_host != (cp_ctx.seq_len_full,)
-            or cp_ctx.prefix_lengths_host != (cp_ctx.prefix_length,)
-            or cp_ctx.chunk_lengths_per_req != (cp_ctx.chunk_length,)
             or not cp_ctx.global_positions.is_cuda
             or prepare_hidden_fn is not None
             or kv_cache is None
@@ -309,6 +347,23 @@ class CEDPlan:
             or not _supported_model(v4)
             or not torch.distributed.is_initialized()
             or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        lengths = cp_ctx.input_lengths_global_host
+        prefixes = cp_ctx.prefix_lengths_host
+        chunks = cp_ctx.chunk_lengths_per_req
+        if (
+            not lengths
+            or prefixes is None
+            or chunks is None
+            or len(prefixes) != len(lengths)
+            or len(chunks) != len(lengths)
+            or any(n <= 0 for n in lengths)
+            or any(p < 0 for p in prefixes)
+            or (len(lengths) == 1 and prefixes != (cp_ctx.prefix_length,))
+            or sum(lengths) != cp_ctx.seq_len_full
+            or sum(chunks) != cp_ctx.chunk_length
+            or (not bounded_replay and len(lengths) != 1)
         ):
             return None
         regions = tuple(getattr(kv_cache, "group_region_names", ()))
@@ -323,7 +378,7 @@ class CEDPlan:
             or not isinstance(host, torch.Tensor)
             or host.device.type != "cpu"
             or host.ndim != 3
-            or host.shape[1] != 1
+            or host.shape[1] != len(lengths)
             or host.shape[0] != len(regions)
             or len(spans) != len(regions)
             or spans[groups[0]] <= 0
@@ -343,9 +398,14 @@ class CEDPlan:
         if bounded_replay:
             # Only live decode state is produced. Native cache policy must
             # exclude these decoder/draft SWA pools from prefix reuse.
-            selected = torch.arange(
-                cp_ctx.seq_len_full - 128, cp_ctx.seq_len_full, dtype=torch.int64
-            )
+            starts = tuple(max(n - 128, 0) for n in lengths)
+            selected_parts, offset = [], 0
+            for length, start in zip(lengths, starts):
+                selected_parts.append(
+                    torch.arange(offset + start, offset + length, dtype=torch.int64)
+                )
+                offset += length
+            selected = torch.cat(selected_parts)
         else:
             selected = checkpoint_positions(
                 cp_ctx.prefix_length,
@@ -370,12 +430,18 @@ class CEDPlan:
             cp_ctx, selected, group, keep_candidate_rows=bounded_replay
         )
         if bounded_replay:
-            context.swa_replay_start = cp_ctx.seq_len_full - 128
+            if len(lengths) == 1:
+                context.swa_replay_start = starts[0]
+            else:
+                context.swa_replay_starts_host = starts
+        cumulative = [0]
+        for chunk in context.chunk_lengths_per_req:
+            cumulative.append(cumulative[-1] + chunk)
         return cls(
             cp_ctx,
             context,
             torch.tensor(
-                [0, context.chunk_length],
+                cumulative,
                 dtype=torch.int32,
                 device=cp_ctx.global_positions.device,
             ),
@@ -388,7 +454,7 @@ class CEDPlan:
     def candidate_publication(self, shared):
         """Limit L20 publication only when this forward will compact its consumers."""
         rows = self.exchange.candidate_rows_host
-        if self.context.swa_replay_start is None or rows is None:
+        if cp_swa_replay_starts(self.context) is None or rows is None:
             yield
             return
         shared["ced_candidate_rows"] = rows
@@ -403,7 +469,7 @@ class CEDPlan:
             return False
         block = v4.layers[20]
         interfaces = (
-            self.context.swa_replay_start is not None
+            cp_swa_replay_starts(self.context) is not None
             and callable(getattr(block, "forward_prefill_ced_l20", None))
             and callable(getattr(block.attn, "_prefill_produce", None))
             and callable(getattr(block.attn, "_prefill_query", None))
@@ -448,6 +514,15 @@ class CEDPlan:
         else:
             self._router_groups = None
             self._router_chunk_rows = None
+        gate_rows = int(getattr(ffn.gate, "_prefill_gate_chunk_rows", 0))
+        outer_rows = self._router_chunk_rows or self.original_context.chunk_length
+        self._router_gate_rows = gate_rows
+        self._router_gate_groups = (
+            self._router_chunk_groups(outer_rows, gate_rows=gate_rows)
+            if gate_rows > 0
+            and min(outer_rows, self.original_context.chunk_length) > gate_rows
+            else None
+        )
 
     @contextmanager
     def router_projection(self, ffn):
@@ -455,7 +530,7 @@ class CEDPlan:
         gate = getattr(ffn, "gate", None)
         if (
             not self._compacted
-            or self.context.swa_replay_start is None
+            or cp_swa_replay_starts(self.context) is None
             or not callable(getattr(gate, "_project_scores", None))
             or not callable(getattr(ffn, "_should_chunk", None))
             or ffn._should_chunk(self.context.chunk_length)
@@ -472,6 +547,10 @@ class CEDPlan:
             )
         elif self._router_groups is not None:
             raise ValueError("CED router chunk policy changed after admission")
+        if int(getattr(gate, "_prefill_gate_chunk_rows", 0)) != self._router_gate_rows:
+            raise ValueError("CED gate chunk policy changed after admission")
+        if self._router_gate_groups is not None:
+            projection = self._project_router_weights
         missing = object()
         previous = getattr(gate, "_ced_row_projection", missing)
         gate._ced_row_projection = projection
@@ -488,7 +567,7 @@ class CEDPlan:
         """Move the current Block state after full L20 source production."""
         if (
             self._compacted
-            or self.context.swa_replay_start is None
+            or cp_swa_replay_starts(self.context) is None
             or block.layer_id != 20
         ):
             raise ValueError("invalid L20 CED transition")
@@ -510,20 +589,26 @@ class CEDPlan:
 
     def l20_query_metadata(self, common):
         """Replace only query fields; L20 keeps exact SWA/global visibility."""
-        if not self._compacted or self.context.swa_replay_start is None:
+        if not self._compacted or cp_swa_replay_starts(self.context) is None:
             raise ValueError("L20 query metadata requires a completed transition")
-        query_context = replace(self.context, swa_replay_start=None)
+        query_context = replace(
+            self.context, swa_replay_start=None, swa_replay_starts_host=None
+        )
         rows = query_context.chunk_length
+        slices, start = [], 0
+        for count in query_context.chunk_lengths_per_req:
+            slices.append(slice(start, start + count))
+            start += count
         return common._replace(
             seqlen=rows,
             cp_ctx=query_context,
             freqs_cis=self.exchange.compact(common.freqs_cis),
             cu_seqlens=self.cu_seqlens,
-            input_lengths=self.cu_seqlens[1:],
+            input_lengths=self.cu_seqlens[1:] - self.cu_seqlens[:-1],
             position_ids=query_context.global_positions,
             req_id_per_token=query_context.req_id_per_token,
-            max_seqlen_q=rows,
-            request_row_slices=(slice(0, rows),),
+            max_seqlen_q=max(query_context.chunk_lengths_per_req),
+            request_row_slices=tuple(slices),
             swa_meta=None,
         )
 
@@ -547,7 +632,7 @@ class CEDPlan:
         self._compacted = True
         return compact_hidden, compact_ids
 
-    def _router_chunk_groups(self, rows_per_chunk):
+    def _router_chunk_groups(self, rows_per_chunk, *, gate_rows=0):
         if rows_per_chunk <= 0 or not self.exchange.projection_groups_host:
             raise ValueError("missing original router chunk geometry")
         device = self.context.global_positions.device
@@ -557,19 +642,43 @@ class CEDPlan:
             # indices coincide. All grouping uses metadata retained on CPU.
             chunks = {}
             for dst, src in zip(compact_rows, original_rows):
-                start = src // rows_per_chunk * rows_per_chunk
-                destinations, sources = chunks.setdefault(start, ([], []))
+                outer_start = src // rows_per_chunk * rows_per_chunk
+                stop = min(
+                    outer_start + rows_per_chunk, self.original_context.chunk_length
+                )
+                start = outer_start
+                if gate_rows > 0:
+                    start += (src - outer_start) // gate_rows * gate_rows
+                    stop = min(stop, start + gate_rows)
+                destinations, sources = chunks.setdefault((start, stop), ([], []))
                 destinations.append(dst)
                 sources.append(src - start)
-            for start, (destinations, sources) in chunks.items():
+            for (start, stop), (destinations, sources) in chunks.items():
                 groups.append(
                     (
                         torch.tensor(destinations, dtype=torch.long, device=device),
                         torch.tensor(sources, dtype=torch.long, device=device),
-                        min(rows_per_chunk, self.original_context.chunk_length - start),
+                        stop - start,
                     )
                 )
         return tuple(groups)
+
+    def _project_router_weights(self, x, weight):
+        # CED's gate callback precedes Gate's own chunk policy. Reproduce that
+        # policy in the original owner layout, including each outer MoE tail.
+        if (
+            not torch.is_grad_enabled()
+            and x.ndim == weight.ndim == 2
+            and x.dtype == weight.dtype == torch.bfloat16
+            and x.is_cuda
+            and weight.is_cuda
+        ):
+            groups = self._router_gate_groups
+        else:
+            groups = self._router_groups
+        if groups is None:
+            return self.project_indexer_weights(x, weight)
+        return self._project_original_rows(x, weight, groups)
 
     def project_indexer_weights(self, x, weight):
         return self._project_original_rows(

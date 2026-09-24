@@ -65,6 +65,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full_varlen,
     cp_freqs_cis_local,
     cp_padded_local_kv_lens,
+    cp_swa_replay_starts,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_merge import merge_lse_output
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
@@ -5208,7 +5209,7 @@ class AttentionFP8(nn.Module):
                     kv_full_flat = cp_all_gather_full_varlen(
                         kv_flat,
                         common.cp_ctx,
-                        replay_only=common.cp_ctx.swa_replay_start is not None,
+                        replay_only=cp_swa_replay_starts(common.cp_ctx) is not None,
                         profile_name=(
                             f"dsv4.cp.all_gather.L{self.layer_id:02d}."
                             "swa_kv_full.varlen"

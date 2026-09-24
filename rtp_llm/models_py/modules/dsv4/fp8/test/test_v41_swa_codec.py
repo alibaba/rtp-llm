@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
+import importlib.util
+import sys
+import types
 import unittest
+from collections import namedtuple
+from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -738,6 +745,399 @@ class V41SwaGatherOutputTest(unittest.TestCase):
             self.assertTrue(
                 torch.equal(actual.view(torch.int16), expected.view(torch.int16))
             )
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PREFIX = "rtp_llm.models_py.modules.dsv4"
+
+
+def _layout(lengths, prefixes):
+    """Independent CP4 oracle: concatenate front/back eighths per request/rank."""
+    selected, per_request, offset = [], [], 0
+    for length in lengths:
+        rows = torch.arange(offset + max(0, length - 128), offset + length)
+        selected.append(rows)
+        padded = torch.full((((len(rows) + 7) // 8) * 8,), -1, dtype=torch.long)
+        padded[: len(rows)] = rows
+        per_request.append(padded.chunk(8))
+        offset += length
+    rank_rows = [
+        torch.cat([torch.cat((chunks[r], chunks[7 - r])) for chunks in per_request])
+        for r in range(4)
+    ]
+    positions = torch.cat(selected)
+    gathered = torch.cat(rank_rows)
+    restore = torch.tensor(
+        [(gathered == row).nonzero().item() for row in positions], dtype=torch.long
+    )
+    starts = tuple(max(0, n - 128) for n in lengths)
+    ctx = types.SimpleNamespace(
+        cp_size=4,
+        cp_rank=0,
+        chunk_length=rank_rows[0].numel(),
+        seq_len_full=sum(lengths),
+        input_lengths_global_host=tuple(lengths),
+        input_lengths_global=torch.tensor(lengths, dtype=torch.int32),
+        prefix_lengths_host=tuple(prefixes),
+        swa_replay_start=starts[0] if len(starts) == 1 else None,
+        swa_replay_starts_host=starts if len(starts) > 1 else None,
+        gather_restore_positions=positions,
+        unpad_restore=restore,
+        unpad_restore_is_prefix=False,
+    )
+    return ctx, rank_rows
+
+
+class BatchedBoundedSWA(unittest.TestCase):
+    def setUp(self):
+        # Load complete CP helpers; only the communication boundary is mocked.
+        self.modules = patch.dict(sys.modules)
+        self.modules.start()
+        self.addCleanup(self.modules.stop)
+        source_root = ROOT.parents[3]
+        for name in (
+            "rtp_llm",
+            "rtp_llm.models_py",
+            "rtp_llm.models_py.distributed",
+            "rtp_llm.models_py.modules",
+            PREFIX,
+            PREFIX + ".fp8",
+        ):
+            module = types.ModuleType(name)
+            module.__path__ = [str(source_root.joinpath(*name.split(".")))]
+            sys.modules[name] = module
+        collective = types.ModuleType("rtp_llm.models_py.distributed.collective_torch")
+        collective.Group = types.SimpleNamespace(TP="TP")
+        collective.all_gather = Mock(side_effect=AssertionError("unexpected gather"))
+        sys.modules[collective.__name__] = collective
+        profiler = types.ModuleType(PREFIX + "._profiler")
+        profiler.record_function_range = lambda *args: nullcontext()
+        sys.modules[profiler.__name__] = profiler
+        spec = importlib.util.spec_from_file_location(PREFIX + ".cp", ROOT / "cp.py")
+        self.cp = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = self.cp
+        spec.loader.exec_module(self.cp)
+        metadata = types.ModuleType(PREFIX + ".fp8._v41_prefill_metadata")
+        metadata.try_chunk_metadata = Mock(return_value=None)
+        sys.modules[metadata.__name__] = metadata
+        self.fast_meta = metadata.try_chunk_metadata
+        self.codec = types.SimpleNamespace(
+            quantize_and_insert_k_cache_cp_byte_sliced=Mock(),
+            quantize_and_insert_swa_k_cache=Mock(),
+        )
+
+    def owner(self, bounded=True, pool=True, byte_sliced=True):
+        # Execute the unchanged production methods; GPU codec remains a boundary.
+        path = ROOT / "fp8/attention_v41.py"
+        cls = next(
+            node
+            for node in ast.parse(path.read_text()).body
+            if isinstance(node, ast.ClassDef) and node.name == "AttentionV41FP8"
+        )
+        names = {
+            "_host_prefill_lengths",
+            "_host_prefill_prefixes",
+            "_swa_prefill_workspace",
+            "_prefill_write_swa_fp8_paged",
+            "_prefill_chunk_meta",
+        }
+        methods = [node for node in cls.body if getattr(node, "name", None) in names]
+        self.assertEqual({node.name for node in methods}, names)
+        namespace = {
+            "__package__": PREFIX + ".fp8",
+            "torch": torch,
+            "swa_codec": self.codec,
+            "SWA_KV": 7,
+        }
+        exec(
+            compile(ast.Module(body=methods, type_ignores=[]), str(path), "exec"),
+            namespace,
+        )
+        owner = types.SimpleNamespace(
+            swa_bounded_replay=bounded,
+            window_size=128,
+            head_dim=2,
+            compress_ratio=1,
+            _shared_attention={},
+            _swa_cp_byte_sliced=lambda: byte_sliced,
+            _pool_raw_u8=lambda region: torch.empty(1, dtype=torch.uint8),
+            _pool_view_3d_fp8=lambda region: torch.empty(1, dtype=torch.uint8),
+            _swa_entries_per_block=lambda: 512,
+            _source_pool=lambda region: object() if pool else None,
+            _global_region=lambda: 2,
+            _swa_prefill_concat=Mock(
+                side_effect=AssertionError("unexpected cache read")
+            ),
+        )
+        for name in names:
+            setattr(owner, name, types.MethodType(namespace[name], owner))
+        return owner
+
+    def common(self, lengths, prefixes):
+        ctx, ranks = _layout(lengths, prefixes)
+        common = types.SimpleNamespace(
+            cp_on=True,
+            cp_ctx=ctx,
+            batch_size=len(lengths),
+            prefix_lengths=torch.tensor(prefixes, dtype=torch.int32),
+            any_cont=any(prefixes),
+        )
+        return common, ranks
+
+    def test_replay_helper_legacy_tuple_precedence_and_off(self):
+        helper = self.cp.cp_swa_replay_starts
+        self.assertIsNone(helper(None))
+        self.assertIsNone(helper(types.SimpleNamespace()))
+        self.assertEqual(helper(types.SimpleNamespace(swa_replay_start=0)), (0,))
+        self.assertEqual(
+            helper(
+                types.SimpleNamespace(
+                    swa_replay_start=999, swa_replay_starts_host=(3, 0)
+                )
+            ),
+            (3, 0),
+        )
+
+    def test_cp4_compact_gather_preserves_request_tails_and_trailing_dims(self):
+        for lengths in ((2048,) * 32, (133, 1, 2048, 127, 128, 9), (129,), (7,)):
+            with self.subTest(lengths=lengths):
+                ctx, ranks = _layout(lengths, (0,) * len(lengths))
+                all_rows = torch.cat(ranks).reshape(-1, 1).expand(-1, 6).clone()
+                with patch.object(
+                    self.cp, "_cp_all_gather_into_empty", return_value=all_rows
+                ) as gather:
+                    compact = self.cp.cp_all_gather_full_varlen(
+                        all_rows[: ctx.chunk_length].reshape(-1, 2, 3),
+                        ctx,
+                        replay_only=True,
+                    )
+                expected = ctx.gather_restore_positions[:, None, None].expand(-1, 2, 3)
+                self.assertTrue(torch.equal(compact, expected))
+                self.assertEqual(gather.call_count, 1)
+
+    def test_invalid_replay_is_rejected_before_collective(self):
+        for bad in (
+            {"swa_replay_starts_host": (1,)},
+            {"swa_replay_starts_host": (0, 0)},
+            {"gather_restore_positions": None},
+            {"unpad_restore": torch.arange(2)},
+            {"input_lengths_global_host": None},
+        ):
+            with self.subTest(bad=bad):
+                ctx, ranks = _layout((1024, 13), (0, 0))
+                ctx.__dict__.update(bad)
+                with patch.object(self.cp, "_cp_all_gather_into_empty") as gather:
+                    with self.assertRaisesRegex(ValueError, "bounded replay domain"):
+                        self.cp.cp_all_gather_full_varlen(
+                            ranks[0][:, None], ctx, replay_only=True
+                        )
+                gather.assert_not_called()
+
+    def test_exact_ced_gather_retains_original_full_domain(self):
+        ctx, ranks = _layout((133, 7), (0, 0))
+        ctx.swa_replay_starts_host = None
+        gathered = torch.cat(ranks)[:, None]
+        with patch.object(self.cp, "_cp_all_gather_into_empty", return_value=gathered):
+            full = self.cp.cp_all_gather_full_varlen(ranks[0][:, None], ctx)
+        expected = torch.zeros(sum(ctx.input_lengths_global_host), 1, dtype=torch.long)
+        expected[ctx.gather_restore_positions, 0] = ctx.gather_restore_positions
+        self.assertTrue(torch.equal(full, expected))
+
+    def test_workspace_uses_per_request_lengths_and_absolute_starts(self):
+        for lengths, prefixes in (
+            ((2048, 13, 129), (30720, 0, 7)),
+            ((129,), (41,)),
+            ((7,), (0,)),
+        ):
+            with self.subTest(lengths=lengths):
+                owner = self.owner()
+                common, _ = self.common(lengths, prefixes)
+                selected = common.cp_ctx.gather_restore_positions
+                kv = selected[:, None].expand(-1, 2)
+                swa, starts = owner._swa_prefill_workspace(
+                    types.SimpleNamespace(kv_full=kv), common
+                )
+                self.assertEqual(
+                    starts, [p + max(0, n - 128) for n, p in zip(lengths, prefixes)]
+                )
+                offset = 0
+                for values, n in zip(swa, lengths):
+                    expected = torch.arange(offset + max(0, n - 128), offset + n)
+                    self.assertTrue(torch.equal(values[:, 0], expected))
+                    self.assertEqual(
+                        values.untyped_storage().data_ptr(),
+                        kv.untyped_storage().data_ptr(),
+                    )
+                    offset += n
+
+    def test_workspace_rejects_incomplete_compact_kv_and_short_reused_suffix(self):
+        common, _ = self.common((2048, 13), (30720, 0))
+        owner = self.owner()
+        with self.assertRaisesRegex(ValueError, "per-request replay rows"):
+            owner._swa_prefill_workspace(
+                types.SimpleNamespace(kv_full=torch.zeros(128, 2)), common
+            )
+        common.cp_ctx.prefix_lengths_host = (30720, 1)
+        with self.assertRaisesRegex(ValueError, "128 fresh tokens"):
+            owner._swa_prefill_workspace(
+                types.SimpleNamespace(kv_full=torch.zeros(141, 2)), common
+            )
+
+    def test_cache_write_selects_original_slots_and_compaction_without_mutation(self):
+        Compaction = namedtuple("Compaction", "compact_slots unique_blocks")
+        for byte_sliced in (True, False):
+            with self.subTest(byte_sliced=byte_sliced):
+                owner = self.owner(byte_sliced=byte_sliced)
+                common, _ = self.common((2048, 7, 133), (30720, 0, 17))
+                # A populated tuple takes precedence over a legacy scalar.
+                common.cp_ctx.swa_replay_start = 0
+                slots = torch.arange(2188, dtype=torch.long) + 8000
+                slots[0] = -1
+                slots[2047] = -1
+                compact_slots = slots.clone() - 8000
+                blocks = torch.tensor([4, 6, 9])
+                compaction = Compaction(compact_slots, blocks)
+                common.swa_meta = types.SimpleNamespace(
+                    slot_mapping=slots, slot_compaction=compaction
+                )
+                rows = common.cp_ctx.gather_restore_positions
+                kv = torch.arange(rows.numel() * 2).reshape(-1, 2).bfloat16()
+                owner._prefill_write_swa_fp8_paged(common, kv)
+                codec = (
+                    self.codec.quantize_and_insert_k_cache_cp_byte_sliced
+                    if byte_sliced
+                    else self.codec.quantize_and_insert_swa_k_cache
+                )
+                args, kwargs = codec.call_args
+                self.assertTrue(torch.equal(args[0], kv))
+                self.assertTrue(torch.equal(args[2], slots[rows]))
+                if byte_sliced:
+                    self.assertTrue(
+                        torch.equal(
+                            kwargs["compaction"].compact_slots, compact_slots[rows]
+                        )
+                    )
+                    self.assertIs(kwargs["compaction"].unique_blocks, blocks)
+                self.assertIs(common.swa_meta.slot_mapping, slots)
+                self.assertIs(common.swa_meta.slot_compaction, compaction)
+
+    def test_single_request_write_keeps_zero_copy_tail_views(self):
+        Compaction = namedtuple("Compaction", "compact_slots unique_blocks")
+        for length in (128, 129, 2048):
+            for byte_sliced in (False, True):
+                for has_compaction in (False, True):
+                    with self.subTest(
+                        length=length,
+                        byte_sliced=byte_sliced,
+                        compaction=has_compaction,
+                    ):
+                        owner = self.owner(byte_sliced=byte_sliced)
+                        common, _ = self.common((length,), (30720,))
+                        slots = torch.arange(length, dtype=torch.long) + 8000
+                        compact_slots = torch.arange(length, dtype=torch.long)
+                        blocks = torch.tensor([4, 6, 9])
+                        compaction = (
+                            Compaction(compact_slots, blocks)
+                            if has_compaction
+                            else None
+                        )
+                        common.swa_meta = types.SimpleNamespace(
+                            slot_mapping=slots, slot_compaction=compaction
+                        )
+                        kv = torch.zeros(128, 2, dtype=torch.bfloat16)
+                        with patch.object(
+                            torch.Tensor,
+                            "index_select",
+                            side_effect=AssertionError("B1 must use tail views"),
+                        ):
+                            owner._prefill_write_swa_fp8_paged(common, kv)
+                        writer = (
+                            self.codec.quantize_and_insert_k_cache_cp_byte_sliced
+                            if byte_sliced
+                            else self.codec.quantize_and_insert_swa_k_cache
+                        )
+                        args, kwargs = writer.call_args
+                        self.assertTrue(torch.equal(args[2], slots[-128:]))
+                        self.assertEqual(args[2].data_ptr(), slots[-128:].data_ptr())
+                        if byte_sliced and has_compaction:
+                            actual = kwargs["compaction"]
+                            self.assertTrue(
+                                torch.equal(actual.compact_slots, compact_slots[-128:])
+                            )
+                            self.assertEqual(
+                                actual.compact_slots.data_ptr(),
+                                compact_slots[-128:].data_ptr(),
+                            )
+                            self.assertIs(actual.unique_blocks, blocks)
+                        self.assertIs(common.swa_meta.slot_mapping, slots)
+                        self.assertIs(common.swa_meta.slot_compaction, compaction)
+
+    def test_single_request_write_rejects_incomplete_replay_window(self):
+        owner = self.owner()
+        common, _ = self.common((2048,), (30720,))
+        common.swa_meta = types.SimpleNamespace(
+            slot_mapping=torch.arange(2048), slot_compaction=None
+        )
+        for rows in (127, 129):
+            with self.subTest(rows=rows):
+                with self.assertRaisesRegex(ValueError, "exactly 128 rows"):
+                    owner._prefill_write_swa_fp8_paged(
+                        common, torch.zeros(rows, 2, dtype=torch.bfloat16)
+                    )
+        self.codec.quantize_and_insert_k_cache_cp_byte_sliced.assert_not_called()
+
+    def test_chunk_metadata_offsets_follow_compact_swa_not_original_miss(self):
+        for pool in (False, True):
+            for ratio in (1, 2):
+                with self.subTest(pool=pool, ratio=ratio):
+                    owner = self.owner(pool=pool)
+                    owner.compress_ratio = ratio
+                    lengths, prefixes = (2048, 7, 133), (30720, 0, 17)
+                    common, _ = self.common(lengths, prefixes)
+                    sizes = [(p + n) // ratio for p, n in zip(prefixes, lengths)]
+                    globals_by_req = [(torch.empty(n, 2), None) for n in sizes]
+                    swa = [torch.empty(min(n, 128), 2) for n in lengths]
+                    starts = [p + max(0, n - 128) for p, n in zip(prefixes, lengths)]
+                    reqs = torch.tensor([0, 0, 1, 2, 2, 1])
+                    actual = owner._prefill_chunk_meta(
+                        globals_by_req,
+                        swa,
+                        starts,
+                        reqs,
+                        torch.device("cpu"),
+                        common=common,
+                    )
+                    offsets, offset = [], 0
+                    for size, sw in zip(sizes, swa):
+                        offsets.append(offset)
+                        offset += size + sw.shape[0]
+                    for value, expected in zip(actual, (offsets, sizes, starts)):
+                        self.assertTrue(
+                            torch.equal(value, torch.tensor(expected)[reqs, None])
+                        )
+                    self.fast_meta.assert_not_called()
+                    self.assertIs(
+                        owner._prefill_chunk_meta(
+                            globals_by_req,
+                            swa,
+                            starts,
+                            reqs,
+                            torch.device("cpu"),
+                            common=common,
+                        ),
+                        actual,
+                    )
+
+    def test_uncompacted_bounded_workspace_retains_full_miss(self):
+        owner = self.owner()
+        common, _ = self.common((2048, 128), (30720, 256))
+        common.cp_ctx.swa_replay_starts_host = None
+        kv = torch.arange(2176 * 2).reshape(-1, 2)
+        swa, starts = owner._swa_prefill_workspace(
+            types.SimpleNamespace(kv_full=kv), common
+        )
+        self.assertEqual([t.shape[0] for t in swa], [2048, 128])
+        self.assertEqual(starts, [30720, 256])
 
 
 if __name__ == "__main__":

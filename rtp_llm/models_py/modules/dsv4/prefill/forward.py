@@ -605,12 +605,12 @@ def forward_layers(
                             block_tables_by_type,
                             sp_per_req=cp_ctx.prefix_lengths,
                             cu_seqlens=cu_seqlens,
-                            batch_size=1,
-                            input_lengths=cu_seqlens[1:],
+                            batch_size=len(cp_ctx.chunk_lengths_per_req),
+                            input_lengths=cu_seqlens[1:] - cu_seqlens[:-1],
                             prefix_lengths=cp_ctx.prefix_lengths,
                             position_ids=positions,
                             req_id_per_token=cp_ctx.req_id_per_token,
-                            max_seqlen_q=cp_ctx.chunk_length,
+                            max_seqlen_q=max(cp_ctx.chunk_lengths_per_req),
                             workspace=ws,
                         )
                 with layer_forward_range(layer_idx):
