@@ -165,6 +165,9 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    // Accept shared prompt all_hidden_states and packed softmax_probs; absent means legacy output.
+    // Only changes the wire layout; does not enable the corresponding return_* fields.
+    bool accept_compact_output = 77;
 }
 
 message MMPreprocessConfigPB {
@@ -377,7 +380,6 @@ message FlattenOutputPB {
     PromptLogitsOutputPB prompt_logits = 9;
     // Output of the deployment-registered post-layers CustomHandler.
     TensorPB custom_output = 10;
-    TensorPB all_softmax_probs = 12;
 }
 
 message GenerateOutputsPB {
