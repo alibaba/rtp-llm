@@ -30,8 +30,12 @@ def main():
     generator = torch.Generator().manual_seed(48149)
     operands = (torch.randint(-64, 65, (8, 5032, 128), generator=generator)
                 .float().div_(256).bfloat16())
-    # Every product sum is exactly representable in FP32 before BF16 rounding.
-    full_reference = operands.double().sum(0).bfloat16()
+    # Emulate the native BF16 rank-order contract with FP64 oracle additions
+    # and explicit rounding after each step. This differs from one final cast.
+    full_reference = operands[0].clone()
+    for contribution in operands[1:]:
+        full_reference = (full_reference.double() + contribution.double()).bfloat16()
+    assert not torch.equal(full_reference, operands.double().sum(0).bfloat16())
     report = {'rank': rank, 'world_size': 8, 'scope': 'K3 collective correctness only', 'shapes': {}}
     results = {}
 
@@ -50,7 +54,7 @@ def main():
         expected = full_reference[offset:offset+count]
         eager = reduce_scatter(x, collective.Group.TP)
         actual = gather(eager)
-        assert torch.equal(actual, expected), (name, 'FP64 oracle')
+        assert torch.equal(actual, expected), (name, 'native BF16 rounding oracle')
         results[name] = actual
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
@@ -73,7 +77,7 @@ def main():
         assert fp32.dtype == torch.float32
         assert torch.equal(gather(fp32), operands[:, offset:offset+count].float().sum(0))
         report['shapes'][name] = {'physical_tokens': count, 'noncontiguous': True,
-                                'fp64_oracle_equal': True, 'replay_scales': [1, .5, 1],
+                                'native_bf16_oracle_equal': True, 'replay_scales': [1, .5, 1],
                                 'fp32_fallback_equal': True}
         del graph, captured, eager, x, backing
     assert torch.equal(results['full'][4096:5030], results['reuse'][:934])
@@ -93,7 +97,7 @@ def main():
         json.dump(report, out, indent=2)
     dist.barrier()
     if rank == 0:
-        print('PASS: TP8 FP64 oracle, strided input, full/reuse, six graph replays, FP32 fallback, TP1', flush=True)
+        print('PASS: TP8 native BF16 rounding oracle, strided input, full/reuse, six graph replays, FP32 fallback, TP1', flush=True)
     dist.destroy_process_group()
 
 

@@ -1,4 +1,4 @@
-"""K3 sequence-parallel reduction with a fixed FP32 accumulation order."""
+"""K3 sequence-parallel reduction with a fixed BF16 accumulation order."""
 
 import torch
 
@@ -12,11 +12,12 @@ from rtp_llm.models_py.distributed.collective_torch import (
 def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
     """Sum BF16 TP contributions in rank order, then return the local token shard.
 
-    NCCL reduction order can depend on the physical token shape and output
-    owner. Even FP32 accumulation can then round identical BF16 contributions
-    differently at a BF16 midpoint when a cached prefix changes SP ownership.
-    Exchange contributions without arithmetic and sum in a fixed rank order.
-    Other dtypes retain RTP's existing reduction implementation.
+    Exchange contributions without arithmetic, then add in rank order with
+    BF16 rounding after each addition, matching the native K3 reference.
+    Keeping the order independent of token count and output owner also makes
+    cached-prefix reuse invariant to a change in SP ownership. FP32
+    accumulation changes K3's numerical behavior. Other dtypes retain RTP's
+    existing reduction implementation.
     """
     if input_tensor.dtype != torch.bfloat16:
         return default_reduce_scatter(input_tensor, group)
@@ -34,7 +35,7 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
     received = torch.empty_like(source)
     torch.distributed.all_to_all_single(received, source, group=process_group)
     contributions = received.view(world_size, *shape)
-    accumulated = contributions[0].float()
+    accumulated = contributions[0]
     for rank in range(1, world_size):
-        accumulated = accumulated + contributions[rank].float()
-    return accumulated.to(input_tensor.dtype)
+        accumulated = accumulated + contributions[rank]
+    return accumulated
