@@ -364,6 +364,10 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
+    GRPC_RET_IF_ERROR(decode_context,
+                      !decode_context.peer_addrs.empty(),
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      "ALLOCATE requires at least one prefill peer address");
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
         && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         const auto configured_prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
@@ -837,6 +841,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    // Reject invalid topology before accessing the stream or taking a modulo.
+    // Internal callers must preserve the same invariant as the RPC boundary.
+    if (decode_context.peer_addrs.empty() || resource_.workers.empty()) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "prefill peers and decode workers must be non-empty"), 0};
+    }
     auto*                              generate_stream = decode_context.getStream().get();
     auto&                              cache_keys      = generate_stream->cacheKeys(0);
     const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
@@ -896,6 +905,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
                                                                       LoadKVCacheContext&    load_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (decode_context.peer_addrs.empty() || resource_.workers.empty()) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "prefill peers and decode workers must be non-empty"), 0};
+    }
     validateGroupTags(load_context, engine_->resourceContext().cache_manager->cacheConfig().topology());
     int64_t load_cache_begin_time_us = currentTimeUs();
 
@@ -1585,7 +1597,8 @@ void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_contex
                       stream ? stream->inputLength() : 0,
                       /*prefix_length=*/0,
                       error_code,
-                      error_message);
+                      error_message,
+                      decode_context.allocate_request.input().priority());
     RTP_LLM_LOG_DEBUG("request [%s] reported early finished task to master, error_code [%ld]",
                       decode_context.request_key.c_str(),
                       error_code);

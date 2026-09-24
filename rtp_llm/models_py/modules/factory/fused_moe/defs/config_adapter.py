@@ -3,11 +3,13 @@ Adapter to provide a unified interface from individual config objects.
 This allows Router and Executor classes to work with specific config objects.
 """
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+if TYPE_CHECKING:
+    from rtp_llm.config.quant_config import QuantizationConfig
 
 
 class MoEConfigAdapter:
@@ -21,12 +23,16 @@ class MoEConfigAdapter:
         model_config: ModelConfig,
         parallelism_config: ParallelismConfig,
         moe_config: Optional[MoeConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: Optional["QuantizationConfig"] = None,
         enable_cuda_graph: bool = False,
     ):
+        if not isinstance(enable_cuda_graph, bool):
+            raise TypeError("enable_cuda_graph must be a bool")
         self.model_config = model_config
         self.parallelism_config = parallelism_config
-        self.moe_config = moe_config or MoeConfig()
+        self.moe_config = moe_config if moe_config is not None else MoeConfig()
+        # None means that this layer is not quantized. Callers that want
+        # model-level quantization pass model_config.quant_config explicitly.
         self.quant_config = quant_config
 
         # Provide shortcut access to commonly used attributes
@@ -105,21 +111,18 @@ class MoEConfigAdapter:
         # Generic execution is not chunked, so JIT warmup only needs the
         # request-visible bucket representatives rather than the capacity cap.
         self.warmup_include_capacity = False
-        effective_quant_config = (
-            quant_config if quant_config is not None else model_config.quant_config
-        )
         self.moe_quant_method = (
-            effective_quant_config.get_method()
-            if effective_quant_config is not None
+            quant_config.get_moe_runtime_method_key()
+            if quant_config is not None
             else None
         )
         self.data_type = model_config.data_type
         self.head_num = model_config.attn_config.head_num
-        self.ll_num_max_token = moe_config.ll_num_max_token
-        self.masked_max_token_num = moe_config.masked_max_token_num
-        self.moe_strategy = moe_config.moe_strategy
-        self.use_mori_ep = moe_config.use_mori_ep
-        self.use_deepep_moe = moe_config.use_deepep_moe
+        self.ll_num_max_token = self.moe_config.ll_num_max_token
+        self.masked_max_token_num = self.moe_config.masked_max_token_num
+        self.moe_strategy = self.moe_config.moe_strategy
+        self.use_mori_ep = self.moe_config.use_mori_ep
+        self.use_deepep_moe = self.moe_config.use_deepep_moe
         self.enable_cuda_graph = enable_cuda_graph
 
     @property
