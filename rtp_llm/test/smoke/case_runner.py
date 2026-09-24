@@ -52,6 +52,7 @@ from smoke.worker_status_comparer import WorkerStatusComparer
 
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+from rtp_llm.utils.import_util import has_internal_source
 from rtp_llm.utils.util import str_to_bool
 
 
@@ -554,6 +555,15 @@ class CaseRunner(object):
             return DashScGrpcComparer
         if q_r.get("tau2_bench", False):
             return Tau2BenchComparer
+        if q_r.get("pg_module", False):
+            if not has_internal_source():
+                raise SmokeException(
+                    QueryStatus.VALID_FAILED,
+                    "pg_module smoke queries require internal_source",
+                )
+            from internal_source.rtp_llm.test.smoke.pg.pg_comparer import PgComparer
+
+            return PgComparer
         if "messages" in q_r["query"]:
             return OpenaiComparer
         elif request_endpoint in [
