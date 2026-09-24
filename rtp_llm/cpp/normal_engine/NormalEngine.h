@@ -61,6 +61,7 @@ private:
     size_t                          getWarmUpInputLength() const;
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
     void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    bool          rejectInvalidInputEmbeddings(const GenerateStreamPtr& stream) const;
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -74,6 +75,7 @@ private:
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;
+    bool                                          model_supports_input_embeddings_ = false;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
     EPLBConfig                                    eplb_config;

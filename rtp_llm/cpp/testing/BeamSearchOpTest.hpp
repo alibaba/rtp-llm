@@ -165,4 +165,19 @@ public:
             }
         }
     }
+
+    void runPrunedVocabV2Tests() {
+        const int batch_size  = 1;
+        const int beam_width  = 1500;
+        const int vocab_size  = 2048;
+        const int max_seq_len = 16;
+
+        variableBeamWidthTest(batch_size, 1, beam_width, vocab_size, max_seq_len);
+        simpleTest(batch_size, beam_width, vocab_size, max_seq_len);
+        // V < output width: stage 1 must shrink, while stage 2 still has
+        // enough candidates across input beams. Batch > 1 exercises strides.
+        variableBeamWidthTest(2, 9, 12, 10, max_seq_len);
+        variableBeamWidthTest(2, 12, 9, 5, max_seq_len);
+        variableBeamWidthTest(2, 1, 9, 9, max_seq_len);
+    }
 };

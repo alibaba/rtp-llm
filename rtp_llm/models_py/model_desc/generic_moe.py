@@ -359,6 +359,8 @@ class GenericMoeDecoderLayer(nn.Module):
 class GenericMoeModel(GptModelBase):
     """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
 
+    supports_input_embeddings = True
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -411,7 +413,7 @@ class GenericMoeModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.get_inputs_embeds(input_ids, inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
