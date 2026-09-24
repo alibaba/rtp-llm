@@ -2,7 +2,7 @@
 
 import json
 
-from master_compat import mock_formula_config, legacy_discovery
+from master_compat import mock_formula_config, legacy_discovery, config_generation
 import os
 import shutil
 import signal
@@ -19,6 +19,17 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / "online_eval"))
 from flexlb_cfg import render_env, render_process_config
 from mode_profiles import load_mode_tables, resolve_address_plan, resolve_mode
+
+
+def master_ready_port(raw_config: str, http_port: int) -> int:
+    """The port the master opens first, which the bundle probes for readiness.
+
+    The pre-schema-1 master (flat FLEXLB_CONFIG, no schemaVersion) serves only
+    the HTTP ports and never binds the master gRPC listener that later builds
+    add. Probing http_port + 2 for such a master blocks until the startup
+    deadline and tears the whole bundle down, so its readiness is on http_port.
+    """
+    return http_port + 2 if config_generation(raw_config) == "versioned" else http_port
 
 
 def run():
@@ -233,7 +244,9 @@ def run():
             ],
             env,
         )
-        ready(http_port + 2, master)
+        # A flat (pre-schema-1) master never binds the master gRPC port, so its
+        # readiness is observed on the HTTP port instead of http_port + 2.
+        ready(master_ready_port(raw, http_port), master)
         # This bundle replaces appctl, so it also owns the normal local online hook.
         deadline = time.monotonic() + cfg["startup_timeout_s"]
         while not stopping:

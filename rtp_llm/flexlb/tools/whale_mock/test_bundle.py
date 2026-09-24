@@ -113,6 +113,17 @@ class BundleConfigurationTest(unittest.TestCase):
                 {"MOCK_PERFORMANCE_CONFIG_JSON": '{"block_size":64}'}
             )
 
+    def test_flat_master_readiness_is_observed_on_the_http_port(self):
+        # The d9a0accf3 flat master binds only HTTP; waiting for the gRPC
+        # listener on http_port + 2 stalls until the startup deadline kills
+        # the whole bundle.
+        flat = '{"loadBalanceStrategy":"CACHE_AFFINITY_FIRST","enableQueueing":true}'
+        self.assertEqual(bundle.master_ready_port(flat, 7001), 7001)
+
+    def test_versioned_master_readiness_waits_for_the_grpc_port(self):
+        self.assertEqual(bundle.master_ready_port('{"schemaVersion":1}', 7001), 7003)
+        self.assertEqual(bundle.master_ready_port('{"schemaVersion":3}', 7001), 7003)
+
 
 if __name__ == "__main__":
     unittest.main()

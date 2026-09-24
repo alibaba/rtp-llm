@@ -82,6 +82,22 @@ def mock_formula_config(raw, legacy, mock_expression=None):
         raise ValueError(f"unsupported legacy config shape (schemaVersion={schema})")
 
 
+def config_generation(raw):
+    """Classify a FLEXLB_CONFIG by the master generation that consumes it.
+
+    "flat" is the pre-schema master (d9a0accf3 and earlier): a schema-less
+    document that serves only HTTP ports and never binds the master gRPC
+    listener. "versioned" is any schema-bearing master (schema 1/3), which
+    does open it. This is the single source of truth for the generation
+    question; consumers translate it into their own consequence (readiness
+    port, formula projection) instead of re-parsing the document themselves.
+    """
+    config = json.loads(raw)
+    if not isinstance(config, dict):
+        raise ValueError("FLEXLB_CONFIG must be a JSON object")
+    return "versioned" if "schemaVersion" in config else "flat"
+
+
 def legacy_discovery(endpoints, file_discovery=False):
     env = dict(endpoints["env"])
     service = json.loads(env["MODEL_SERVICE_CONFIG"])

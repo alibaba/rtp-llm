@@ -1,9 +1,16 @@
 import json
 from pathlib import Path
 import unittest
-from master_compat import legacy_discovery, mock_formula_config
+from master_compat import config_generation, legacy_discovery, mock_formula_config
 
 class MasterCompatibilityTest(unittest.TestCase):
+    def test_generation_classifies_the_master_contract_of_each_document(self):
+        self.assertEqual("flat", config_generation(
+            '{"loadBalanceStrategy":"CACHE_AFFINITY_FIRST","enableQueueing":true}'))
+        self.assertEqual("versioned", config_generation('{"schemaVersion":1}'))
+        self.assertEqual("versioned", config_generation('{"schemaVersion":3}'))
+        with self.assertRaises(ValueError): config_generation("[1,2,3]")
+
     def test_legacy_document_is_only_projected_for_mock_formula(self):
         raw = json.dumps({
             "schemaVersion": 1,
