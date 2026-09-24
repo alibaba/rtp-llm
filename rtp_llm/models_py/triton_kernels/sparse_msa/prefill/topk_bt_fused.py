@@ -3,8 +3,8 @@
 
 Reuses kernel-1 (``_flash_attn_fwd_with_block_score_kernel``) for QK score,
 then in one kernel-2 (``_topk_to_block_table_kernel``) does bitonic top-k and
-emits either trtllm block_tables+seq_lens (``EMIT_BLOCK_TABLE``) or the
-``topk_idx`` layout topk_sparse.py expects (``EMIT_TOPK_IDX``). Assumes
+emits either block_tables+seq_lens (``EMIT_BLOCK_TABLE``) or the
+``topk_idx`` layout consumed by paged sparse attention (``EMIT_TOPK_IDX``). Assumes
 ``idx_group_size == 1`` (M3 production: num_idx_heads == num_kv_heads).
 """
 
@@ -218,84 +218,6 @@ def _patch_cutlass_cute_thrmma():
 
 _patch_cutlass_cute_thrmma()
 _patch_fmha_sm100_cxx_standard()
-
-
-@triton.jit
-def _kv_flat_to_paged_kernel(
-    k_in,
-    v_in,
-    k_out,
-    v_out,
-    block,
-    nkv,
-    dim,
-    BLOCK_B: tl.constexpr,
-    DIM: tl.constexpr,
-    NKV: tl.constexpr,
-):
-    """Fused K+V copy: flat scratch page [block, nkv, dim] -> paged [nkv, block, dim]
-    (out[p,h,b,d] = in[p,b,h,d]). One launch for both caches; coalesced read (the
-    input page is contiguous [block,nkv,dim]) + coalesced write (nkv contiguous
-    [BLOCK_B,dim] chunks). ~4x faster than two aten permute+contiguous copies."""
-    # The process-wide CP scratch grows with the independent historical maxima
-    # of batch size and sequence length.  Long-context traffic can therefore
-    # make the flattened [page, block, head, dim] offset exceed INT32 even when
-    # the current request itself is small.  Promote the page term before the
-    # multiplication; otherwise Triton wraps at 2**31 elements and both the
-    # loads and stores below address memory outside their tensors.
-    pid_p = tl.program_id(0)
-    pid_p_i64 = pid_p.to(tl.int64)
-    b0 = tl.program_id(1) * BLOCK_B
-    offs_b = b0 + tl.arange(0, BLOCK_B)
-    offs_h = tl.arange(0, NKV)
-    offs_d = tl.arange(0, DIM)
-    mask_b = offs_b < block
-    in_off = (
-        pid_p_i64 * (block * nkv * dim)
-        + offs_b[:, None, None] * (nkv * dim)
-        + offs_h[None, :, None] * dim
-        + offs_d[None, None, :]
-    )
-    k_tile = tl.load(k_in + in_off, mask=mask_b[:, None, None], other=0)
-    v_tile = tl.load(v_in + in_off, mask=mask_b[:, None, None], other=0)
-    out_off = (
-        pid_p_i64 * (nkv * block * dim)
-        + offs_h[None, :, None] * (block * dim)
-        + offs_b[:, None, None] * dim
-        + offs_d[None, None, :]
-    )
-    tl.store(k_out + out_off, k_tile, mask=mask_b[:, None, None])
-    tl.store(v_out + out_off, v_tile, mask=mask_b[:, None, None])
-
-
-def _kv_flat_to_paged(
-    k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
-):
-    """flat [slots, nkv, dim] -> paged [num_paged, nkv, block, dim] for K and V in one
-    fused launch. Returns (k_paged, v_paged) contiguous. Replaces two aten
-    permute(0,2,1,3).contiguous() copies (~4x faster, bit-identical)."""
-    shape = (num_paged, num_kv_heads, block_size_k, head_dim)
-    k_paged = torch.empty(shape, dtype=k_cache.dtype, device=k_cache.device)
-    v_paged = torch.empty(shape, dtype=v_cache.dtype, device=v_cache.device)
-    # BLOCK_B=8 / num_warps=8 / num_stages=2 tuned best; the copy is HBM-bandwidth-bound
-    # (~6 TB/s achievable here) so it already runs at the pure-contiguous-copy ceiling.
-    BLOCK_B = 8
-    grid = (num_paged, triton.cdiv(block_size_k, BLOCK_B))
-    _kv_flat_to_paged_kernel[grid](
-        k_cache,
-        v_cache,
-        k_paged,
-        v_paged,
-        block_size_k,
-        num_kv_heads,
-        head_dim,
-        BLOCK_B=BLOCK_B,
-        DIM=head_dim,
-        NKV=num_kv_heads,
-        num_warps=8,
-        num_stages=2,
-    )
-    return k_paged, v_paged
 
 
 @triton.jit
@@ -669,7 +591,7 @@ def _topk_to_block_table_kernel(
         )
         tl.store(seqlen_ptr + row, sl_val)
     if EMIT_TOPK_IDX:
-        # topk_idx [NKV, total_q, topk] in the layout topk_sparse expects.
+        # topk_idx [NKV, total_q, topk] for paged sparse attention.
         # Padding is -1 (matches existing flash_prefill_with_topk_index contract).
         ti_val = tl.where(valid, t, -1)
         ti_offset = (
@@ -1848,8 +1770,8 @@ def _sparse_attn_chunked(
 @torch.no_grad()
 def flash_prefill_with_fmha(
     q: torch.Tensor,  # [total_q, num_q_heads, head_dim] bf16
-    k_cache: torch.Tensor | None,  # [max_slots, num_kv_heads, head_dim] FLAT
-    v_cache: torch.Tensor | None,  # [max_slots, num_kv_heads, head_dim] FLAT
+    k_paged_cache: torch.Tensor,  # HND working pages
+    v_paged_cache: torch.Tensor,  # HND working pages
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
     idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
     req_to_token: torch.Tensor,
@@ -1866,8 +1788,6 @@ def flash_prefill_with_fmha(
     index_score_plan=None,
     sparse_attn_plan=None,
     kv_indices=None,
-    k_paged_cache: torch.Tensor | None = None,
-    v_paged_cache: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fast sparse prefill: mega topk (index score + bitonic) -> fmha_sm100 sparse attn.
 
@@ -1880,75 +1800,61 @@ def flash_prefill_with_fmha(
     schedule + GPU page_table + direct ``sparse_atten_func``, bit-identical + determi-
     nistic); otherwise it uses the adapter ``sparse_fmha``.
 
-    Decode uses ``flash_decode_with_trtllm_gen`` instead (trtllm-gen sparse-decode).
     Constraint: idx_group_size == 1 (num_idx_heads == num_kv_heads).
     """
     if sparse_attn_plan is None:
         raise ValueError("flash_prefill_with_fmha requires a sparse_attn_plan")
 
     total_q, num_q_heads, head_dim = q.shape
-    if (k_paged_cache is None) != (v_paged_cache is None):
-        raise ValueError("paged K and V caches must be provided together")
     plan_uses_fp8_kv = bool(
         sparse_attn_plan.get("_use_fp8_kvcache", False)
         if isinstance(sparse_attn_plan, dict)
         else False
     )
-    if k_paged_cache is not None:
-        if k_paged_cache.dim() != 4 or v_paged_cache.dim() != 4:
-            raise ValueError(
-                "paged K/V must be [pages,heads,page_size,head_dim], got "
-                f"K={tuple(k_paged_cache.shape)} V={tuple(v_paged_cache.shape)}"
-            )
-        if k_paged_cache.shape != v_paged_cache.shape:
-            raise ValueError(
-                f"paged K/V shape mismatch: K={tuple(k_paged_cache.shape)} "
-                f"V={tuple(v_paged_cache.shape)}"
-            )
-        if k_paged_cache.dtype != v_paged_cache.dtype or k_paged_cache.dtype not in (
-            torch.bfloat16,
-            torch.float8_e4m3fn,
-        ):
-            raise ValueError(
-                "direct paged K/V must use matching BF16 or E4M3 tensors, got "
-                f"K={k_paged_cache.dtype} V={v_paged_cache.dtype}"
-            )
-        if k_paged_cache.device != q.device or v_paged_cache.device != q.device:
-            raise ValueError(
-                "direct paged K/V and Q must be on the same device, got "
-                f"Q={q.device} K={k_paged_cache.device} V={v_paged_cache.device}"
-            )
-        if not k_paged_cache.is_contiguous() or not v_paged_cache.is_contiguous():
-            raise ValueError("direct paged K/V must be contiguous HND tensors")
-        storage_uses_fp8_kv = k_paged_cache.dtype == torch.float8_e4m3fn
-        if storage_uses_fp8_kv != plan_uses_fp8_kv:
-            raise ValueError(
-                "direct paged K/V dtype does not match sparse-attention plan: "
-                f"dtype={k_paged_cache.dtype} plan_fp8={plan_uses_fp8_kv}"
-            )
-        if not storage_uses_fp8_kv and k_paged_cache.dtype != q.dtype:
-            raise ValueError(
-                "direct BF16 paged K/V must match Q dtype, got "
-                f"Q={q.dtype} K={k_paged_cache.dtype}"
-            )
-        if int(k_paged_cache.shape[2]) != int(block_size_k):
-            raise ValueError(
-                f"paged K/V page size {k_paged_cache.shape[2]} != {block_size_k}"
-            )
-        if int(k_paged_cache.shape[3]) != int(head_dim):
-            raise ValueError(
-                f"paged K/V head dim {k_paged_cache.shape[3]} != {head_dim}"
-            )
-        num_kv_heads = int(k_paged_cache.shape[1])
-        k_paged_f, v_paged_f = k_paged_cache, v_paged_cache
-    else:
-        if k_cache is None or v_cache is None:
-            raise ValueError("flat K/V caches are required when paged K/V are absent")
-        if plan_uses_fp8_kv:
-            raise ValueError(
-                "an FP8 sparse-attention plan requires direct FP8 paged K/V"
-            )
-        max_slots, num_kv_heads, _ = k_cache.shape
+    if k_paged_cache.dim() != 4 or v_paged_cache.dim() != 4:
+        raise ValueError(
+            "paged K/V must be [pages,heads,page_size,head_dim], got "
+            f"K={tuple(k_paged_cache.shape)} V={tuple(v_paged_cache.shape)}"
+        )
+    if k_paged_cache.shape != v_paged_cache.shape:
+        raise ValueError(
+            f"paged K/V shape mismatch: K={tuple(k_paged_cache.shape)} "
+            f"V={tuple(v_paged_cache.shape)}"
+        )
+    if k_paged_cache.dtype != v_paged_cache.dtype or k_paged_cache.dtype not in (
+        torch.bfloat16,
+        torch.float8_e4m3fn,
+    ):
+        raise ValueError(
+            "direct paged K/V must use matching BF16 or E4M3 tensors, got "
+            f"K={k_paged_cache.dtype} V={v_paged_cache.dtype}"
+        )
+    if k_paged_cache.device != q.device or v_paged_cache.device != q.device:
+        raise ValueError(
+            "direct paged K/V and Q must be on the same device, got "
+            f"Q={q.device} K={k_paged_cache.device} V={v_paged_cache.device}"
+        )
+    if not k_paged_cache.is_contiguous() or not v_paged_cache.is_contiguous():
+        raise ValueError("direct paged K/V must be contiguous HND tensors")
+    storage_uses_fp8_kv = k_paged_cache.dtype == torch.float8_e4m3fn
+    if storage_uses_fp8_kv != plan_uses_fp8_kv:
+        raise ValueError(
+            "direct paged K/V dtype does not match sparse-attention plan: "
+            f"dtype={k_paged_cache.dtype} plan_fp8={plan_uses_fp8_kv}"
+        )
+    if not storage_uses_fp8_kv and k_paged_cache.dtype != q.dtype:
+        raise ValueError(
+            "direct BF16 paged K/V must match Q dtype, got "
+            f"Q={q.dtype} K={k_paged_cache.dtype}"
+        )
+    if int(k_paged_cache.shape[2]) != int(block_size_k):
+        raise ValueError(
+            f"paged K/V page size {k_paged_cache.shape[2]} != {block_size_k}"
+        )
+    if int(k_paged_cache.shape[3]) != int(head_dim):
+        raise ValueError(f"paged K/V head dim {k_paged_cache.shape[3]} != {head_dim}")
+    num_kv_heads = int(k_paged_cache.shape[1])
+    k_paged_f, v_paged_f = k_paged_cache, v_paged_cache
     num_pages = (max_seqlen_k + block_size_k - 1) // block_size_k
 
     # Physical page table: build once here (or take the per-forward cached one) and
@@ -1977,15 +1883,6 @@ def flash_prefill_with_fmha(
         emit_block_table=False,
     )
 
-    # Step 3 consumes HND paged K/V. The reference path converts the flat BF16
-    # gather scratch here. A direct-paged caller may instead supply an already
-    # paged, request-local BF16 or FP8 working set and avoid both the flat main
-    # scratch and this conversion.
-    if k_paged_cache is None:
-        num_paged = max_slots // block_size_k
-        k_paged_f, v_paged_f = _kv_flat_to_paged(
-            k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
-        )
     return sparse_prefill_from_topk(
         q,
         k_paged_f,
@@ -2160,142 +2057,6 @@ def sparse_prefill_from_topk_fp4(
     )
 
 
-@torch.no_grad()
-def flash_decode_with_trtllm_gen(
-    q: torch.Tensor,  # [total_q, num_q_heads, head_dim] bf16
-    k_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
-    v_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
-    idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
-    idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
-    req_to_token: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    seq_lens: torch.Tensor,
-    prefix_lens: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
-    block_size_k: int,
-    topk: int,
-    init_blocks: int,
-    local_blocks: int,
-    sm_scale: float,
-    workspace: torch.Tensor,
-    index_score_plan=None,
-    kv_indices=None,
-) -> torch.Tensor:
-    """Fast sparse decode: mega topk (index score + bitonic) -> trtllm-gen sparse-decode.
-
-    Step 1+2 emit bt/sl (compacted trtllm block table) + topk_idx; step 3 runs
-    flashinfer's trtllm-gen sparse-decode kernel over the paged KV.
-
-    trtllm-gen's kernel launches with grid_dim_x = total_q * num_kv_heads, capped at
-    2**16 - 1 = 65535; when total_q exceeds ``65535 // num_kv_heads`` we slice the
-    q_packed / block_tables / seq_lens rows and issue multiple calls over the shared
-    paged KV (per-query independence -> no LSE merge). Verified bit-equivalent up to
-    q=65536 in m3_test/test_trtllm_gen_q_limit.py. Constraint: idx_group_size == 1.
-    """
-    from flashinfer.decode import trtllm_batch_decode_with_kv_cache
-
-    total_q, num_q_heads, head_dim = q.shape
-    max_slots, num_kv_heads, _ = k_cache.shape
-    gqa = num_q_heads // num_kv_heads
-    num_pages = (max_seqlen_k + block_size_k - 1) // block_size_k
-
-    if kv_indices is None:
-        kv_indices = build_kv_page_indices(req_to_token, seq_lens, block_size_k)
-
-    # Step 1+2: fused QK score + bitonic topk; emit bt/sl (compacted trtllm block table).
-    bt, sl, _topk_idx = flash_prefill_topk_to_block_tables(
-        idx_q=idx_q,
-        idx_k_cache=idx_k_cache,
-        req_to_token=req_to_token,
-        cu_seqlens=cu_seqlens,
-        seq_lens=seq_lens,
-        prefix_lens=prefix_lens,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        block_size_k=block_size_k,
-        topk=topk,
-        num_pages=num_pages,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
-        index_score_plan=index_score_plan,
-        kv_indices=kv_indices,
-        emit_block_table=True,
-    )
-
-    # Permute flat MSA side cache to trtllm's paged layout:
-    #   flat  [num_pages * block_size_k, num_kv_heads, head_dim]
-    # -> paged [num_kv_heads * num_pages, 1, block_size_k, head_dim]
-    # The trailing unsqueeze(1) is trtllm's blocks-per-token dim (= 1 here).
-    paged_slots = num_pages * block_size_k
-
-    def _to_paged(cache: torch.Tensor) -> torch.Tensor:
-        return (
-            cache[:paged_slots]
-            .view(num_pages, block_size_k, num_kv_heads, head_dim)
-            .permute(2, 0, 1, 3)
-            .contiguous()
-            .view(num_kv_heads * num_pages, block_size_k, head_dim)
-            .unsqueeze(1)
-        )
-
-    k_paged = _to_paged(k_cache)
-    v_paged = _to_paged(v_cache)
-
-    # Pack Q for trtllm-gen's GQA layout:
-    #   [total_q, num_q_heads, head_dim] -> [total_q * num_kv_heads, gqa, head_dim]
-    q_packed = (
-        q.view(total_q, num_kv_heads, gqa, head_dim)
-        .reshape(total_q * num_kv_heads, gqa, head_dim)
-        .contiguous()
-    )
-
-    # Chunk q_packed along axis 0 (= (token, kv_head) interleaved rows) so each
-    # call's grid_dim_x stays <= 65535. block_tables and seq_lens share the same
-    # row layout so they slice identically. KV cache + workspace are shared across
-    # chunks; sparse-decode queries are mutually independent, no LSE merge needed.
-    CUDA_GRID_MAX = 65535
-    rows_per_chunk = (CUDA_GRID_MAX // num_kv_heads) * num_kv_heads
-    nrows = q_packed.shape[0]
-
-    if nrows <= rows_per_chunk:
-        out = trtllm_batch_decode_with_kv_cache(
-            query=q_packed,
-            kv_cache=(k_paged, v_paged),
-            workspace_buffer=workspace,
-            block_tables=bt,
-            seq_lens=sl,
-            max_seq_len=max_seqlen_k,
-            bmm1_scale=sm_scale,
-            bmm2_scale=1.0,
-            backend="trtllm-gen",
-            out_dtype=torch.bfloat16,
-        )
-    else:
-        out_chunks = []
-        for start in range(0, nrows, rows_per_chunk):
-            end = min(start + rows_per_chunk, nrows)
-            out_chunks.append(
-                trtllm_batch_decode_with_kv_cache(
-                    query=q_packed[start:end],
-                    kv_cache=(k_paged, v_paged),
-                    workspace_buffer=workspace,
-                    block_tables=bt[start:end],
-                    seq_lens=sl[start:end],
-                    max_seq_len=max_seqlen_k,
-                    bmm1_scale=sm_scale,
-                    bmm2_scale=1.0,
-                    backend="trtllm-gen",
-                    out_dtype=torch.bfloat16,
-                )
-            )
-        out = torch.cat(out_chunks, dim=0)
-
-    return out.view(total_q, num_kv_heads, gqa, head_dim).reshape(
-        total_q, num_q_heads, head_dim
-    )
-
-
 def _flash_prefill_with_fused_topk_index_chunked(
     idx_q,
     idx_k_cache,
@@ -2466,7 +2227,7 @@ def flash_prefill_with_fused_topk_index(
 ):
     """Drop-in for ``flash_prefill_with_topk_index`` (M3 sparse, disable_index_value,
     idx_group_size==1). Returns ``(None, topk_idx[num_idx_heads, total_q, topk] int32)``
-    with -1 padding — same contract, fed straight into topk_sparse step 3.
+    with -1 padding, ready for paged sparse attention.
     """
     triton.set_allocator(robust_allocator)
     total_q, num_heads, qk_head_dim = idx_q.shape

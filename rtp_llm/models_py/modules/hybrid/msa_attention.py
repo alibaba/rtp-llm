@@ -14,14 +14,9 @@ Design (paged-only store):
   BF16). Both are addressed by the same block table and therefore travel
   together under PD separation.
 
-* Prefill MSA kernels consume flat *token-slot* tensors
-  ``[max_slots, num_kv_heads, head_dim]`` addressed by a
-  ``req_to_token [max_reqs, max_kv_len]`` map plus ``slot_ids [batch]``. Since
-  that layout differs from the paged pool, prefill gathers the active sequence
-  out of the paged pool into a process-wide *transient* scratch
-  (``_MainKVScratch`` / ``_IdxKScratch``) that the prefill kernel reads.
-  The opt-in paged decode path writes only the current K/V/idx_K token into the
-  persistent paged pool and reads history directly via the physical block table.
+* Prefill writes the persistent paged pool and gathers the active request pages
+  into HND working pages for sparse FMHA. The index-score operator consumes a
+  compact idx_K working tensor. Decode reads the persistent pages directly.
 
 * In the normal non-CP path the physical slot for ``(request b, token
   position p)`` is the paged block table::
@@ -29,8 +24,7 @@ Design (paged-only store):
       slot = block_table[b, p // page_size] * page_size + (p % page_size)
 
 * In CP prefill, K/V are all-gathered into full sequence order while Q stays
-  rank-local, then written into this rank's paged shard; the gather scratch is
-  indexed by a compact ``b*seq_len + pos`` grid for the kernel.
+  rank-local, then written into this rank's paged shard and HND working pages.
 
 The index branch (``index_q_proj`` / ``index_k_proj`` + per-head Gemma RMSNorm
 + partial RoPE) only selects top-k blocks; with ``disable_index_value=True``
@@ -49,9 +43,6 @@ import triton.language as tl
 
 logger = logging.getLogger(__name__)
 
-# Fused paged->scratch main-K/V gather (one pass instead of torch's
-# index -> cast -> index_put). Set M3_MSA_FUSED_KV_GATHER=0 for the torch path.
-_FUSED_KV_GATHER = os.environ.get("M3_MSA_FUSED_KV_GATHER", "1") != "0"
 _CP_PACKED_KV_OVERLAP = os.environ.get("RTP_LLM_CP_PACKED_KV_OVERLAP", "0") == "1"
 _CP_PREFIX_PREFETCH = os.environ.get("RTP_LLM_CP_PREFIX_PREFETCH", "0") == "1"
 _CP_COMPACT_PREFILL = os.environ.get("M3_MSA_CP_COMPACT_PREFILL", "0") == "1"
@@ -1014,226 +1005,94 @@ def _write_decode_kv_idx_to_paged(
     )
 
 
+@triton.jit
+def _write_main_kv_to_paged_kernel(
+    k_ptr,
+    v_ptr,
+    slot_ptr,
+    base_ptr,
+    TOKEN_COUNT,
+    NUM_KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
+    K_S0: tl.constexpr,
+    K_S1: tl.constexpr,
+    K_S2: tl.constexpr,
+    V_S0: tl.constexpr,
+    V_S1: tl.constexpr,
+    V_S2: tl.constexpr,
+    BASE_S0: tl.constexpr,
+    BASE_S1: tl.constexpr,
+    BASE_S2: tl.constexpr,
+    BASE_S3: tl.constexpr,
+    BASE_S4: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+):
+    row = tl.program_id(0)
+    slot = tl.load(slot_ptr + row).to(tl.int64)
+    block = slot // PAGE_SIZE
+    page_off = slot - block * PAGE_SIZE
+    offs = tl.arange(0, BLOCK_KV)
+    head = offs // HEAD_DIM
+    dim = offs - head * HEAD_DIM
+    valid = (slot >= 0) & (block < NUM_BLOCKS) & (offs < NUM_KV_HEADS * HEAD_DIM)
+    k = tl.load(
+        k_ptr + row * K_S0 + head * K_S1 + dim * K_S2,
+        mask=valid,
+        other=0.0,
+    )
+    v = tl.load(
+        v_ptr + row * V_S0 + head * V_S1 + dim * V_S2,
+        mask=valid,
+        other=0.0,
+    )
+    dst = (
+        base_ptr + block * BASE_S0 + head * BASE_S2 + page_off * BASE_S3 + dim * BASE_S4
+    )
+    tl.store(dst, k, mask=valid)
+    tl.store(dst + BASE_S1, v, mask=valid)
+
+
 def _write_main_kv_to_paged(
     k: torch.Tensor,
     v: torch.Tensor,
     base: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """Persist K/V into the 5-D paged pool via the tuned C++ writer.
-
-    When ``base`` is float8_e4m3fn the C++ op casts bf16/half/float activations
-    to e4m3 on store (no-scale cast, matching the sparse decode kernels)."""
-    from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-    rtp_llm_ops.mha_kv_write_cache(k.contiguous(), v.contiguous(), base, slot_mapping)
-
-
-@triton.jit
-def _gather_paged_kv_to_scratch_kernel(
-    base_ptr,
-    gf_ptr,
-    dst_ptr,
-    out_k_ptr,
-    out_v_ptr,
-    N,
-    PAGE_SIZE: tl.constexpr,
-    NUM_KV_HEADS: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
-    BASE_S0: tl.constexpr,
-    BASE_S1: tl.constexpr,
-    BASE_S2: tl.constexpr,
-    BASE_S3: tl.constexpr,
-    BASE_S4: tl.constexpr,
-    OUT_S0: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-    BLOCK_HD: tl.constexpr,
-):
-    """One pass: read paged K/V at physical slot gf[t], cast, write scratch[dst[t]].
-
-    Replaces ``scratch[dst] = pool[gf // p, gf % p].to(bf16)``, which torch
-    lowers to three full passes over the whole active history (index -> cast ->
-    index_put) per K and per V per layer.
-    """
-    # Every term that scales with the scratch or the pool is promoted to int64
-    # before it is multiplied. The scratch is sized from the *historical* maxima
-    # of batch size and sequence length (see
-    # _ensure_scratch_addressing_capacity), so dst can
-    # be far larger than the current request implies, and int32 offsets would
-    # wrap into unrelated tensors -- cf. the _kv_flat_to_paged_kernel INT32 fix.
-    pid = tl.program_id(0).to(tl.int64)
-    t = pid * BLOCK_T + tl.arange(0, BLOCK_T).to(tl.int64)
-    t_ok = t < N
-    gf = tl.load(gf_ptr + t, mask=t_ok, other=-1).to(tl.int64)
-    dst = tl.load(dst_ptr + t, mask=t_ok, other=0).to(tl.int64)
-    # gf < 0 marks a non-owned token under CP page-RR sharding; skip it rather
-    # than letting a negative index wrap into unrelated pool rows.
-    row_ok = t_ok & (gf >= 0)
-    blk = gf // PAGE_SIZE
-    off = gf % PAGE_SIZE
-
-    hd = tl.arange(0, BLOCK_HD)
-    head = hd // HEAD_DIM
-    dim = hd % HEAD_DIM
-    m = row_ok[:, None] & (hd < NUM_KV_HEADS * HEAD_DIM)[None, :]
-
-    src = (
-        blk[:, None] * BASE_S0
-        + head[None, :] * BASE_S2
-        + off[:, None] * BASE_S3
-        + dim[None, :] * BASE_S4
-    )
-    k_vals = tl.load(base_ptr + src, mask=m, other=0.0)
-    v_vals = tl.load(base_ptr + src + BASE_S1, mask=m, other=0.0)
-    # out is [slots, head, dim] contiguous, so hd == head * HEAD_DIM + dim.
-    dof = dst[:, None] * OUT_S0 + hd[None, :]
-    tl.store(out_k_ptr + dof, k_vals.to(out_k_ptr.dtype.element_ty), mask=m)
-    tl.store(out_v_ptr + dof, v_vals.to(out_v_ptr.dtype.element_ty), mask=m)
-
-
-def _gather_paged_main_kv_to_scratch(
-    base: torch.Tensor,
-    gf: torch.Tensor,
-    dst_full: torch.Tensor,
-    scratch_k: torch.Tensor,
-    scratch_v: torch.Tensor,
-    page_size: int,
-) -> None:
-    """Fused paged->scratch gather+cast+scatter for the full active history."""
-    n = int(dst_full.numel())
-    if n == 0:
+    """Persist K/V into the 5-D paged pool, including padded block strides."""
+    if k.shape != v.shape or k.ndim != 3:
+        raise ValueError("K/V must have matching [token, head, dim] shapes")
+    if base.ndim != 5 or tuple(base.shape[1:3]) != (2, k.shape[1]):
+        raise ValueError("paged K/V base must be [block, 2, head, page, dim]")
+    if base.shape[4] != k.shape[2] or slot_mapping.numel() != k.shape[0]:
+        raise ValueError("paged K/V base or slots do not match K/V rows")
+    rows = int(k.shape[0])
+    if rows == 0:
         return
-    if base.dim() != 5:
-        raise RuntimeError(
-            f"fused KV gather needs a 5-D paged base, got {tuple(base.shape)}"
-        )
-    heads = int(scratch_k.shape[1])
-    head_dim = int(scratch_k.shape[2])
-    for name, t in (("scratch_k", scratch_k), ("scratch_v", scratch_v)):
-        if t.stride(2) != 1 or t.stride(1) != head_dim:
-            raise RuntimeError(
-                f"fused KV gather needs a contiguous {name} [slots, head, dim], "
-                f"got strides {tuple(t.stride())}"
-            )
-    block_t = int(os.environ.get("M3_MSA_KV_GATHER_BLOCK_T", "8"))
-    _gather_paged_kv_to_scratch_kernel[(triton.cdiv(n, block_t),)](
+    _write_main_kv_to_paged_kernel[(rows,)](
+        k,
+        v,
+        slot_mapping,
         base,
-        gf,
-        dst_full,
-        scratch_k,
-        scratch_v,
-        n,
-        PAGE_SIZE=int(page_size),
-        NUM_KV_HEADS=heads,
-        HEAD_DIM=head_dim,
+        rows,
+        NUM_KV_HEADS=int(k.shape[1]),
+        HEAD_DIM=int(k.shape[2]),
+        PAGE_SIZE=int(base.shape[3]),
+        NUM_BLOCKS=int(base.shape[0]),
+        K_S0=int(k.stride(0)),
+        K_S1=int(k.stride(1)),
+        K_S2=int(k.stride(2)),
+        V_S0=int(v.stride(0)),
+        V_S1=int(v.stride(1)),
+        V_S2=int(v.stride(2)),
         BASE_S0=int(base.stride(0)),
         BASE_S1=int(base.stride(1)),
         BASE_S2=int(base.stride(2)),
         BASE_S3=int(base.stride(3)),
         BASE_S4=int(base.stride(4)),
-        OUT_S0=int(scratch_k.stride(0)),
-        BLOCK_T=block_t,
-        BLOCK_HD=triton.next_power_of_2(heads * head_dim),
-    )
-
-
-@triton.jit
-def _gather_paged_idx_rows_kernel(
-    src_ptr,
-    src_scale_ptr,
-    gf_ptr,
-    dst_ptr,
-    out_ptr,
-    N,
-    ROW_DIM: tl.constexpr,
-    PAGE_SIZE: tl.constexpr,
-    SRC_S0: tl.constexpr,
-    SRC_S1: tl.constexpr,
-    SRC_S2: tl.constexpr,
-    SCALE_S0: tl.constexpr,
-    SCALE_S1: tl.constexpr,
-    OUT_S0: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    HAS_SCALE: tl.constexpr,
-):
-    """Gather physical idx-K slots into a flat working scratch."""
-    # int64 promotion before every scratch/pool multiply -- same reasoning as
-    # _gather_paged_kv_to_scratch_kernel.
-    pid = tl.program_id(0).to(tl.int64)
-    t = pid * BLOCK_T + tl.arange(0, BLOCK_T).to(tl.int64)
-    t_ok = t < N
-    gf = tl.load(gf_ptr + t, mask=t_ok, other=-1).to(tl.int64)
-    dst = tl.load(dst_ptr + t, mask=t_ok, other=0).to(tl.int64)
-    row_ok = t_ok & (gf >= 0)
-    src_block = gf // PAGE_SIZE
-    src_offset = gf - src_block * PAGE_SIZE
-    d = tl.arange(0, BLOCK_D)
-    m = row_ok[:, None] & (d < ROW_DIM)[None, :]
-    vals = tl.load(
-        src_ptr
-        + src_block[:, None] * SRC_S0
-        + src_offset[:, None] * SRC_S1
-        + d[None, :] * SRC_S2,
-        mask=m,
-        other=0.0,
-    )
-    if HAS_SCALE:
-        row_scale = tl.load(
-            src_scale_ptr + src_block * SCALE_S0 + src_offset * SCALE_S1,
-            mask=row_ok,
-            other=0.0,
-        )
-        vals = vals * row_scale[:, None]
-    tl.store(out_ptr + dst[:, None] * OUT_S0 + d[None, :], vals, mask=m)
-
-
-def _gather_paged_idx_rows(
-    src: torch.Tensor,
-    gf: torch.Tensor,
-    dst_full: torch.Tensor,
-    out: torch.Tensor,
-    src_scale: Optional[torch.Tensor] = None,
-) -> None:
-    """Gather paged idx-K values, optionally dequantizing per-token scales."""
-    n = int(dst_full.numel())
-    if n == 0:
-        return
-    if src.dim() != 3 or out.dim() != 2:
-        raise RuntimeError(
-            "paged idx gather needs [block,page,dim] src and [row,dim] out, got "
-            f"{tuple(src.shape)} -> {tuple(out.shape)}"
-        )
-    page_size, row_dim = int(src.shape[1]), int(src.shape[2])
-    if int(out.shape[1]) != row_dim or src.stride(2) != 1 or out.stride(1) != 1:
-        raise RuntimeError(
-            f"paged idx gather needs contiguous row dimensions, got strides "
-            f"{tuple(src.stride())} -> {tuple(out.stride())}"
-        )
-    if src_scale is not None and tuple(src_scale.shape) != tuple(src.shape[:2]):
-        raise RuntimeError(
-            f"paged idx scale shape {tuple(src_scale.shape)} does not match "
-            f"value pages {tuple(src.shape[:2])}"
-        )
-    block_t = int(os.environ.get("M3_MSA_IDX_GATHER_BLOCK_T", "8"))
-    _gather_paged_idx_rows_kernel[(triton.cdiv(n, block_t),)](
-        src,
-        src_scale if src_scale is not None else src,
-        gf,
-        dst_full,
-        out,
-        n,
-        ROW_DIM=row_dim,
-        PAGE_SIZE=page_size,
-        SRC_S0=int(src.stride(0)),
-        SRC_S1=int(src.stride(1)),
-        SRC_S2=int(src.stride(2)),
-        SCALE_S0=0 if src_scale is None else int(src_scale.stride(0)),
-        SCALE_S1=0 if src_scale is None else int(src_scale.stride(1)),
-        OUT_S0=int(out.stride(0)),
-        BLOCK_T=block_t,
-        BLOCK_D=triton.next_power_of_2(row_dim),
-        HAS_SCALE=src_scale is not None,
+        BLOCK_KV=triton.next_power_of_2(int(k.shape[1] * k.shape[2])),
+        num_warps=1,
     )
 
 
@@ -1328,10 +1187,10 @@ def _fused_cp_paged_write_kernel(
     unpad_ptr,
     write_slots_ptr,
     slot_mapping_ptr,
-    scratch_k_ptr,
-    scratch_v_ptr,
+    working_k_ptr,
+    working_v_ptr,
     scratch_idx_ptr,
-    base_flat_ptr,
+    base_ptr,
     idx_value_ptr,
     idx_scale_ptr,
     kv_lens_ptr,
@@ -1342,9 +1201,13 @@ def _fused_cp_paged_write_kernel(
     NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
+    BASE_S0: tl.constexpr,
+    BASE_S1: tl.constexpr,
+    BASE_S2: tl.constexpr,
+    BASE_S3: tl.constexpr,
+    BASE_S4: tl.constexpr,
     SCRATCH_SEQ_LEN: tl.constexpr,
-    SCRATCH_IS_PAGED: tl.constexpr,
-    WRITE_MAIN_SCRATCH: tl.constexpr,
+    WRITE_MAIN_PAGES: tl.constexpr,
     IDX_VALUE_S0: tl.constexpr,
     IDX_VALUE_S1: tl.constexpr,
     IDX_VALUE_S2: tl.constexpr,
@@ -1370,9 +1233,7 @@ def _fused_cp_paged_write_kernel(
         safe_slot = tl.where(valid, physical_slot, 0)
         block_id = safe_slot // PAGE_SIZE
         page_off = safe_slot - block_id * PAGE_SIZE
-        head_stride = PAGE_SIZE * HEAD_DIM
-        kv_stride = NUM_KV_HEADS * head_stride
-        paged_k = block_id * 2 * kv_stride + page_off * HEAD_DIM
+        paged_k = block_id * BASE_S0 + page_off * BASE_S3
 
         for h in tl.range(0, NUM_KV_HEADS):
             k = tl.load(packed_ptr + src_row + h * HEAD_DIM + d, mask=dmask, other=0.0)
@@ -1381,26 +1242,23 @@ def _fused_cp_paged_write_kernel(
                 mask=dmask,
                 other=0.0,
             )
-            if WRITE_MAIN_SCRATCH:
-                if SCRATCH_IS_PAGED:
-                    scratch_page = dst_slot // PAGE_SIZE
-                    scratch_off = dst_slot - scratch_page * PAGE_SIZE
-                    scratch_addr = (
-                        scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
-                        + h * PAGE_SIZE * HEAD_DIM
-                        + scratch_off * HEAD_DIM
-                    )
-                else:
-                    scratch_addr = dst_slot * NK + h * HEAD_DIM
-                tl.store(scratch_k_ptr + scratch_addr + d, k, mask=dmask)
-                tl.store(scratch_v_ptr + scratch_addr + d, v, mask=dmask)
+            if WRITE_MAIN_PAGES:
+                scratch_page = dst_slot // PAGE_SIZE
+                scratch_off = dst_slot - scratch_page * PAGE_SIZE
+                scratch_addr = (
+                    scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
+                    + h * PAGE_SIZE * HEAD_DIM
+                    + scratch_off * HEAD_DIM
+                )
+                tl.store(working_k_ptr + scratch_addr + d, k, mask=dmask)
+                tl.store(working_v_ptr + scratch_addr + d, v, mask=dmask)
             tl.store(
-                base_flat_ptr + paged_k + h * head_stride + d,
+                base_ptr + paged_k + h * BASE_S2 + d * BASE_S4,
                 k,
                 mask=dmask & valid,
             )
             tl.store(
-                base_flat_ptr + paged_k + kv_stride + h * head_stride + d,
+                base_ptr + paged_k + BASE_S1 + h * BASE_S2 + d * BASE_S4,
                 v,
                 mask=dmask & valid,
             )
@@ -1437,25 +1295,22 @@ def _fused_cp_paged_write_kernel(
         tail = (PAGE_SIZE - kv_len % PAGE_SIZE) % PAGE_SIZE
         scratch_row = batch_idx * SCRATCH_SEQ_LEN + kv_len + page_offset
         clear = (page_offset < tail) & (scratch_row < (batch_idx + 1) * SCRATCH_SEQ_LEN)
-        if WRITE_MAIN_SCRATCH:
+        if WRITE_MAIN_PAGES:
             for h in tl.range(0, NUM_KV_HEADS):
-                if SCRATCH_IS_PAGED:
-                    scratch_page = scratch_row // PAGE_SIZE
-                    scratch_off = scratch_row - scratch_page * PAGE_SIZE
-                    scratch_addr = (
-                        scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
-                        + h * PAGE_SIZE * HEAD_DIM
-                        + scratch_off * HEAD_DIM
-                    )
-                else:
-                    scratch_addr = scratch_row * NK + h * HEAD_DIM
+                scratch_page = scratch_row // PAGE_SIZE
+                scratch_off = scratch_row - scratch_page * PAGE_SIZE
+                scratch_addr = (
+                    scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
+                    + h * PAGE_SIZE * HEAD_DIM
+                    + scratch_off * HEAD_DIM
+                )
                 tl.store(
-                    scratch_k_ptr + scratch_addr + d,
+                    working_k_ptr + scratch_addr + d,
                     0.0,
                     mask=dmask & clear,
                 )
                 tl.store(
-                    scratch_v_ptr + scratch_addr + d,
+                    working_v_ptr + scratch_addr + d,
                     0.0,
                     mask=dmask & clear,
                 )
@@ -1471,8 +1326,8 @@ def _fused_cp_paged_write(
     unpad_indices: torch.Tensor,
     write_slots: torch.Tensor,
     slot_mapping: torch.Tensor,
-    scratch_k: torch.Tensor,
-    scratch_v: torch.Tensor,
+    working_k: torch.Tensor,
+    working_v: torch.Tensor,
     idx_scratch: torch.Tensor,
     base: torch.Tensor,
     idx_values: torch.Tensor,
@@ -1485,10 +1340,9 @@ def _fused_cp_paged_write(
     head_dim: int,
     page_size: int,
     token_count: Optional[int] = None,
-    scratch_is_paged: bool = False,
-    write_main_scratch: bool = True,
+    write_main_pages: bool = True,
 ) -> None:
-    """Unpad CP all-gather output and write scratch plus scheduler paged caches."""
+    """Unpad CP output into paged working K/V and persistent cache pages."""
     if token_count is None:
         token_count = int(write_slots.numel())
     batch_size = int(kv_lens.numel())
@@ -1517,10 +1371,10 @@ def _fused_cp_paged_write(
         unpad_indices,
         write_slots,
         slot_mapping,
-        scratch_k.reshape(-1, nk) if write_main_scratch else packed,
-        scratch_v.reshape(-1, nk) if write_main_scratch else packed,
+        working_k.reshape(-1, nk) if write_main_pages else packed,
+        working_v.reshape(-1, nk) if write_main_pages else packed,
         idx_scratch.reshape(-1, ni),
-        base.reshape(-1),
+        base,
         idx_values,
         idx_scales if idx_scales is not None else idx_values,
         kv_lens,
@@ -1531,9 +1385,13 @@ def _fused_cp_paged_write(
         NUM_KV_HEADS=num_kv_heads,
         HEAD_DIM=head_dim,
         PAGE_SIZE=page_size,
+        BASE_S0=int(base.stride(0)),
+        BASE_S1=int(base.stride(1)),
+        BASE_S2=int(base.stride(2)),
+        BASE_S3=int(base.stride(3)),
+        BASE_S4=int(base.stride(4)),
         SCRATCH_SEQ_LEN=scratch_seq_len,
-        SCRATCH_IS_PAGED=scratch_is_paged,
-        WRITE_MAIN_SCRATCH=write_main_scratch,
+        WRITE_MAIN_PAGES=write_main_pages,
         IDX_VALUE_S0=int(idx_values.stride(0)),
         IDX_VALUE_S1=int(idx_values.stride(1)),
         IDX_VALUE_S2=int(idx_values.stride(2)),
@@ -1560,6 +1418,10 @@ def _scatter_cp_prefix_pages_kernel(
     MAIN_PAGE_ELEMS: tl.constexpr,
     IDX_PAGE_ELEMS: tl.constexpr,
     IDX_DIM: tl.constexpr,
+    MAIN_SRC_PAGE_STRIDE: tl.constexpr,
+    MAIN_SRC_V_OFFSET: tl.constexpr,
+    IDX_SRC_PAGE_STRIDE: tl.constexpr,
+    IDX_SCALE_PAGE_STRIDE: tl.constexpr,
     COPY_BLOCK: tl.constexpr,
     USE_SRC_PAGES: tl.constexpr,
     HAS_IDX_SCALE: tl.constexpr,
@@ -1580,21 +1442,21 @@ def _scatter_cp_prefix_pages_kernel(
     else:
         src_page = logical_page
 
-    src_main = src_page * (2 * MAIN_PAGE_ELEMS) + offsets
+    src_main = src_page * MAIN_SRC_PAGE_STRIDE + offsets
     dst_main = dst_page * MAIN_PAGE_ELEMS + offsets
     k = tl.load(main_pages_ptr + src_main)
-    v = tl.load(main_pages_ptr + src_main + MAIN_PAGE_ELEMS)
+    v = tl.load(main_pages_ptr + src_main + MAIN_SRC_V_OFFSET)
     tl.store(k_pages_ptr + dst_main, k)
     tl.store(v_pages_ptr + dst_main, v)
 
     idx_valid = page_valid & (offsets < IDX_PAGE_ELEMS)
-    src_idx = src_page * IDX_PAGE_ELEMS + offsets
+    src_idx = src_page * IDX_SRC_PAGE_STRIDE + offsets
     dst_idx = dst_page * IDX_PAGE_ELEMS + offsets
     idx = tl.load(idx_pages_ptr + src_idx, mask=idx_valid, other=0.0)
     if HAS_IDX_SCALE:
         token_in_page = offsets // IDX_DIM
         idx_scale = tl.load(
-            idx_scales_ptr + src_page * (IDX_PAGE_ELEMS // IDX_DIM) + token_in_page,
+            idx_scales_ptr + src_page * IDX_SCALE_PAGE_STRIDE + token_in_page,
             mask=idx_valid,
             other=0.0,
         )
@@ -1612,7 +1474,11 @@ def _scatter_cp_prefix_pages(
     idx_scratch: torch.Tensor,
     src_pages: Optional[torch.Tensor] = None,
 ) -> None:
-    """Restore page-aligned BF16/E4M3 storage into HND working pages."""
+    """Gather BF16/E4M3 pool pages into contiguous HND working pages.
+
+    Source pools may have a larger stride between pages, as in hybrid KV
+    storage. ``src_pages`` maps compact destination pages to physical pages.
+    """
     page_count = int(dst_pages.numel())
     if page_count == 0:
         return
@@ -1658,19 +1524,20 @@ def _scatter_cp_prefix_pages(
     if not all(t.is_cuda for t in tensors):
         raise ValueError("fused prefix-page scatter requires CUDA tensors")
     if not all(
-        t.is_contiguous()
-        for t in (
-            main_pages,
-            idx_pages,
-            idx_scales if idx_scales is not None else idx_pages,
-            dst_pages,
-            src_pages,
-            k_paged,
-            v_paged,
-            idx_scratch,
-        )
+        t.is_contiguous() for t in (dst_pages, src_pages, k_paged, v_paged, idx_scratch)
     ):
-        raise ValueError("fused prefix-page scatter requires contiguous page tensors")
+        raise ValueError(
+            "fused prefix-page scatter requires contiguous destinations and page ids"
+        )
+    if (
+        not main_pages[0, 0].is_contiguous()
+        or int(main_pages.stride(1)) != int(main_pages[0, 0].numel())
+        or not idx_pages[0].is_contiguous()
+        or (idx_scales is not None and not idx_scales[0].is_contiguous())
+    ):
+        raise ValueError(
+            "fused prefix-page scatter requires contiguous data within each page"
+        )
     if int(main_pages.shape[0]) < page_count or int(idx_pages.shape[0]) < page_count:
         raise ValueError(
             "prefix source has fewer pages than the logical restore: "
@@ -1713,6 +1580,10 @@ def _scatter_cp_prefix_pages(
         MAIN_PAGE_ELEMS=main_page_elems,
         IDX_PAGE_ELEMS=idx_page_elems,
         IDX_DIM=int(idx_pages.shape[-1]),
+        MAIN_SRC_PAGE_STRIDE=int(main_pages.stride(0)),
+        MAIN_SRC_V_OFFSET=int(main_pages.stride(1)),
+        IDX_SRC_PAGE_STRIDE=int(idx_pages.stride(0)),
+        IDX_SCALE_PAGE_STRIDE=(0 if idx_scales is None else int(idx_scales.stride(0))),
         COPY_BLOCK=copy_block,
         USE_SRC_PAGES=use_src_pages,
         HAS_IDX_SCALE=idx_scales is not None,
@@ -1740,55 +1611,8 @@ def _gemma_rmsnorm_per_head(
     ).view(orig_shape)
 
 
-class _MainKVScratch:
-    """Process-wide shared, transient gather scratch for MSA main K/V.
-
-    The persistent store is the standard cache-manager paged pool; the MSA
-    Triton kernels still need the active K/V in flat
-    token-slot layout, so each forward we gather the full active sequence out
-    of the paged pool into this scratch. Sparse layers run strictly
-    sequentially within one model forward (layer i finishes before layer i+1),
-    so a single buffer grown on demand serves all sparse layers — the scratch
-    footprint is 1x, not num_sparse_layers x.
-    """
-
-    def __init__(self) -> None:
-        self._k: Optional[torch.Tensor] = None
-        self._v: Optional[torch.Tensor] = None
-
-    def acquire(
-        self,
-        slots: int,
-        heads: int,
-        dim: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ):
-        if (
-            self._k is None
-            or self._k.shape[0] < slots
-            or self._k.shape[1] != heads
-            or self._k.shape[2] != dim
-            or self._k.dtype != dtype
-            or self._k.device != device
-        ):
-            self._k = torch.zeros(slots, heads, dim, dtype=dtype, device=device)
-            self._v = torch.zeros_like(self._k)
-        return self._k[:slots], self._v[:slots]
-
-
-_MAIN_KV_SCRATCH = _MainKVScratch()
-
-
 class _IdxKScratch:
-    """Process-wide shared, transient gather scratch for MSA idx_K.
-
-    Counterpart to ``_MainKVScratch`` for the index branch: the persistent
-    store is the main paged pool's scale region (PD-transferable); the MSA
-    Triton kernels still want idx_K in flat ``[slot, 1, idx_head_dim]`` layout,
-    so each forward we gather the active sequence out of the scale region into
-    this single buffer (one grown-on-demand buffer for all sparse layers).
-    """
+    """Shared compact idx_K working tensor consumed by FMHA index scoring."""
 
     def __init__(self) -> None:
         self._t: Optional[torch.Tensor] = None
@@ -1994,12 +1818,10 @@ _ROPE_DUMMY_SCRATCH = _RopeDummyScratch()
 
 
 class _Mxfp8FusedQKVIndexProj(nn.Module):
-    """MXFP8 output-dim concat projection for MSA decode QKV + idx_Q + idx_K.
+    """MXFP8 output-dim concat projection for QKV + idx_Q + idx_K.
 
-    This is intentionally narrow: it only supports the current MiniMax-M3
-    decode business path where qkv_proj is CudaMxfp8Linear and idx_Q/idx_K are
-    loaded in MXFP8 form. Normal BF16-dequantized idx weights use the
-    original unfused F.linear fallback.
+    Prefill and decode can share this projection when QKV is also MXFP8.
+    Otherwise the index branch uses its own MXFP8 projection.
     """
 
     def __init__(self, fused_linear: CudaMxfp8Linear) -> None:
@@ -2107,10 +1929,10 @@ class _Mxfp8FusedQKVIndexProj(nn.Module):
 
     def forward(
         self,
-        x_fp8: torch.Tensor,
-        x_scale: torch.Tensor,
+        x: torch.Tensor,
+        input_scales: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.fused_linear(x_fp8, input_scales=x_scale)
+        return self.fused_linear(x, input_scales=input_scales)
 
 
 class MSAAttention(nn.Module):
@@ -2121,11 +1943,9 @@ class MSAAttention(nn.Module):
     # Real instances overwrite this with the per-layer AttentionConfig value.
     nvfp4_kv_cache: bool = False
 
-    # Class-level workspace shared across all sparse layers (trtllm-gen needs
-    # a 256 MB scratch buffer; one per device is enough). Lazily allocated on
-    # the first prefill that takes the trtllm-gen fast path.
-    _trtllm_workspace: Dict[torch.device, torch.Tensor] = {}
+    # Shared prefill metadata and working pages are reused across sparse layers.
     _cp_shared_meta: Optional[Dict[str, Any]] = None
+    _prefill_shared_meta: Optional[Dict[str, Any]] = None
     _paged_decode_shared_meta: Optional[Dict[str, Any]] = None
     _target_verify_shared_meta: Optional[Dict[str, Any]] = None
     _cp_side_stream: Dict[torch.device, torch.cuda.Stream] = {}
@@ -2134,15 +1954,8 @@ class MSAAttention(nn.Module):
     _cp_prefetch_entries: Dict[int, Dict[str, Any]] = {}
     _cp_prefetch_disabled: bool = False
 
-    @classmethod
-    def _get_trtllm_workspace(cls, device: torch.device):
-        ws = cls._trtllm_workspace.get(device)
-        if ws is None:
-            ws = torch.zeros(256 * 1024 * 1024, dtype=torch.uint8, device=device)
-            cls._trtllm_workspace[device] = ws
-        return ws
-
     def _maybe_build_mxfp8_fused_qkv_idx_proj(self) -> None:
+        self._mxfp8_idx_proj = None
         if not self._has_raw_mxfp8_idx_weights:
             self._mxfp8_fused_qkv_idx_proj = None
             self._can_use_mxfp8_fused_qkv_idx_decode = False
@@ -2157,6 +1970,21 @@ class MSAAttention(nn.Module):
             self.idx_k_raw_w,
             self.idx_k_raw_s,
         )
+        if self._mxfp8_fused_qkv_idx_proj is None:
+            idx_q_scale = _Mxfp8FusedQKVIndexProj._mxfp8_scale_inv_to_weight_scale(
+                self.idx_q_raw_w, self.idx_q_raw_s
+            )
+            idx_k_scale = _Mxfp8FusedQKVIndexProj._mxfp8_scale_inv_to_weight_scale(
+                self.idx_k_raw_w, self.idx_k_raw_s
+            )
+            self._mxfp8_idx_proj = CudaMxfp8Linear(
+                weight=torch.cat((self.idx_q_raw_w, self.idx_k_raw_w), dim=0),
+                weight_scales=torch.cat((idx_q_scale, idx_k_scale), dim=0),
+                input_scales=None,
+                bias=None,
+                quant_config=None,
+            )
+            self._mxfp8_idx_proj._packed_weight_scale()
         fused_decode_ready = (
             self._mxfp8_fused_qkv_idx_proj is not None
             and self.qk_fuse_norm is not None
@@ -2166,6 +1994,45 @@ class MSAAttention(nn.Module):
             and int(self.rotary_dim) <= int(self.head_dim)
         )
         self._can_use_mxfp8_fused_qkv_idx_decode = fused_decode_ready
+
+    def _project_qkv_idx(
+        self,
+        hidden_states: torch.Tensor,
+        x_fp8: Optional[torch.Tensor],
+        x_scale: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project QKV and index Q/K using the checkpoint's MXFP8 idx weights."""
+        use_quantized_input = x_fp8 is not None and x_scale is not None
+        projection_input = x_fp8 if use_quantized_input else hidden_states
+        projection_scale = x_scale if use_quantized_input else None
+        fused = getattr(self, "_mxfp8_fused_qkv_idx_proj", None)
+        if fused is not None:
+            projected = fused(projection_input, input_scales=projection_scale)
+            return torch.split(
+                projected,
+                [
+                    self.q_size + 2 * self.kv_size,
+                    self.num_idx_heads * self.idx_head_dim,
+                    self.idx_head_dim,
+                ],
+                dim=-1,
+            )
+        if use_quantized_input and isinstance(self.qkv_proj, CudaMxfp8Linear):
+            qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
+        else:
+            qkv = self.qkv_proj(hidden_states)
+        idx_proj = getattr(self, "_mxfp8_idx_proj", None)
+        if idx_proj is not None:
+            idx = idx_proj(projection_input, input_scales=projection_scale)
+            idx_q, idx_k = torch.split(
+                idx,
+                [self.num_idx_heads * self.idx_head_dim, self.idx_head_dim],
+                dim=-1,
+            )
+        else:
+            idx_q = F.linear(hidden_states, self.idx_q_w)
+            idx_k = F.linear(hidden_states, self.idx_k_w)
+        return qkv, idx_q, idx_k
 
     def _should_use_mxfp8_fused_qkv_idx_decode(
         self,
@@ -2191,14 +2058,14 @@ class MSAAttention(nn.Module):
         x_fp8: torch.Tensor,
         x_scale: torch.Tensor,
     ):
-        fused_qkv_idx = self._mxfp8_fused_qkv_idx_proj(x_fp8=x_fp8, x_scale=x_scale)
+        fused_qkv_idx = self._mxfp8_fused_qkv_idx_proj(x_fp8, input_scales=x_scale)
         if (
             paged_kv_base.dtype not in (fused_qkv_idx.dtype, torch.float8_e4m3fn)
             or paged_idx_k.dtype != self._idx_k_persistent_dtype
             or (paged_idx_k_scale is not None) != (self.idx_k_fp8_mode > 0)
         ):
             raise RuntimeError(
-                "M3_MSA_RAW_IDX_MXFP8 fused paged decode requires the idx_K "
+                "MXFP8 fused paged decode requires the idx_K "
                 "side region to match the configured cache mode: BF16 values "
                 "for mode 0, scaled-E4M3 values plus per-token scales for "
                 "mode 1/2."
@@ -2241,14 +2108,6 @@ class MSAAttention(nn.Module):
             self.layernorm_eps,
         )
         return q, idx_q
-
-    def _maybe_trtllm_workspace(self, device: torch.device):
-        """Optional native workspace for generic flat-scratch paths."""
-        if not self.cp_enabled:
-            return None
-        if os.environ.get("M3_DISABLE_TRTLLM_GEN", "0") == "1":
-            return None
-        return MSAAttention._get_trtllm_workspace(device)
 
     def __init__(
         self,
@@ -2333,8 +2192,8 @@ class MSAAttention(nn.Module):
             )
 
         # --- index branch ---
-        # BF16 idx projections are always present for the original/F.linear
-        # fallback. Optional raw MXFP8 copies feed only the fused decode matmul.
+        # Native checkpoints keep MXFP8 idx weights and scales. BF16 idx
+        # weights are accepted only for checkpoints that store BF16 directly.
         self.idx_head_dim = int(sparse_config["idx_head_dim"])
         self.idx_k_fp8_mode = int(sparse_config.get("idx_k_fp8_mode", 0))
         if self.idx_k_fp8_mode not in (0, 1, 2, 3):
@@ -2368,10 +2227,12 @@ class MSAAttention(nn.Module):
                 W.msa_idx_k_raw_s,
             )
         )
-        if not has_bf16_idx_w or raw_idx_key_count not in (0, 4):
+        if raw_idx_key_count not in (0, 4) or (
+            not has_bf16_idx_w and raw_idx_key_count == 0
+        ):
             raise RuntimeError(
-                "MSA idx weights must contain BF16 q/k weights and either all "
-                "raw MXFP8 q/k weights+scales or none. Check M3_MSA_RAW_IDX_MXFP8."
+                "MSA idx weights require BF16 q/k weights or all four raw "
+                "MXFP8 q/k weights and scales."
             )
 
         self.idx_q_w: Optional[torch.Tensor] = None
@@ -2382,7 +2243,9 @@ class MSAAttention(nn.Module):
         self.idx_k_raw_s: Optional[torch.Tensor] = None
         self._has_raw_mxfp8_idx_weights = raw_idx_key_count == 4
 
-        full_idx_q_w_for_heads = weights[W.msa_idx_q_w]
+        full_idx_q_w_for_heads = weights[
+            W.msa_idx_q_raw_w if self._has_raw_mxfp8_idx_weights else W.msa_idx_q_w
+        ]
         self.total_idx_heads = int(
             sparse_config.get(
                 "num_idx_heads", full_idx_q_w_for_heads.shape[0] // self.idx_head_dim
@@ -2405,8 +2268,9 @@ class MSAAttention(nn.Module):
                 f"local_idx_heads={self.num_idx_heads}"
             )
 
-        self.idx_q_w = weights[W.msa_idx_q_w][start:end].contiguous()
-        self.idx_k_w = weights[W.msa_idx_k_w].contiguous()
+        if has_bf16_idx_w:
+            self.idx_q_w = weights[W.msa_idx_q_w][start:end].contiguous()
+            self.idx_k_w = weights[W.msa_idx_k_w].contiguous()
         if self._has_raw_mxfp8_idx_weights:
             self.idx_q_raw_w = weights[W.msa_idx_q_raw_w][start:end].contiguous()
             self.idx_q_raw_s = weights[W.msa_idx_q_raw_s][start:end].contiguous()
@@ -2451,21 +2315,14 @@ class MSAAttention(nn.Module):
 
         self._maybe_build_mxfp8_fused_qkv_idx_proj()
 
-        # Paged-only store: the main K/V live in the standard cache-manager
-        # paged pool (kv_cache_base) and idx_K in its scale region
-        # (kv_scale_base, reinterpreted as BF16). Both are PD-transferable and
-        # addressed by the same block table. The self-built persistent side
-        # cache was removed; only a process-wide gather scratch is kept for the
-        # MSA kernel.
+        # Persistent main K/V and idx_K share the cache-manager page table.
+        # CP prefill uses a request-local paged working set.
         self._scratch_batch_size = 0
         self._scratch_seq_len = 0
 
-        # Views into the process-wide shared gather scratch, refreshed by
-        # the original scratch-backed prefill/decode helpers.
-        self._scratch_k: Optional[torch.Tensor] = None
-        self._scratch_v: Optional[torch.Tensor] = None
+        # The index-score path still uses a compact per-request idx_K tensor.
         self._scratch_idx_k: Optional[torch.Tensor] = None
-        # Allocated kernel slot span (anchors scratch sizing).
+        # CP request-local page namespace capacity.
         self._scratch_slots = 0
         self._paged_decode_static_ok: Optional[bool] = None
 
@@ -2702,55 +2559,30 @@ class MSAAttention(nn.Module):
         self,
         bsz: Optional[int] = None,
         max_kv: Optional[int] = None,
-        max_slot: Optional[int] = None,
         exact_cp_shape: bool = False,
     ) -> None:
-        # Paged-only: main K/V and idx_K live in the cache-manager pool, so no
-        # persistent side tensors are allocated here. This only tracks the
-        # kernel slot span (and, under CP, the [bsz, seq_len] addressing grid)
-        # that sizes the process-wide gather scratch acquired per forward.
-        if self.cp_enabled:
-            if bsz is None or max_kv is None:
-                raise RuntimeError(
-                    "CP MSA gather scratch requires batch size and kv length"
-                )
-            if (
-                not exact_cp_shape
-                and self._scratch_slots > 0
-                and self._scratch_batch_size >= int(bsz)
-                and self._scratch_seq_len >= int(max_kv)
-            ):
-                return
-            if exact_cp_shape:
-                # The CP paged-prefill path owns no grow-only main-K/V scratch. Keep
-                # its logical page namespace at the current live shape so a
-                # previous high-batch request cannot cross-multiply with a
-                # later long-sequence request.
-                target_bsz = max(int(bsz), 1)
-                requested_seq_len = max(int(max_kv), 1)
-            else:
-                target_bsz = max(int(bsz), self._scratch_batch_size, 1)
-                requested_seq_len = max(int(max_kv), self._scratch_seq_len, 1)
-            grow_granularity = max(int(self.page_size), 256)
-            target_seq_len = (
-                (requested_seq_len + grow_granularity - 1)
-                // grow_granularity
-                * grow_granularity
-            )
-            self._scratch_batch_size = target_bsz
-            self._scratch_seq_len = target_seq_len
-            self._scratch_slots = target_bsz * target_seq_len
+        if bsz is None or max_kv is None:
+            raise RuntimeError("CP MSA working pages require batch size and KV length")
+        if (
+            not exact_cp_shape
+            and self._scratch_slots > 0
+            and self._scratch_batch_size >= int(bsz)
+            and self._scratch_seq_len >= int(max_kv)
+        ):
             return
-
-        if max_slot is None:
-            raise RuntimeError("non-CP MSA gather scratch requires max active slot")
-        requested_slots = max(int(max_slot) + 1, 1)
-        if self._scratch_slots >= requested_slots:
-            return
+        if exact_cp_shape:
+            target_bsz = max(int(bsz), 1)
+            requested_seq_len = max(int(max_kv), 1)
+        else:
+            target_bsz = max(int(bsz), self._scratch_batch_size, 1)
+            requested_seq_len = max(int(max_kv), self._scratch_seq_len, 1)
         grow_granularity = max(int(self.page_size), 256)
-        self._scratch_slots = (
-            (requested_slots + grow_granularity - 1) // grow_granularity
+        target_seq_len = (
+            (requested_seq_len + grow_granularity - 1) // grow_granularity
         ) * grow_granularity
+        self._scratch_batch_size = target_bsz
+        self._scratch_seq_len = target_seq_len
+        self._scratch_slots = target_bsz * target_seq_len
 
     def _get_lengths(self, attn_inputs: PyAttentionInputs):
         if attn_inputs.is_prefill:
@@ -2763,120 +2595,6 @@ class MSAAttention(nn.Module):
             prefix = kv_lens - 1
             inlen = torch.ones_like(kv_lens)
         return kv_lens, prefix, inlen
-
-    def _build_compact_addressing(
-        self, attn_inputs: PyAttentionInputs, device: torch.device
-    ):
-        """CP path addressing over the compact per-request gather scratch."""
-        if self._scratch_seq_len <= 0:
-            raise RuntimeError("compact MSA gather scratch is not initialized")
-        kv_lens, prefix, inlen = self._get_lengths(attn_inputs)
-        bsz = int(kv_lens.numel())
-        if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
-            max_kv = self._cuda_graph_max_kv(attn_inputs)
-            pos = torch.arange(max_kv, device=device, dtype=torch.int32)
-            row_offsets = (
-                torch.arange(bsz, device=device, dtype=torch.int32)[:, None] * max_kv
-            )
-            req_to_token = row_offsets + pos[None, :]
-            slot_ids = torch.arange(bsz, device=device, dtype=torch.int64)
-            positions = prefix.to(device=device, dtype=torch.int32)
-            batch_ids = torch.arange(bsz, device=device, dtype=torch.long)
-            write_slots = req_to_token[
-                batch_ids, prefix.to(device=device, dtype=torch.long)
-            ].to(torch.int64)
-            return (
-                req_to_token,
-                slot_ids,
-                kv_lens,
-                positions,
-                write_slots,
-                prefix,
-                inlen,
-            )
-
-        max_kv = int(kv_lens.max().item())
-        pos = torch.arange(max_kv, device=device, dtype=torch.int32)
-        row_offsets = torch.arange(bsz, device=device, dtype=torch.int32)[
-            :, None
-        ] * int(self._scratch_seq_len)
-        req_to_token = row_offsets + pos[None, :]
-        slot_ids = torch.arange(bsz, device=device, dtype=torch.int64)
-
-        prefix_cpu = prefix.detach().cpu().tolist()
-        kv_cpu = kv_lens.detach().cpu().tolist()
-        pos_parts = []
-        slot_parts = []
-        for b in range(bsz):
-            p0, p1 = int(prefix_cpu[b]), int(kv_cpu[b])
-            pos_parts.append(torch.arange(p0, p1, device=device, dtype=torch.int64))
-            slot_parts.append(req_to_token[b, p0:p1])
-        positions = torch.cat(pos_parts).to(torch.int32)
-        write_slots = torch.cat(slot_parts).to(torch.int64)
-        return req_to_token, slot_ids, kv_lens, positions, write_slots, prefix, inlen
-
-    def _build_addressing(self, attn_inputs: PyAttentionInputs, device: torch.device):
-        """Return (req_to_token [B, max_kv], slot_ids [B], kv_lens [B],
-        positions [T], write_slots [T]) from rtp-llm block table + lengths."""
-        block_table = attn_inputs.kv_cache_kernel_block_id_device  # [B, max_blocks]
-        bsz = block_table.size(0)
-        max_blocks = block_table.size(1)
-        kv_lens, prefix, inlen = self._get_lengths(attn_inputs)
-
-        max_kv = int(kv_lens.max().item())
-        pos = torch.arange(max_kv, device=device, dtype=torch.int64)
-        blk_idx = (pos // self.page_size).clamp(max=max_blocks - 1)
-        blk_off = pos % self.page_size
-        bt = block_table.index_select(1, blk_idx).to(torch.int64)  # [B, max_kv]
-        req_to_token = (bt * self.page_size + blk_off[None, :]).to(torch.int32)
-        slot_ids = torch.arange(bsz, device=device, dtype=torch.int64)
-
-        # token order: per-request concat of new tokens [prefix[b], kv_len[b])
-        prefix_cpu = prefix.tolist()
-        kv_cpu = kv_lens.tolist()
-        pos_parts = []
-        slot_parts = []
-        for b in range(bsz):
-            p0, p1 = prefix_cpu[b], kv_cpu[b]
-            pos_parts.append(torch.arange(p0, p1, device=device, dtype=torch.int64))
-            slot_parts.append(req_to_token[b, p0:p1])
-        positions = torch.cat(pos_parts).to(torch.int32)
-        write_slots = torch.cat(slot_parts).to(torch.int64)
-        return req_to_token, slot_ids, kv_lens, positions, write_slots, prefix, inlen
-
-    @staticmethod
-    def _max_active_slot(req_to_token: torch.Tensor, kv_lens: torch.Tensor) -> int:
-        """Return the largest physical slot read by the sparse kernels."""
-        max_slot = 0
-        kv_lens_cpu = kv_lens.detach().cpu().to(torch.int64).tolist()
-        for b, kv_len in enumerate(kv_lens_cpu):
-            kv_len = int(kv_len)
-            if kv_len <= 0:
-                continue
-            row_max = int(req_to_token[b, :kv_len].max().item())
-            max_slot = max(max_slot, row_max)
-        return max_slot
-
-    # ------------------------------------------------------------------
-    # Source main K/V from the standard cache-manager paged pool.
-    # The paged pool (kv_cache.kv_cache_base) is the persistent, PD-transferable
-    # store; the per-step gather scratch (_scratch_k / _scratch_v) is filled
-    # from it and read by the MSA kernel (req_to_token unchanged).
-    # ------------------------------------------------------------------
-    def _paged_main_views(self, kv_cache: LayerKVCache):
-        """Token-major [block, page, head, dim] views of the standard HND paged
-        pool [block, 2, head, page, head_dim] for K and V (non-contiguous views;
-        fine for advanced-index read/write)."""
-        base = self._paged_kv_base_view(kv_cache)
-        if base is None or base.dim() != 5:
-            raise RuntimeError(
-                "MSA paged main K/V requires a 5-D paged cache "
-                "[block,2,head,page,dim], got "
-                f"{None if base is None else tuple(base.shape)}"
-            )
-        kpv = base[:, 0].permute(0, 2, 1, 3)
-        vpv = base[:, 1].permute(0, 2, 1, 3)
-        return kpv, vpv
 
     def _physical_block_table(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
         """Resolve this MSA layer's page table from shared request metadata."""
@@ -2963,15 +2681,14 @@ class MSAAttention(nn.Module):
         ni: int,
         token_count: int,
         *,
-        write_main_scratch: bool = True,
+        write_main_pages: bool = True,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Persist suffix/idx and optionally materialize full working pages.
 
-        Compact prefill disables main scratch while retaining all persistent
-        writes and idx scratch writes/padding. The default path is unchanged.
+        Compact prefill skips BF16 main working pages while retaining persistent
+        writes and the idx_K working tensor.
         The same launch persists rank-owned suffix pages and fills the configured
-        BF16/FP8 idx-K scratch. Main K/V never materialize in the process-wide BF16
-        flat scratch on this path. Working pages come from ``_BF16_WORKING_PAGES``
+        BF16/FP8 idx_K working tensor. Main working pages come from ``_BF16_WORKING_PAGES``
         so all sparse layers of one forward share a single buffer.
         """
         if self.nvfp4_kv_cache:
@@ -3015,7 +2732,7 @@ class MSAAttention(nn.Module):
         # layers of a forward. Avoids N x ~2GiB empties that pile up under CP
         # side/prefetch stream deferred frees.
         k_paged, v_paged = None, None
-        if write_main_scratch:
+        if write_main_pages:
             k_paged, v_paged = _BF16_WORKING_PAGES.acquire(
                 page_count,
                 self.kv_head_num,
@@ -3045,11 +2762,8 @@ class MSAAttention(nn.Module):
             self.head_dim,
             self.page_size,
             token_count=token_count,
-            scratch_is_paged=True,
-            write_main_scratch=write_main_scratch,
+            write_main_pages=write_main_pages,
         )
-        self._scratch_k = None
-        self._scratch_v = None
         self._scratch_idx_k = idx_scratch
         return k_paged, v_paged
 
@@ -3221,139 +2935,6 @@ class MSAAttention(nn.Module):
         )
         return main, main_scales, idx_packed, idx_scales
 
-    def _full_history_slots(
-        self,
-        req_to_token: torch.Tensor,
-        kv_lens: torch.Tensor,
-        attn_inputs: PyAttentionInputs,
-        device: torch.device,
-        graph_decode: bool,
-    ):
-        """Scratch/paged slot addressing for every token of the active history.
-
-        Returns ``(dst_full, gf)``: the flat scratch rows and their physical
-        paged slots.
-
-        These depend only on per-batch metadata (``req_to_token``, ``kv_lens``,
-        the physical block table), not on the layer, but both the main-K/V and
-        the idx_K sourcing path needed them — so they were rebuilt twice per
-        sparse layer, i.e. ~2x num_sparse_layers times per forward. Each rebuild
-        is a chain of bs*max_kv-sized int64 ops plus a ``_kernel_slots_to_paged``
-        call, and that call resolves the block table through
-        ``layer_to_group[...].item()`` — a device sync. So memoize.
-
-        The memo lives inside the shared CP ``addr`` dict, which is replaced
-        wholesale whenever the first sparse layer rebuilds metadata, so a cached
-        entry can never outlive its batch. Reuse additionally requires the very
-        same ``req_to_token``/``kv_lens`` objects, which covers the call sites
-        that run without CP metadata. Like the ``slot_mapping`` entry already in
-        that dict, this assumes all sparse layers resolve the same physical block
-        table (they share one KV cache group).
-        """
-        meta = MSAAttention._cp_shared_meta
-        addr = meta.get("addr") if isinstance(meta, dict) else None
-        key = (int(self._scratch_seq_len), int(self.page_size), bool(graph_decode))
-        if (
-            addr is not None
-            and addr.get("hist_key") == key
-            and addr.get("hist_rtt") is req_to_token
-            and addr.get("hist_lens") is kv_lens
-        ):
-            return addr["hist_dst_full"], addr["hist_gf"]
-
-        if graph_decode:
-            dst_full = req_to_token.reshape(-1).to(torch.int64)
-        else:
-            max_kv = req_to_token.shape[1]
-            ar = torch.arange(max_kv, device=device, dtype=torch.int64)
-            mask = ar[None, :] < kv_lens.to(device=device, dtype=torch.int64)[:, None]
-            dst_full = req_to_token.to(torch.int64)[mask]
-        gf = self._kernel_slots_to_paged(dst_full, attn_inputs)
-
-        if addr is not None:
-            addr["hist_key"] = key
-            addr["hist_rtt"] = req_to_token
-            addr["hist_lens"] = kv_lens
-            addr["hist_dst_full"] = dst_full
-            addr["hist_gf"] = gf
-        return dst_full, gf
-
-    def _source_main_kv_from_paged(
-        self,
-        kv_cache: LayerKVCache,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        write_slots: torch.Tensor,
-        req_to_token: torch.Tensor,
-        kv_lens: torch.Tensor,
-        attn_inputs: PyAttentionInputs,
-        device: torch.device,
-        slot_mapping: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Persist K/V into the standard paged pool (PD-store) and build the
-        transient gather scratch the MSA kernel reads.
-
-        The paged write goes through the sharding-aware C++ writer
-        ``mha_kv_write_cache`` with a physical-block-table slot mapping, so it is
-        correct under CP page-RR sharding (each rank stores only its 1/cp_size of
-        the tokens; non-owned tokens get a -1 slot and are skipped).
-
-        Scratch sourcing depends on sharding:
-        * sharded CP prefill fills scratch directly from the already-all-gathered
-          full sequence (``k``/``v`` are the full sequence in CP prefill).
-        * not sharded (non-CP prefill, or the original decode path): the full
-          active history is read back from the persistent paged pool."""
-        base = self._paged_kv_base_view(kv_cache)
-        if base is None or base.dim() != 5:
-            raise RuntimeError(
-                "MSA paged main K/V requires a 5-D paged cache "
-                "[block,2,head,page,dim], got "
-                f"{None if base is None else tuple(base.shape)}"
-            )
-        if base.dtype != k.dtype and base.dtype != torch.float8_e4m3fn:
-            raise RuntimeError(
-                f"MSA paged main K/V dtype mismatch: paged={base.dtype} vs "
-                f"act={k.dtype}; expected a match or float8_e4m3fn (fp8 KV)"
-            )
-
-        # 1) persist into the paged pool via the sharding-aware writer (C++ casts
-        # bf16 activations to e4m3 when the pool is float8_e4m3fn).
-        if slot_mapping is None:
-            slot_mapping = self._kernel_slots_to_paged(write_slots, attn_inputs)
-        _write_main_kv_to_paged(k, v, base, slot_mapping)
-
-        # 2) build the transient gather scratch the prefill MSA kernel reads.
-        scratch_slots = int(self._scratch_slots)
-        scratch_k, scratch_v = _MAIN_KV_SCRATCH.acquire(
-            scratch_slots, self.kv_head_num, self.head_dim, k.dtype, device
-        )
-        if self._kv_sharded:
-            scratch_k[write_slots] = k
-            scratch_v[write_slots] = v
-        else:
-            graph_decode = (
-                not attn_inputs.is_prefill
-            ) and self._cuda_graph_forward_active()
-            dst_full, gf = self._full_history_slots(
-                req_to_token, kv_lens, attn_inputs, device, graph_decode
-            )
-            # The paged pool holds e4m3 for fp8 KV; upconvert to the bf16 gather
-            # scratch the MSA step-3 kernel reads. One fused kernel does
-            # gather+cast+scatter in a single pass; the torch form below needs
-            # three full passes over the whole history per K and per V per layer.
-            if _FUSED_KV_GATHER:
-                _gather_paged_main_kv_to_scratch(
-                    base, gf, dst_full, scratch_k, scratch_v, self.page_size
-                )
-            else:
-                kpv, vpv = self._paged_main_views(kv_cache)
-                p = self.page_size
-                gf_blk, gf_off = gf // p, gf % p
-                scratch_k[dst_full] = kpv[gf_blk, gf_off].to(scratch_k.dtype)
-                scratch_v[dst_full] = vpv[gf_blk, gf_off].to(scratch_v.dtype)
-        self._scratch_k = scratch_k
-        self._scratch_v = scratch_v
-
     # ------------------------------------------------------------------
     # Task-2: source idx_K from the main paged pool's scale region.
     # The C++ cache manager sizes the MHA scale region (kv_scale_base) to hold
@@ -3421,78 +3002,6 @@ class MSAAttention(nn.Module):
         ).view(torch.float8_e4m3fn)
         scales = raw[:, value_bytes:].view(torch.float32).view(blk, self.page_size)
         return values, scales
-
-    def _source_idx_k_from_paged(
-        self,
-        kv_cache: LayerKVCache,
-        idx_k: torch.Tensor,
-        write_slots: torch.Tensor,
-        req_to_token: torch.Tensor,
-        kv_lens: torch.Tensor,
-        attn_inputs: PyAttentionInputs,
-        device: torch.device,
-        slot_mapping: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Persist idx_K into the paged scale region (PD-store) and build the
-        shared idx scratch the MSA kernel reads.
-
-        Uses the same sharding-aware physical slot mapping as the main K/V: the
-        scale region is a ``[block, page, idx_head_dim]`` view, so a token's
-        flat row is exactly its physical slot. Non-owned tokens (slot == -1)
-        are skipped. The kernel scratch is filled directly from the
-        all-gathered ``idx_k`` (no paged read-back)."""
-        idx_view, idx_scale = self._idx_k_paged_storage(kv_cache)
-        if idx_view.dtype != self._idx_k_persistent_dtype:
-            raise RuntimeError(
-                f"MSA paged idx_K dtype mismatch: paged={idx_view.dtype} vs "
-                f"configured={self._idx_k_persistent_dtype}"
-            )
-        p = self.page_size
-        idx_flat = idx_k.reshape(-1, self.idx_head_dim)
-        # 1) persist into the scale region at physical slots (skip -1 non-owned).
-        #    The scale region is [block, page, idx_dim]; a token's flat row is
-        #    exactly its physical slot (block*page + off), same mapping as K/V.
-        if slot_mapping is None:
-            slot_mapping = self._kernel_slots_to_paged(write_slots, attn_inputs)
-        graph_decode = (
-            not attn_inputs.is_prefill
-        ) and self._cuda_graph_forward_active()
-        _write_idx_rows(
-            idx_flat,
-            slot_mapping,
-            idx_view,
-            idx_scale,
-        )
-
-        # 2) build the transient scratch the MSA kernel reads.
-        scratch_slots = int(self._scratch_slots)
-        idx_scratch = _IDX_K_SCRATCH.acquire(
-            scratch_slots, 1, self.idx_head_dim, self._idx_k_working_dtype, device
-        )
-        if self._kv_sharded:
-            idx_scratch[write_slots, 0] = idx_flat
-        else:
-            dst_full, gf = self._full_history_slots(
-                req_to_token, kv_lens, attn_inputs, device, graph_decode
-            )
-            if _FUSED_KV_GATHER:
-                _gather_paged_idx_rows(
-                    idx_view,
-                    gf,
-                    dst_full,
-                    idx_scratch.view(-1, self.idx_head_dim),
-                    idx_scale,
-                )
-            else:
-                gf_block, gf_offset = gf // p, gf % p
-                restored = idx_view[gf_block, gf_offset]
-                if idx_scale is not None:
-                    restored = (
-                        restored.to(torch.float32)
-                        * idx_scale[gf_block, gf_offset, None]
-                    )
-                idx_scratch[dst_full, 0] = restored.to(idx_scratch.dtype)
-        self._scratch_idx_k = idx_scratch
 
     def _restore_cp_prefix_working_pages(
         self,
@@ -3941,6 +3450,219 @@ class MSAAttention(nn.Module):
         return all_packed, event
 
     # ------------------------------------------------------------------
+    def _forward_prefill(
+        self,
+        hidden_states: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        kv_cache: LayerKVCache,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run ordinary MSA prefill over compact HND pages, including prefixes."""
+        from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
+            minimax_sparse_prefill,
+        )
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.score_chunk import (
+            m3_index_score_chunk_enabled,
+        )
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+            build_index_score_plan,
+            build_kv_page_indices,
+            build_sparse_attn_plan,
+        )
+
+        if kv_cache is None or self.nvfp4_kv_cache:
+            raise RuntimeError("MSA non-CP prefill requires a BF16/FP8 paged cache")
+        if (
+            self.page_size != self.block_size
+            or self.page_size != self.physical_page_size
+            or not self.disable_index_value
+            or self.num_idx_heads != self.kv_head_num
+        ):
+            raise RuntimeError(
+                "MSA paged prefill requires aligned pages, matching index/KV "
+                "heads and disabled index values"
+            )
+        device = hidden_states.device
+        total_tokens = int(hidden_states.shape[0])
+        kv_lens, prefix_lens, inlens = self._get_lengths(attn_inputs)
+        kv_cpu = [int(x) for x in kv_lens.cpu().tolist()]
+        prefix_cpu = [int(x) for x in prefix_lens.cpu().tolist()]
+        inlen_cpu = [int(x) for x in inlens.cpu().tolist()]
+        if not kv_cpu or sum(inlen_cpu) != total_tokens:
+            raise RuntimeError(
+                "MSA prefill input token count does not match request lengths"
+            )
+        table = self._physical_block_table(attn_inputs)
+        counts = [(n + self.page_size - 1) // self.page_size for n in kv_cpu]
+        if not sum(counts) or max(counts) > int(table.shape[1]):
+            raise RuntimeError("MSA prefill physical page table is too short")
+        pages = torch.cat([table[b, :n] for b, n in enumerate(counts)]).long()
+        offsets, page_count = [], 0
+        for count in counts:
+            offsets.append(page_count)
+            page_count += count
+        req_to_token = (
+            torch.tensor(offsets, device=device, dtype=torch.int32)[:, None]
+            * self.page_size
+            + torch.arange(max(kv_cpu), device=device, dtype=torch.int32)[None, :]
+        ).contiguous()
+        pos_parts, slot_parts = [], []
+        for b, (prefix, length) in enumerate(zip(prefix_cpu, kv_cpu)):
+            pos = torch.arange(prefix, length, device=device, dtype=torch.int64)
+            pos_parts.append(pos)
+            slot_parts.append(
+                table[b, pos // self.page_size].long() * self.page_size
+                + pos % self.page_size
+            )
+        positions = torch.cat(pos_parts).to(torch.int32)
+        physical_slots = torch.cat(slot_parts).contiguous()
+
+        qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
+        if self.qk_fuse_norm is not None:
+            qkv = self.qk_fuse_norm(qkv)
+        q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.reshape(total_tokens, self.head_num, self.head_dim).contiguous()
+        k = k.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
+        v = v.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
+        idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
+        idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
+        idx_q = _gemma_rmsnorm_per_head(
+            idx_q, self.idx_q_norm_w, self.layernorm_eps
+        ).contiguous()
+        idx_k = _gemma_rmsnorm_per_head(
+            idx_k, self.idx_k_norm_w, self.layernorm_eps
+        ).contiguous()
+        self._apply_rope(q, k, positions)
+        self._apply_rope(idx_q, idx_k, positions)
+        base = self._paged_kv_base_view(kv_cache)
+        if (
+            base is None
+            or base.dim() != 5
+            or base.dtype
+            not in (
+                torch.bfloat16,
+                torch.float8_e4m3fn,
+            )
+        ):
+            raise RuntimeError("MSA prefill requires BF16 or E4M3 paged K/V")
+        idx_view, idx_scale = self._idx_k_paged_storage(kv_cache)
+        _write_main_kv_to_paged(k, v, base, physical_slots)
+        _write_idx_rows(
+            idx_k.reshape(-1, self.idx_head_dim),
+            physical_slots,
+            idx_view,
+            idx_scale,
+        )
+        if attn_inputs.cache_store_inputs:
+            from rtp_llm.models_py.modules.factory.attention import common
+
+            write_impl = common.create_write_cache_store_impl(attn_inputs)
+            common.apply_write_cache_store(write_impl, attn_inputs, kv_cache)
+        working_k, working_v = _BF16_WORKING_PAGES.acquire(
+            page_count, self.kv_head_num, self.page_size, self.head_dim, device
+        )
+        idx_scratch = _IDX_K_SCRATCH.acquire(
+            page_count * self.page_size,
+            1,
+            self.idx_head_dim,
+            self._idx_k_working_dtype,
+            device,
+        )
+        _scatter_cp_prefix_pages(
+            base,
+            idx_view,
+            idx_scale,
+            torch.arange(page_count, device=device, dtype=torch.long),
+            working_k,
+            working_v,
+            idx_scratch,
+            src_pages=pages.contiguous(),
+        )
+        cu_seqlens = attn_inputs.cu_seqlens[: len(kv_cpu) + 1].to(torch.int32)
+        seq_lens, prefix_i32 = kv_lens.to(torch.int32), prefix_lens.to(torch.int32)
+        geometry = (
+            tuple(kv_cpu),
+            tuple(prefix_cpu),
+            tuple(inlen_cpu),
+            self.page_size,
+            self.head_num,
+            self.kv_head_num,
+            self.num_idx_heads,
+            self.topk_blocks,
+            self.idx_k_fp8_mode,
+        )
+        shared = MSAAttention._prefill_shared_meta
+        if (
+            shared is not None
+            and shared["owner"] is attn_inputs
+            and shared["layer_idx"] < self.layer_idx
+            and shared["geometry"] == geometry
+        ):
+            plan = shared["sparse_attn_plan"]
+            index_score_plan = shared["index_score_plan"]
+            page_indices = shared["page_indices"]
+            shared["layer_idx"] = self.layer_idx
+        else:
+            plan = build_sparse_attn_plan(
+                cu_seqlens,
+                seq_lens,
+                prefix_i32,
+                self.head_num,
+                self.kv_head_num,
+                self.block_size,
+                self.topk_blocks,
+                use_fp8_kvcache=False,
+            )
+            if m3_index_score_chunk_enabled(total_tokens):
+                index_score_plan = {}
+            else:
+                index_score_plan = build_index_score_plan(
+                    cu_seqlens,
+                    seq_lens,
+                    prefix_i32,
+                    self.num_idx_heads,
+                    1,
+                    self.block_size,
+                    use_fp8_kvcache=self.idx_k_fp8_mode == 2,
+                )
+            page_indices = build_kv_page_indices(
+                req_to_token, seq_lens, self.block_size
+            )
+            MSAAttention._prefill_shared_meta = {
+                "owner": attn_inputs,
+                "layer_idx": self.layer_idx,
+                "geometry": geometry,
+                "sparse_attn_plan": plan,
+                "index_score_plan": index_score_plan,
+                "page_indices": page_indices,
+            }
+        _, output = minimax_sparse_prefill(
+            q=q,
+            idx_q=idx_q,
+            idx_k_cache=idx_scratch,
+            req_to_token=req_to_token,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_i32,
+            max_seqlen_q=max(inlen_cpu),
+            max_seqlen_k=max(kv_cpu),
+            block_size_k=self.block_size,
+            topk=self.topk_blocks,
+            init_blocks=self.init_blocks,
+            local_blocks=self.local_blocks,
+            disable_index_value=self.disable_index_value,
+            index_score_plan=index_score_plan,
+            sparse_attn_plan=plan,
+            kv_indices=page_indices,
+            k_paged_cache=working_k,
+            v_paged_cache=working_v,
+        )
+        projected = self.o_proj(output.reshape(total_tokens, -1).contiguous())
+        if self.tp_size > 1:
+            projected = all_reduce(projected, group=Group.TP)
+        return projected
+
     def _forward_cp_prefill(
         self,
         hidden_states: torch.Tensor,
@@ -4029,16 +3751,11 @@ class MSAAttention(nn.Module):
             )
             need_build_new_meta = True
 
-        if x_fp8 is not None and x_scale is not None:
-            qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
-        else:
-            qkv = self.qkv_proj(hidden_states)
+        qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
         q = qkv[:, : self.q_size].reshape(local_tokens, self.head_num, self.head_dim)
 
-        idx_q = F.linear(hidden_states, self.idx_q_w)
-        idx_k = F.linear(hidden_states, self.idx_k_w)
         idx_q = idx_q.reshape(local_tokens, self.num_idx_heads, self.idx_head_dim)
         idx_k = idx_k.reshape(local_tokens, 1, self.idx_head_dim)
         idx_q = _gemma_rmsnorm_per_head(idx_q, self.idx_q_norm_w, self.layernorm_eps)
@@ -4323,8 +4040,6 @@ class MSAAttention(nn.Module):
             )
 
             if not m3_fmha_prefill_enabled(
-                workspace=None,
-                require_workspace=False,
                 sparse_attn_plan=sparse_attn_plan,
                 num_idx_heads=self.num_idx_heads,
                 num_kv_heads=self.kv_head_num,
@@ -4335,9 +4050,6 @@ class MSAAttention(nn.Module):
                 total_q=local_tokens,
             ):
                 raise ValueError("compact CP prefill requires the native FMHA path")
-            fmha_workspace = None
-        else:
-            fmha_workspace = MSAAttention._get_trtllm_workspace(device)
         if index_score_chunk_enabled:
             assert index_score_host_metadata is not None
             from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
@@ -4448,7 +4160,7 @@ class MSAAttention(nn.Module):
                 nk,
                 ni,
                 token_count_py,
-                write_main_scratch=False,
+                write_main_pages=False,
             )
             prefix_rows = (
                 prefix_gather_plan.restore_indices
@@ -4663,28 +4375,19 @@ class MSAAttention(nn.Module):
 
         _, o = minimax_sparse_prefill(
             q=q,
-            k_cache=None,
-            v_cache=None,
-            sink=None,
             idx_q=idx_q,
             idx_k_cache=self._scratch_idx_k,
-            idx_v_cache=None,
-            idx_sink=None,
             req_to_token=req_to_token_segments,
-            slot_ids=slot_ids,
             cu_seqlens=cu_seqlens,
             seq_lens=seq_lens_i32,
             prefix_lens=prefix_i32,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
-            block_size_q=1,
             block_size_k=self.block_size,
             topk=self.topk_blocks,
             init_blocks=self.init_blocks,
             local_blocks=self.local_blocks,
-            score_type=self.score_type,
             disable_index_value=self.disable_index_value,
-            workspace=fmha_workspace,
             index_score_plan=index_score_plan,
             sparse_attn_plan=sparse_attn_plan,
             kv_indices=kv_page_indices,
@@ -4727,7 +4430,7 @@ class MSAAttention(nn.Module):
         score_block_table = None
         # The fused write kernel casts K/V to the paged-pool dtype, so this path
         # is valid for both BF16 and FP8 KV cache. Keep draft decode aligned with
-        # target verify instead of silently disabling M3_MSA_RAW_IDX_MXFP8 for
+        # target verify instead of silently disabling the fused decode path for
         # the production FP8 configuration.
         if (
             self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale)
@@ -4754,10 +4457,7 @@ class MSAAttention(nn.Module):
                 paged_idx_scale,
             )
         else:
-            if x_fp8 is not None and x_scale is not None:
-                qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
-            else:
-                qkv = self.qkv_proj(hidden_states)
+            qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
             if self.qk_fuse_norm is not None:
                 qkv = self.qk_fuse_norm(qkv)
             q, k, v = torch.split(
@@ -4767,8 +4467,6 @@ class MSAAttention(nn.Module):
             k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
             v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
 
-            idx_q = F.linear(hidden_states, self.idx_q_w)
-            idx_k = F.linear(hidden_states, self.idx_k_w)
             idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
             idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
             idx_q = _gemma_rmsnorm_per_head(
@@ -4825,9 +4523,7 @@ class MSAAttention(nn.Module):
         if paged_decode_views is None:
             raise RuntimeError(
                 "MSA paged decode requires a BF16 or FP8 5-D paged KV cache and "
-                "an idx_K side region matching the configured cache mode. The original forward "
-                "decode path is selected automatically when static paged KV "
-                "conditions are not satisfied."
+                "an idx_K side region matching the configured cache mode"
             )
         paged_main_k, paged_main_v, phys_block_table, paged_idx_k, paged_idx_scale = (
             paged_decode_views
@@ -4927,10 +4623,7 @@ class MSAAttention(nn.Module):
                 paged_idx_scale,
             )
         else:
-            if x_fp8 is not None and x_scale is not None:
-                qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
-            else:
-                qkv = self.qkv_proj(hidden_states)
+            qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
             if self.qk_fuse_norm is not None:
                 qkv = self.qk_fuse_norm(qkv)
             q, k, v = torch.split(
@@ -4940,8 +4633,6 @@ class MSAAttention(nn.Module):
             k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
             v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
 
-            idx_q = F.linear(hidden_states, self.idx_q_w)
-            idx_k = F.linear(hidden_states, self.idx_k_w)
             idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
             idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
             idx_q = _gemma_rmsnorm_per_head(
@@ -5141,11 +4832,6 @@ class MSAAttention(nn.Module):
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
-            minimax_sparse_decode,
-            minimax_sparse_prefill,
-        )
-
         assert kv_cache is not None, "MSAAttention requires a KV cache"
         assert (
             attn_inputs.kv_cache_kernel_block_id_device is not None
@@ -5160,207 +4846,21 @@ class MSAAttention(nn.Module):
                 x_scale=x_scale,
             )
 
-        if self._use_paged_decode_path(attn_inputs, kv_cache):
+        if not attn_inputs.is_prefill:
+            if not self._use_paged_decode_path(attn_inputs, kv_cache):
+                raise RuntimeError(
+                    "MSA decode requires paged KV/index cache; "
+                    "flat-scratch decode is unsupported"
+                )
             return self._forward_paged_decode(
-                hidden_states,
-                attn_inputs,
-                kv_cache,
-                x_fp8=x_fp8,
-                x_scale=x_scale,
+                hidden_states, attn_inputs, kv_cache, x_fp8=x_fp8, x_scale=x_scale
             )
-
-        if (
-            self.cp_enabled
-            and attn_inputs.is_prefill
-            and attn_inputs.context_parallel_info is not None
-        ):
-            return self._forward_cp_prefill(
-                hidden_states,
-                attn_inputs,
-                kv_cache,
-                x_fp8=x_fp8,
-                x_scale=x_scale,
-            )
-
-        if self.nvfp4_kv_cache:
-            raise RuntimeError(
-                "MiniMax-M3.1 NVFP4 reached the legacy BF16/FP8 MSA path; "
-                "prefill must use native packed-FP4 CP attention, and decode "
-                "must use the native Q8KV4 paged path"
-            )
-
-        input_shape = hidden_states.shape[:-1]
-        total_tokens = hidden_states.shape[0]
-        device = hidden_states.device
-
-        # --- main QKV + per-head Gemma QK norm ---
-        if x_fp8 is not None and x_scale is not None:
-            qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
-        else:
-            qkv = self.qkv_proj(hidden_states)
-        if self.qk_fuse_norm is not None:
-            qkv = self.qk_fuse_norm(qkv)
-        q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.reshape(total_tokens, self.head_num, self.head_dim)
-        k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
-        v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
-
-        # --- index branch: proj -> per-head Gemma norm ---
-        idx_q = F.linear(hidden_states, self.idx_q_w)
-        idx_k = F.linear(hidden_states, self.idx_k_w)
-        idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
-        idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
-        idx_q = _gemma_rmsnorm_per_head(idx_q, self.idx_q_norm_w, self.layernorm_eps)
-        idx_k = _gemma_rmsnorm_per_head(idx_k, self.idx_k_norm_w, self.layernorm_eps)
-
-        # --- addressing (req_to_token / slot_ids / positions / write slots) ---
         if self.cp_enabled:
-            alloc_kv_lens, _, _ = self._get_lengths(attn_inputs)
-            if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
-                max_kv = self._cuda_graph_max_kv(attn_inputs)
-            else:
-                max_kv = int(alloc_kv_lens.max().item())
-            self._ensure_scratch_addressing_capacity(
-                bsz=int(alloc_kv_lens.numel()),
-                max_kv=max_kv,
+            if attn_inputs.context_parallel_info is None:
+                raise RuntimeError("MSA CP prefill requires context-parallel metadata")
+            return self._forward_cp_prefill(
+                hidden_states, attn_inputs, kv_cache, x_fp8=x_fp8, x_scale=x_scale
             )
-            (
-                req_to_token,
-                slot_ids,
-                kv_lens,
-                positions,
-                write_slots,
-                prefix_lens,
-                inlens,
-            ) = self._build_compact_addressing(attn_inputs, device)
-        else:
-            (
-                req_to_token,
-                slot_ids,
-                kv_lens,
-                positions,
-                write_slots,
-                prefix_lens,
-                inlens,
-            ) = self._build_addressing(attn_inputs, device)
-            self._ensure_scratch_addressing_capacity(
-                max_slot=self._max_active_slot(req_to_token, kv_lens),
-            )
-
-        # --- partial RoPE on main q/k and index q/k ---
-        q = _rows_to_contig(q)
-        k = k.contiguous()
-        self._apply_rope(q, k, positions)
-        idx_q = idx_q.contiguous()
-        idx_k = idx_k.contiguous()
-        self._apply_rope(idx_q, idx_k, positions)
-        if self.nvfp4_kv_cache:
-            nvfp4_round_to_e4m3_compute_grid_(q)
-            nvfp4_round_to_e4m3_compute_grid_(idx_q)
-
-        # --- write current tokens into the cache-manager pool ---
-        # idx_K -> paged scale region; main K/V -> paged pool. Both are
-        # PD-transferable and the scratch is filled from paged so the kernel
-        # reads paged-sourced data.
-        if kv_cache is not None:
-            self._source_idx_k_from_paged(
-                kv_cache, idx_k, write_slots, req_to_token, kv_lens, attn_inputs, device
-            )
-            self._source_main_kv_from_paged(
-                kv_cache, k, v, write_slots, req_to_token, kv_lens, attn_inputs, device
-            )
-
-        # PD separation: register this MSA layer's paged K/V (and the idx_K
-        # piggybacked on the scale region) with the cache store, exactly like
-        # dense CausalAttention does through its fmha_impl. Without this the
-        # decode side waits forever for the missing MSA-layer blocks.
-        if (
-            kv_cache is not None
-            and attn_inputs.is_prefill
-            and attn_inputs.cache_store_inputs
-        ):
-            from rtp_llm.models_py.modules.factory.attention import (
-                common as _attn_common,
-            )
-
-            _write_impl = _attn_common.create_write_cache_store_impl(attn_inputs)
-            _attn_common.apply_write_cache_store(_write_impl, attn_inputs, kv_cache)
-
-        # --- sparse attention via Triton MSA kernels ---
-        main_k = self._scratch_k
-        main_v = self._scratch_v
-        idx_kc = self._scratch_idx_k
-        if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
-            max_seqlen_k = int(req_to_token.shape[1])
-        else:
-            max_seqlen_k = int(kv_lens.max().item())
-        if attn_inputs.is_prefill:
-            cu_seqlens = attn_inputs.cu_seqlens[: slot_ids.numel() + 1].to(torch.int32)
-            seq_lens = kv_lens.to(torch.int32)
-            prefix_i32 = prefix_lens.to(torch.int32)
-            max_seqlen_q = int(inlens.max().item())
-            _idx_o, o = minimax_sparse_prefill(
-                q=q,
-                k_cache=main_k,
-                v_cache=main_v,
-                sink=None,
-                idx_q=idx_q,
-                idx_k_cache=idx_kc,
-                idx_v_cache=None,
-                idx_sink=None,
-                req_to_token=req_to_token,
-                slot_ids=slot_ids,
-                cu_seqlens=cu_seqlens,
-                seq_lens=seq_lens,
-                prefix_lens=prefix_i32,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                block_size_q=1,
-                block_size_k=self.block_size,
-                topk=self.topk_blocks,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
-                score_type=self.score_type,
-                disable_index_value=self.disable_index_value,
-                workspace=self._maybe_trtllm_workspace(device),
-            )
-        else:
-            seq_lens = kv_lens.to(torch.int32)
-            # Decode = 1 query token per request: cu_seqlens is [0,1,...,batch].
-            # Pass it + prefix_lens + the trtllm workspace so minimax_sparse_decode
-            # can take the trtllm-gen sparse-decode fast path (same op as prefill)
-            # instead of the legacy triton step3; falls back to triton when the
-            # trtllm gate is not satisfied (e.g. multi-request batch).
-            decode_bsz = int(slot_ids.numel())
-            decode_cu_seqlens = torch.arange(
-                decode_bsz + 1, device=device, dtype=torch.int32
-            )
-            _idx_o, o = minimax_sparse_decode(
-                q=q,
-                sink=None,
-                k_cache=main_k,
-                v_cache=main_v,
-                idx_q=idx_q,
-                idx_sink=None,
-                idx_k_cache=idx_kc,
-                idx_v_cache=None,
-                req_to_token=req_to_token,
-                slot_ids=slot_ids,
-                seq_lens=seq_lens,
-                max_seqlen=max_seqlen_k,
-                block_size_k=self.block_size,
-                topk=self.topk_blocks,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
-                score_type=self.score_type,
-                disable_index_value=self.disable_index_value,
-                workspace=self._maybe_trtllm_workspace(device),
-                cu_seqlens=decode_cu_seqlens,
-                prefix_lens=prefix_lens.to(torch.int32),
-            )
-
-        attn_output = o.reshape(*input_shape, -1).contiguous()
-        output = self.o_proj(attn_output)
-        if self.tp_size > 1:
-            output = all_reduce(output, group=Group.TP)
-        return output
+        return self._forward_prefill(
+            hidden_states, attn_inputs, kv_cache, x_fp8=x_fp8, x_scale=x_scale
+        )

@@ -430,7 +430,6 @@ class CompactCpKernelTest(unittest.TestCase):
                     2,
                     128,
                     128,
-                    scratch_is_paged=True,
                 )
                 _fused_cp_paged_write(
                     packed,
@@ -450,8 +449,7 @@ class CompactCpKernelTest(unittest.TestCase):
                     2,
                     128,
                     128,
-                    scratch_is_paged=True,
-                    write_main_scratch=False,
+                    write_main_pages=False,
                 )
                 self.assertTrue(torch.equal(base.float(), base_ref.float()))
                 self.assertTrue(torch.equal(scale, scale_ref))

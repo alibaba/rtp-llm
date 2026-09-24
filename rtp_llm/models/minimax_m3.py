@@ -25,7 +25,7 @@ Notable M3-specific points wired here:
   are routed to ``MSAAttention`` (rtp_llm/models_py/modules/hybrid/
   msa_attention.py), which runs the ported MSA Triton kernels under
   rtp_llm/models_py/triton_kernels/sparse_msa/. The index-branch weights are
-  loaded only when ``M3_LOAD_MSA_INDEX`` is set (see _get_hf_layer_weight_info).
+  loaded for sparse layers detected from the checkpoint.
 """
 
 import functools
@@ -106,33 +106,6 @@ def _get_target_lm_head(device: str) -> torch.Tensor:
     return lm_head
 
 
-def _mxfp8_dequant_to_bf16(ts: List[torch.Tensor]) -> torch.Tensor:
-    """Dequantize an on-disk MXFP8 (1x32 microscaling) linear weight to BF16.
-
-    The MiniMax-M3 MSA index projections (``index_q_proj`` / ``index_k_proj``)
-    ship as MXFP8: an e4m3 ``weight`` [N, K] plus a UE8M0 ``weight_scale_inv``
-    [N, K/32] (one uint8 power-of-two exponent per 1x32 micro-block). The index
-    branch only drives top-k *block selection* (it does not contribute to the
-    attention value when ``disable_index_value=True``), so BF16 precision is
-    plenty and lets us run the index GEMMs as plain ``F.linear`` — no MXFP8
-    linear plumbing required.
-
-    ``ts[0]``: e4m3 weight [N, K] (may already be cast to a wider dtype by the
-               generic loader — we re-cast to fp32 defensively).
-    ``ts[1]``: UE8M0 scale [N, K/32] (uint8 exponent bytes, bias 127).
-    """
-    w = ts[0].to(torch.float32)
-    s = ts[1].to(torch.float32)
-    scale = torch.exp2(s - 127.0)  # per (1,32) block power-of-two
-    n, k = w.shape
-    groups = scale.shape[1]
-    group_size = k // groups
-    scale_full = scale.repeat_interleave(group_size, dim=1)
-    if scale_full.shape[1] != k:
-        scale_full = scale_full[:, :k]
-    return (w * scale_full).to(torch.bfloat16)
-
-
 def add_unit_offset(ts: List[torch.Tensor]) -> torch.Tensor:
     """Bake the Gemma-style RMSNorm ``+1`` offset into the gamma at load time.
 
@@ -153,10 +126,6 @@ def _env_flag(name: str, default: str = "0") -> bool:
         "yes",
         "on",
     )
-
-
-def _should_load_raw_mxfp8_idx() -> bool:
-    return _env_flag("M3_MSA_RAW_IDX_MXFP8")
 
 
 def _router_dtype() -> Any:
@@ -198,12 +167,11 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
       the MSA index-branch weights into ``W.msa_idx_{q,k}_{w,norm}`` (consumed
       by ``MSAAttention``). With ``disable_index_value=True`` (M3 default for
       all sparse layers) there is NO ``index_v_proj`` / ``index_o_proj``, so
-      those are intentionally not declared. Loading is gated behind
-      ``M3_LOAD_MSA_INDEX``.
+      those are intentionally not declared. Loading follows the detected
+      sparse layers in the checkpoint.
     """
 
     def __init__(self, *args: Any, **kwargs: Any):
-        self._load_raw_mxfp8_idx = _should_load_raw_mxfp8_idx()
         self._native_mxfp4_routed = False
         super().__init__(*args, **kwargs)
         # Multi-modal checkpoints prefix all LLM tensors with `language_model.`
@@ -218,6 +186,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
         # the actual M3 checkpoint where sparse_attention_freq == moe_layer_freq.
         # If a checkpoint diverges on that, _process_meta auto-detects.
         self._sparse_layer_set = None
+        self._raw_mxfp8_idx_layers = set()
 
     def _process_meta(self, meta_dict, weight_keys):
         # Auto-detect missing prefix (e.g. a stripped checkpoint).
@@ -256,11 +225,26 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                 except (IndexError, ValueError):
                     pass
         self._sparse_layer_set = sparse
+        keys = set(weight_keys)
+        self._raw_mxfp8_idx_layers = set()
+        for layer_id in sparse:
+            scales = tuple(
+                self.prefix
+                + f"model.layers.{layer_id}.self_attn.index_{name}_proj.weight_scale_inv"
+                in keys
+                for name in ("q", "k")
+            )
+            if scales.count(True) == 1:
+                raise ValueError(
+                    f"MiniMax-M3 layer {layer_id} has incomplete MXFP8 index scales"
+                )
+            if all(scales):
+                self._raw_mxfp8_idx_layers.add(layer_id)
 
     def _should_load_msa_index(self, layer_id: int) -> bool:
         """Whether this checkpoint layer must materialize the MSA index branch."""
         sparse_set = self._sparse_layer_set or set()
-        return _env_flag("M3_LOAD_MSA_INDEX", "false") and layer_id in sparse_set
+        return layer_id in sparse_set
 
     # ------------------------------------------------------------------
     # Per-layer attention weights
@@ -393,88 +377,63 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
             # wrong makes the loader request a missing tensor and crash with
             # "ts is empty".
             sparse_set = set()
-        # Gate the index branch behind M3_LOAD_MSA_INDEX. When off, only the
-        # main GQA chain is loaded and every layer runs dense FlashInfer
-        # attention (numerically equivalent to MSA for kv_len <= topk*block);
-        # when on, sparse layers load the index weights and route to MSAAttention.
+        # Sparse layers load index weights and route to MSAAttention. Dense
+        # layers have no index weights and retain the GQA attention path.
         load_msa_index = self._should_load_msa_index(layer_id)
         if load_msa_index and layer_id in sparse_set:
             idx_prefix = self.prefix + "model.layers.{i}.self_attn."
-            # Always keep BF16-dequantized idx weights for the original/F.linear
-            # paths. When M3_MSA_RAW_IDX_MXFP8 is enabled, load an additional
-            # raw MXFP8 copy for the fused decode projection. This lets PDFUSION
-            # performance tests exercise fused decode while preserving fallback.
-            idx_projection_weights = [
-                AtomicWeight(
-                    W.msa_idx_q_w,
-                    [
-                        CkptWeightInfo(idx_prefix + "index_q_proj.weight", identity),
-                        CkptWeightInfo(
-                            idx_prefix + "index_q_proj.weight_scale_inv", identity
-                        ),
-                    ],
-                    _mxfp8_dequant_to_bf16,
-                    data_type=torch.bfloat16,
-                ),
-                AtomicWeight(
-                    W.msa_idx_k_w,
-                    [
-                        CkptWeightInfo(idx_prefix + "index_k_proj.weight", identity),
-                        CkptWeightInfo(
-                            idx_prefix + "index_k_proj.weight_scale_inv", identity
-                        ),
-                    ],
-                    _mxfp8_dequant_to_bf16,
-                    data_type=torch.bfloat16,
-                ),
-            ]
-            if self._load_raw_mxfp8_idx:
-                idx_projection_weights.extend(
-                    [
-                        AtomicWeight(
-                            W.msa_idx_q_raw_w,
-                            [
-                                CkptWeightInfo(
-                                    idx_prefix + "index_q_proj.weight", identity
-                                )
-                            ],
-                            identity,
-                            data_type=torch.float8_e4m3fn,
-                        ),
-                        AtomicWeight(
-                            W.msa_idx_q_raw_s,
-                            [
-                                CkptWeightInfo(
-                                    idx_prefix + "index_q_proj.weight_scale_inv",
-                                    identity,
-                                )
-                            ],
-                            identity,
-                            data_type=torch.uint8,
-                        ),
-                        AtomicWeight(
-                            W.msa_idx_k_raw_w,
-                            [
-                                CkptWeightInfo(
-                                    idx_prefix + "index_k_proj.weight", identity
-                                )
-                            ],
-                            identity,
-                            data_type=torch.float8_e4m3fn,
-                        ),
-                        AtomicWeight(
-                            W.msa_idx_k_raw_s,
-                            [
-                                CkptWeightInfo(
-                                    idx_prefix + "index_k_proj.weight_scale_inv",
-                                    identity,
-                                )
-                            ],
-                            identity,
-                            data_type=torch.uint8,
-                        ),
-                    ]
-                )
+            if layer_id in self._raw_mxfp8_idx_layers:
+                idx_projection_weights = [
+                    AtomicWeight(
+                        W.msa_idx_q_raw_w,
+                        [CkptWeightInfo(idx_prefix + "index_q_proj.weight", identity)],
+                        identity,
+                        data_type=torch.float8_e4m3fn,
+                    ),
+                    AtomicWeight(
+                        W.msa_idx_q_raw_s,
+                        [
+                            CkptWeightInfo(
+                                idx_prefix + "index_q_proj.weight_scale_inv",
+                                identity,
+                            )
+                        ],
+                        identity,
+                        data_type=torch.uint8,
+                    ),
+                    AtomicWeight(
+                        W.msa_idx_k_raw_w,
+                        [CkptWeightInfo(idx_prefix + "index_k_proj.weight", identity)],
+                        identity,
+                        data_type=torch.float8_e4m3fn,
+                    ),
+                    AtomicWeight(
+                        W.msa_idx_k_raw_s,
+                        [
+                            CkptWeightInfo(
+                                idx_prefix + "index_k_proj.weight_scale_inv",
+                                identity,
+                            )
+                        ],
+                        identity,
+                        data_type=torch.uint8,
+                    ),
+                ]
+            else:
+                idx_projection_weights = [
+                    AtomicWeight(
+                        W.msa_idx_q_w,
+                        [CkptWeightInfo(idx_prefix + "index_q_proj.weight", identity)],
+                        identity,
+                        data_type=torch.bfloat16,
+                    ),
+                    AtomicWeight(
+                        W.msa_idx_k_w,
+                        [CkptWeightInfo(idx_prefix + "index_k_proj.weight", identity)],
+                        identity,
+                        data_type=torch.bfloat16,
+                    ),
+                ]
             layer_weights.extend(
                 [
                     *idx_projection_weights,
@@ -719,7 +678,7 @@ class MiniMaxM3(DeepSeekV2):
     Reuses DeepSeekV2's base infrastructure (which is the closest hybrid
     MoE+QK-norm cousin already wired for the GenericMoeModel python path).
     Dense layers run FlashInfer GQA; sparse layers run the Triton MSA path
-    (MSAAttention) when ``M3_LOAD_MSA_INDEX`` is set. Dense and MSA are
+    (MSAAttention) when index weights are present. Dense and MSA are
     numerically equivalent whenever the total KV length is <= topk *
     block_size (16 * 128 = 2048 tokens for the default M3 config).
     """

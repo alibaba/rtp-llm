@@ -155,7 +155,7 @@ class MiniMaxM31WeightContractTest(unittest.TestCase):
     @staticmethod
     def _weight():
         weight = object.__new__(MiniMaxM31Weight)
-        weight._load_raw_mxfp8_idx = False
+        weight._raw_mxfp8_idx_layers = set()
         weight._native_mxfp4_routed = False
         weight._prepacked_nvfp4_routed = False
         weight.prefix = "language_model."

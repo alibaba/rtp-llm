@@ -48,6 +48,15 @@ class MiniMaxM3MTPWeight(MiniMaxM3Weight):
             eh_proj_prefix + ".weight_scale_inv" in weight_keys
         )
         self._sparse_layer_set = {0}
+        idx_scales = tuple(
+            self._mtp_root
+            + f"transformer_layer.self_attn.index_{name}_proj.weight_scale_inv"
+            in weight_keys
+            for name in ("q", "k")
+        )
+        if idx_scales.count(True) == 1:
+            raise ValueError("MiniMax-M3 MTP has incomplete MXFP8 index scales")
+        self._raw_mxfp8_idx_layers = {0} if all(idx_scales) else set()
         self.has_e_score_correction_bias = self._contains(
             weight_keys,
             self._mtp_root
@@ -55,12 +64,10 @@ class MiniMaxM3MTPWeight(MiniMaxM3Weight):
         )
         self._native_mxfp4_routed = self._contains(
             weight_keys,
-            self._mtp_root
-            + "transformer_layer.block_sparse_moe.experts.w13_weight",
+            self._mtp_root + "transformer_layer.block_sparse_moe.experts.w13_weight",
         ) and self._contains(
             weight_keys,
-            self._mtp_root
-            + "transformer_layer.block_sparse_moe.experts.w2_weight",
+            self._mtp_root + "transformer_layer.block_sparse_moe.experts.w2_weight",
         )
 
     def _should_load_msa_index(self, layer_id: int) -> bool:

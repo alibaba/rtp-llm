@@ -47,11 +47,17 @@ class MiniMaxM3DecoderLayer(GenericMoeDecoderLayer):
         # replicated and the TP dimension splits the sequence instead of the heads.
         attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
         msa_config = config.msa_sparse_config
-        is_sparse_layer = (
-            msa_config is not None
-            and layer_idx in set(msa_config.get("sparse_layer_ids", []))
-            and W.msa_idx_q_w in weights
+        configured_sparse = msa_config is not None and layer_idx in set(
+            msa_config.get("sparse_layer_ids", [])
         )
+        has_index_weights = W.msa_idx_q_raw_w in weights or W.msa_idx_q_w in weights
+        if configured_sparse != has_index_weights:
+            raise RuntimeError(
+                "MiniMax-M3 sparse attention config and index weights disagree "
+                f"at layer {layer_idx}: configured={configured_sparse}, "
+                f"loaded={has_index_weights}"
+            )
+        is_sparse_layer = configured_sparse
         if is_sparse_layer:
             return MSAAttention(
                 attn_configs,

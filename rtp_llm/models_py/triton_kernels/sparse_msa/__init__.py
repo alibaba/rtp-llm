@@ -1,9 +1,7 @@
 """MiniMax MSA (sparse attention) Triton kernels.
 
-Direct port of sglang's ``srt/layers/attention/minimax_sparse_ops``. The
-three-step prefill / decode flow (index attention → topk reduce → sparse GQA)
-is intentionally kept identical to the reference; only the consumer
-(MSAAttention module) will need to adapt to rtp-llm's KV cache layout.
+The runtime prefill and decode operators read paged K/V. Prefill uses compact
+HND working pages; decode reads the persistent cache-manager pages.
 
 **Triton 3.6.0 / Python 3.10 note**: the kernels carry 3-deep
 ``@triton.heuristics → @triton.autotune → @triton.jit`` decorator stacks. When
@@ -23,10 +21,10 @@ from typing import Callable, Tuple
 
 
 def get_sparse_ops() -> Tuple[Callable, Callable]:
-    """Return (minimax_sparse_prefill, minimax_sparse_decode), compiling lazily."""
-    from .minimax_sparse import minimax_sparse_decode, minimax_sparse_prefill
+    """Return the paged prefill and decode operators, compiling lazily."""
+    from .minimax_sparse import minimax_paged_sparse_decode, minimax_sparse_prefill
 
-    return minimax_sparse_prefill, minimax_sparse_decode
+    return minimax_sparse_prefill, minimax_paged_sparse_decode
 
 
 __all__ = ["get_sparse_ops"]

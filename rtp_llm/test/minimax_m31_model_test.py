@@ -4,12 +4,87 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models.minimax_m3 import MiniMaxM3Weight
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.minimax_m31 import (
     MiniMaxM31Model,
     _MiniMaxM31MSAQueryContext,
 )
 from rtp_llm.ops import KVCacheConfig, KvCacheDataType, TaskType
+from rtp_llm.utils.model_weight import W
+
+
+class MiniMaxM3IndexWeightTest(unittest.TestCase):
+    def test_raw_mxfp8_idx_follows_checkpoint_scales(self):
+        weight = object.__new__(MiniMaxM3Weight)
+        weight.prefix = "language_model."
+        weight._hidden_size = 512
+        weight._size_per_head = 128
+        weight._head_num = 4
+        weight._head_num_kv = 4
+        weight._use_qk_norm = True
+        keys = {
+            f"language_model.model.layers.{layer}.self_attn.index_{name}_proj.weight"
+            for layer in (1, 2)
+            for name in ("q", "k")
+        }
+        keys.update(
+            f"language_model.model.layers.1.self_attn.index_{name}_proj.weight_scale_inv"
+            for name in ("q", "k")
+        )
+        weight._process_meta({}, keys)
+        self.assertEqual(weight._raw_mxfp8_idx_layers, {1})
+        with patch.object(
+            MiniMaxM3Weight, "_get_hf_ffn_layer_weight_info", return_value=[]
+        ):
+            layer_1 = weight._get_hf_layer_weight_info(1)
+            layer_2 = weight._get_hf_layer_weight_info(2)
+
+        raw = {
+            W.msa_idx_q_raw_w,
+            W.msa_idx_q_raw_s,
+            W.msa_idx_k_raw_w,
+            W.msa_idx_k_raw_s,
+        }
+        self.assertTrue(raw <= {module.name for module in layer_1})
+        self.assertFalse(raw & {module.name for module in layer_2})
+        self.assertNotIn(W.msa_idx_q_w, {module.name for module in layer_1})
+        self.assertIn(W.msa_idx_q_w, {module.name for module in layer_2})
+
+        keys.add(
+            "language_model.model.layers.2.self_attn.index_q_proj.weight_scale_inv"
+        )
+        with self.assertRaisesRegex(ValueError, "incomplete MXFP8 index scales"):
+            weight._process_meta({}, keys)
+
+    def test_index_weights_follow_checkpoint_sparse_layers(self):
+        weight = object.__new__(MiniMaxM3Weight)
+        weight.prefix = "language_model."
+        weight._hidden_size = 512
+        weight._size_per_head = 128
+        weight._head_num = 4
+        weight._head_num_kv = 4
+        weight._use_qk_norm = True
+        weight._raw_mxfp8_idx_layers = set()
+        keys = {
+            "language_model.model.layers.1.self_attn.index_q_proj.weight",
+            "language_model.model.layers.1.self_attn.index_k_proj.weight",
+            "language_model.model.mtp.layers.0.transformer_layer.self_attn.index_q_proj.weight",
+        }
+
+        weight._process_meta({}, keys)
+        with patch.object(
+            MiniMaxM3Weight, "_get_hf_ffn_layer_weight_info", return_value=[]
+        ):
+            dense = weight._get_hf_layer_weight_info(0)
+            sparse = weight._get_hf_layer_weight_info(1)
+
+        self.assertEqual(weight._sparse_layer_set, {1})
+        self.assertNotIn(W.msa_idx_q_w, {module.name for module in dense})
+        self.assertTrue(
+            {W.msa_idx_q_w, W.msa_idx_k_w, W.msa_idx_q_norm, W.msa_idx_k_norm}
+            <= {module.name for module in sparse}
+        )
 
 
 class MiniMaxM31PrepareTest(unittest.TestCase):

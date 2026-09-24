@@ -70,7 +70,7 @@ def _config(**overrides):
 
 def _weight_info():
     weight = object.__new__(MiniMaxM3MTPWeight)
-    weight._load_raw_mxfp8_idx = False
+    weight._raw_mxfp8_idx_layers = set()
     weight._num_layers = 1
     weight._hidden_size = 8
     weight._size_per_head = 4
@@ -217,6 +217,114 @@ class MiniMaxM3MTPAttentionTest(unittest.TestCase):
         attention.nvfp4_kv_cache = False
         attention.idx_k_fp8_mode = 0
         return attention
+
+    def test_raw_only_idx_weights_select_msa_layer(self):
+        config = SimpleNamespace(
+            attn_config=SimpleNamespace(use_mla=False),
+            getAttentionConfigs=lambda _tp: object(),
+            msa_sparse_config={"sparse_layer_ids": [1]},
+            layernorm_eps=1e-5,
+        )
+        parallel = SimpleNamespace(get_attn_tp_size=lambda: 1)
+        sentinel = object()
+        with patch(
+            "rtp_llm.models_py.model_desc.minimax_m3.MSAAttention",
+            return_value=sentinel,
+        ) as msa:
+            actual = MiniMaxM3DecoderLayer._create_attention(
+                object(),
+                config,
+                parallel,
+                {W.msa_idx_q_raw_w: torch.empty(0)},
+                {},
+                1,
+                None,
+                None,
+            )
+        self.assertIs(actual, sentinel)
+        msa.assert_called_once()
+
+        with self.assertRaisesRegex(RuntimeError, "config and index weights disagree"):
+            MiniMaxM3DecoderLayer._create_attention(
+                object(), config, parallel, {}, {}, 1, None, None
+            )
+        with self.assertRaisesRegex(RuntimeError, "config and index weights disagree"):
+            MiniMaxM3DecoderLayer._create_attention(
+                object(),
+                config,
+                parallel,
+                {W.msa_idx_q_raw_w: torch.empty(0)},
+                {},
+                0,
+                None,
+                None,
+            )
+
+    def test_idx_projection_uses_mxfp8_with_shared_or_dynamic_input(self):
+        attention = self._attention()
+        attention.q_size = 2
+        attention.kv_size = 2
+        attention.num_idx_heads = 1
+        attention.idx_head_dim = 2
+        hidden = torch.ones(2, 4, dtype=torch.bfloat16)
+        quantized = torch.zeros(2, 4, dtype=torch.float8_e4m3fn)
+        scales = torch.ones(2, 1)
+        seen = []
+
+        def project_idx(x, input_scales=None):
+            seen.append((x, input_scales))
+            return torch.full((2, 4), 7, dtype=torch.bfloat16)
+
+        qkv_inputs = []
+
+        def project_qkv(x):
+            qkv_inputs.append(x)
+            return torch.full((2, 6), 3, dtype=torch.bfloat16)
+
+        attention.qkv_proj = project_qkv
+        attention._mxfp8_fused_qkv_idx_proj = None
+        attention._mxfp8_idx_proj = project_idx
+        attention.idx_q_w = torch.zeros(2, 4, dtype=torch.bfloat16)
+        attention.idx_k_w = torch.zeros(2, 4, dtype=torch.bfloat16)
+
+        for input_tensor, input_scales in ((quantized, scales), (hidden, None)):
+            qkv, idx_q, idx_k = attention._project_qkv_idx(
+                hidden,
+                input_tensor if input_scales is not None else None,
+                input_scales,
+            )
+            self.assertIs(seen[-1][0], input_tensor)
+            self.assertIs(seen[-1][1], input_scales)
+            self.assertIs(qkv_inputs[-1], hidden)
+            self.assertTrue(torch.all(qkv == 3))
+            self.assertTrue(torch.all(idx_q == 7))
+            self.assertTrue(torch.all(idx_k == 7))
+
+    def test_prefill_projection_reuses_fused_qkv_idx_when_available(self):
+        attention = self._attention()
+        attention.q_size = 2
+        attention.kv_size = 2
+        attention.num_idx_heads = 1
+        attention.idx_head_dim = 2
+        hidden = torch.ones(2, 4, dtype=torch.bfloat16)
+        expected = torch.arange(20, dtype=torch.bfloat16).view(2, 10)
+        seen = []
+
+        def project_fused(x, input_scales=None):
+            seen.append((x, input_scales))
+            return expected
+
+        attention._mxfp8_fused_qkv_idx_proj = project_fused
+        attention.qkv_proj = lambda *_args, **_kwargs: self.fail(
+            "fused projection must replace separate QKV projection"
+        )
+        qkv, idx_q, idx_k = attention._project_qkv_idx(hidden, None, None)
+
+        self.assertIs(seen[0][0], hidden)
+        self.assertIsNone(seen[0][1])
+        torch.testing.assert_close(qkv, expected[:, :6])
+        torch.testing.assert_close(idx_q, expected[:, 6:8])
+        torch.testing.assert_close(idx_k, expected[:, 8:10])
 
     def test_initial_cp_prefill_delegates_without_model_specific_cache_mutation(self):
         layer = object.__new__(MiniMaxM3MTPDecoderLayer)
@@ -436,6 +544,23 @@ class MiniMaxM3MTPWeightTest(unittest.TestCase):
         standalone._process_meta({}, {"model.mtp.layers.0.enorm.weight"})
         self.assertEqual(standalone.prefix, "")
         self.assertEqual(standalone._mtp_root, "model.mtp.layers.0.")
+
+    def test_raw_mxfp8_idx_follows_mtp_checkpoint_scales(self):
+        weight = _weight_info()
+        root = "language_model.model.mtp.layers.0.transformer_layer.self_attn."
+        keys = {
+            root + "index_q_proj.weight_scale_inv",
+            root + "index_k_proj.weight_scale_inv",
+        }
+        weight._process_meta({}, keys)
+
+        self.assertEqual(weight._raw_mxfp8_idx_layers, {0})
+        names = _checkpoint_names(weight._get_weight_info())
+        self.assertIn(root + "index_q_proj.weight_scale_inv", names)
+        self.assertIn(root + "index_k_proj.weight_scale_inv", names)
+
+        with self.assertRaisesRegex(ValueError, "incomplete MXFP8 index scales"):
+            weight._process_meta({}, {root + "index_q_proj.weight_scale_inv"})
 
     def test_meta_rejects_missing_or_multiple_modules(self):
         with self.assertRaisesRegex(ValueError, "exactly module 0"):

@@ -95,10 +95,8 @@ class PrefillScoreChunkTest(unittest.TestCase):
             m3_fmha_prefill_enabled,
         )
 
-        workspace = torch.empty(0)
         self.assertTrue(
             m3_fmha_prefill_enabled(
-                workspace=workspace,
                 sparse_attn_plan={},
                 num_idx_heads=4,
                 num_kv_heads=4,
@@ -111,8 +109,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
         )
         self.assertFalse(
             m3_fmha_prefill_enabled(
-                workspace=None,
-                sparse_attn_plan={},
+                sparse_attn_plan=None,
                 num_idx_heads=4,
                 num_kv_heads=4,
                 disable_index_value=True,
@@ -122,25 +119,22 @@ class PrefillScoreChunkTest(unittest.TestCase):
                 total_q=128,
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             m3_fmha_prefill_enabled(
-                workspace=None,
                 sparse_attn_plan={},
-                num_idx_heads=4,
+                num_idx_heads=8,
                 num_kv_heads=4,
                 disable_index_value=True,
                 has_idx_sink=False,
                 has_sink=False,
                 max_seqlen_k=1024,
                 total_q=128,
-                require_workspace=False,
             )
         )
 
         os.environ["M3_MSA_INDEX_SCORE_CHUNK_ROWS"] = "100000"
         self.assertFalse(
             m3_fmha_prefill_enabled(
-                workspace=workspace,
                 sparse_attn_plan={},
                 num_idx_heads=4,
                 num_kv_heads=4,
@@ -255,24 +249,28 @@ class PrefillScoreChunkTest(unittest.TestCase):
         unpad_indices = torch.arange(token_count, dtype=torch.int64, device=device)
         slot_mapping = write_slots.clone()
 
-        scratch_k = torch.full(
-            (2 * scratch_seq_len, num_kv_heads, head_dim),
+        working_k = torch.full(
+            (2 * scratch_seq_len // page_size, num_kv_heads, page_size, head_dim),
             7,
             dtype=torch.bfloat16,
             device=device,
         )
-        scratch_v = torch.full_like(scratch_k, 7)
+        working_v = torch.full_like(working_k, 7)
         scratch_idx = torch.full(
             (2 * scratch_seq_len, 1, ni),
             7,
             dtype=torch.bfloat16,
             device=device,
         )
-        paged_kv = torch.full(
-            (4, 2, num_kv_heads, page_size, head_dim),
+        page_elements = 2 * num_kv_heads * page_size * head_dim
+        padded_pool = torch.full(
+            (4, page_elements + 8),
             7,
             dtype=torch.bfloat16,
             device=device,
+        )
+        paged_kv = padded_pool[:, :page_elements].view(
+            4, 2, num_kv_heads, page_size, head_dim
         )
         paged_idx = torch.full(
             (4, page_size, ni),
@@ -286,8 +284,8 @@ class PrefillScoreChunkTest(unittest.TestCase):
             unpad_indices,
             write_slots,
             slot_mapping,
-            scratch_k,
-            scratch_v,
+            working_k,
+            working_v,
             scratch_idx,
             paged_kv,
             paged_idx,
@@ -306,11 +304,25 @@ class PrefillScoreChunkTest(unittest.TestCase):
         expected_k = packed[:, :nk].reshape(token_count, num_kv_heads, head_dim)
         expected_v = packed[:, nk : 2 * nk].reshape(token_count, num_kv_heads, head_dim)
         expected_idx = packed[:, 2 * nk :].reshape(token_count, 1, ni)
-        self.assertTrue(torch.equal(scratch_k[write_slots], expected_k))
-        self.assertTrue(torch.equal(scratch_v[write_slots], expected_v))
+        working_k = working_k.permute(0, 2, 1, 3).reshape(-1, num_kv_heads, head_dim)
+        working_v = working_v.permute(0, 2, 1, 3).reshape(-1, num_kv_heads, head_dim)
+        self.assertTrue(torch.equal(working_k[write_slots], expected_k))
+        self.assertTrue(torch.equal(working_v[write_slots], expected_v))
         self.assertTrue(torch.equal(scratch_idx[write_slots], expected_idx))
-        self.assertEqual(torch.count_nonzero(scratch_k[5:8]).item(), 0)
-        self.assertEqual(torch.count_nonzero(scratch_v[5:8]).item(), 0)
+        for row, slot in enumerate(write_slots.tolist()):
+            self.assertTrue(
+                torch.equal(
+                    paged_kv[slot // page_size, 0, :, slot % page_size], expected_k[row]
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    paged_kv[slot // page_size, 1, :, slot % page_size], expected_v[row]
+                )
+            )
+        self.assertTrue(torch.all(padded_pool[:, page_elements:] == 7))
+        self.assertEqual(torch.count_nonzero(working_k[5:8]).item(), 0)
+        self.assertEqual(torch.count_nonzero(working_v[5:8]).item(), 0)
         self.assertEqual(torch.count_nonzero(scratch_idx[5:8]).item(), 0)
 
     def test_fused_cp_paged_write_builds_fp8_main_and_index_working_pages(self) -> None:
@@ -400,7 +412,6 @@ class PrefillScoreChunkTest(unittest.TestCase):
             head_dim,
             page_size,
             token_count=token_count,
-            scratch_is_paged=True,
         )
         torch.cuda.synchronize()
 
@@ -514,11 +525,14 @@ class PrefillScoreChunkTest(unittest.TestCase):
                     torch.empty(2, 2, 1, 2, 1, dtype=dtype)
                 )
                 idx_scratch = torch.zeros(4, 1, 1, dtype=torch.bfloat16)
-                with mock.patch.object(
-                    msa_attention._IDX_K_SCRATCH,
-                    "acquire",
-                    return_value=idx_scratch,
-                ), mock.patch.object(msa_attention, "_fused_cp_paged_write") as write:
+                with (
+                    mock.patch.object(
+                        msa_attention._IDX_K_SCRATCH,
+                        "acquire",
+                        return_value=idx_scratch,
+                    ),
+                    mock.patch.object(msa_attention, "_fused_cp_paged_write") as write,
+                ):
                     k_paged, v_paged = attn._write_cp_suffix_to_bf16_working_pages(
                         kv_cache,
                         packed,
@@ -534,10 +548,8 @@ class PrefillScoreChunkTest(unittest.TestCase):
                 self.assertEqual(k_paged.dtype, torch.bfloat16)
                 self.assertEqual(v_paged.dtype, torch.bfloat16)
                 self.assertEqual(tuple(k_paged.shape), (2, 1, 2, 1))
-                self.assertIsNone(attn._scratch_k)
-                self.assertIsNone(attn._scratch_v)
                 self.assertIs(attn._scratch_idx_k, idx_scratch)
-                self.assertTrue(write.call_args.kwargs["scratch_is_paged"])
+                self.assertTrue(write.call_args.kwargs["write_main_pages"])
 
     def test_cp_prefix_scatter_accepts_bf16_and_e4m3_persistent_pages(self) -> None:
         from rtp_llm.models_py.modules.hybrid.msa_attention import (
@@ -616,6 +628,120 @@ class PrefillScoreChunkTest(unittest.TestCase):
         torch.cuda.synchronize()
         self.assertTrue(torch.equal(idx_scratch[1], idx_pages_bf16[0]))
         self.assertTrue(torch.equal(idx_scratch[0], idx_pages_bf16[1]))
+
+    def test_non_cp_paged_prefill_preserves_prefix_and_request_pages(self) -> None:
+        from rtp_llm.models_py.modules.hybrid import msa_attention
+
+        device = torch.device("cuda")
+        attn = msa_attention.MSAAttention.__new__(msa_attention.MSAAttention)
+        torch.nn.Module.__init__(attn)
+        attn.page_size = attn.physical_page_size = attn.block_size = 4
+        attn.layer_idx = 1
+        attn.head_num = attn.kv_head_num = attn.num_idx_heads = 1
+        attn.head_dim = attn.idx_head_dim = 2
+        attn.q_size = attn.kv_size = 2
+        attn.layernorm_eps = 1e-5
+        attn.disable_index_value = True
+        attn.nvfp4_kv_cache = False
+        attn.tp_size = 1
+        attn.topk_blocks = 4
+        attn.init_blocks = attn.local_blocks = 0
+        attn.score_type = "max"
+        attn._idx_k_working_dtype = torch.bfloat16
+        attn.idx_k_fp8_mode = 0
+        attn.qkv_proj = lambda x: torch.cat((x, x, x), dim=-1)
+        attn.qk_fuse_norm = None
+        attn.idx_q_w = torch.eye(2, dtype=torch.bfloat16, device=device)
+        attn.idx_k_w = torch.eye(2, dtype=torch.bfloat16, device=device)
+        attn._mxfp8_idx_proj = lambda x, input_scales=None: torch.cat(
+            (x + 10, x + 20), dim=-1
+        )
+        attn.idx_q_norm_w = torch.ones(2, dtype=torch.bfloat16, device=device)
+        attn.idx_k_norm_w = torch.ones(2, dtype=torch.bfloat16, device=device)
+        attn.o_proj = lambda x: x
+        attn._apply_rope = lambda q, k, positions: None
+        table = torch.tensor([[1, 2], [3, 4]], device=device)
+        attn._physical_block_table = lambda inputs: table
+        attn._paged_kv_base_view = lambda cache: cache.kv_cache_base
+        attn._idx_k_paged_storage = lambda cache: (cache.idx, None)
+        # The hybrid pool has padding between physical pages.
+        raw_base = torch.full((5, 20), -1, dtype=torch.bfloat16, device=device)
+        base = raw_base[:, :16].view(5, 2, 1, 4, 2)
+        idx = torch.full((5, 4, 2), -1, dtype=torch.bfloat16, device=device)
+        cache = SimpleNamespace(kv_cache_base=base, idx=idx)
+        inputs = SimpleNamespace(
+            is_prefill=True,
+            prefix_lengths=torch.tensor([3, 1], device=device),
+            input_lengths=torch.tensor([2, 3], device=device),
+            cu_seqlens=torch.tensor([0, 2, 5], dtype=torch.int32, device=device),
+            cache_store_inputs=None,
+        )
+        hidden = torch.arange(10, dtype=torch.bfloat16, device=device).view(5, 2)
+        captured = {}
+
+        def write_idx(values, slots, dst, scales):
+            for row, slot in enumerate(slots.tolist()):
+                dst[slot // 4, slot % 4] = values[row]
+
+        def sparse_prefill(**kwargs):
+            captured.update(kwargs)
+            captured["working_k"] = kwargs["k_paged_cache"].clone()
+            captured["working_idx"] = kwargs["idx_k_cache"].clone()
+            return None, torch.zeros(5, 1, 2, dtype=torch.bfloat16, device=device)
+
+        with (
+            mock.patch.object(
+                msa_attention, "_gemma_rmsnorm_per_head", side_effect=lambda x, *_: x
+            ),
+            mock.patch.object(msa_attention, "_write_idx_rows", side_effect=write_idx),
+            mock.patch(
+                "rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused.build_sparse_attn_plan",
+                return_value={},
+            ) as sparse_plan_builder,
+            mock.patch(
+                "rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused.build_index_score_plan",
+                return_value={},
+            ) as score_plan_builder,
+            mock.patch(
+                "rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse.minimax_sparse_prefill",
+                side_effect=sparse_prefill,
+            ),
+        ):
+            attn._forward_prefill(hidden, inputs, cache)
+            attn.layer_idx = 2
+            attn._forward_prefill(hidden, inputs, cache)
+            sparse_plan_builder.assert_called_once()
+            score_plan_builder.assert_called_once()
+        torch.cuda.synchronize()
+        self.assertNotIn("k_cache", captured)
+        self.assertEqual(
+            captured["k_paged_cache"].device, captured["v_paged_cache"].device
+        )
+        self.assertEqual(captured["kv_indices"].tolist(), [0, 1, 2])
+        self.assertEqual(
+            captured["req_to_token"][:, :5].tolist(),
+            [[0, 1, 2, 3, 4], [8, 9, 10, 11, 12]],
+        )
+        self.assertTrue(torch.equal(captured["working_k"][0, 0, :3], base[1, 0, 0, :3]))
+        self.assertTrue(torch.equal(captured["working_k"][1, 0, 0], hidden[1]))
+        self.assertTrue(torch.equal(captured["working_k"][2, 0, :4], base[3, 0, 0]))
+        self.assertTrue(torch.equal(captured["working_idx"][:3, 0], idx[1, :3]))
+        self.assertTrue(torch.equal(idx[1, 3], hidden[0] + 20))
+        self.assertTrue(torch.equal(idx[2, 0], hidden[1] + 20))
+
+    def test_decode_rejects_layout_without_paged_path(self) -> None:
+        from rtp_llm.models_py.modules.hybrid.msa_attention import MSAAttention
+
+        attn = MSAAttention.__new__(MSAAttention)
+        torch.nn.Module.__init__(attn)
+        inputs = SimpleNamespace(
+            is_prefill=False,
+            is_target_verify=False,
+            kv_cache_kernel_block_id_device=torch.ones(1, 1, device="cuda"),
+        )
+        with mock.patch.object(attn, "_use_paged_decode_path", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "requires paged KV/index cache"):
+                attn.forward(torch.empty(1, 1, device="cuda"), inputs, object())
 
     def test_idx_k_side_region_views_scaled_fp8_layout(self) -> None:
         from types import SimpleNamespace
@@ -757,16 +883,6 @@ class PrefillScoreChunkTest(unittest.TestCase):
             .mul_(0.25)
             .to(torch.float8_e4m3fn)
         )
-        k_flat = (
-            k_paged.permute(0, 2, 1, 3)
-            .reshape(kv_len, num_kv_heads, head_dim)
-            .to(torch.bfloat16)
-        )
-        v_flat = (
-            v_paged.permute(0, 2, 1, 3)
-            .reshape(kv_len, num_kv_heads, head_dim)
-            .to(torch.bfloat16)
-        )
         idx_q = torch.randn(
             query_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device
         )
@@ -825,46 +941,27 @@ class PrefillScoreChunkTest(unittest.TestCase):
             use_fp8_kvcache=True,
         )
         out_bf16 = topk_bt_fused.flash_prefill_with_fmha(
-            k_cache=k_flat,
-            v_cache=v_flat,
+            k_paged_cache=k_paged.to(torch.bfloat16),
+            v_paged_cache=v_paged.to(torch.bfloat16),
             sparse_attn_plan=bf16_plan,
             **common,
         )
-        with mock.patch.object(
-            topk_bt_fused,
-            "_kv_flat_to_paged",
-            side_effect=AssertionError("direct paged input must skip flat conversion"),
+        with self.assertRaisesRegex(
+            ValueError, "direct paged K/V dtype does not match sparse-attention plan"
         ):
-            out_bf16_direct = topk_bt_fused.flash_prefill_with_fmha(
-                k_cache=None,
-                v_cache=None,
+            topk_bt_fused.flash_prefill_with_fmha(
                 k_paged_cache=k_paged.to(torch.bfloat16),
                 v_paged_cache=v_paged.to(torch.bfloat16),
-                sparse_attn_plan=bf16_plan,
-                **common,
-            )
-            with self.assertRaisesRegex(
-                ValueError,
-                "direct paged K/V dtype does not match sparse-attention plan",
-            ):
-                topk_bt_fused.flash_prefill_with_fmha(
-                    k_cache=None,
-                    v_cache=None,
-                    k_paged_cache=k_paged.to(torch.bfloat16),
-                    v_paged_cache=v_paged.to(torch.bfloat16),
-                    sparse_attn_plan=fp8_plan,
-                    **common,
-                )
-            out_fp8 = topk_bt_fused.flash_prefill_with_fmha(
-                k_cache=None,
-                v_cache=None,
-                k_paged_cache=k_paged,
-                v_paged_cache=v_paged,
                 sparse_attn_plan=fp8_plan,
                 **common,
             )
+        out_fp8 = topk_bt_fused.flash_prefill_with_fmha(
+            k_paged_cache=k_paged,
+            v_paged_cache=v_paged,
+            sparse_attn_plan=fp8_plan,
+            **common,
+        )
         torch.cuda.synchronize()
-        self.assertTrue(torch.equal(out_bf16_direct, out_bf16))
         self.assertFalse(torch.isnan(out_fp8).any() or torch.isinf(out_fp8).any())
         cosine = torch.nn.functional.cosine_similarity(
             out_fp8.float().reshape(1, -1),
