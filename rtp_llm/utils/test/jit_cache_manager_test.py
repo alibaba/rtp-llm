@@ -538,6 +538,54 @@ class ScopeTest(JitCacheTestBase):
         self.assertEqual(os.environ["TORCH_EXTENSIONS_DIR"], str(torch_ext.local_dir))
         self.assertIn(scope.scope_id, os.environ["TORCH_EXTENSIONS_DIR"])
 
+    def test_configured_root_overrides_test_root_and_keeps_parent_private(self):
+        parent = self.root / "private"
+        parent.mkdir(mode=0o700)
+        configured = str(parent / "cache")
+        with _fake_probes():
+            scope = jit.setup_jit_cache_env(configured)
+            self.assertIs(scope, jit.setup_jit_cache_env(configured))
+        self.assertEqual(scope.root.parent.parent, Path(configured))
+        self.assertEqual(parent.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(scope.root.exists())  # only the stable base is prepared
+        for item in scope.components:
+            self.assertEqual(os.environ[item.env_name], str(item.local_dir))
+
+    def test_configured_root_is_part_of_remote_scope(self):
+        with _fake_probes():
+            old = jit.resolve_scope(self.root / "old")
+            new = jit.resolve_scope(self.root / "new")
+        self.assertNotEqual(old.scope_id, new.scope_id)
+
+    def test_configured_root_errors_cannot_fall_back(self):
+        for invalid in ("relative/path", "dfs://bucket/cache"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "absolute"
+            ):
+                jit.setup_jit_cache_env(invalid)
+        configured = str(self.root / "configured")
+        with _fake_probes(), mock.patch.object(
+            jit.os, "statvfs", return_value=types.SimpleNamespace(f_flag=os.ST_NOEXEC)
+        ), self.assertRaisesRegex(ValueError, "noexec"):
+            jit.setup_jit_cache_env(configured)
+        with _fake_probes(), mock.patch.object(
+            jit.tempfile, "TemporaryFile", side_effect=PermissionError("unwritable")
+        ), self.assertRaisesRegex(PermissionError, "unwritable"):
+            jit.setup_jit_cache_env(configured)
+        with mock.patch.object(
+            jit, "resolve_scope", return_value=None
+        ), self.assertRaisesRegex(RuntimeError, "scope"):
+            jit.setup_jit_cache_env(configured)
+        self.assertNotIn("TRITON_CACHE_DIR", os.environ)
+
+    def test_configured_root_preserves_component_opt_out(self):
+        preset = str(self.root / "preset-triton")
+        os.environ["TRITON_CACHE_DIR"] = preset
+        with _fake_probes():
+            scope = jit.setup_jit_cache_env(str(self.root / "configured"))
+        self.assertEqual(os.environ["TRITON_CACHE_DIR"], preset)
+        self.assertNotIn("triton", {item.name for item in scope.components})
+
     def test_presetting_every_component_disables_all_redirection(self):
         off = self.root / "off"  # the documented rollback: no root, no ACL, no env
         os.environ["TEST_JIT_LOCAL_DIR"] = str(off)
@@ -1145,6 +1193,7 @@ class ManagerTest(JitCacheTestBase):
 class BackendTest(JitCacheTestBase):
     def make_configs(self, remote="", world_size=1):
         configs = mock.Mock()
+        configs.jit_config.local_jit_dir = ""
         configs.jit_config.remote_jit_dir = remote
         configs.jit_config.jit_cache_setup_timeout_s = 5
         configs.jit_config.manage_jit_cache = True
@@ -1194,7 +1243,7 @@ class BackendTest(JitCacheTestBase):
             )
         self.assertEqual(result, "served")
         rank_start.assert_called_once_with(
-            controller, configs, 0, pipe_writer, service_draining
+            controller, configs, 0, pipe_writer, service_draining, None
         )
         jit_start.assert_not_called()
 
@@ -1231,6 +1280,45 @@ class BackendTest(JitCacheTestBase):
         ):
             self.assertEqual(backend.start_backend_server(None, configs), "served")
         rank_start.assert_called_once()
+
+    def test_explicit_storage_failure_prevents_engine_start(self):
+        configs = self.make_configs(remote="/remote")
+        configs.jit_config.local_jit_dir = str(self.root / "configured")
+        with self.patched_backend(), mock.patch.object(
+            jit,
+            "setup_jit_cache_env",
+            side_effect=PermissionError("bad local directory"),
+        ), mock.patch.object(backend, "local_rank_start") as rank, mock.patch.object(
+            jit, "start_from_config"
+        ) as start:
+            with self.assertRaisesRegex(PermissionError, "bad local"):
+                backend.start_backend_server(None, configs)
+        rank.assert_not_called()
+        start.assert_not_called()
+
+    def test_explicit_local_root_is_used_without_remote(self):
+        config = self.make_configs().jit_config
+        config.local_jit_dir = str(self.root / "configured")
+        with _fake_probes():
+            self.assertIsNone(jit.start_from_config(config))
+        self.assertIn(
+            Path(config.local_jit_dir), Path(os.environ["TRITON_CACHE_DIR"]).parents
+        )
+
+    def test_explicit_root_keeps_remote_failure_fail_open(self):
+        configs = self.make_configs(remote="/remote")
+        configs.jit_config.local_jit_dir = str(self.root / "configured")
+        with self.patched_backend(), mock.patch.object(
+            jit, "setup_jit_cache_env"
+        ) as setup, mock.patch.object(
+            jit, "start_from_config", side_effect=RuntimeError("remote unavailable")
+        ), mock.patch.object(
+            backend, "local_rank_start", return_value="served"
+        ), self.assertLogs(
+            level="ERROR"
+        ):
+            self.assertEqual(backend.start_backend_server(None, configs), "served")
+        setup.assert_called_once_with(configs.jit_config.local_jit_dir)
 
     def test_multi_rank_start_owns_manager_cleanup(self):
         manager = mock.Mock()

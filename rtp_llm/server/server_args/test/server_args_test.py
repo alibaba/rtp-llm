@@ -1,5 +1,6 @@
 import importlib
 import os
+import pickle
 import sys
 from types import SimpleNamespace
 from unittest import TestCase, main
@@ -64,6 +65,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit"
+        os.environ["LOCAL_JIT_DIR"] = "/dev/shm/rtp-llm/.jit_cache"
         os.environ["JIT_CACHE_SETUP_TIMEOUT_S"] = "60"
         os.environ["MANAGE_JIT_CACHE"] = "1"
         os.environ["GRAMMAR_COMPILE_TIMEOUT_MS"] = "1500"
@@ -140,6 +142,9 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(py_env_configs.jit_config.jit_cache_setup_timeout_s, 60)
         self.assertTrue(py_env_configs.jit_config.manage_jit_cache)
+        self.assertEqual(
+            py_env_configs.jit_config.local_jit_dir, "/dev/shm/rtp-llm/.jit_cache"
+        )
 
         # Verify grammar_config defaults to deterministic JSON whitespace.
         self.assertTrue(
@@ -148,8 +153,11 @@ class ServerArgsSetTest(TestCase):
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
+        os.environ["LOCAL_JIT_DIR"] = "/ignored/env/cache"
         sys.argv = [
             "prog",
+            "--local_jit_dir",
+            "/dev/shm/cli-cache",
             "--model_type",
             "llama",
             "--checkpoint_path",
@@ -192,6 +200,7 @@ class ServerArgsSetTest(TestCase):
 
         # Verify model_args
         self.assertEqual(py_env_configs.model_args.model_type, "llama")
+        self.assertEqual(py_env_configs.jit_config.local_jit_dir, "/dev/shm/cli-cache")
         self.assertEqual(
             py_env_configs.model_args.ckpt_path, "/path/to/llama/checkpoint"
         )
