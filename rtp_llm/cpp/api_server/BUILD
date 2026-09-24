@@ -80,8 +80,22 @@ cc_library(
     strip_include_prefix = "http_server/http_server",
     visibility = ["//visibility:public"],
     deps = [
-        "//:rtp_compute_ops",
-        "@havenask//aios/network/arpc:arpc",
+        "@havenask//aios/autil:lock_free",
+        "@havenask//aios/autil:log",
+        "@havenask//aios/autil:string_helper",
+        "@havenask//aios/autil:time",
+        "@havenask//aios/network/anet:anet",
+    ],
+)
+
+cc_test(
+    name = "http_native_options_test",
+    srcs = ["http_server/test/HttpNativeOptionsTest.cpp"],
+    deps = [
+        ":http_server",
+        "@havenask//aios/autil:net",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
