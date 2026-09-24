@@ -7,6 +7,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -25,10 +26,30 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ExpirationCleanerTest {
+
+    @Test
+    void embeddingMembershipDoesNotExpireFromMissingLlmStatus() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.getWorkerRegistry().setEngineType(EngineType.EMBEDDING);
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        WorkerDirectory directory = new WorkerDirectory(mock(EndpointRegistry.class));
+        WorkerStatus discovered = spy(status("127.0.0.1", 8080));
+        when(discovered.pollHealth())
+                .thenReturn(new WorkerStatus.PollHealth(0, 0, 0, false));
+        directory.currentOrDiscover(RoleType.PREFILL, discovered.getIpPort(), () -> discovered);
+
+        new ExpirationCleaner(service, mock(CacheAwareService.class), directory).cleanExpiredWorkers();
+
+        assertTrue(directory.isCurrentStatus(RoleType.PREFILL, discovered.getIpPort(), discovered));
+        assertTrue(discovered.isActiveGeneration());
+        assertEquals(0, directory.routingCapacity(RoleType.PREFILL));
+    }
 
     @Test
     void springSchedulesWorkerCleanupAtTheConfiguredInterval() {

@@ -37,7 +37,7 @@ class RequestExtractor:
     def is_streaming(req: Dict[str, Any]):
         return req.get(
             "yield_generator",
-            req.get("generation_config", req.get("generate_config", {})).get(
+            req.get("generate_config", req.get("generation_config", {})).get(
                 "yield_generator", False
             ),
         )
