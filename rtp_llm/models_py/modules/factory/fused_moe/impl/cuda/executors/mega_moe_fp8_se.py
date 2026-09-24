@@ -20,6 +20,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp
     MegaMoeFp8Executor,
     mega_moe_fp8_available,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_impl import (
+    mega_moe_fp8_impl,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_weights import (
     expand_fp8_scale,
     prepare_mega_moe_fp8_weights,
@@ -68,6 +71,7 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         checker.check(mega_moe_fp8_se_available())
 
     def __init__(self, config, quant_config, weights):
+        mega_moe_fp8_impl(shared_expert_gates=True)
         from deep_gemm import mega_fp8
 
         if (
@@ -84,6 +88,7 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         super().__init__(config, quant_config, weights)
 
     def setup_weights(self, weights: Dict[str, torch.Tensor]) -> None:
+        impl = mega_moe_fp8_impl(shared_expert_gates=True)
         if not mega_moe_fp8_available():
             raise RuntimeError(
                 "mega_moe_fp8_se requires SM10x and DeepGEMM mega_fp8 support"
@@ -125,8 +130,9 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         self._input_packer = get_mega_moe_se_input_packer()
         self._maybe_warmup_jit_once()
         logging.info(
-            "MegaMoE FP8-SE weights prepared during model construction: experts=%d, "
+            "MegaMoE FP8-SE weights prepared during model construction: impl=%s, experts=%d, "
             "hidden=%d, intermediate=%d, max_tokens_per_rank=%d, shared=%d",
+            impl,
             config.n_local_experts,
             config.hidden_size,
             config.moe_inter_dim,

@@ -175,55 +175,65 @@ def _get_or_create_mega_fp8_se_buf(
     use_fp8_dispatch: bool = True,
     activation: str = "swiglu",
 ):
+    import deep_gemm
     from deep_gemm import mega_fp8
 
-    key = (
-        id(group),
-        num_experts,
-        num_max_tokens_per_rank,
-        num_topk,
-        hidden,
-        intermediate_hidden,
-        num_shared_experts,
-        bool(use_fp8_dispatch),
-        activation,
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_sm_reserve import (
+        configure_mega_moe_fp8_num_sms,
     )
-    buf = _MEGA_FP8_SE_BUF_CACHE.get(key)
-    if buf is not None:
-        return buf
-    buf = mega_fp8.get_symm_buffer_for_mega_moe_fp8(
-        group,
-        num_experts,
-        num_max_tokens_per_rank,
-        num_topk,
-        hidden,
-        intermediate_hidden,
-        num_shared_experts=num_shared_experts,
-        use_fp8_dispatch=use_fp8_dispatch,
-        activation=activation,
-    )
-    if getattr(buf, "shared_l1_acts_sf", None) is None:
-        raise RuntimeError(
-            "DeepGEMM returned a MegaMoE FP8-SE buffer without shared_l1_acts_sf"
-        )
-    try:
-        actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
-        logging.info(
-            "[MegaMoE FP8-SE] allocated symm buffer: num_experts=%d "
-            "max_tokens_per_rank=%d topk=%d hidden=%d intermediate=%d "
-            "shared=%d actual=%.3f GiB",
+
+    # FP8 ring size changes input offsets too: allocation and launch must agree.
+    with configure_mega_moe_fp8_num_sms(deep_gemm, "cuda"):
+        num_sms = deep_gemm.get_num_sms()
+        key = (
+            num_sms,
+            id(group),
             num_experts,
             num_max_tokens_per_rank,
             num_topk,
             hidden,
             intermediate_hidden,
             num_shared_experts,
-            actual_bytes / (1024**3),
+            bool(use_fp8_dispatch),
+            activation,
         )
-    except Exception:
-        pass
-    _MEGA_FP8_SE_BUF_CACHE[key] = buf
-    return buf
+        buf = _MEGA_FP8_SE_BUF_CACHE.get(key)
+        if buf is not None:
+            return buf
+        buf = mega_fp8.get_symm_buffer_for_mega_moe_fp8(
+            group,
+            num_experts,
+            num_max_tokens_per_rank,
+            num_topk,
+            hidden,
+            intermediate_hidden,
+            num_shared_experts=num_shared_experts,
+            use_fp8_dispatch=use_fp8_dispatch,
+            activation=activation,
+        )
+        if getattr(buf, "shared_l1_acts_sf", None) is None:
+            raise RuntimeError(
+                "DeepGEMM returned a MegaMoE FP8-SE buffer without shared_l1_acts_sf"
+            )
+        buf._rtp_fp8_num_sms = num_sms
+        try:
+            actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
+            logging.info(
+                "[MegaMoE FP8-SE] allocated symm buffer: num_experts=%d "
+                "max_tokens_per_rank=%d topk=%d hidden=%d intermediate=%d "
+                "shared=%d actual=%.3f GiB",
+                num_experts,
+                num_max_tokens_per_rank,
+                num_topk,
+                hidden,
+                intermediate_hidden,
+                num_shared_experts,
+                actual_bytes / (1024**3),
+            )
+        except Exception:
+            pass
+        _MEGA_FP8_SE_BUF_CACHE[key] = buf
+        return buf
 
 
 def _get_or_create_mega_se_output(capacity, hidden, dtype, device):

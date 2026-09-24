@@ -164,49 +164,59 @@ def _get_or_create_mega_fp8_buf(
     use_fp8_dispatch=True,
     activation="swiglu",
 ):
+    import deep_gemm
     from deep_gemm import mega_fp8
 
-    key = (
-        id(group),
-        num_experts,
-        num_max_tokens_per_rank,
-        num_topk,
-        hidden,
-        intermediate_hidden,
-        bool(use_fp8_dispatch),
-        activation,
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_sm_reserve import (
+        configure_mega_moe_fp8_num_sms,
     )
-    buf = _MEGA_FP8_BUF_CACHE.get(key)
-    if buf is not None:
-        return buf
-    buf = mega_fp8.get_symm_buffer_for_mega_moe_fp8(
-        group,
-        num_experts,
-        num_max_tokens_per_rank,
-        num_topk,
-        hidden,
-        intermediate_hidden,
-        num_shared_experts=0,
-        use_fp8_dispatch=use_fp8_dispatch,
-        activation=activation,
-    )
-    try:
-        actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
-        logging.info(
-            "[MegaMoE FP8] allocated symm buffer: num_experts=%d "
-            "max_tokens_per_rank=%d topk=%d hidden=%d intermediate=%d "
-            "actual=%.3f GiB",
+
+    # FP8 ring size changes input offsets too: allocation and launch must agree.
+    with configure_mega_moe_fp8_num_sms(deep_gemm, "cuda"):
+        num_sms = deep_gemm.get_num_sms()
+        key = (
+            num_sms,
+            id(group),
             num_experts,
             num_max_tokens_per_rank,
             num_topk,
             hidden,
             intermediate_hidden,
-            actual_bytes / (1024**3),
+            bool(use_fp8_dispatch),
+            activation,
         )
-    except Exception:
-        pass
-    _MEGA_FP8_BUF_CACHE[key] = buf
-    return buf
+        buf = _MEGA_FP8_BUF_CACHE.get(key)
+        if buf is not None:
+            return buf
+        buf = mega_fp8.get_symm_buffer_for_mega_moe_fp8(
+            group,
+            num_experts,
+            num_max_tokens_per_rank,
+            num_topk,
+            hidden,
+            intermediate_hidden,
+            num_shared_experts=0,
+            use_fp8_dispatch=use_fp8_dispatch,
+            activation=activation,
+        )
+        buf._rtp_fp8_num_sms = num_sms
+        try:
+            actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
+            logging.info(
+                "[MegaMoE FP8] allocated symm buffer: num_experts=%d "
+                "max_tokens_per_rank=%d topk=%d hidden=%d intermediate=%d "
+                "actual=%.3f GiB",
+                num_experts,
+                num_max_tokens_per_rank,
+                num_topk,
+                hidden,
+                intermediate_hidden,
+                actual_bytes / (1024**3),
+            )
+        except Exception:
+            pass
+        _MEGA_FP8_BUF_CACHE[key] = buf
+        return buf
 
 
 def _get_or_create_mega_output(

@@ -26,6 +26,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
     _get_or_create_mega_fp8_buf,
     _get_or_create_mega_output,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_impl import (
+    mega_moe_fp8_impl,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_sm_reserve import (
+    configure_mega_moe_fp8_num_sms,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_weights import (
     prepare_mega_moe_fp8_weights,
 )
@@ -109,7 +115,11 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         checker.check(config.expert_num % config.ep_size == 0)
         checker.check(mega_moe_fp8_available())
 
+    def _jit_warmup_variant(self) -> tuple:
+        return ("fp8", mega_moe_fp8_impl())
+
     def setup_weights(self, weights: Dict[str, torch.Tensor]) -> None:
+        impl = mega_moe_fp8_impl()
         if not mega_moe_fp8_available():
             raise RuntimeError(
                 "mega_moe_fp8 requires SM10x and DeepGEMM mega_fp8 support"
@@ -152,8 +162,9 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         self._input_packer = get_mega_moe_input_packer()
         self._maybe_warmup_jit_once()
         logging.info(
-            "MegaMoE FP8 weights prepared during model construction: experts=%d, "
+            "MegaMoE FP8 weights prepared during model construction: impl=%s, experts=%d, "
             "hidden=%d, intermediate=%d, max_tokens_per_rank=%d, shared=%d",
+            impl,
             config.n_local_experts,
             config.hidden_size,
             config.moe_inter_dim,
@@ -225,7 +236,13 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         diagnostic_inputs=None,
         **kwargs,
     ):
+        import deep_gemm
         from deep_gemm import mega_fp8
+
+        # DeepGEMM reads the same variable on each call and selects the kernel.
+        mega_moe_fp8_impl(
+            shared_expert_gates=kwargs.get("shared_expert_gates") is not None
+        )
 
         # Keep a bounded snapshot of the current prefill on each rank.
         # The DeepGEMM sync-id=1 diagnostic reports per-SM progress on timeout.
@@ -268,17 +285,25 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
             f".tokens{tokens}.before_deepgemm",
             device,
         )
-        mega_fp8.fp8_fp8_mega_moe(
-            y,
-            self.l1,
-            self.l2,
-            self._mega_buf,
-            recipe=(1, 1, 32),
-            weight_recipe=(1, 32),
-            activation="swiglu",
-            fast_math=False,
-            **kwargs,
-        )
+        with configure_mega_moe_fp8_num_sms(deep_gemm, device):
+            buffer_num_sms = getattr(self._mega_buf, "_rtp_fp8_num_sms", None)
+            if buffer_num_sms is not None and buffer_num_sms != deep_gemm.get_num_sms():
+                raise RuntimeError(
+                    "MegaMoE FP8 SM budget changed after buffer allocation; "
+                    "restart with a consistent MEGA_MOE_FP8_RESERVE_SM setting "
+                    "and DeepGEMM SM budget"
+                )
+            mega_fp8.fp8_fp8_mega_moe(
+                y,
+                self.l1,
+                self.l2,
+                self._mega_buf,
+                recipe=(1, 1, 32),
+                weight_recipe=(1, 32),
+                activation="swiglu",
+                fast_math=False,
+                **kwargs,
+            )
 
     def forward_gate_pack(self, x, gate_payload):
         if not self.supports_gate_pack:

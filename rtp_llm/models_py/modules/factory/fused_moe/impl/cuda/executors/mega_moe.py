@@ -294,6 +294,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             include_cap=cfg.warmup_include_capacity,
         )
 
+    def _jit_warmup_variant(self) -> tuple:
+        return ()
+
     def _maybe_warmup_jit_once(self) -> None:
         if not mega_moe_jit_warmup_enabled():
             return
@@ -313,6 +316,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
+            self._jit_warmup_variant(),
             cfg.ep_size,
             cfg.n_routed_experts,
             cfg.n_local_experts,

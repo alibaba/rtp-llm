@@ -93,3 +93,23 @@ cuda13_sm100_py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "test_mega_moe_fp8_sm_reserve",
+    srcs = ["test_mega_moe_fp8_sm_reserve.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_mega_moe_fp8_impl",
+    srcs = ["test_mega_moe_fp8_impl.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA13_ONLY,
+)
