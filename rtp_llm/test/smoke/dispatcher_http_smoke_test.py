@@ -1,8 +1,4 @@
-"""Local Master -> production Python FE smoke; model generation is a test double.
-
-Run in the RTP-LLM Python environment (including built ops/protobuf bindings).
-Pass --master-jar or --master-classpath for the matching Java 21 Master build.
-"""
+"""CI Master -> Python FE smoke; BE generation/status use test doubles."""
 
 import argparse
 import asyncio
@@ -405,15 +401,24 @@ def check_cases(port, state):
 
 
 def main():
+    runtime = Path(__file__).absolute().parent / "flexlb_runtime"
     parser = argparse.ArgumentParser(description=__doc__)
-    master_input = parser.add_mutually_exclusive_group(required=True)
+    master_input = parser.add_mutually_exclusive_group()
     master_input.add_argument("--master-jar", type=Path)
     master_input.add_argument("--master-classpath")
-    parser.add_argument("--java", default="java")
+    parser.add_argument("--java", default=str(runtime / "java/bin/java"))
     parser.add_argument("--log-dir", type=Path)
     args = parser.parse_args()
+    if not args.master_jar and not args.master_classpath:
+        args.master_jar = runtime / "flexlb-api.jar"
+    if args.master_jar and not args.master_jar.is_file():
+        parser.error(f"CI Master JAR is missing: {args.master_jar}")
     args.log_dir = (
-        args.log_dir or Path(tempfile.mkdtemp(prefix="dispatcher-smoke-"))
+        args.log_dir
+        or Path(
+            os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+            or tempfile.mkdtemp(prefix="dispatcher-smoke-")
+        )
     ).resolve()
     args.log_dir.mkdir(parents=True, exist_ok=True)
     os.environ["LOG_PATH"] = str(args.log_dir / "fe")

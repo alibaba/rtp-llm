@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "SMOKE_FRAMEWORK_DEPS", "custom_smoke_test", "smoke_test")
 
 def cuda13_suites():
     # ============================================================================
@@ -388,6 +388,7 @@ def cuda13_suites():
                 envs=["DG_JIT_CPP_STANDARD=20"],
                 gpu_type=["L20D_TEST"],
             ),
+            ":dispatcher_http_smoke",
             ":smoke_sm100_dsv4_flexlb_cache_affinity",
         ],
         tags = ["manual"],
@@ -398,6 +399,19 @@ def cuda13_suites():
     native.filegroup(
         name = "flexlb_runtime_bundle",
         srcs = native.glob(["flexlb_runtime/**"], allow_empty = True),
+    )
+
+    native.py_test(
+        name = "dispatcher_http_smoke",
+        srcs = ["dispatcher_http_smoke_test.py"],
+        main = "dispatcher_http_smoke_test.py",
+        data = [":flexlb_runtime_bundle"],
+        deps = SMOKE_FRAMEWORK_DEPS,
+        timeout = "moderate",
+        env = {"PYTHONNOUSERSITE": "1"},
+        exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+        tags = ["manual", "smoke_case", "L20D_TEST"],
+        legacy_create_init = 0,
     )
 
     _DSV4_FLEXLB_CACHE_AFFINITY_DATA = [
