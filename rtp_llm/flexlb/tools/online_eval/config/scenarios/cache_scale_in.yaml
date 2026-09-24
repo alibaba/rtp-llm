@@ -85,3 +85,7 @@ test:
   kind: workload
   description: Fixed Java traffic across one-step P withdrawal with cache collapse adjudication
   collection: request
+reports:
+  default:
+    template: workload
+  custom: [gate]

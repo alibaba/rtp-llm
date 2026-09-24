@@ -1,0 +1,11 @@
+schema_version: 1
+templates:
+  workload:
+    group_by: [epoch, source, metric]
+    detail_labels: [engine_name, pod]
+    summaries: [mean, max]
+    default_visible: [mean, max]
+    max_points_per_series: 256
+    presets:
+      概览: [mean, max]
+      明细: [detail]

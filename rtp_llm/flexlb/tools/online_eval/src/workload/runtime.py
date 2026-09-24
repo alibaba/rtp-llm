@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class WorkloadPolicy:
     def attach(self, ctx):
         self.options = dict(ctx.instance["workload_runtime"])
+        self.reports = ctx.instance.get("test", {}).get("reports")
         self.profile = ctx.instance.get("collection_profile", "request")
         self.monitors = {}
         self.anchor = dict(monotonic_s=ctx.clock(), epoch_s=time.time())
@@ -289,8 +290,9 @@ class WorkloadPolicy:
         result["workload"]["collection_profile"] = self.profile
         result["workload"]["monitor_backend"] = "prometheus"
         analysis = analyze_report(ctx.artifact_dir, result, payload)
-        bundle = write_report(ctx.artifact_dir, analysis)
-        result["workload"]["report"] = str(bundle / "report.html")
+        if self.reports is None or self.reports["default"]["enabled"]:
+            bundle = write_report(ctx.artifact_dir, analysis, reports=self.reports)
+            result["workload"]["report"] = str(bundle / "report.html")
         # Dedicated gate is evaluated before teardown. Refresh only its presentation
         # once Prometheus export is complete; the original checks remain authoritative.
         gate_evidence = ctx.artifact_dir / "performance-gate-evidence.json"

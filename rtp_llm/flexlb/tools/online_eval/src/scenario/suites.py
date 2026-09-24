@@ -19,7 +19,7 @@ DEFAULT_MONITORING = {
 
 
 def normalize_test(value):
-    if not isinstance(value, dict) or set(value) - {"kind", "description", "collection", "monitoring"}:
+    if not isinstance(value, dict) or set(value) - {"kind", "description", "collection", "monitoring", "reports"}:
         raise ScenarioError("test must declare kind, description and collection; optional monitoring")
     if value.get("kind") not in KINDS:
         raise ScenarioError("test.kind must be functional or workload")
@@ -39,6 +39,10 @@ def normalize_test(value):
             raise ScenarioError("invalid test.monitoring budget: " + key)
     if monitoring["max_sample_gap_s"] < monitoring["sample_interval_s"]:
         raise ScenarioError("maximum sample gap is shorter than sampling interval")
+    if "reports" in value:
+        from reporting.view_config import declaration
+
+        declaration(value["reports"], kind=value["kind"], path="test.reports")
     return {**value, "monitoring": monitoring}
 
 

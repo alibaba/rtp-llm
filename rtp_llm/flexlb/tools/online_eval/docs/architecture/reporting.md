@@ -8,6 +8,8 @@
 
 `kind` 表示制品关系：`run` 是单次运行，`comparison` 是两个或多个运行的对照（含时间线），`sweep` 是参数扫描。`discover_reports(root, kind=..., role=...)` 在所选 kind 下读取并校验 bundle；`role` 可选，由生产者声明，不从目录名猜测。默认 kind 为 `run`，兼容现有门禁发现调用。
 
+workload case 可在 YAML 的 `reports` 段引用 `config/report_views.yaml` 中的公共模板，并声明附加的 `gate` 视角；未声明时仍发布默认 run 视角。模板按 epoch、监控源和指标合图，均值与最大值仅作展示投影，逐引擎原线可在指标选择器中查找。HTML 为控制体积保留分桶极值和缺采点；`analysis.json` 保留原始序列全集，spec 中每条线标明来源、计算方式与采样方式。run 与 gate 是独立 bundle，各自保留时间原点，run 仅以相对路径链接 gate。YAML 只选视角和可见性，不定义计算式或门禁判定。
+
 输入归档保持各自的历史格式。`reporting.core.load_analysis` 接受旧分析 JSON 与带 manifest 的新 bundle；cache 和性能证据仍由对应分析器按原格式读取。不得因为呈现格式统一，就把不同证据类型混作同一分析输入。
 
 独立的 `traffic_fidelity_report.py` 保留自包含 `fidelity.html` 作为显式例外：它提供可调阈值、ECDF 和三幅联合密度热图，通用 renderer 尚无等价交互组件。该例外只影响合成输入保真度诊断，不进入运行门禁或 `discover_reports`。若迁入 bundle，先为这些交互补齐通用组件并逐项核对信息完整性。压测的 `aggregate.py` 子进程链路属于证据生成，不改变装配契约；它继续经 `write_bundle` 发布报告。

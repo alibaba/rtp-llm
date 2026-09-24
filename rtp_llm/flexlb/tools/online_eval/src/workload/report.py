@@ -1,10 +1,9 @@
 """Presentation of already analyzed workload evidence; no status mutation."""
 
 import copy
-import hashlib
 import os
 from pathlib import Path
-from reporting.catalog import WORKLOAD_COLORS
+from workload.report_panels import build_panels
 from reporting import (
     bundle_path,
     details,
@@ -15,38 +14,31 @@ from reporting import (
 )
 
 
-def build_spec(payload, directory):
+def build_spec(payload, directory, reports=None):
     series = payload["series"]
-    panels = [
-        dict(
-            id="metric-" + hashlib.sha256(key.encode()).hexdigest(),
-            title=key,
-            caption="Seconds since workload start; gaps are not zero.",
-            type="line",
-            timeX=True,
-            x=[str(p[0]) for p in points],
-            xNums=[p[0] for p in points],
-            series=[dict(name=key, data=[p[1] for p in points], color=WORKLOAD_COLORS[0])],
-        )
-        for key, points in series.items()
-    ]
-    target = bundle_path(directory, "run", payload["id"])
+    panels = build_panels(series, payload.get("statistic_sources", {}),
+                          reports["default"] if reports is not None else None)
+    target = bundle_path(directory, "run", payload["id"]).resolve()
     items = []
     for aggregate in payload["workload"].get("stress_aggregates", []):
         if aggregate["status"] != "GENERATED":
             continue
-        reports = [("Environment " + aggregate["env_epoch"], aggregate["report"])]
-        reports += [
+        aggregate_links = [("Environment " + aggregate["env_epoch"], aggregate["report"])]
+        aggregate_links += [
             (name + " metrics", entry["report"])
             for name, entry in aggregate.get("master_aggregates", {}).items()
         ]
         items += [
             dict(label=title, href=os.path.relpath(path, target))
-            for title, path in reports
+            for title, path in aggregate_links
         ]
     gates = payload.get("gate_reports")
     if gates is None:
         gates = [payload["gate_report"]] if payload.get("gate_report") else []
+    if reports is not None and "gate" not in reports["custom"]:
+        gates = []
+    if reports is not None and "gate" in reports["custom"] and not gates:
+        raise ValueError("declared gate report was not produced")
     for gate in gates:
         items.append(
             dict(
@@ -84,9 +76,11 @@ def build_spec(payload, directory):
     )
 
 
-def write_report(directory, analysis):
+def write_report(directory, analysis, *, reports=None):
     payload = copy.deepcopy(analysis)
-    target = bundle_path(directory, "run", payload["id"])
+    if reports is not None:
+        payload["report_views"] = copy.deepcopy(reports)
+    target = bundle_path(directory, "run", payload["id"]).resolve()
     for source in payload.get("request_sources", []):
         source["path"] = os.path.relpath(source["path"], target)
     meta = run_meta(
@@ -106,7 +100,7 @@ def write_report(directory, analysis):
         "run",
         payload["id"],
         payload,
-        build_spec(analysis, directory),
+        build_spec(analysis, directory, reports=reports),
         meta=meta,
         producer="workload",
     )
