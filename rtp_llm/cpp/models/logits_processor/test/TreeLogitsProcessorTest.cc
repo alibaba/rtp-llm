@@ -201,6 +201,33 @@ TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
     }
 }
 
+TEST_F(TreeLogitsProcessorTest, CompactBeamTokensMatchLegacyHistory) {
+    PrefixToCandidateTokens::instance()->reloadPrefixDict(
+        "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json");
+    auto make_processor = [] {
+        std::vector<StreamTreeInfo> infos;
+        for (int row = 0; row < 2; ++row) {
+            infos.emplace_back(
+                true, 3, 0, true, std::make_shared<TreeDFA<std::string, int>>(PrefixToCandidateTokens::instance()));
+        }
+        return std::make_shared<TreeLogitsProcessor>(infos);
+    };
+    auto compact = make_processor();
+    auto legacy  = make_processor();
+    ASSERT_FALSE(compact->updateStatus(torch::tensor({{64000}, {64003}}, torch::kInt32), 1).has_value());
+    ASSERT_FALSE(
+        legacy->updateStatus(torch::tensor({{1, 2, 3, 64000}, {1, 2, 3, 64003}}, torch::kInt32), 1).has_value());
+    EXPECT_EQ(compact->getStatus(), (std::vector<std::string>{"225_64000", "225_64003"}));
+    EXPECT_EQ(compact->getStatus(), legacy->getStatus());
+    compact->updateMultiSeqStatus({1, 0});
+    legacy->updateMultiSeqStatus({1, 0});
+    ASSERT_FALSE(compact->updateStatus(torch::tensor({{64001}, {64001}}, torch::kInt32), 1).has_value());
+    ASSERT_FALSE(
+        legacy->updateStatus(torch::tensor({{1, 2, 3, 64003, 64001}, {1, 2, 3, 64000, 64001}}, torch::kInt32), 1)
+            .has_value());
+    EXPECT_EQ(compact->getStatus(), legacy->getStatus());
+}
+
 TEST_F(TreeLogitsProcessorTest, testProcess) {
     {
         SamplerDataBuilder     builder;

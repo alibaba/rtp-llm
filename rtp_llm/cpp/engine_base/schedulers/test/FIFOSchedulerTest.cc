@@ -4597,7 +4597,7 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
     resource_context.cache_manager = cache_manager;
 
     ModelConfig model_config;
-    model_config.max_seq_len = 6;
+    model_config.max_seq_len = 7;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 6;

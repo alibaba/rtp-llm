@@ -35,10 +35,10 @@ private:
                               const MergedOutput&  merge_outputs,
                               int                  batch_idx_in,
                               int                  batch_idx_out,
+                              int                  sampler_batch_idx_in,
                               int                  token_offset,
                               bool                 return_all_probs,
                               const torch::Tensor& new_tokens_all,
-                              const torch::Tensor& token_ids_cpu,
                               const torch::Tensor& success_cpu,
                               const torch::Tensor& custom_output_cpu,
                               int                  custom_output_batch_idx) const;

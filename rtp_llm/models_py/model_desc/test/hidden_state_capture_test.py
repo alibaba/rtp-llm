@@ -195,6 +195,10 @@ def _make_inputs(
     return SimpleNamespace(
         input_ids=torch.tensor(input_ids, dtype=dtype),
         capture_hidden_states=capture_hidden_states,
+        input_embeddings=None,
+        input_embeddings_locs=None,
+        cuda_graph_input_embedding_overrides=None,
+        cuda_graph_input_embedding_mask=None,
     )
 
 
@@ -395,6 +399,10 @@ def _make_vl_inputs(capture_hidden_states: bool) -> SimpleNamespace:
     return SimpleNamespace(
         input_ids=torch.tensor([1, 2], dtype=torch.int64),
         combo_position_ids=None,
+        input_embeddings=None,
+        input_embeddings_locs=None,
+        cuda_graph_input_embedding_overrides=None,
+        cuda_graph_input_embedding_mask=None,
         embedding_inputs=SimpleNamespace(
             combo_tokens_type_ids=None,
             text_tokens_mask=None,

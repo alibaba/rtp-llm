@@ -32,6 +32,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Host-side word-id validation used by the normal engine input gatherer.
+cc_library(
+    name = "embedding_id_range",
+    hdrs = [
+        "EmbeddingIdRange.h",
+    ],
+    deps = [
+        "@com_google_absl//absl/status",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Profiling and performance monitoring
 cc_library(
     name = "profiler",

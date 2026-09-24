@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
@@ -146,39 +147,38 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     const auto&  sampler_output       = merge_outputs.sampler_output;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == (size_t)sampler_output.token_ids.size(0));
-    // token_ids and success may be CUDA tensors. Keep the non-beam token copy
-    // narrow, then stage D2H through pinned CPU buffers and synchronize once.
-    bool any_beam_search = false;
-    if (sampler_output.token_ids.defined() && sampler_output.token_ids.size(1) > 1) {
-        for (auto& stream : stream_groups.allStreams()) {
-            if (stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1) {
-                any_beam_search = true;
-                break;
-            }
-        }
+    int  batch_idx_in         = 0;
+    int  batch_idx_out        = 0;
+    int  sampler_batch_idx_in = 0;
+    int  token_offset         = 0;
+    bool return_all_probs     = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
+    if (total_batch_size_out == 0) {
+        return absl::OkStatus();
     }
-    torch::Tensor token_ids_for_copy;
-    if (sampler_output.token_ids.defined()) {
-        if (any_beam_search) {
-            token_ids_for_copy = sampler_output.token_ids;
-        } else {
-            // Slice the last column on-device so the D2H is only [B, 1] int32.
-            const int64_t last_col = sampler_output.token_ids.size(1) - 1;
-            token_ids_for_copy     = sampler_output.token_ids.narrow(1, last_col, 1).contiguous();
-        }
+
+    // Select each stream's new token on-device. Beam history is reordered on
+    // CPU using parent indices, so only [B, 1] tokens cross the device boundary.
+    std::vector<torch::Tensor> new_token_views;
+    new_token_views.reserve(stream_groups.size());
+    for (auto& stream : stream_groups.allStreams()) {
+        const auto    next_batch_size = stream->nextBatchSize();
+        const int64_t token_position  = stream->usesBeamSearchTokenLayoutForCurrentStep() ?
+                                            static_cast<int64_t>(stream->seqLength()) :
+                                            sampler_output.token_ids.size(1) - 1;
+        RTP_LLM_CHECK(token_position >= 0 && token_position < sampler_output.token_ids.size(1));
+        new_token_views.emplace_back(
+            sampler_output.token_ids.narrow(0, batch_idx_out, next_batch_size).narrow(1, token_position, 1));
+        batch_idx_out += next_batch_size;
     }
-    bool                need_d2h_sync = false;
-    const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
-    const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    const auto          new_tokens_for_copy = torch::cat(new_token_views, 0).contiguous();
+    bool                need_d2h_sync       = false;
+    const torch::Tensor new_tokens_all      = copyToPinnedCpuAsync(new_tokens_for_copy, need_d2h_sync);
+    const torch::Tensor success_cpu         = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
     const torch::Tensor custom_output_cpu =
         copyToPinnedCpuAsync(merge_outputs.model_output.custom_output, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
-    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
-    int  batch_idx_in     = 0;
-    int  batch_idx_out    = 0;
-    int  token_offset     = 0;
-    bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
-    auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
+    batch_idx_out = 0;
+    RTP_LLM_LOG_DEBUG("new_tokens = [%s]", tensorDebugStringWithData<int32_t>(new_tokens_all).c_str());
 
     std::vector<autil::ThreadPoolBase::Future<void>> futures;
     if (thread_pool_) {
@@ -204,10 +204,12 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
             stream->isContextStream()
             && stream->generateInput()->custom_output_token_position >= stream->prefixLength();
 
-        auto task = [&,
+        const auto sampler_batch_size = stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
+        auto       task               = [&,
                      stream,
                      batch_idx_in,
                      batch_idx_out,
+                     sampler_batch_idx_in,
                      token_offset,
                      dispatch_stream,
                      custom_output_batch_idx = has_custom_output ? custom_output_offset : -1]() {
@@ -223,10 +225,10 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                  merge_outputs,
                                  batch_idx_in,
                                  batch_idx_out,
+                                 sampler_batch_idx_in,
                                  token_offset,
                                  return_all_probs,
                                  new_tokens_all,
-                                 token_ids_cpu,
                                  success_cpu,
                                  custom_output_cpu,
                                  custom_output_batch_idx);
@@ -243,6 +245,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         }
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
+        sampler_batch_idx_in += sampler_batch_size;
         token_offset += token_size;
     }
 
@@ -263,22 +266,22 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   const MergedOutput&  merge_outputs,
                                                   int                  batch_idx_in,
                                                   int                  batch_idx_out,
+                                                  int                  sampler_batch_idx_in,
                                                   int                  token_offset,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
-                                                  const torch::Tensor& token_ids_cpu,
                                                   const torch::Tensor& success_cpu,
                                                   const torch::Tensor& custom_output_cpu,
                                                   int                  custom_output_batch_idx) const {
 
-    const auto&  model_output      = merge_outputs.model_output;
-    const auto&  sampler_output    = merge_outputs.sampler_output;
-    const auto&  new_all_token_ids = token_ids_cpu;
-    const size_t token_stride      = new_all_token_ids.size(1);
+    const auto&  model_output   = merge_outputs.model_output;
+    const auto&  sampler_output = merge_outputs.sampler_output;
+    const size_t token_stride   = new_tokens_all.size(1);
 
-    auto cur_batch_size  = stream->currentBatchSize();
-    auto next_batch_size = stream->nextBatchSize();
-    auto token_size      = stream->currentExecuteTokenSize();
+    auto       cur_batch_size     = stream->currentBatchSize();
+    auto       next_batch_size    = stream->nextBatchSize();
+    auto       token_size         = stream->currentExecuteTokenSize();
+    const auto sampler_batch_size = stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
 
     // Only uncached selected tokens occupy rows in the custom output batch.
     torch::Tensor batch_custom_output;
@@ -289,7 +292,6 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
         batch_custom_output = custom_output_cpu.narrow(0, custom_output_batch_idx, cur_batch_size);
     }
-    auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
 
     bool has_beam_search = stream->usesBeamSearchTokenLayoutForCurrentStep();
     bool has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
@@ -430,21 +432,21 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     torch::Tensor all_hidden_states;
+    int64_t       shared_all_hidden_states_length = 0;
     if (stream->needReturnHiddenStates()) {
         all_hidden_states = model_output.all_hidden_states.narrow(0, token_offset, token_size);
+        if (stream->isContextStream()) {
+            // Prefill may execute N copies of the same prompt. Serialize only
+            // the first input row in the singleton all_hidden_states payload.
+            shared_all_hidden_states_length = token_size / cur_batch_size;
+        }
     }
 
-    auto         new_tokens     = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
-    const size_t token_position = has_beam_search ? stream->seqLength() : token_stride - 1;
-    RTP_LLM_CHECK(token_position < token_stride);
-    for (size_t i = 0; i < next_batch_size; ++i) {
-        new_tokens.data_ptr<int32_t>()[i] =
-            new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_position];
-    }
+    auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
 
     if (!output_vocab_ids_.empty()) {
-        for (int i = 0; i < cur_batch_size; ++i) {
-            if (success_cpu.defined() && !success_cpu.data_ptr<bool>()[batch_idx_in + i]) {
+        for (int i = 0; i < sampler_batch_size; ++i) {
+            if (success_cpu.defined() && !success_cpu.data_ptr<bool>()[sampler_batch_idx_in + i]) {
                 stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
                 return;
             }
@@ -477,14 +479,14 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
     }
 
-    auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
+    auto error_info = collectStreamSamplerError(sampler_output, success_cpu, sampler_batch_idx_in, sampler_batch_size);
     if (custom_output_batch_idx >= 0 && !model_output.custom_output_error.empty() && !error_info.has_value()) {
         error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
                                "custom output processor failed: " + model_output.custom_output_error);
     }
     if (asyncDebugEnabled() && success_cpu.defined()) {
-        for (int i = 0; i < cur_batch_size; ++i) {
-            if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
+        for (int i = 0; i < sampler_batch_size; ++i) {
+            if (!(success_cpu.data_ptr<bool>()[sampler_batch_idx_in + i])) {
                 const auto& state = stream->getNormalAsyncDeviceState();
                 RTP_LLM_LOG_ERROR("[async-debug] sampler success=false: stream=%ld pd_sep=%d status=%s "
                                   "pending=%d seq_len=%d state_next_real=%d batch_idx_in=%d token_stride=%zu",
@@ -494,19 +496,19 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                   stream->hasPendingAsyncBookkeeping(),
                                   stream->seqLength(),
                                   state.next_real_seq_len,
-                                  batch_idx_in + i,
+                                  sampler_batch_idx_in + i,
                                   token_stride);
             }
         }
     }
 
-    if (!restoreCurrentTokenIds(stream, batch_new_all_token_ids, new_tokens, token_position)) {
+    if (!restoreCurrentTokenIds(stream, new_tokens, new_tokens, 0)) {
         return;
     }
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
 
-    StreamUpdateInfo update_info{has_beam_search ? batch_new_all_token_ids : new_tokens,
+    StreamUpdateInfo update_info{new_tokens,
                                  1,
                                  batch_hidden_states,
                                  batch_logits,
@@ -522,7 +524,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  std::move(error_info),
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
                                                              GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
-                                 batch_custom_output};
+                                 batch_custom_output,
+                                 shared_all_hidden_states_length};
     stream->update(update_info);
 }
 
