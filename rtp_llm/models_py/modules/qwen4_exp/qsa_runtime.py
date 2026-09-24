@@ -72,10 +72,13 @@ def select_qsa_paged_tokens(
         raise ValueError(
             "token_budget must be positive and divisible by compress_ratio"
         )
-    if bool(torch.any(token_lengths < 0).item()):
-        raise ValueError("token_lengths must be non-negative")
     complete_blocks = token_lengths // compress_ratio
-    if bool(torch.any(complete_blocks > int(block_logits.shape[1])).item()):
+    invalid_lengths = (token_lengths < 0) | (
+        complete_blocks > int(block_logits.shape[1])
+    )
+    if bool(torch.any(invalid_lengths).item()):
+        if bool(torch.any(token_lengths < 0).item()):
+            raise ValueError("token_lengths must be non-negative")
         raise ValueError(
             "block_logits do not cover every completed block in token_lengths"
         )
@@ -212,25 +215,34 @@ def _validate_required_blocks(
         table.shape[0]
     ):
         raise RuntimeError(f"QSA cache {tag!r} has invalid required-column geometry")
-    if bool(torch.any(required_columns < 0).item()):
-        raise RuntimeError(f"QSA cache {tag!r} has a negative required-column count")
-    if bool(torch.any(required_columns > int(table.shape[1])).item()):
-        raise RuntimeError(
-            f"QSA cache {tag!r} block table does not cover the target-verify tail"
-        )
-    if int(table.shape[1]) == 0:
-        if bool(torch.any(required_columns != 0).item()):
-            raise RuntimeError(f"QSA cache {tag!r} has an empty block table")
-        return
+    required_columns = required_columns.to(device=table.device)
     columns = torch.arange(int(table.shape[1]), device=table.device).unsqueeze(0)
-    required = columns < required_columns.to(device=table.device).unsqueeze(1)
-    invalid = required & ((table <= 0) | (table >= pool_blocks))
-    if bool(torch.any(invalid).item()):
-        raise RuntimeError(
-            f"QSA cache {tag!r} target-verify tail resolves to an unallocated "
-            "or out-of-range physical block"
-        )
-    if table.numel() and int(table.max().item()) >= pool_blocks:
+    required = columns < required_columns.unsqueeze(1)
+    negative_columns = torch.any(required_columns < 0)
+    uncovered_columns = torch.any(required_columns > int(table.shape[1]))
+    invalid_required = torch.any(required & ((table <= 0) | (table >= pool_blocks)))
+    invalid_physical = torch.any(table >= pool_blocks)
+    # Synchronize once on the normal path.  Keep the specific diagnostics on
+    # the rare error path, where the extra synchronizations do not affect TPOT.
+    if bool(
+        (
+            negative_columns
+            | uncovered_columns
+            | invalid_required
+            | invalid_physical
+        ).item()
+    ):
+        if bool(negative_columns.item()):
+            raise RuntimeError(f"QSA cache {tag!r} has a negative required-column count")
+        if bool(uncovered_columns.item()):
+            raise RuntimeError(
+                f"QSA cache {tag!r} block table does not cover the target-verify tail"
+            )
+        if bool(invalid_required.item()):
+            raise RuntimeError(
+                f"QSA cache {tag!r} target-verify tail resolves to an unallocated "
+                "or out-of-range physical block"
+            )
         raise RuntimeError(f"QSA cache {tag!r} contains an out-of-range physical block")
 
 
