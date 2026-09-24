@@ -6,6 +6,7 @@
 ## 架构与契约
 
 - [框架结构](architecture/framework.md)：组件职责、配置和执行边界。
+- [报告装配契约](architecture/reporting.md)：展示词汇、配对、旧归档适配和 bundle 发现。
 - [请求与资源生命周期](architecture/request-lifecycle.md)：P/D 分配、Fetch、完成与释放。
 - [流量与播放模型](architecture/traffic.md)：真实/合成输入、精确长度、节奏与身份策略。
 

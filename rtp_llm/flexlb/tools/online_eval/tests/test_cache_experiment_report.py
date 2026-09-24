@@ -61,7 +61,7 @@ class CacheExperimentReportTest(unittest.TestCase):
             root = Path(d)
             pa,pb = root/'a.json',root/'b.json'
             pa.write_text(json.dumps(a));pb.write_text(json.dumps(b))
-            with mock.patch('workload.cache_gate_ab.write_report', return_value=panel):
+            with mock.patch('workload.cache_gate_ab.build_spec', return_value=panel):
                 result = compare(pa,pb,root/'report',alignment_event='custom_event')
                 plain = compare(pa,pb,root/'plain')
             spec = json.loads((root/'report/reports/comparison/cache-scale-in-ab/report-spec.json').read_text())

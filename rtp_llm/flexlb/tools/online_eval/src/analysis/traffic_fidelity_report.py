@@ -1,6 +1,7 @@
 """Self-contained input-fidelity report; independent of experiment reporting."""
 import json
 from pathlib import Path
+from reporting.catalog import FIDELITY_THEME
 
 
 def markdown(report):
@@ -24,7 +25,10 @@ def markdown(report):
 
 def render(report):
     payload=json.dumps(report,ensure_ascii=False,sort_keys=True,allow_nan=False).replace('<','\\u003c')
-    return TEMPLATE.replace('REPORT_DATA',payload)
+    template = TEMPLATE
+    for name, color in FIDELITY_THEME.items():
+        template = template.replace('__FIDELITY_' + name + '__', color)
+    return template.replace('REPORT_DATA', payload)
 
 
 def write(report, directory):
@@ -36,7 +40,7 @@ def write(report, directory):
 
 TEMPLATE=r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>合成流量 · 输入保真度</title><style>
-:root{--bg:#F5F6FA;--card:#fff;--ink:rgba(0,0,0,.85);--muted:rgba(0,0,0,.65);--border:rgba(0,0,0,.06);--blue:#2563eb;--orange:#d97706;--green:#059669;--bad:#be123c;--small:12px;--body:14px;--title:32px;--gap:24px;--radius:8px}
+:root{--bg:__FIDELITY_BACKGROUND__;--card:__FIDELITY_CARD__;--ink:rgba(0,0,0,.85);--muted:rgba(0,0,0,.65);--border:rgba(0,0,0,.06);--blue:__FIDELITY_REAL__;--orange:__FIDELITY_INDEPENDENT__;--green:__FIDELITY_JOINT__;--bad:__FIDELITY_BAD__;--small:12px;--body:14px;--title:32px;--gap:24px;--radius:8px}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:var(--body) -apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif}main{max-width:1440px;margin:auto;padding:32px}h1{font-size:var(--title);margin:8px 0}h2{font-size:20px;margin:0 0 16px}h3{font-size:16px}p{line-height:1.7;color:var(--muted);overflow-wrap:anywhere}header{margin-bottom:var(--gap)}section,article{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:var(--gap);margin-bottom:var(--gap)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap)}.heat{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.controls{display:flex;gap:16px;flex-wrap:wrap;align-items:center}select,input,button{font:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--ink)}input{width:80px}button{cursor:pointer}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}td,th{text-align:right;padding:8px;border-bottom:1px solid var(--border)}td:first-child,th:first-child{text-align:left}code,pre{font-size:var(--small);overflow-wrap:anywhere}pre{white-space:pre-wrap;max-height:380px;overflow:auto}svg{width:100%;display:block}svg text{font:12px sans-serif;fill:var(--muted)}.PASS{color:var(--green)}.WARN{color:var(--orange)}.FAIL,.MISMATCH{color:var(--bad)}.legend{display:flex;gap:24px;font-weight:600}.real{color:var(--blue)}.independent{color:var(--orange)}.joint{color:var(--green)}.scroll{overflow:auto}.note{font-size:var(--small)}@media(max-width:850px){main{padding:16px}.grid,.heat{grid-template-columns:1fr}.controls{align-items:flex-start}h1{font-size:24px}}
 </style><main><header><div>ONLINE EVAL / 独立诊断工具</div><h1>合成流量与真实输入，差在哪里？</h1><p>直接运行生产生成器，按实际标签重算共享结构。这里评估输入分布，不把理论共享当作有限容量缓存命中，也不代替性能实验。</p><div id="identity"></div></header>
 <section><div class="controls"><label>捕获窗口 <select id="capture"></select></label><label>观察方法 <select id="method"><option value="joint">联合采样</option><option value="independent">旧版独立采样</option></select></label><button id="download">导出当前阈值 JSON</button></div><p id="window"></p><div class="legend"><span class="real">━ 真实输入</span><span class="independent">┄ 旧版独立采样</span><span class="joint">━ 联合采样</span></div></section>
@@ -48,7 +52,7 @@ TEMPLATE=r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name=
 <section><details><summary>画像身份、完整参数与适用边界</summary><pre id="provenance"></pre></details></section></main>
 <script id="data" type="application/json">REPORT_DATA</script><script>
 const report=JSON.parse(document.getElementById('data').textContent), $=id=>document.getElementById(id);
-const colors={real:'#2563eb',independent:'#d97706',joint:'#059669'}, names={real:'真实输入',independent:'旧版独立采样',joint:'联合采样'};
+const colors={real:'__FIDELITY_REAL__',independent:'__FIDELITY_INDEPENDENT__',joint:'__FIDELITY_JOINT__'}, names={real:'真实输入',independent:'旧版独立采样',joint:'联合采样'};
 const el=(tag,text,parent)=>{const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(parent)parent.appendChild(x);return x};
 const fmt=x=>typeof x==='number'?(Math.abs(x)>=1000?x.toFixed(1):x.toFixed(4)):(x??'—');
 const svgEl=(tag,attrs,parent)=>{const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(parent)parent.appendChild(e);return e};
@@ -58,7 +62,7 @@ function table(host,headers,rows){host.replaceChildren();const t=el('table',unde
 function series(row){return {real:row.real,...Object.fromEntries(Object.entries(row.methods).filter(([k,v])=>v.status==='MEASURED').map(([k,v])=>[k,v.summary]))}}
 function ecdf(host,s,key,log){host.replaceChildren();const svg=svgEl('svg',{viewBox:'0 0 600 280',role:'img','aria-label':key},host);const max=Math.max(...Object.values(s).map(x=>x[key].at(-1)[0]));const xmax=log?Math.max(10,Math.log2(max)):Math.max(1,max),xmin=log?9:0;
 const X=x=>48+530*((log?Math.log2(Math.max(512,x)):x)-xmin)/(xmax-xmin),Y=y=>238-y*210;
-for(let i=0;i<=4;i++){const y=i/4;svgEl('line',{x1:48,y1:Y(y),x2:578,y2:Y(y),stroke:'#e5e7eb'},svg);svgEl('text',{x:8,y:Y(y)+4},svg).textContent=Math.round(y*100)+'%'}
+for(let i=0;i<=4;i++){const y=i/4;svgEl('line',{x1:48,y1:Y(y),x2:578,y2:Y(y),stroke:'__FIDELITY_GRID__'},svg);svgEl('text',{x:8,y:Y(y)+4},svg).textContent=Math.round(y*100)+'%'}
 for(let i=0;i<=4;i++){const v=xmin+(xmax-xmin)*i/4;svgEl('text',{x:48+530*i/4,y:264,'text-anchor':i===0?'start':i===4?'end':'middle'},svg).textContent=Math.round(log?2**v:v).toLocaleString()}
 for(const[k,v]of Object.entries(s)){let c=0,d=`M48 ${Y(0)}`;for(const[x,n]of v[key]){d+=` H${X(x)} V${Y((c+=n)/v.requests)}`};svgEl('path',{d,fill:'none',stroke:colors[k],'stroke-width':2,'stroke-dasharray':k==='independent'?'5 3':''},svg)}}
 function draw(){const row=report.rows[+$('capture').value];if(!row){$('verdict').textContent='UNASSESSED：无对照捕获。仅展示画像参数及身份检查，不能据此判断保真度。';return}const s=series(row),m=row.methods[$('method').value];$('window').textContent=`${row.interpretation} · ${row.real.requests.toLocaleString()} 个真实请求 · SHA ${row.capture_sha256}`;

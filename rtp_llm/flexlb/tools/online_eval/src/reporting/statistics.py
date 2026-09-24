@@ -25,6 +25,15 @@ def counter_delta(values):
     return values[-1] - values[0], "AVAILABLE"
 
 
+def adjacent_counter_rates(points):
+    """Rate each valid adjacent counter pair; omit resets and invalid intervals."""
+    return [
+        (time, (value - previous_value) / (time - previous_time))
+        for (previous_time, previous_value), (time, value) in zip(points, points[1:])
+        if time > previous_time and value >= previous_value
+    ]
+
+
 def percentile_nr(values, p, nd=1):
     """Pooled nearest rank, retaining the existing zero-sample caller contract."""
     if not values:

@@ -6,6 +6,8 @@ import statistics
 from pathlib import Path
 
 from reporting.statistics import select_window
+from reporting.catalog import WORKLOAD_COLORS
+from reporting.pairing import align_series, pair_samples
 from reporting import (
     write_bundle,
     load_analysis,
@@ -49,14 +51,14 @@ def compare(a, b):
                 samples.append(
                     []
                     if window is None
-                    else [
-                        [t - window[0], v]
-                        for t, v in select_window(
+                    else align_series(
+                        select_window(
                             report["series"].get(metric, []),
                             *window,
                             time=lambda p: p[0],
-                        )
-                    ]
+                        ),
+                        window[0],
+                    )
                 )
             left, right = samples
             row = dict(
@@ -136,9 +138,7 @@ def main(argv=None):
     args.out.mkdir(parents=True, exist_ok=True)
     panels = []
     for row in result["changes"][: args.max_panels]:
-        axis = sorted(
-            set(t for field in ("baseline", "candidate") for t, v in row[field])
-        )
+        axis, _, _, _ = pair_samples(row["baseline"], row["candidate"])
         panels.append(
             dict(
                 id=hashlib.sha256((row["phase"] + row["metric"]).encode()).hexdigest(),
@@ -158,8 +158,8 @@ def main(argv=None):
                         color=color,
                     )
                     for field, color in [
-                        ("baseline", "#2563eb"),
-                        ("candidate", "#dc2626"),
+                        ("baseline", WORKLOAD_COLORS[0]),
+                        ("candidate", WORKLOAD_COLORS[1]),
                     ]
                 ],
             )

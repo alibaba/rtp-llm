@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import json
 import re
@@ -141,9 +140,11 @@ def _atomic(path, content):
 
 def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None):
     """Publish one canonical report; manifest is written last as the commit record."""
+    from reporting.assembly import normalize_spec
+
     directory = bundle_path(root, kind, identity)
     directory.mkdir(parents=True, exist_ok=True)
-    spec = copy.deepcopy(spec)
+    spec = normalize_spec(spec)
     spec["schema_version"] = SCHEMA_VERSION
     legacy_meta = spec.get("meta") or {}
     spec["run_meta"] = meta or run_meta(
@@ -188,12 +189,14 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     return directory
 
 
-def discover_reports(root, *, role):
-    """Find committed run reports by producer-declared role, independent of identity."""
+def discover_reports(root, *, role=None, kind="run"):
+    """Find verified bundles by kind and optional producer-declared role."""
+    if kind not in {"run", "comparison", "sweep"}:
+        raise ValueError("unsupported report kind: " + str(kind))
     reports = []
-    for path in sorted((Path(root) / "reports" / "run").glob("*/manifest.json")):
+    for path in sorted((Path(root) / "reports" / kind).glob("*/manifest.json")):
         manifest = json.loads(path.read_text())
-        if manifest.get("role") != role:
+        if role is not None and manifest.get("role") != role:
             continue
         directory = read_bundle(path)
         entrypoint = manifest["entrypoint"]

@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 
+from reporting.catalog import CACHE_AXES, CACHE_METRICS
 from reporting import (
     details,
     table,
@@ -222,62 +223,14 @@ def analyze(evidence):
     )
 
 
-def build_spec(directory, evidence, result):
+def prepare_report(directory, evidence):
     from monitoring.session import archived_series
     from statistics import median
 
     rows = evidence["samples"]
     anchor = rows[0]["epoch_s"] - rows[0]["t"] if rows else 0
     series, sources, gaps, errors = archived_series(directory, anchor)
-    axes = {
-        key: dict(title=label, position=position)
-        for key, label, position in (
-            ("queue", "每引擎 streams", "left"),
-            ("count", "数量", "right"),
-            ("p", "引擎数", "right"),
-            ("qps", "请求 / 秒", "right"),
-            ("tokens", "tokens / 秒", "right"),
-            ("ms", "毫秒", "right"),
-            ("blocks", "KV blocks", "right"),
-            ("seconds", "秒", "right"),
-            ("ratio", "命中率", "right"),
-        )
-    }
-    # Report vocabulary is intentionally explicit. Prometheus identities remain
-    # available in the audit table, but never leak into the visual legend.
-    metric_defs = {
-        ("mock", "running_avg"): ("P Running / engine", "队列", "queue", "streams", "#1677ff", False),
-        ("mock", "running_max"): ("P Running max", "队列", "queue", "streams", "#69b1ff", True),
-        ("mock", "waiting_avg"): ("P Waiting / engine", "队列", "queue", "streams", "#f5222d", False),
-        ("mock", "waiting_max"): ("P Waiting max", "队列", "queue", "streams", "#ff7875", True),
-        ("mock", "engine_count"): ("P engine count", "规模", "count", "engines", "#722ed1", False),
-        ("mock", "cache_hit_ratio"): ("P cache hit ratio", "缓存", "ratio", "", "#13c2c2", False),
-        ("mock", "context_wall_tps"): ("P compute token throughput", "性能", "tokens", "tokens/s", "#52c41a", True),
-        ("mock", "context_execution_tps_avg"): ("P model forward TPS", "性能", "tokens", "tokens/s", "#389e0d", False),
-        ("mock", "context_execution_tps_with_cache_avg"): ("P model forward TPS incl. cache", "性能", "tokens", "tokens/s", "#95de64", True),
-        ("mock", "simulated_prefill_ms_avg"): ("P simulated model forward", "性能", "ms", "ms", "#fa8c16", True),
-        ("mock", "context_completed_qps"): ("P completed QPS", "流量", "qps", "req/s", "#08979c", False),
-        ("mock", "accepted_qps"): ("P accepted QPS", "流量", "qps", "req/s", "#36cfc9", True),
-        ("mock", "rtp_llm_kv_cache_pool_total_blocks"): ("P KV total blocks", "KV", "blocks", "blocks", "#531dab", True),
-        ("mock", "rtp_llm_kv_cache_pool_available_blocks"): ("P KV available blocks", "KV", "blocks", "blocks", "#b37feb", True),
-        ("mock", "mock_engine_held_blocks"): ("P held blocks", "KV", "blocks", "blocks", "#ad6800", True),
-        ("mock", "mock_engine_referenced_blocks"): ("P referenced blocks", "KV", "blocks", "blocks", "#d48806", True),
-        ("client", "actual_send_qps"): ("Client sent QPS", "流量", "qps", "req/s", "#2f54eb", False),
-        ("client", "success_qps"): ("Client success QPS", "流量", "qps", "req/s", "#52c41a", False),
-        ("client", "error_qps"): ("Client error QPS", "流量", "qps", "req/s", "#cf1322", False),
-        ("client", "completed_qps"): ("Client completed QPS", "流量", "qps", "req/s", "#597ef7", True),
-        ("client", "ttft_p99_seconds"): ("TTFT p99", "延迟", "seconds", "s", "#fa541c", True),
-        ("client", "total_p99_seconds"): ("Total latency p99", "延迟", "seconds", "s", "#faad14", True),
-        ("client", "schedule_p99_seconds"): ("Schedule latency p99", "延迟", "seconds", "s", "#d4b106", True),
-        ("master", "arrivals_qps"): ("Master arrival QPS", "流量", "qps", "req/s", "#1d39c4", True),
-        ("master", "completions_qps"): ("Master legacy schedule response QPS", "流量", "qps", "req/s", "#237804", True),
-        ("master", "schedule_responses_qps"): ("Master schedule response QPS", "流量", "qps", "req/s", "#237804", True),
-        ("master", "flexlb_app_flexlb_batcher_queue_size"): ("Master batcher queue", "Master", "count", "requests", "#c41d7f", True),
-        ("master", "flexlb_app_flexlb_scheduler_inflight_size"): ("Master scheduler inflight", "Master", "count", "requests", "#eb2f96", True),
-        ("master", "flexlb_app_flexlb_inflight_request_count"): ("Master inflight requests", "Master", "count", "requests", "#9e1068", False),
-        ("master", "flexlb_auto_tpm_decode_reserved_count"): ("Master decode reserved", "Master", "count", "requests", "#7cb305", True),
-        ("master", "flexlb_auto_tpm_decode_running_count"): ("Master decode running", "Master", "count", "requests", "#a0d911", True),
-    }
+    metric_defs = CACHE_METRICS
     curves = []
     audit = []
     found = set()
@@ -349,6 +302,19 @@ def build_spec(directory, evidence, result):
             f"客户端错误已主导流量：error/send 中位数 {median(failures) / median(sent):.1%}"
         )
     monitoring_status = "INVALID" if monitor_warnings else "OK"
+    return dict(curves=curves, audit=audit, sources=sources, gaps=gaps, errors=errors,
+                monitoring_status=monitoring_status, monitor_warnings=monitor_warnings)
+
+
+def build_spec(directory, evidence, result, prepared):
+    rows = evidence["samples"]
+    curves = prepared["curves"]
+    audit = prepared["audit"]
+    sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
+    monitoring_status = prepared["monitoring_status"]
+    monitor_warnings = prepared["monitor_warnings"]
+    axes = {key: dict(value) for key, value in CACHE_AXES.items()}
+    by_name = {curve["name"]: curve for curve in curves}
     presets = {
         "核心": ["P cache hit ratio", "P Waiting / engine", "P Running / engine", "P engine count", "Client sent QPS", "Client success QPS", "Client error QPS", "Master inflight requests"],
         "队列": [name for name in by_name if "Waiting" in name or "Running" in name or "queue" in name or "inflight" in name],
@@ -400,13 +366,14 @@ def build_spec(directory, evidence, result):
     )
 
 
-def write_report(directory, evidence, result):
+def write_report(directory, evidence, result, prepared=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "cache-gate-evidence.json").write_text(
         json.dumps(evidence, indent=2, allow_nan=False)
     )
-    spec = build_spec(directory, evidence, result)
+    prepared = prepared if prepared is not None else prepare_report(directory, evidence)
+    spec = build_spec(directory, evidence, result, prepared)
     provenance = evidence.get("provenance", {})
     meta = run_meta(
         dict(id="cache-scale-in", instance=provenance.get("instance")),

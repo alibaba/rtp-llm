@@ -13,6 +13,7 @@ import statistics
 from pathlib import Path
 
 from scenario.loader import load_document
+from reporting.pairing import align_series
 
 
 def digest(value):
@@ -164,7 +165,7 @@ def timeline(reports, spec):
             if set(panel) != {"title", "metrics"}:
                 raise ValueError("invalid timeline panel")
             series = {
-                key: [[t - offset, v] for t, v in report["series"].get(key, [])]
+                key: align_series(report["series"].get(key, []), offset)
                 for key in panel["metrics"]
             }
             panels.append(

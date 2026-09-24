@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from reporting import (
     write_bundle,
+    discover_reports,
     read_bundle,
     load_analysis,
     render,
@@ -17,11 +19,19 @@ from reporting import (
     table,
 )
 from reporting.statistics import select_window, counter_delta
+from reporting.pairing import event_anchor, shifted_panel, pair_samples, paired_overlay
 from reporting.renderer import render_context, render_sections
 from workload.report import write_report
 
 
 class ReportBundleTest(unittest.TestCase):
+    def test_report_producers_do_not_declare_new_color_literals(self):
+        source = Path(__file__).resolve().parents[1] / "src"
+        offenders = [str(path.relative_to(source)) for path in source.rglob("*.py")
+                     if path.name != "catalog.py"
+                     and re.search(r"#[0-9a-fA-F]{6}\b", path.read_text())]
+        self.assertEqual(offenders, [])
+
     def test_common_context_uses_actual_runs_and_omits_missing_fields(self):
         spec = {"run_meta": run_meta(
             {"id": "comparison"},
@@ -136,6 +146,22 @@ class ReportBundleTest(unittest.TestCase):
         self.assertEqual(counter_delta([10, 2, 15]), (None, "COUNTER_RESET"))
         self.assertEqual(counter_delta([10, None]), (None, "MISSING_COUNTER"))
 
+    def test_shared_pairing_supports_stage_and_event_anchors_without_zero_fill(self):
+        self.assertEqual(event_anchor([dict(name="start", t=12)], "start"), 12)
+        self.assertIsNone(event_anchor([dict(name="start", t=12), dict(name="start", t=13)], "start"))
+        panel = dict(series=[dict(name="hit", color="#123456",
+                                  points=[dict(x=12, y=None), dict(x=13, y=2)])])
+        aligned = shifted_panel(panel, 12)
+        self.assertEqual(panel["series"][0]["points"][0]["x"], 12)
+        self.assertEqual(aligned["series"][0]["points"],
+                         [dict(x=0, y=None), dict(x=1, y=2)])
+        axis, left, right, delta = pair_samples([(0, None), (1, 2)], [(0, 3), (2, 4)])
+        self.assertEqual((axis, left, right, delta),
+                         ([0, 1, 2], [None, 2, None], [3, None, 4], [None, None, None]))
+        curves, _ = paired_overlay([aligned, aligned])
+        self.assertEqual([curve["name"] for curve in curves], ["A · hit", "B · hit"])
+        self.assertEqual([curve["dash"] for curve in curves], [[6, 4], []])
+
     def test_workload_presentation_cannot_change_status_or_read_telemetry(self):
         payload = dict(
             id="case",
@@ -165,6 +191,35 @@ class ReportBundleTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             result = write_bundle(d, "run", "../../other", {}, dict(panels=[]))
             self.assertEqual(result.parent, Path(d) / "reports/run")
+
+    def test_all_bundle_kinds_are_discoverable_and_verified(self):
+        with tempfile.TemporaryDirectory() as d:
+            for kind in ("run", "comparison", "sweep"):
+                write_bundle(d, kind, "example", {}, dict(panels=[]), role="audit")
+                self.assertEqual(len(discover_reports(d, kind=kind, role="audit")), 1)
+                self.assertEqual(len(discover_reports(d, kind=kind)), 1)
+            self.assertEqual(discover_reports(d, role="missing"), [])
+            with self.assertRaisesRegex(ValueError, "unsupported report kind"):
+                discover_reports(d, kind="timeline")
+
+    def test_time_panel_adapter_preserves_gaps_and_legacy_coordinates(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = dict(title="mixed", panels=[
+                dict(id="legacy", type="line", timeX=True, x=["0", "1"],
+                     xNums=[0, 1], series=[dict(name="x", data=[3, None])]),
+                dict(id="multi", overlay=True, axes={"y": dict(title="count")},
+                     series=[dict(name="y", points=[dict(x=0, y=None)])]),
+            ])
+            bundle = write_bundle(d, "run", "mixed", {}, source)
+            saved = json.loads((bundle / "report-spec.json").read_text())
+            self.assertEqual(source["panels"][0]["series"][0]["data"], [3, None])
+            self.assertEqual(saved["panels"][0]["series"][0]["points"],
+                             [dict(x=0, y=3), dict(x=1, y=None)])
+            self.assertEqual(saved["panels"][1]["series"][0]["points"],
+                             [dict(x=0, y=None)])
+            self.assertEqual([p["representation"] for p in saved["panels"]],
+                             ["standard", "multi"])
+            self.assertIn("FlexMultiCurve.mount", (bundle / "report.html").read_text())
 
 
 if __name__ == "__main__":

@@ -4,17 +4,9 @@ import math
 from collections import defaultdict
 
 from monitoring.session import archived_series
+from reporting.catalog import PERFORMANCE_COLORS, performance_axes, performance_metric_style
 
-COLORS = [
-    "#1677ff",
-    "#13c2c2",
-    "#fa541c",
-    "#722ed1",
-    "#52c41a",
-    "#eb2f96",
-    "#faad14",
-    "#2f54eb",
-]
+COLORS = PERFORMANCE_COLORS
 
 
 def panel(directory, evidence, result):
@@ -23,23 +15,7 @@ def panel(directory, evidence, result):
     lo = evidence.get("window", {}).get("start_epoch_ms", 0)
     duration = evidence.get("criteria", {}).get("measure_s", 1)
     curves, audit = [], []
-    axes = {
-        k: dict(title=title, position="left" if i == 0 else "right")
-        for i, (k, title) in enumerate(
-            [
-                ("input", "输入 tok/s"),
-                ("output", "输出 tok/s"),
-                ("qps", "req/s"),
-                ("ms", "ms"),
-                ("count", "数量"),
-                ("ratio", "比例"),
-                ("tokens", "tokens"),
-                ("blocks", "KV blocks"),
-                ("seconds", "s"),
-                ("forward", "执行 tok/s"),
-            ]
-        )
-    }
+    axes = performance_axes()
 
     def add(name, group, axis, points, description, hidden=True):
         curves.append(
@@ -156,42 +132,7 @@ def panel(directory, evidence, result):
             continue
         labels = json.loads(label_json)
         role = {"prefill": "P", "decode": "D"}.get(labels.pop("role", ""), "")
-        primary = metric in {"rtp_llm_context_tps_engine_mean", "rtp_llm_context_tps_with_cache_engine_mean"}
-        if primary:
-            group, axis = "Prefill TPS", "forward"
-        elif metric in {"rtp_llm_context_tps_per_engine", "rtp_llm_context_tps_with_cache_per_engine"}:
-            group, axis = "Prefill 逐引擎 TPS", "forward"
-        elif "blocks" in metric:
-            group, axis = "KV", "blocks"
-        elif "ratio" in metric:
-            group, axis = "KV", "ratio"
-        elif "engine_count" in metric:
-            group, axis = "规模", "count"
-        elif any(
-            s in metric for s in ("running", "waiting", "queue", "inflight", "reserved")
-        ):
-            group, axis = "队列", "count"
-        elif "qps" in metric:
-            group, axis = "流量", "qps"
-        elif "seconds" in metric:
-            group, axis = "延迟", "seconds"
-        elif "_ms" in metric:
-            group, axis = "模拟执行", "ms"
-        else:
-            group, axis = "模拟执行", "forward"
-        name = " ".join(
-            s
-            for s in [
-                role,
-                metric.replace("flexlb_app_flexlb_", "")
-                .replace("flexlb_auto_tpm_", "")
-                .replace("rtp_llm_", "")
-                .replace("mock_engine_", "")
-                .replace("_", " "),
-            ]
-            if s
-        )
-        name = f'{source.split("-")[0]} · {name}'
+        name, group, axis, primary = performance_metric_style(source, metric, role)
         if labels:
             name += " · " + ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
         if any(c["name"] == name for c in curves):

@@ -50,51 +50,7 @@ import html
 import json
 from pathlib import Path
 
-# tone → 数值色（KPI 卡）
-KPI_TONE_COLOR = {
-    "success": "#52c41a",
-    "danger": "#f5222d",
-    "warn": "#faad14",
-    "warning": "#faad14",
-    "info": "#1677ff",
-    "primary": "#1677ff",
-}
-
-# 系列默认调色板（chartjs.html 里一图内多系列的常用色）
-PALETTE = [
-    "#1677ff",  # primary blue
-    "#52c41a",  # success green
-    "#faad14",  # warn amber
-    "#f5222d",  # danger red
-    "#722ed1",  # purple
-    "#13c2c2",  # cyan
-    "#eb2f96",  # magenta
-    "#fa8c16",  # orange
-    "#a0d911",  # lime
-    "#2f54eb",  # geekblue
-    "#fadb14",  # yellow
-    "#08979c",  # teal
-]
-
-# 语义 tone → 色（系列层面用）
-TONE_TO_COLOR = {
-    "primary": "#1677ff",
-    "success": "#52c41a",
-    "warning": "#faad14",
-    "warn": "#faad14",
-    "danger": "#f5222d",
-    "info": "#13c2c2",
-    "secondary": "#722ed1",
-    "tertiary": "#eb2f96",
-    "quaternary": "#fa8c16",
-    "neutral": "#8c8c8c",
-}
-
-
-def series_color(tone, idx):
-    if tone and tone in TONE_TO_COLOR:
-        return TONE_TO_COLOR[tone]
-    return PALETTE[idx % len(PALETTE)]
+from reporting.catalog import KPI_TONE_COLOR, PALETTE, TONE_TO_COLOR, RENDERER_THEME, series_color
 
 
 def _present(value):
@@ -178,6 +134,9 @@ def render_sections(sections):
 
 def render(spec):
     """spec: 见模块 docstring。返回完整 HTML 字符串。"""
+    from reporting.assembly import normalize_spec
+
+    spec = normalize_spec(spec)
     run_id = spec.get("run_id", "")
     title = spec.get("title") or ("FlexLB 压测报告 · run " + run_id)
     subtitle = spec.get("subtitle") or ""
@@ -218,7 +177,7 @@ def render(spec):
                 "timeX": bool(p.get("timeX")),
                 "xNums": p.get("xNums") or [],
                 "yMax": p.get("yMax"),
-                "overlay": p.get("overlay", False),
+                "representation": p["representation"],
                 "axes": p.get("axes", {}),
                 "presets": p.get("presets", {}),
                 "unit": p.get("unit", "") or "",
@@ -252,8 +211,11 @@ def render(spec):
     chartjs = (resource_dir / "chart.umd.min.js").read_text(encoding="utf-8")
     overlay = (resource_dir / "multi_curve.js").read_text(encoding="utf-8")
     interaction = (resource_dir / "legend_interaction.js").read_text(encoding="utf-8")
+    template = _TEMPLATE
+    for name, color in RENDERER_THEME.items():
+        template = template.replace("__REPORT_" + name + "__", color)
     return (
-        _TEMPLATE.replace("__SECTIONS__", render_sections(sections))
+        template.replace("__SECTIONS__", render_sections(sections))
         .replace("__CONTEXT__", render_context(spec))
         .replace("__PAGE_TITLE__", page_title)
         .replace(
@@ -273,10 +235,10 @@ _TEMPLATE = r"""<!doctype html>
 <script>__MULTI_CURVE_JS__</script>
 <script>__LEGEND_INTERACTION_JS__</script>
 <style>
-.report-sections{padding:24px}.report-sections table{width:100%;border-collapse:collapse}.report-sections td,.report-sections th{border:1px solid #ddd;padding:6px;text-align:left}.report-sections pre{white-space:pre-wrap;overflow-wrap:anywhere}.report-sections details{margin:16px 0}
+.report-sections{padding:24px}.report-sections table{width:100%;border-collapse:collapse}.report-sections td,.report-sections th{border:1px solid __REPORT_LIGHT_BORDER__;padding:6px;text-align:left}.report-sections pre{white-space:pre-wrap;overflow-wrap:anywhere}.report-sections details{margin:16px 0}
 :root{
-  --bg:#f5f6fa; --card:#fff; --fg:rgba(0,0,0,0.85); --sub:rgba(0,0,0,0.55);
-  --border:rgba(0,0,0,0.08); --danger:#f5222d; --success:#52c41a; --warn:#faad14;
+  --bg:__REPORT_BACKGROUND__; --card:__REPORT_CARD__; --fg:rgba(0,0,0,0.85); --sub:rgba(0,0,0,0.55);
+  --border:rgba(0,0,0,0.08); --danger:__REPORT_DANGER__; --success:__REPORT_SUCCESS__; --warn:__REPORT_WARNING__;
 }
 *{box-sizing:border-box}
 body{margin:0;padding:24px;background:var(--bg);color:var(--fg);
@@ -285,25 +247,25 @@ header{margin-bottom:20px}
 h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .sub{color:var(--sub)}
 .multi-toolbar{position:sticky;top:8px;z-index:5;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;padding:8px;background:rgba(255,255,255,.97);border:1px solid var(--border);border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
-.multi-toolbar button{border:1px solid #d9d9d9;background:#fff;border-radius:6px;padding:5px 11px;cursor:pointer}
-.multi-toolbar button:hover{border-color:#1677ff;color:#1677ff}.multi-range{margin-left:auto;color:var(--sub)}
-.multi-range input{margin:0 5px;border:1px solid #d9d9d9;border-radius:5px;padding:4px}
-.multi-picker{position:relative}.multi-picker-button{font-weight:600;color:#1677ff}
-.multi-dropdown{position:absolute;top:calc(100% + 8px);left:0;width:min(520px,calc(100vw - 56px));max-height:min(68vh,560px);overflow:auto;padding:10px;background:#fff;border:1px solid #d9d9d9;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.18)}
+.multi-toolbar button{border:1px solid __REPORT_BORDER__;background:__REPORT_CARD__;border-radius:6px;padding:5px 11px;cursor:pointer}
+.multi-toolbar button:hover{border-color:__REPORT_PRIMARY__;color:__REPORT_PRIMARY__}.multi-range{margin-left:auto;color:var(--sub)}
+.multi-range input{margin:0 5px;border:1px solid __REPORT_BORDER__;border-radius:5px;padding:4px}
+.multi-picker{position:relative}.multi-picker-button{font-weight:600;color:__REPORT_PRIMARY__}
+.multi-dropdown{position:absolute;top:calc(100% + 8px);left:0;width:min(520px,calc(100vw - 56px));max-height:min(68vh,560px);overflow:auto;padding:10px;background:__REPORT_CARD__;border:1px solid __REPORT_BORDER__;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.18)}
 .multi-dropdown[hidden],.multi-choice[hidden],.multi-group[hidden]{display:none}
-.multi-search{position:sticky;top:-10px;z-index:1;width:100%;padding:7px 10px;border:1px solid #d9d9d9;border-radius:6px;background:#fff}
+.multi-search{position:sticky;top:-10px;z-index:1;width:100%;padding:7px 10px;border:1px solid __REPORT_BORDER__;border-radius:6px;background:__REPORT_CARD__}
 .multi-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:4px 8px;margin-top:8px}
 .multi-group{grid-column:1/-1;color:var(--sub);font-size:12px;font-weight:650;margin-top:4px}
 .multi-choice{display:flex;align-items:center;gap:5px;min-width:0;padding:4px 7px;border-radius:5px;cursor:pointer;transition:opacity .12s,background .12s}
-.multi-choice:hover{background:#eef4ff}.multi-choice i,.multi-hover-row i{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
+.multi-choice:hover{background:__REPORT_HOVER_BACKGROUND__}.multi-choice i,.multi-hover-row i{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
 .multi-choice input{margin:0}
 .multi-legend{display:flex;flex-wrap:wrap;align-content:flex-start;gap:5px 8px;max-height:104px;overflow:auto;margin:9px 0;padding:8px;border:1px solid var(--border);border-radius:8px}
 .multi-legend[hidden],.multi-legend-item[hidden]{display:none}
 .multi-legend-key{width:100%;order:-1;color:var(--sub);font-size:12px}
 .multi-legend-item{display:inline-flex;align-items:center;gap:6px;border:1px solid transparent;border-radius:5px;background:transparent;padding:3px 6px;color:var(--fg);font:inherit;font-size:12px;cursor:pointer}
-.multi-legend-item:hover{background:#eef4ff}
+.multi-legend-item:hover{background:__REPORT_HOVER_BACKGROUND__}
 .multi-legend-item i{display:inline-block;width:22px;border-top-width:3px;border-top-style:solid;flex:none}
-.multi-hover{display:flex;flex-wrap:wrap;align-content:flex-start;gap:3px 12px;min-height:48px;max-height:140px;overflow:auto;background:#fafafa;border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--sub);font-size:12px}
+.multi-hover{display:flex;flex-wrap:wrap;align-content:flex-start;gap:3px 12px;min-height:48px;max-height:140px;overflow:auto;background:__REPORT_MUTED_BACKGROUND__;border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--sub);font-size:12px}
 .multi-hover strong{width:100%;color:var(--fg)}
 .multi-hover-row{display:flex;align-items:center;gap:7px;min-width:210px;white-space:nowrap}
 /* KPI 两行（指标五连 + 结果五连）：wrapper 纵向叠行，每行 grid 随
@@ -319,7 +281,7 @@ h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .context-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
 .context-card{min-width:0;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px}
 .context-card h3{font-size:13px;margin:0 0 8px}
-.context-card pre,.report-sections .attachment pre{max-height:280px;overflow:auto;margin:0;padding:10px 12px;background:#f7f8fa;border:1px solid var(--border);border-radius:6px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
+.context-card pre,.report-sections .attachment pre{max-height:280px;overflow:auto;margin:0;padding:10px 12px;background:__REPORT_CODE_BACKGROUND__;border:1px solid var(--border);border-radius:6px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
 .report-sections .attachment{margin:10px 0;border:1px solid var(--border);border-radius:8px;background:var(--card)}
 .report-sections .attachment summary{cursor:pointer;padding:10px 14px;font-weight:600}
 .report-sections .attachment pre{margin:0 12px 12px}
@@ -391,7 +353,7 @@ const TIME_AXIS = (SPEC.timeAxis
 const TA_MIN = TIME_AXIS ? TIME_AXIS.min : undefined;
 const TA_MAX = TIME_AXIS ? TIME_AXIS.max : undefined;
 SPEC.panels.forEach(p=>{
-  if (p.overlay) { FlexMultiCurve.mount(grid, p, {timeAxis:TIME_AXIS, events:SPEC.events || []}); return; }
+  if (p.representation === 'multi') { FlexMultiCurve.mount(grid, p, {timeAxis:TIME_AXIS, events:SPEC.events || []}); return; }
   const wrap=document.createElement('div'); wrap.className='panel';
   wrap.innerHTML='<h3></h3><div class="cap"></div><div class="box"><canvas></canvas></div>';
   wrap.querySelector('h3').textContent=p.title;
@@ -423,9 +385,9 @@ SPEC.panels.forEach(p=>{
         if (!Number.isFinite(e.t)) return;
         const px=x.getPixelForValue(e.t);
         if(px<a.left || px>a.right) return;
-        ctx.strokeStyle='#94a3b8'; ctx.setLineDash([3,3]);
+        ctx.strokeStyle='__REPORT_EVENT_LINE__'; ctx.setLineDash([3,3]);
         ctx.beginPath(); ctx.moveTo(px,a.top); ctx.lineTo(px,a.bottom); ctx.stroke();
-        ctx.fillStyle='#64748b'; ctx.fillText(e.name || e.label || '',px+2,a.top+12+(i%3)*12);
+        ctx.fillStyle='__REPORT_EVENT_TEXT__'; ctx.fillText(e.name || e.label || '',px+2,a.top+12+(i%3)*12);
       });
       ctx.restore();
     }}],
@@ -472,9 +434,9 @@ SPEC.panels.forEach(p=>{
     const btn=document.createElement('span');
     btn.textContent='⟲ 全选';
     btn.title='一键恢复该面板全部序列';
-    btn.style.cssText='position:absolute;top:34px;right:10px;font-size:10px;color:#888;cursor:pointer;padding:2px 6px;border:1px solid #ddd;border-radius:10px;background:rgba(255,255,255,.9);z-index:5;user-select:none;transition:all .15s';
-    btn.onmouseenter=()=>{btn.style.color='#333';btn.style.borderColor='#999';};
-    btn.onmouseleave=()=>{btn.style.color='#888';btn.style.borderColor='#ddd';};
+    btn.style.cssText='position:absolute;top:34px;right:10px;font-size:10px;color:__REPORT_MUTED_TEXT__;cursor:pointer;padding:2px 6px;border:1px solid __REPORT_LIGHT_BORDER__;border-radius:10px;background:rgba(255,255,255,.9);z-index:5;user-select:none;transition:all .15s';
+    btn.onmouseenter=()=>{btn.style.color='__REPORT_DARK_TEXT__';btn.style.borderColor='__REPORT_HOVER_BORDER__';};
+    btn.onmouseleave=()=>{btn.style.color='__REPORT_MUTED_TEXT__';btn.style.borderColor='__REPORT_LIGHT_BORDER__';};
     btn.onclick=()=>legendController.all();
     wrap.style.position='relative';
     wrap.appendChild(btn);

@@ -3,8 +3,9 @@
 import json
 import math
 from reporting import render as render_report, details, table
+from reporting.catalog import VIEW_COLORS
 
-COLORS = ("#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2")
+COLORS = VIEW_COLORS
 
 
 def bounds(values):

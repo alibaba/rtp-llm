@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from reporting import compare_controls, write_bundle, run_meta, details, table
+from reporting.pairing import paired_overlay
 from workload.performance_gate import analyze, report
 
 REQUIRED = (
@@ -111,21 +112,7 @@ def compare(left, right, output, allowed=(), left_directory=None, right_director
         presets={},
         caption="A 虚线 / B 实线；同一指标同色，各自测量起点对齐。比较仅供观察，绝对门禁分别判定。",
     )
-    colors = {}
-    for label, chart in zip(("A", "B"), individual):
-        for source in chart["series"]:
-            curve = copy.deepcopy(source)
-            colors.setdefault(curve["name"], curve["color"])
-            curve.update(
-                color=colors[curve["name"]],
-                name=label + " · " + curve["name"],
-                dash=[6, 4] if label == "A" else [],
-            )
-            overlay["series"].append(curve)
-        for name, selection in chart["presets"].items():
-            overlay["presets"].setdefault(name, []).extend(
-                label + " · " + s for s in selection
-            )
+    overlay["series"], overlay["presets"] = paired_overlay(individual)
     panels = [overlay, *individual]
     rows = []
     for key in sorted(a["metrics"].keys() | b["metrics"].keys()):

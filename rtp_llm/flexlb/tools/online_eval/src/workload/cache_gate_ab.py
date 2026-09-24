@@ -1,15 +1,15 @@
 """Offline comparison of two completed cache-scale-in runs."""
 
 import argparse
-import copy
 import json
-import math
 import shutil
 from pathlib import Path
 
 from reporting import write_bundle, run_meta, compare_controls, details
+from reporting.catalog import cache_ab_color
+from reporting.pairing import event_anchor, paired_overlay, shifted_panel
 from traffic.playback_config import comparison_notice
-from workload.cache_gate import analyze, write_report
+from workload.cache_gate import analyze, build_spec, prepare_report, write_report
 from workload.cache_comparison_config import validate_policy
 
 REQUIRED = (
@@ -67,13 +67,7 @@ def compare(a_path, b_path, output, *, alignment_event=None):
         alignment["aligned"] = False
         alignment["status"] = "DIFFERENT"
         alignment["traffic_semantics"] = notice
-    event_times = []
-    for e in evidence:
-        matches = [v.get("t") for v in e.get("events", [])
-                   if alignment_event is not None and v.get("name") == alignment_event]
-        event_times.append(matches[0] if len(matches) == 1
-                           and type(matches[0]) in (int, float)
-                           and math.isfinite(matches[0]) else None)
+    event_times = [event_anchor(e.get("events", []), alignment_event) for e in evidence]
     event_aligned = alignment_event is not None and all(t is not None for t in event_times)
     time_alignment = dict(
         event=alignment_event,
@@ -87,7 +81,7 @@ def compare(a_path, b_path, output, *, alignment_event=None):
                     if alignment_event else "保留各 run 原时间轴。")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    panels, combined, results = [], [], []
+    panels, results = [], []
     start, end = 0, 1
     for label, path, e, shift, identity in zip(
         ("A", "B"), paths, evidence, event_times, identities
@@ -99,30 +93,24 @@ def compare(a_path, b_path, output, *, alignment_event=None):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(archive, target)
         result = analyze(e)
-        panel = copy.deepcopy(write_report(directory, e, result)["panels"][0])
+        prepared = prepare_report(directory, e)
+        panel = shifted_panel(build_spec(directory, e, result, prepared)["panels"][0],
+                              shift if event_aligned else None)
+        write_report(directory, e, result, prepared)
         results.append(result)
         panel["id"] = label
         panel["title"] = f"{label} · {e['provenance'].get('instance', 'run')} · {result['verdict']}"
         panel["caption"] += " " + time_caption
         for series in panel["series"]:
             for point in series["points"]:
-                if event_aligned:
-                    point["x"] -= shift
                 start = min(start, point["x"])
                 end = max(end, point["x"])
-            paired = copy.deepcopy(series)
-            paired["name"] = f"{label} · {series['name']}"
-            paired["dash"] = [6, 4] if label == "A" else []
-            paired["color"] = {
-                "P cache hit ratio": ("#d4380d", "#1677ff"),
-                "P Waiting / engine": ("#cf1322", "#2f54eb"),
-                "P engine count": ("#fa8c16", "#722ed1"),
-                "Client success QPS": ("#ad6800", "#13c2c2"),
-            }.get(series["name"], (series["color"], series["color"]))[label == "B"]
-            paired["hidden"] = series["name"] not in CORE_METRICS
-            combined.append(paired)
         panels.append(panel)
-    overlay = copy.deepcopy(panels[0])
+    combined, _ = paired_overlay(
+        panels, color_for=cache_ab_color,
+        hidden_for=lambda name: name not in CORE_METRICS,
+    )
+    overlay = shifted_panel(panels[0], None)
     overlay.update(
         id="ab-overlay", title="A/B · 关键曲线同图", series=combined,
         caption=time_caption + "图例可选择和高亮。曲线仅来自归档监控。",

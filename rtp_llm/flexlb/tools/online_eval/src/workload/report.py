@@ -4,6 +4,7 @@ import copy
 import hashlib
 import os
 from pathlib import Path
+from reporting.catalog import WORKLOAD_COLORS
 from reporting import (
     bundle_path,
     details,
@@ -25,7 +26,7 @@ def build_spec(payload, directory):
             timeX=True,
             x=[str(p[0]) for p in points],
             xNums=[p[0] for p in points],
-            series=[dict(name=key, data=[p[1] for p in points], color="#2563eb")],
+            series=[dict(name=key, data=[p[1] for p in points], color=WORKLOAD_COLORS[0])],
         )
         for key, points in series.items()
     ]

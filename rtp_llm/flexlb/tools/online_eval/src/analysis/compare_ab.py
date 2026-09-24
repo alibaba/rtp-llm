@@ -62,6 +62,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from traffic.playback_config import comparison_notice
 
+from reporting.catalog import STRESS_AB_METRICS, PALETTE
+from reporting.pairing import pair_samples
+from reporting.statistics import adjacent_counter_rates
 from reporting import render, write_bundle, table, details, run_meta
 from reporting.statistics import select_window
 
@@ -1021,75 +1024,7 @@ def render_html(payload):
 
 def build_curve_spec(run_a, run_b, lo, hi):
     """Pair matching samples on a shared relative-time axis; gaps stay null."""
-    sources = (
-        ("per_second", None, "arrivals", "发射 QPS", "req/s", False),
-        ("per_second", None, "success", "成功 QPS", "req/s", False),
-        ("per_second", None, "errors", "错误 QPS", "req/s", False),
-        ("per_second", None, "sched_p95", "调度耗时 P95", "ms", False),
-        ("per_second", None, "ttft_p95", "首 token 耗时 P95", "ms", False),
-        ("inflight_ts", None, "prefill_requests", "Prefill 在飞", "requests", False),
-        ("inflight_ts", None, "decode_reserved", "Decode 预留", "requests", False),
-        ("mock_tps_ts", None, "context_tps", "Prefill 计算 TPS", "tokens/s", False),
-        (
-            "mock_tps_ts",
-            None,
-            "context_tps_with_cache",
-            "Prefill 含缓存 TPS",
-            "tokens/s",
-            False,
-        ),
-        (
-            "mock_tps_ts",
-            None,
-            "context_wall_tps",
-            "Prefill 墙钟计算 TPS",
-            "tokens/s",
-            False,
-        ),
-        (
-            "mock_tps_ts",
-            None,
-            "context_wall_tps_with_cache",
-            "Prefill 墙钟含缓存 TPS",
-            "tokens/s",
-            False,
-        ),
-        ("mock_tps_ts", None, "generate_tps", "Decode 生成 TPS", "tokens/s", False),
-        ("cache_hit_ts", None, "engine_token", "引擎 token 命中比例", "ratio", False),
-        ("cache_hit_ts", None, "master_routing", "Master 路由命中比例", "ratio", False),
-        (
-            "kv_blocks_ts_by_role",
-            "prefill",
-            "available_blocks",
-            "P 可用 KV 块",
-            "blocks",
-            False,
-        ),
-        (
-            "kv_blocks_ts_by_role",
-            "decode",
-            "available_blocks",
-            "D 可用 KV 块",
-            "blocks",
-            False,
-        ),
-        (
-            "kv_blocks_ts_by_role",
-            "prefill",
-            "cache_evictions",
-            "P KV 驱逐速率",
-            "blocks/s",
-            True,
-        ),
-        (
-            "kv_blocks_ts_by_role",
-            "decode",
-            "cache_evictions",
-            "D KV 驱逐速率",
-            "blocks/s",
-            True,
-        ),
-    )
+    sources = STRESS_AB_METRICS
     panels = []
     for source, role, key, title, unit, counter_rate in sources:
         rows = []
@@ -1105,13 +1040,9 @@ def build_curve_spec(run_a, run_b, lo, hi):
                 and isinstance(r.get(key), (int, float))
             )
             if counter_rate:
-                points = [
-                    (t, (v - previous_v) / (t - previous_t))
-                    for (previous_t, previous_v), (t, v) in zip(points, points[1:])
-                    if t > previous_t and v >= previous_v
-                ]
+                points = adjacent_counter_rates(points)
             series_maps.append(dict(points))
-        axis = sorted(set(series_maps[0]) | set(series_maps[1]))
+        axis, left_values, right_values, deltas = pair_samples(*series_maps)
         if not axis:
             continue
         panel_id = f"ab_{source}_{role + '_' if role else ''}{key}"
@@ -1131,12 +1062,12 @@ def build_curve_spec(run_a, run_b, lo, hi):
                 "series": [
                     {
                         "name": name,
-                        "data": [values.get(t) for t in axis],
+                        "data": values,
                         "color": color,
                     }
                     for name, values, color in (
-                        ("A · baseline", series_maps[0], "#1677ff"),
-                        ("B · candidate", series_maps[1], "#f5222d"),
+                        ("A · baseline", left_values, PALETTE[0]),
+                        ("B · candidate", right_values, PALETTE[3]),
                     )
                 ],
             }
@@ -1155,15 +1086,8 @@ def build_curve_spec(run_a, run_b, lo, hi):
                     "series": [
                         {
                             "name": "B−A",
-                            "color": "#722ed1",
-                            "data": [
-                                (
-                                    series_maps[1][t] - series_maps[0][t]
-                                    if t in series_maps[0] and t in series_maps[1]
-                                    else None
-                                )
-                                for t in axis
-                            ],
+                            "color": PALETTE[4],
+                            "data": deltas,
                         }
                     ],
                 }
