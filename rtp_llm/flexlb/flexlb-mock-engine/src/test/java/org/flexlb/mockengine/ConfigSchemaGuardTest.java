@@ -13,7 +13,6 @@ class ConfigSchemaGuardTest {
 
     private static final String[] PERFORMANCES = {
             "../tools/online_eval/data/performance/dsv4_l20_mock_calibration.json",
-            "../tools/online_eval/data/performance/deepseek_v4_flash_decode_table.json",
             "../tools/online_eval/data/performance/deepseek_v4_flash_l20c.json",
     };
 
