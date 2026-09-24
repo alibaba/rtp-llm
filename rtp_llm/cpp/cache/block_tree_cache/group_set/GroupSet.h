@@ -37,7 +37,10 @@ public:
 
     virtual ~GroupSet() = default;
 
-    void initialize(size_t group_set_id, std::shared_ptr<const CacheTopology> topology, std::vector<size_t> group_ids);
+    void initialize(size_t                               group_set_id,
+                    std::shared_ptr<const CacheTopology> topology,
+                    std::vector<size_t>                  group_ids,
+                    bool                                 enable_crc = false);
 
     size_t groupSetId() const {
         return group_set_id_;
@@ -53,6 +56,13 @@ public:
     }
     size_t payloadBytes() const {
         return payload_bytes_;
+    }
+    // Storage adds a per-backing footer; model payload and tile geometry stay unchanged.
+    size_t storageBytes() const {
+        return storage_bytes_;
+    }
+    bool crcEnabled() const {
+        return enable_crc_;
     }
     CacheGroupType groupType() const {
         return groupAt(0).policy.group_type;
@@ -70,8 +80,6 @@ public:
     std::shared_ptr<BlockTreeDiskBlockPool> diskPool() const {
         return disk_pool_;
     }
-
-    bool hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const;
 
     void referenceBlocks(const MultiNodeResource& resource) const;
     void unreferenceBlocks(const MultiNodeResource& resource) const;
@@ -91,6 +99,8 @@ private:
     std::shared_ptr<const CacheTopology>    topology_;
     std::vector<size_t>                     group_ids_;
     size_t                                  payload_bytes_{0};
+    size_t                                  storage_bytes_{0};
+    bool                                    enable_crc_{false};
 };
 
 using GroupSetPtr = std::shared_ptr<GroupSet>;

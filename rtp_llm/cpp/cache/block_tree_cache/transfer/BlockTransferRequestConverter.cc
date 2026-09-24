@@ -65,20 +65,32 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         return false;
     }
     request.set_timeout_ms(remaining->count());
-    const auto&                             descriptors = task.descriptors();
-    const TransferDescriptor&               first       = descriptors.front();
+    const auto& descriptors = task.descriptors();
+    if (descriptors.empty() || descriptors.front().group_set_id >= group_sets.size()) {
+        return false;
+    }
+    const TransferDescriptor&               first = descriptors.front();
     MemoryOperationRequestPB::CopyDirection request_direction;
     if (!directionFor(first, request_direction)) {
         return false;
     }
+    const bool enable_crc = group_sets[first.group_set_id]->crcEnabled();
+    if (enable_crc) {
+        request_direction =
+            static_cast<MemoryOperationRequestPB::CopyDirection>(static_cast<int>(request_direction) + 6);
+    }
     request.set_copy_direction(request_direction);
 
     for (const TransferDescriptor& descriptor : descriptors) {
-        if (descriptor.source_tier != first.source_tier || descriptor.target_tier != first.target_tier) {
+        if (!descriptor.isExecutable() || descriptor.group_set_id >= group_sets.size()
+            || descriptor.source_tier != first.source_tier || descriptor.target_tier != first.target_tier) {
             return false;
         }
         const GroupSet& group_set = *group_sets[descriptor.group_set_id];
-        CopyItem        item;
+        if (group_set.crcEnabled() != enable_crc) {
+            return false;
+        }
+        CopyItem item;
         item.set_group_set_id(descriptor.group_set_id);
 
         if (descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST) {
@@ -90,6 +102,9 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         if (descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE) {
             const auto& blocks    = descriptor.blocksAt(Tier::DEVICE);
             const auto& group_ids = group_set.groupIds();
+            if (blocks.size() != group_ids.size()) {
+                return false;
+            }
             for (size_t i = 0; i < blocks.size(); ++i) {
                 auto* group_block = item.add_group_blocks();
                 group_block->set_group_id(static_cast<int32_t>(group_ids[i]));
@@ -108,15 +123,25 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
         return false;
     }
 
+    const int wire_direction = static_cast<int>(request.copy_direction());
+    if (wire_direction < 0 || wire_direction > 11) {
+        return false;
+    }
+    const bool enable_crc = wire_direction >= 6;
+    const auto direction  = static_cast<MemoryOperationRequestPB::CopyDirection>(wire_direction % 6);
     for (const CopyItem& item : request.copy_items()) {
         const size_t group_set_id = item.group_set_id();
         if (group_set_id >= group_sets.size()) {
             RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet id=%lu", item.group_set_id());
             return false;
         }
-        const GroupSet&    group_set = *group_sets[group_set_id];
+        const GroupSet& group_set = *group_sets[group_set_id];
+        if (group_set.crcEnabled() != enable_crc) {
+            RTP_LLM_LOG_WARNING("BlockTree CRC mode mismatch, group=%zu", group_set_id);
+            return false;
+        }
         TransferDescriptor descriptor;
-        switch (request.copy_direction()) {
+        switch (direction) {
             case MemoryOperationRequestPB::D2H: {
                 std::vector<BlockIdxType> device_blocks;
                 if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())

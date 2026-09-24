@@ -102,6 +102,17 @@ private:
     std::shared_ptr<PausableHybridPerRankBlockTransferEngine> transfer_engine_;
 };
 
+// Refcount tests also use the real load engine. Seed lower-tier records through
+// the production store path so their footer matches the build's storage format.
+static void initializeHostBlock(BlockTreeCache& cache, GroupSet& group, BlockIdxType host_block) {
+    const auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(group, 1);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    const auto result = cache.executeTransferWithError(block_transfer_engine_test::makeTransferTask(
+        {TransferDescriptor::deviceToHost(group.groupSetId(), device_blocks.front(), host_block)}));
+    block_tree_cache_test::unreferenceDeviceBlocksForTest(group, device_blocks);
+    ASSERT_TRUE(result.ok()) << result.ToString();
+}
+
 static CacheConfig makeTinyHybridConfig() {
     auto config                      = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
                                                  /*block_num=*/10,
@@ -933,9 +944,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
 
     const auto& cache = allocator->blockTreeCacheOwner();
     ASSERT_NE(cache, nullptr);
-    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
-    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
-    ScopedHybridTransferRelease transfer_release(transfer_engine);
 
     const CacheKeysType                        cached_keys{100, 101};
     std::vector<std::vector<GroupSetResource>> slots(cached_keys.size(),
@@ -945,10 +953,15 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
         for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
             const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
             ASSERT_FALSE(isNullBlockIdx(source_block));
+            ASSERT_NO_FATAL_FAILURE(initializeHostBlock(*cache, *group_set, source_block));
             slots[path_index][group_set->groupSetId()].host_block = source_block;
         }
     }
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, cached_keys, slots));
+
+    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
+    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
+    ScopedHybridTransferRelease transfer_release(transfer_engine);
 
     const CacheKeysType request_keys{100, 101, 102};
     auto                first_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
@@ -1077,9 +1090,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DeviceLoadSourceMatchRefBecomesRequestRef
 
     const auto& cache = allocator->blockTreeCacheOwner();
     ASSERT_NE(cache, nullptr);
-    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
-    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
-    ScopedHybridTransferRelease transfer_release(transfer_engine);
 
     const CacheKeysType                                                         cached_keys{100, 101};
     std::vector<std::vector<GroupSetResource>>                                  slots(cached_keys.size(),
@@ -1099,6 +1109,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DeviceLoadSourceMatchRefBecomesRequestRef
             for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
                 const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
                 ASSERT_FALSE(isNullBlockIdx(source_block));
+                ASSERT_NO_FATAL_FAILURE(initializeHostBlock(*cache, *group_set, source_block));
                 slots[path_index][group_set_id].host_block = source_block;
             }
         }
@@ -1108,6 +1119,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DeviceLoadSourceMatchRefBecomesRequestRef
     for (const auto& [group_set, blocks] : device_resources) {
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group_set, blocks);
     }
+
+    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
+    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
+    ScopedHybridTransferRelease transfer_release(transfer_engine);
 
     const CacheKeysType request_keys{100, 101, 102};
     auto                request_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);

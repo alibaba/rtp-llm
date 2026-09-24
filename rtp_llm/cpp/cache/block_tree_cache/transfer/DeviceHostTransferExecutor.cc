@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 
 #include <map>
+#include <algorithm>
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -12,8 +14,10 @@ namespace rtp_llm {
 DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    transfer_task_pool,
                                                        size_t                max_descriptors_per_batch,
                                                        DeviceHostCopyOptions options,
-                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                                                       std::shared_ptr<CrcTransferService>            crc_service):
     TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)),
+    crc_service_(std::move(crc_service)),
     options_(std::move(options)) {
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
@@ -23,6 +27,12 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
 TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
                                                         const std::vector<TransferDescriptor>& descriptors,
                                                         const std::vector<const GroupSet*>&    group_sets) {
+    const bool protected_batch = std::any_of(
+        group_sets.begin(), group_sets.end(), [](const GroupSet* group) { return group && group->crcEnabled(); });
+    if (protected_batch) {
+        return crc_service_ ? crc_service_->copy(hosts, descriptors, group_sets) :
+                              TransferStatus::CACHE_INTEGRITY_ERROR;
+    }
     auto [status, plans] = generatePlan(hosts, descriptors, group_sets);
     if (status != TransferStatus::OK) {
         return status;

@@ -783,8 +783,12 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     }
     const auto timeout =
         timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
-    const bool transfer_success = block_tree_cache_->executeTransfer(TransferTask(std::move(descriptors), timeout));
-    if (!transfer_success) {
+    const ErrorInfo transfer_error =
+        block_tree_cache_->executeTransferWithError(TransferTask(std::move(descriptors), timeout));
+    if (!transfer_error.ok()) {
+        if (transfer_error.code() == ErrorCode::CACHE_INTEGRITY_ERROR) {
+            memory_response->set_code(MemoryOperationResponsePB::CACHE_INTEGRITY_ERROR);
+        }
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
         return true;
     }

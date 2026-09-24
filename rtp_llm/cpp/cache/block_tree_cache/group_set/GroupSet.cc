@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
+#include <limits>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -49,29 +52,28 @@ GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
 
 void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
-                          std::vector<size_t>                  group_ids) {
+                          std::vector<size_t>                  group_ids,
+                          bool                                 enable_crc) {
     size_t payload_bytes = 0;
     for (size_t group_id : group_ids) {
-        const auto& group = topology->groupById(group_id);
-        payload_bytes += group.layer_ids.size() * (group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
+        const auto&  group = topology->groupById(group_id);
+        const size_t limit = std::numeric_limits<size_t>::max();
+        if (group.kv_scale_stride_bytes > limit - group.kv_block_stride_bytes) {
+            throw std::overflow_error("GroupSet layer size overflow");
+        }
+        const size_t layer_bytes = group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
+        if (layer_bytes && group.layer_ids.size() > (limit - payload_bytes) / layer_bytes) {
+            throw std::overflow_error("GroupSet payload size overflow");
+        }
+        payload_bytes += group.layer_ids.size() * layer_bytes;
     }
 
     group_set_id_  = group_set_id;
     topology_      = std::move(topology);
     group_ids_     = std::move(group_ids);
     payload_bytes_ = payload_bytes;
-}
-
-bool GroupSet::hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const {
-    if (blocks.size() != device_pools_.size()) {
-        return false;
-    }
-    for (size_t pool_index = 0; pool_index < blocks.size(); ++pool_index) {
-        if (!device_pools_[pool_index]->isAllocated(blocks[pool_index])) {
-            return false;
-        }
-    }
-    return true;
+    enable_crc_    = enable_crc;
+    storage_bytes_ = enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes;
 }
 
 void GroupSet::referenceBlocks(const MultiNodeResource& resource) const {

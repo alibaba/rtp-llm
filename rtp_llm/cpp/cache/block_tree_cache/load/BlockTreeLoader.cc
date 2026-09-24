@@ -276,10 +276,16 @@ void BlockTreeLoader::shutdown() {
 
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex>            lock(mutex_);
-    const std::vector<TransferDescriptor>& load_descs               = context->loadDescs();
-    const std::vector<bool>&               joined_loads             = context->joinedLoads();
-    const uint64_t                         context_id               = context->contextId();
-    size_t                                 prepared_desc_count      = 0;
+    const std::vector<TransferDescriptor>& load_descs   = context->loadDescs();
+    const std::vector<bool>&               joined_loads = context->joinedLoads();
+    for (const auto& desc : load_descs) {
+        if (tree_->groupSets()[desc.group_set_id]->crcEnabled()) {
+            context->requireIntegritySuccess();
+            break;
+        }
+    }
+    const uint64_t                         context_id          = context->contextId();
+    size_t                                 prepared_desc_count = 0;
     block_tree_cache_detail::ScopeRollback rollback_guard(
         [this, &load_descs, &joined_loads, &prepared_desc_count, context_id]() {
             abortLoadLocked(load_descs,
@@ -422,7 +428,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
     const auto complete = [task](ErrorInfo error) {
         const size_t descriptor_count = task->load_descs.size();
-        if (!task->context->completeTransfers(descriptor_count, error.ok())) {
+        if (!task->context->completeTransfers(descriptor_count, std::move(error))) {
             RTP_LLM_LOG_WARNING("failed to record load copy completion, descriptor_count=%zu", descriptor_count);
         }
     };
@@ -448,9 +454,14 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
                 settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
             }
             for (const std::shared_ptr<LoadAsyncContext>& joined_context : joined_contexts) {
-                bool    join_completed       = false;
-                int64_t join_wait_latency_us = 0;
-                if (!joined_context->completeJoinedOne(settlement_success, join_completed, join_wait_latency_us)) {
+                bool            join_completed       = false;
+                int64_t         join_wait_latency_us = 0;
+                const ErrorInfo error                = settlement_success ?
+                                                           ErrorInfo::OkStatus() :
+                                                           (context->errorInfo().ok() ?
+                                                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed") :
+                                                                context->errorInfo());
+                if (!joined_context->completeJoinedOne(error, join_completed, join_wait_latency_us)) {
                     RTP_LLM_LOG_WARNING("failed to complete joined load context");
                 } else if (join_completed) {
                     metrics_reporter_.reportLoadJoinWait(join_wait_latency_us);
@@ -497,8 +508,11 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
                                        bool                                            aggregate_success,
                                        std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
     const bool settlement_success = aggregate_success && validateLoadTaskLocked(task);
-    bool       state_settled      = false;
-    bool       tree_data_mutated  = false;
+    if (!settlement_success) {
+        task.context->recordFailure(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed"));
+    }
+    bool state_settled     = false;
+    bool tree_data_mutated = false;
 
     const auto& descriptors = task.load_descs;
     for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
@@ -538,7 +552,14 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
             continue;
         }
 
-        // On copy/batch-settlement failure, leave the source data untouched.
+        // Preserve ownership/topology until normal eviction can safely prune it.
+        // Conservatively quarantine every source in this failed batch; the error
+        // currently identifies the operation rather than a single backing.
+        if (task.context->errorInfo().code() == ErrorCode::CACHE_INTEGRITY_ERROR) {
+            resource.integrity_quarantined = true;
+            tree_data_mutated              = true;
+        }
+        // Ordinary copy failures still retain a reusable source.
         if (!changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE)) {
             RTP_LLM_LOG_WARNING(

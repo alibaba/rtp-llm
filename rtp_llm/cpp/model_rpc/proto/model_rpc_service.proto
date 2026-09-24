@@ -662,6 +662,13 @@ message MemoryOperationRequestPB {
         DISK2H = 3;
         D2DISK = 4;
         DISK2D = 5;
+        // Separate directions make older workers reject protected transfers.
+        CRC_H2D = 6;
+        CRC_D2H = 7;
+        CRC_H2DISK = 8;
+        CRC_DISK2H = 9;
+        CRC_D2DISK = 10;
+        CRC_DISK2D = 11;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
@@ -676,6 +683,7 @@ message MemoryOperationResponsePB {
         CODE_UNSPECIFIED = 0;
         OK = 1;
         FAILED = 2;
+        CACHE_INTEGRITY_ERROR = 3;
     }
     Code code = 1;
 }

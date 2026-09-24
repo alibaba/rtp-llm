@@ -196,7 +196,7 @@ void LoadAsyncContext::onBackendRead(bool success) {
         if (success) {
             matched_blocks_ = backend_matched_blocks_;
         } else {
-            has_failure_ = true;
+            recordFailureLocked(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load backend read failed"));
         }
         backend_pending_ = false;
         finishIfReadyLocked(notify, settlement_ready_callback);
@@ -267,9 +267,16 @@ void LoadAsyncContext::startJoinWait(int64_t start_time_us) {
 }
 
 bool LoadAsyncContext::completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us) {
+    return completeJoinedOne(success ? ErrorInfo::OkStatus() :
+                                       ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "joined load failed"),
+                             join_completed,
+                             join_wait_latency_us);
+}
+
+bool LoadAsyncContext::completeJoinedOne(ErrorInfo error, bool& join_completed, int64_t& join_wait_latency_us) {
     join_completed       = false;
     join_wait_latency_us = 0;
-    if (!completeTransfers(1, success)) {
+    if (!completeTransfers(1, std::move(error))) {
         return false;
     }
     const size_t previous_count = remaining_join_count_.fetch_sub(1, std::memory_order_acq_rel);
@@ -283,6 +290,11 @@ bool LoadAsyncContext::completeJoinedOne(bool success, bool& join_completed, int
 }
 
 bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
+    return completeTransfers(
+        count, success ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load transfer failed"));
+}
+
+bool LoadAsyncContext::completeTransfers(size_t count, ErrorInfo error) {
     bool                    notify = false;
     SettlementReadyCallback settlement_ready_callback;
     {
@@ -291,7 +303,9 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
         if (state != State::PENDING || count == 0 || count > remaining_transfer_count_) {
             return false;
         }
-        has_failure_ = has_failure_ || !success;
+        if (!error.ok()) {
+            recordFailureLocked(std::move(error));
+        }
         remaining_transfer_count_ -= count;
         finishIfReadyLocked(notify, settlement_ready_callback);
     }
@@ -373,7 +387,7 @@ void LoadAsyncContext::onDone(DoneCallback callback) {
         if (done()) {
             run_now = true;
             if (!success()) {
-                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+                error = errorLocked();
             }
         } else {
             callbacks_.push_back(std::move(callback));
@@ -390,7 +404,7 @@ void LoadAsyncContext::notifyCompletion() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!success()) {
-            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+            error = errorLocked();
         }
         callbacks.swap(callbacks_);
     }
@@ -407,6 +421,50 @@ bool LoadAsyncContext::done() const {
 
 bool LoadAsyncContext::success() const {
     return state_.load() == State::SUCCEEDED;
+}
+
+void LoadAsyncContext::requireIntegritySuccess() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fail_closed_on_error_ = true;
+    if (has_failure_ || !error_.ok() || state_.load() == State::FAILED) {
+        recordFailureLocked(error_.ok() ? ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, "protected load failed") :
+                                          error_);
+    }
+}
+
+void LoadAsyncContext::recordFailureLocked(ErrorInfo error) {
+    has_failure_ = true;
+    if (error.ok()) {
+        error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+    }
+    if (fail_closed_on_error_) {
+        error = ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, error.ToString());
+    }
+    if (error_.ok()
+        || (error.code() == ErrorCode::CACHE_INTEGRITY_ERROR && error_.code() != ErrorCode::CACHE_INTEGRITY_ERROR)) {
+        error_ = std::move(error);
+    }
+}
+
+void LoadAsyncContext::recordFailure(ErrorInfo error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    recordFailureLocked(std::move(error));
+}
+
+ErrorInfo LoadAsyncContext::errorLocked() const {
+    if (!error_.ok()) {
+        return error_;
+    }
+    if (has_failure_ || state_.load() == State::FAILED) {
+        return ErrorInfo(fail_closed_on_error_ ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::EXECUTION_EXCEPTION,
+                         "load async context failed");
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo LoadAsyncContext::errorInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return errorLocked();
 }
 
 MallocStatus LoadAsyncContext::mallocStatus() const {

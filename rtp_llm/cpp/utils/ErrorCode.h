@@ -24,6 +24,9 @@ enum class ErrorCode {
     GRAMMAR_EOS_OUT_OF_VOCAB          = 612,
     GRAMMAR_VERIFY_EXCEPTION          = 613,
 
+    // Terminal cache validation failure; never eligible for prefill fallback.
+    CACHE_INTEGRITY_ERROR = 614,
+
     // multimodal error
     MM_LONG_PROMPT_ERROR   = 901,
     MM_WRONG_FORMAT_ERROR  = 902,
@@ -38,9 +41,9 @@ enum class ErrorCode {
     CANCELLED              = 8100,
     OUT_OF_VOCAB_RANGE     = 8101,
     OUTPUT_QUEUE_FULL      = 8102,
-    OUTPUT_QUEUE_IS_EMPTY      = 8103,
-    FINISHED                   = 8104,
-    OUTPUT_QUEUE_NO_UPDATE     = 8105,
+    OUTPUT_QUEUE_IS_EMPTY  = 8103,
+    FINISHED               = 8104,
+    OUTPUT_QUEUE_NO_UPDATE = 8105,
     // Retryable grammar resource failure. 8105 is already occupied by OUTPUT_QUEUE_NO_UPDATE.
     GRAMMAR_COMPILE_OVERLOADED = 8106,
 
@@ -108,6 +111,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "LONG_PROMPT_ERROR";
         case ErrorCode::UNKNOWN_ERROR:
             return "UNKNOWN_ERROR";
+        case ErrorCode::CACHE_INTEGRITY_ERROR:
+            return "CACHE_INTEGRITY_ERROR";
         case ErrorCode::MALLOC_FAILED:
             return "MALLOC_FAILED";
         case ErrorCode::GENERATE_TIMEOUT:

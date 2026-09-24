@@ -138,12 +138,13 @@ public:
     BlockTreeKeySnapshot                      getKeySnapshot() const;
     void            setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
     KVCacheSnapshot logicalCacheSnapshot() const;
-    bool                                      abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
+    bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    bool executeTransfer(TransferTask task);
+    bool      executeTransfer(TransferTask task);
+    ErrorInfo executeTransferWithError(TransferTask task);
 
     // Accessors
     BlockTree* tree() const {

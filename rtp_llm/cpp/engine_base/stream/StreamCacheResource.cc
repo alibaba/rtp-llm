@@ -301,7 +301,8 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         resource.setDiskReuseBlockNum(disk);
         resource.setStorageBackendReuseBlockNum(backend);
         publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
-    } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
+    } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE
+               && error.code() != ErrorCode::CACHE_INTEGRITY_ERROR) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);
     } else {
@@ -320,6 +321,9 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
 
     if (load_success) {
         return absl::OkStatus();
+    }
+    if (error.code() == ErrorCode::CACHE_INTEGRITY_ERROR) {
+        return absl::DataLossError("CACHE_INTEGRITY_ERROR: " + error.ToString());
     }
     if (malloc_status == MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED) {
         return absl::UnavailableError("allocator load materialization is temporarily out of KV blocks");
@@ -435,8 +439,11 @@ bool StreamCacheResource::loadCacheDone() {
             stream_->generate_status_->clearLoadInitiated();
             reportMallocRetry();
         } else if (!status.ok()) {
-            stream_->reportEventWithoutLock(
-                StreamEvents::Error, ErrorCode::MALLOC_FAILED, std::string(status.message()));
+            stream_->reportEventWithoutLock(StreamEvents::Error,
+                                            error.code() == ErrorCode::CACHE_INTEGRITY_ERROR ?
+                                                ErrorCode::CACHE_INTEGRITY_ERROR :
+                                                ErrorCode::MALLOC_FAILED,
+                                            std::string(status.message()));
         }
     }
     return true;

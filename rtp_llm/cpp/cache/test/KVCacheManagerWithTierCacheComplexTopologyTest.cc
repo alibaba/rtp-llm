@@ -285,391 +285,460 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     if (GetParam() != TierLayout::HOST_DISK) {
         GTEST_SKIP() << "mixed DEVICE+HOST+DISK segmentation requires HostDisk layout";
     }
-    ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
-    auto cache  = manager_->blockTreeCache();
-    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
-    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
-    transfer_engine_.reset();
-    const auto initial_device = snapshotDevicePools(manager_);
-    const auto initial_lower  = snapshotLowerPools(*cache, GetParam());
-    auto       seed_opt       = seedDevicePrefix(manager_, cache_config_, 0, 3);
-    ASSERT_TRUE(seed_opt.has_value());
-    auto seed = std::move(*seed_opt);
-    ASSERT_TRUE(fillSeedPayload(manager_, cache_config_, seed));
+    for (const bool fail_load : {false, true}) {
+        SCOPED_TRACE(fail_load ? "mixed protected/legacy failure" : "mixed successful load-back");
+        ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
+        auto cache = manager_->blockTreeCache();
+        auto engine =
+            std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
+        BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
+        transfer_engine_.reset();
+        const auto initial_device = snapshotDevicePools(manager_);
+        const auto initial_lower  = snapshotLowerPools(*cache, GetParam());
+        auto       seed_opt       = seedDevicePrefix(manager_, cache_config_, 0, 3);
+        ASSERT_TRUE(seed_opt.has_value());
+        auto seed = std::move(*seed_opt);
+        ASSERT_TRUE(fillSeedPayload(manager_, cache_config_, seed));
 
-    // Keep the first logical path resident while a two-block excess moves the
-    // remaining paths through HOST and DISK.
-    auto       guard        = makeResource(cache_config_);
-    auto       guard_tokens = makeTokenIds(0,
-                                     2 * cache_config_.seq_size_per_block,
-                                     2 * cache_config_.seq_size_per_block,
-                                     cache_config_.seq_size_per_block);
-    MallocInfo guard_info{guard, guard_tokens};
-    guard_info.reuse_cache         = true;
-    guard_info.enable_cache_lookup = true;
-    auto guard_result              = manager_->malloc(guard_info);
-    ASSERT_TRUE(guard_result.success);
-    ASSERT_EQ(guard_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+        // Keep the first logical path resident while a two-block excess moves the
+        // remaining paths through HOST and DISK.
+        auto       guard        = makeResource(cache_config_);
+        auto       guard_tokens = makeTokenIds(0,
+                                         2 * cache_config_.seq_size_per_block,
+                                         2 * cache_config_.seq_size_per_block,
+                                         cache_config_.seq_size_per_block);
+        MallocInfo guard_info{guard, guard_tokens};
+        guard_info.reuse_cache         = true;
+        guard_info.enable_cache_lookup = true;
+        auto guard_result              = manager_->malloc(guard_info);
+        ASSERT_TRUE(guard_result.success);
+        ASSERT_EQ(guard_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
 
-    std::vector<std::shared_ptr<IBlockPool>> device_pools;
-    for (const auto& gs : cache->groupSets()) {
-        device_pools.insert(device_pools.end(), gs->devicePools().begin(), gs->devicePools().end());
-    }
-    ASSERT_FALSE(device_pools.empty());
-    const auto device_ratio = blockExcessWatermarkRatio(device_pools, /*excess_blocks=*/2);
-    ASSERT_TRUE(device_ratio.has_value());
-    // FULL path 1 is not an eviction candidate until its child path has
-    // settled at HOST, whereas the SWA candidates can be selected in the first
-    // pass. Re-running the same target ratio catches up only the still-excess
-    // FULL pools; pools already at the target submit nothing.
-    for (int pass = 0; pass < 2; ++pass) {
-        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
+        std::vector<std::shared_ptr<IBlockPool>> device_pools;
+        for (const auto& gs : cache->groupSets()) {
+            device_pools.insert(device_pools.end(), gs->devicePools().begin(), gs->devicePools().end());
+        }
+        ASSERT_FALSE(device_pools.empty());
+        const auto device_ratio = blockExcessWatermarkRatio(device_pools, /*excess_blocks=*/2);
+        ASSERT_TRUE(device_ratio.has_value());
+        // FULL path 1 is not an eviction candidate until its child path has
+        // settled at HOST, whereas the SWA candidates can be selected in the first
+        // pass. Re-running the same target ratio catches up only the still-excess
+        // FULL pools; pools already at the target submit nothing.
+        for (int pass = 0; pass < 2; ++pass) {
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
+            BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        }
+        auto staged = snapshotPathResources(*cache, seed.cache_keys);
+        ASSERT_TRUE(staged.has_value());
+        ASSERT_EQ(staged->size(), 3u);
+        for (size_t path = 0; path < staged->size(); ++path) {
+            for (size_t gid = 0; gid < cache->groupSets().size(); ++gid) {
+                const auto& resource = (*staged)[path][gid];
+                EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+                const Tier expected = path == 0 ? Tier::DEVICE : Tier::HOST;
+                EXPECT_EQ(resource.getTopTier(), expected) << "path=" << path << " group_set=" << gid;
+            }
+        }
+
+        // First load path 1 from HOST. A lower-tier load-back does not itself make
+        // that path hot because BlockTreeMatcher only refreshes ready DEVICE
+        // resources during match.
+        auto       touch_resource = makeResource(cache_config_);
+        auto       touch_tokens   = makeTokenIds(0,
+                                         3 * cache_config_.seq_size_per_block,
+                                         3 * cache_config_.seq_size_per_block,
+                                         cache_config_.seq_size_per_block);
+        MallocInfo touch_info{touch_resource, touch_tokens};
+        touch_info.reuse_cache         = true;
+        touch_info.enable_cache_lookup = true;
+        const auto touch_result        = manager_->malloc(touch_info);
+        ASSERT_TRUE(touch_result.success);
+        EXPECT_EQ(touch_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+
+        ASSERT_NE(touch_result.async_context, nullptr);
+        touch_result.async_context->waitDone();
+        ASSERT_TRUE(touch_result.async_context->success()) << touch_result.async_context->errorInfo().ToString();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        ASSERT_TRUE(requestReusesExpectedPath(
+            *cache, cache_config_, seed.cache_keys, touch_resource, /*logical_reuse_blocks=*/2));
+        ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(
+            manager_, *cache, cache_config_, seed.cache_keys, touch_resource, /*logical_reuse_blocks=*/2));
+        manager_->free(FreeInfo{touch_resource, touch_tokens});
+
+        // Now both path 0 and path 1 are ready on DEVICE. This synchronous hit is
+        // the event that updates path 1's LRU heat before it is returned to HOST.
+        auto       heat_resource = makeResource(cache_config_);
+        auto       heat_tokens   = makeTokenIds(0,
+                                        3 * cache_config_.seq_size_per_block,
+                                        3 * cache_config_.seq_size_per_block,
+                                        cache_config_.seq_size_per_block);
+        MallocInfo heat_info{heat_resource, heat_tokens};
+        heat_info.reuse_cache         = true;
+        heat_info.enable_cache_lookup = true;
+        const auto heat_result        = manager_->malloc(heat_info);
+        ASSERT_TRUE(heat_result.success);
+        EXPECT_EQ(heat_result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
+
+        EXPECT_EQ(heat_result.async_context, nullptr);
+        ASSERT_TRUE(requestReusesExpectedPath(
+            *cache, cache_config_, seed.cache_keys, heat_resource, /*logical_reuse_blocks=*/2));
+        manager_->free(FreeInfo{heat_resource, heat_tokens});
+
+        // Keep the first logical block hotter than the loaded block in every group
+        // set. SWA matching may not touch this block, and request refs intentionally
+        // no longer pin it against eviction.
+        const auto matched_path = cache->tree()->findNode(seed.cache_keys);
+        ASSERT_GE(matched_path.size(), 2u);
+        BlockTreeCacheTestPeer::markPathMatchedForTest(*cache, {matched_path[0]});
+
+        const auto return_path_one_ratio = blockExcessWatermarkRatio(device_pools, /*excess_blocks=*/1);
+        ASSERT_TRUE(return_path_one_ratio.has_value());
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *return_path_one_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    }
-    auto staged = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(staged.has_value());
-    ASSERT_EQ(staged->size(), 3u);
-    for (size_t path = 0; path < staged->size(); ++path) {
-        for (size_t gid = 0; gid < cache->groupSets().size(); ++gid) {
-            const auto& resource = (*staged)[path][gid];
-            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-            const Tier expected = path == 0 ? Tier::DEVICE : Tier::HOST;
-            EXPECT_EQ(resource.getTopTier(), expected) << "path=" << path << " group_set=" << gid;
+
+        staged = snapshotPathResources(*cache, seed.cache_keys);
+        ASSERT_TRUE(staged.has_value());
+        for (size_t path = 0; path < staged->size(); ++path) {
+            for (size_t gid = 0; gid < cache->groupSets().size(); ++gid) {
+                const Tier expected = path == 0 ? Tier::DEVICE : Tier::HOST;
+                EXPECT_EQ((*staged)[path][gid].getTopTier(), expected)
+                    << "post-touch path=" << path << " group_set=" << gid;
+            }
         }
-    }
 
-    // First load path 1 from HOST. A lower-tier load-back does not itself make
-    // that path hot because BlockTreeMatcher only refreshes ready DEVICE
-    // resources during match.
-    auto       touch_resource = makeResource(cache_config_);
-    auto       touch_tokens   = makeTokenIds(0,
-                                     3 * cache_config_.seq_size_per_block,
-                                     3 * cache_config_.seq_size_per_block,
-                                     cache_config_.seq_size_per_block);
-    MallocInfo touch_info{touch_resource, touch_tokens};
-    touch_info.reuse_cache         = true;
-    touch_info.enable_cache_lookup = true;
-    const auto touch_result        = manager_->malloc(touch_info);
-    ASSERT_TRUE(touch_result.success);
-    EXPECT_EQ(touch_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-
-    ASSERT_NE(touch_result.async_context, nullptr);
-    touch_result.async_context->waitDone();
-    ASSERT_TRUE(touch_result.async_context->success()) << touch_result.async_context->errorInfo().ToString();
-    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    ASSERT_TRUE(
-        requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, touch_resource, /*logical_reuse_blocks=*/2));
-    ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(
-        manager_, *cache, cache_config_, seed.cache_keys, touch_resource, /*logical_reuse_blocks=*/2));
-    manager_->free(FreeInfo{touch_resource, touch_tokens});
-
-    // Now both path 0 and path 1 are ready on DEVICE. This synchronous hit is
-    // the event that updates path 1's LRU heat before it is returned to HOST.
-    auto       heat_resource = makeResource(cache_config_);
-    auto       heat_tokens   = makeTokenIds(0,
-                                    3 * cache_config_.seq_size_per_block,
-                                    3 * cache_config_.seq_size_per_block,
-                                    cache_config_.seq_size_per_block);
-    MallocInfo heat_info{heat_resource, heat_tokens};
-    heat_info.reuse_cache         = true;
-    heat_info.enable_cache_lookup = true;
-    const auto heat_result        = manager_->malloc(heat_info);
-    ASSERT_TRUE(heat_result.success);
-    EXPECT_EQ(heat_result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
-
-    EXPECT_EQ(heat_result.async_context, nullptr);
-    ASSERT_TRUE(
-        requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, heat_resource, /*logical_reuse_blocks=*/2));
-    manager_->free(FreeInfo{heat_resource, heat_tokens});
-
-    // Keep the first logical block hotter than the loaded block in every group
-    // set. SWA matching may not touch this block, and request refs intentionally
-    // no longer pin it against eviction.
-    const auto matched_path = cache->tree()->findNode(seed.cache_keys);
-    ASSERT_GE(matched_path.size(), 2u);
-    BlockTreeCacheTestPeer::markPathMatchedForTest(*cache, {matched_path[0]});
-
-    const auto return_path_one_ratio = blockExcessWatermarkRatio(device_pools, /*excess_blocks=*/1);
-    ASSERT_TRUE(return_path_one_ratio.has_value());
-    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *return_path_one_ratio);
-    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-
-    staged = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(staged.has_value());
-    for (size_t path = 0; path < staged->size(); ++path) {
-        for (size_t gid = 0; gid < cache->groupSets().size(); ++gid) {
-            const Tier expected = path == 0 ? Tier::DEVICE : Tier::HOST;
-            EXPECT_EQ((*staged)[path][gid].getTopTier(), expected)
-                << "post-touch path=" << path << " group_set=" << gid;
+        // Build the mixed-tier fixture explicitly. Path 2 is colder than the
+        // re-heated path 1, so each group set independently selects it as its HOST
+        // victim. Reverse-cascade behavior is covered by dedicated eviction tests.
+        for (const auto& group_set : cache->groupSets()) {
+            const size_t group_set_id = group_set->groupSetId();
+            ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, group_set_id, Tier::HOST));
+            ASSERT_TRUE(waitForConditionFor(
+                [&] {
+                    const auto resources = snapshotPathResources(*cache, seed.cache_keys);
+                    if (!resources.has_value() || resources->size() != 3u) {
+                        return false;
+                    }
+                    const auto& resource = (*resources)[2][group_set_id];
+                    return resource.transfer_state == GroupSetTransferState::IDLE
+                           && resource.getTopTier() == Tier::DISK;
+                },
+                std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
         }
-    }
-
-    // Build the mixed-tier fixture explicitly. Path 2 is colder than the
-    // re-heated path 1, so each group set independently selects it as its HOST
-    // victim. Reverse-cascade behavior is covered by dedicated eviction tests.
-    for (const auto& group_set : cache->groupSets()) {
-        const size_t group_set_id = group_set->groupSetId();
-        ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, group_set_id, Tier::HOST));
-        ASSERT_TRUE(waitForConditionFor(
-            [&] {
-                const auto resources = snapshotPathResources(*cache, seed.cache_keys);
-                if (!resources.has_value() || resources->size() != 3u) {
-                    return false;
+        auto mixed = snapshotPathResources(*cache, seed.cache_keys);
+        ASSERT_TRUE(mixed.has_value());
+        ASSERT_EQ(mixed->size(), 3u);
+        std::vector<BlockIdxType> host_sources(cache->groupSets().size(), NULL_BLOCK_IDX);
+        std::vector<BlockIdxType> disk_sources(cache->groupSets().size(), NULL_BLOCK_IDX);
+        for (size_t path = 0; path < mixed->size(); ++path) {
+            for (size_t gid = 0; gid < cache->groupSets().size(); ++gid) {
+                const auto& resource = (*mixed)[path][gid];
+                const Tier  expected = path == 0 ? Tier::DEVICE : (path == 1 ? Tier::HOST : Tier::DISK);
+                EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+                EXPECT_EQ(resource.getTopTier(), expected) << "path=" << path << " group_set=" << gid;
+                if (path == 1) {
+                    host_sources[gid] = resource.host_block;
+                } else if (path == 2) {
+                    disk_sources[gid] = resource.disk_block;
                 }
-                const auto& resource = (*resources)[2][group_set_id];
-                return resource.transfer_state == GroupSetTransferState::IDLE && resource.getTopTier() == Tier::DISK;
-            },
-            std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
-    }
-    auto mixed = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(mixed.has_value());
-    ASSERT_EQ(mixed->size(), 3u);
-    std::vector<BlockIdxType> host_sources(cache->groupSets().size(), NULL_BLOCK_IDX);
-    std::vector<BlockIdxType> disk_sources(cache->groupSets().size(), NULL_BLOCK_IDX);
-    for (size_t path = 0; path < mixed->size(); ++path) {
-        for (size_t gid = 0; gid < cache->groupSets().size(); ++gid) {
-            const auto& resource = (*mixed)[path][gid];
-            const Tier  expected = path == 0 ? Tier::DEVICE : (path == 1 ? Tier::HOST : Tier::DISK);
-            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-            EXPECT_EQ(resource.getTopTier(), expected) << "path=" << path << " group_set=" << gid;
-            if (path == 1) {
-                host_sources[gid] = resource.host_block;
-            } else if (path == 2) {
-                disk_sources[gid] = resource.disk_block;
             }
         }
-    }
 
-    manager_->free(FreeInfo{guard, guard_tokens});
+        manager_->free(FreeInfo{guard, guard_tokens});
 
-    size_t failed_host_loads = 0;
-    for (const auto& group_set : cache->groupSets()) {
-        const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
-        const size_t reuse_begin = 3 - reuse_count;
-        failed_host_loads += reuse_begin <= 1 ? 1u : 0u;
-    }
-    ASSERT_GT(failed_host_loads, 0u);
-    for (size_t index = 0; index < failed_host_loads; ++index) {
-        engine->enqueueResult(/*success=*/true);
-    }
-    engine->enqueueResult(/*success=*/false);
-
-    const size_t descriptors_before_failure = engine->submittedDescriptorCount();
-    ASSERT_TRUE(engine->armPause());
-    ScopedTransferRelease failure_release(engine);
-
-    const int block_size = static_cast<int>(cache_config_.seq_size_per_block);
-    auto      input_ids  = torch::empty({4 * block_size}, torch::kInt32);
-    auto*     input_data = input_ids.data_ptr<int32_t>();
-    for (int index = 0; index < 4 * block_size; ++index) {
-        input_data[index] = index;
-    }
-    auto generate_input                                  = std::make_shared<GenerateInput>();
-    generate_input->input_ids                            = std::move(input_ids);
-    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
-    generate_input->generate_config->reuse_cache         = true;
-    generate_input->generate_config->enable_memory_cache = true;
-
-    ResourceContext resource_context;
-    resource_context.cache_manager       = manager_;
-    resource_context.reuse_cache         = true;
-    resource_context.enable_memory_cache = true;
-    resource_context.enable_disk_cache   = true;
-    resource_context.role_type           = RoleType::PREFILL;
-
-    ModelConfig model_config;
-    model_config.max_seq_len                  = 2048;
-    model_config.attn_config.tokens_per_block = block_size;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 1;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2048;
-    PDSepConfig pd_sep_config;
-    pd_sep_config.role_type = RoleType::PREFILL;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-
-    auto prefill_stream =
-        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
-    auto scheduler = std::make_shared<FIFOScheduler>(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, manager_);
-    ASSERT_TRUE(scheduler->enqueue(prefill_stream).ok());
-    auto first_schedule = scheduler->schedule();
-    ASSERT_TRUE(first_schedule.ok());
-    EXPECT_TRUE(first_schedule.value().empty());
-    EXPECT_EQ(prefill_stream->getStatus(), StreamState::LOADING_CACHE);
-    EXPECT_EQ(prefill_stream->reuseLength(), block_size);
-    EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
-
-    const bool failure_entered =
-        engine->waitUntilEnteredFor(std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
-    if (!failure_entered) {
-        engine->release();
-    }
-    ASSERT_TRUE(failure_entered);
-    engine->release();
-    auto       second_schedule   = scheduler->schedule();
-    const auto schedule_deadline = std::chrono::steady_clock::now() + kTransferWaitTimeout;
-    while (second_schedule.ok() && second_schedule.value().empty()
-           && std::chrono::steady_clock::now() < schedule_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        second_schedule = scheduler->schedule();
-    }
-    ASSERT_TRUE(second_schedule.ok());
-    ASSERT_EQ(second_schedule.value().size(), 1u);
-    EXPECT_EQ(second_schedule.value().front(), prefill_stream);
-    EXPECT_EQ(prefill_stream->getStatus(), StreamState::RUNNING);
-    EXPECT_FALSE(prefill_stream->hasError());
-    EXPECT_EQ(prefill_stream->reuseLength(), block_size);
-    EXPECT_EQ(prefill_stream->initialReuseLength(), block_size);
-    EXPECT_EQ(prefill_stream->deviceReuseLength(), block_size);
-    EXPECT_EQ(prefill_stream->hostReuseLength(), 0);
-    EXPECT_EQ(prefill_stream->diskReuseLength(), 0);
-    EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
-
-    for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        const auto&  group_set   = cache->groupSets()[group_set_id];
-        const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
-        const size_t reuse_begin = 3 - reuse_count;
-        for (const size_t raw_group_id : group_set->groupIds()) {
-            const BlockIndicesType& blocks =
-                prefill_stream->streamCacheResource().kvCache().blocks(0, static_cast<int>(raw_group_id));
-            for (size_t path = reuse_begin; path < 3; ++path) {
-                ASSERT_LT(path, blocks.size());
-                EXPECT_FALSE(isNullBlockIdx(blocks[path]));
+        if (fail_load) {
+            size_t failed_host_loads = 0;
+            for (const auto& group_set : cache->groupSets()) {
+                const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+                const size_t reuse_begin = 3 - reuse_count;
+                failed_host_loads += reuse_begin <= 1 ? 1u : 0u;
             }
-        }
-    }
-
-    const auto failure_descriptors = engine->descriptors();
-    ASSERT_GE(failure_descriptors.size(), descriptors_before_failure + failed_host_loads + 1);
-    for (size_t index = descriptors_before_failure; index < descriptors_before_failure + failed_host_loads; ++index) {
-        EXPECT_EQ(failure_descriptors[index].source_tier, Tier::HOST);
-        EXPECT_EQ(failure_descriptors[index].target_tier, Tier::DEVICE);
-    }
-    EXPECT_EQ(failure_descriptors[descriptors_before_failure + failed_host_loads].source_tier, Tier::DISK);
-    EXPECT_EQ(failure_descriptors[descriptors_before_failure + failed_host_loads].target_tier, Tier::DEVICE);
-
-    prefill_stream->reportError(ErrorCode::CANCELLED, "test cleanup");
-    ASSERT_TRUE(scheduler->schedule().ok());
-    EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
-
-    const size_t descriptors_before_load = engine->submittedDescriptorCount();
-    ASSERT_TRUE(engine->armPause());
-    ScopedTransferRelease load_release(engine);
-    auto                  load_resource = makeResource(cache_config_);
-    auto                  load_tokens   = makeTokenIds(0,
-                                    4 * cache_config_.seq_size_per_block,
-                                    4 * cache_config_.seq_size_per_block,
-                                    cache_config_.seq_size_per_block);
-    MallocInfo            load_info{load_resource, load_tokens};
-    load_info.reuse_cache         = true;
-    load_info.enable_cache_lookup = true;
-    const auto load_result        = manager_->malloc(load_info);
-    ASSERT_TRUE(load_result.success);
-    EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-
-    ASSERT_NE(load_result.async_context, nullptr);
-    const bool entered =
-        engine->waitUntilEnteredFor(std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
-    if (!entered) {
-        engine->release();
-    }
-    ASSERT_TRUE(entered);
-    EXPECT_FALSE(load_result.async_context->done());
-
-    const auto found = cache->tree()->findNode(seed.cache_keys);
-    ASSERT_EQ(found.size(), seed.cache_keys.size());
-    std::vector<size_t> expected_host_loads(cache->groupSets().size(), 0);
-    std::vector<size_t> expected_disk_loads(cache->groupSets().size(), 1);
-    size_t              expected_load_descriptors = 0;
-    auto                loading                   = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(loading.has_value());
-    for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        const auto&  group_set   = cache->groupSets()[group_set_id];
-        const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
-        ASSERT_GT(reuse_count, 0u);
-        ASSERT_LE(reuse_count, 3u);
-        const size_t reuse_begin          = 3 - reuse_count;
-        expected_host_loads[group_set_id] = reuse_begin <= 1 ? 1u : 0u;
-        expected_load_descriptors += expected_host_loads[group_set_id] + expected_disk_loads[group_set_id];
-        for (size_t path = 1; path < 3; ++path) {
-            const bool  reused = path >= reuse_begin;
-            const auto& state  = (*loading)[path][group_set_id];
-            EXPECT_EQ(state.transfer_state, reused ? GroupSetTransferState::LOADING : GroupSetTransferState::IDLE)
-                << "path=" << path << " group_set=" << group_set_id;
-            if (!reused) {
-                EXPECT_EQ(state.getTopTier(), Tier::HOST);
-                EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 1u);
-                continue;
+            ASSERT_GT(failed_host_loads, 0u);
+            for (size_t index = 0; index < failed_host_loads; ++index) {
+                engine->enqueueResult(/*success=*/true);
             }
-            for (const size_t raw_group_id : group_set->groupIds()) {
-                const int               group_id = static_cast<int>(raw_group_id);
-                const BlockIndicesType& blocks   = load_resource->blocks(0, group_id);
-                ASSERT_GE(blocks.size(), 3u);
-                ASSERT_FALSE(isNullBlockIdx(blocks[path]));
-                ASSERT_TRUE(
-                    fillGroupBlockPayload(manager_, cache_config_, group_id, blocks[path], path, /*poison=*/true));
+            engine->enqueueResult(/*success=*/false);
+
+            const size_t descriptors_before_failure = engine->submittedDescriptorCount();
+            ASSERT_TRUE(engine->armPause());
+            ScopedTransferRelease failure_release(engine);
+
+            const int block_size = static_cast<int>(cache_config_.seq_size_per_block);
+            auto      input_ids  = torch::empty({4 * block_size}, torch::kInt32);
+            auto*     input_data = input_ids.data_ptr<int32_t>();
+            for (int index = 0; index < 4 * block_size; ++index) {
+                input_data[index] = index;
             }
-        }
-    }
+            auto generate_input                                  = std::make_shared<GenerateInput>();
+            generate_input->input_ids                            = std::move(input_ids);
+            generate_input->generate_config                      = std::make_shared<GenerateConfig>();
+            generate_input->generate_config->reuse_cache         = true;
+            generate_input->generate_config->enable_memory_cache = true;
 
-    engine->release();
-    ASSERT_TRUE(waitForAsyncContextDoneFor(
-        load_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
-    load_result.async_context->waitDone();
-    ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
-    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+            ResourceContext resource_context;
+            resource_context.cache_manager       = manager_;
+            resource_context.reuse_cache         = true;
+            resource_context.enable_memory_cache = true;
+            resource_context.enable_disk_cache   = true;
+            resource_context.role_type           = RoleType::PREFILL;
 
-    const auto descriptors = engine->descriptors();
-    ASSERT_EQ(descriptors.size(), descriptors_before_load + expected_load_descriptors);
-    std::vector<size_t> host_loads(cache->groupSets().size(), 0);
-    std::vector<size_t> disk_loads(cache->groupSets().size(), 0);
-    for (size_t index = descriptors_before_load; index < descriptors.size(); ++index) {
-        const auto& descriptor = descriptors[index];
-        ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
-        EXPECT_EQ(descriptor.target_tier, Tier::DEVICE);
-        if (descriptor.source_tier == Tier::HOST) {
-            EXPECT_EQ(descriptor.singleBlockAt(Tier::HOST), host_sources[descriptor.group_set_id]);
-            ++host_loads[descriptor.group_set_id];
+            ModelConfig model_config;
+            model_config.max_seq_len                  = 2048;
+            model_config.attn_config.tokens_per_block = block_size;
+            RuntimeConfig runtime_config;
+            runtime_config.max_generate_batch_size                     = 1;
+            runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2048;
+            PDSepConfig pd_sep_config;
+            pd_sep_config.role_type = RoleType::PREFILL;
+            ParallelismConfig   parallelism_config;
+            ModelSpecificConfig model_specific_config;
+
+            auto prefill_stream = std::make_shared<NormalGenerateStream>(
+                generate_input, model_config, runtime_config, resource_context, nullptr);
+            auto scheduler = std::make_shared<FIFOScheduler>(
+                runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, manager_);
+            ASSERT_TRUE(scheduler->enqueue(prefill_stream).ok());
+            auto first_schedule = scheduler->schedule();
+            ASSERT_TRUE(first_schedule.ok());
+            EXPECT_TRUE(first_schedule.value().empty());
+            EXPECT_EQ(prefill_stream->getStatus(), StreamState::LOADING_CACHE);
+            EXPECT_EQ(prefill_stream->reuseLength(), block_size);
+            EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
+
+            const bool failure_entered = engine->waitUntilEnteredFor(
+                std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
+            if (!failure_entered) {
+                engine->release();
+            }
+            ASSERT_TRUE(failure_entered);
+            engine->release();
+            // Await the public load-completion transition before scheduling again.
+            // A failed protected request leaves all scheduler queues empty; polling
+            // schedule() after it is removed would block waiting for a new request.
+            ASSERT_TRUE(
+                waitForConditionFor([&] { return prefill_stream->streamCacheResource().loadCacheDone(); },
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
+            BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+            const auto second_schedule = scheduler->schedule();
+            ASSERT_TRUE(second_schedule.ok());
+            const bool crc_enabled = cache->groupSets().front()->crcEnabled();
+            if (crc_enabled) {
+                EXPECT_TRUE(second_schedule.value().empty());
+                EXPECT_EQ(prefill_stream->getStatus(), StreamState::FINISHED);
+                EXPECT_TRUE(prefill_stream->hasError());
+                EXPECT_EQ(prefill_stream->statusInfo().code(), ErrorCode::CACHE_INTEGRITY_ERROR);
+                EXPECT_EQ(prefill_stream->reuseLength(), 0);
+                EXPECT_EQ(prefill_stream->initialReuseLength(), 0);
+                EXPECT_EQ(prefill_stream->hostReuseLength(), 0);
+                EXPECT_EQ(prefill_stream->diskReuseLength(), 0);
+                EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
+
+                const auto quarantined = snapshotPathResources(*cache, seed.cache_keys);
+                ASSERT_TRUE(quarantined.has_value());
+                ASSERT_EQ(quarantined->size(), 3u);
+                for (const auto& group_set : cache->groupSets()) {
+                    const size_t group_set_id = group_set->groupSetId();
+                    const size_t reuse_begin  = 3 - group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+                    for (size_t path = std::max(size_t{1}, reuse_begin); path < 3; ++path) {
+                        const auto& source = (*quarantined)[path][group_set_id];
+                        EXPECT_TRUE(source.integrity_quarantined);
+                        EXPECT_EQ(source.transfer_state, GroupSetTransferState::IDLE);
+                        EXPECT_FALSE(source.hasTier(Tier::DEVICE));
+                        if (path == 1) {
+                            EXPECT_EQ(source.host_block, host_sources[group_set_id]);
+                            EXPECT_EQ(group_set->hostPool()->treeRefCount(source.host_block), 1u);
+                            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+                        } else {
+                            EXPECT_EQ(source.disk_block, disk_sources[group_set_id]);
+                            EXPECT_EQ(group_set->diskPool()->treeRefCount(source.disk_block), 1u);
+                            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+                        }
+                    }
+                }
+            } else {
+                ASSERT_EQ(second_schedule.value().size(), 1u);
+                EXPECT_EQ(second_schedule.value().front(), prefill_stream);
+                EXPECT_EQ(prefill_stream->getStatus(), StreamState::RUNNING);
+                EXPECT_FALSE(prefill_stream->hasError());
+                EXPECT_EQ(prefill_stream->reuseLength(), block_size);
+                EXPECT_EQ(prefill_stream->initialReuseLength(), block_size);
+                EXPECT_EQ(prefill_stream->deviceReuseLength(), block_size);
+                EXPECT_EQ(prefill_stream->hostReuseLength(), 0);
+                EXPECT_EQ(prefill_stream->diskReuseLength(), 0);
+                EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
+
+                for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
+                    const auto&  group_set   = cache->groupSets()[group_set_id];
+                    const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+                    const size_t reuse_begin = 3 - reuse_count;
+                    for (const size_t raw_group_id : group_set->groupIds()) {
+                        const BlockIndicesType& blocks =
+                            prefill_stream->streamCacheResource().kvCache().blocks(0, static_cast<int>(raw_group_id));
+                        for (size_t path = reuse_begin; path < 3; ++path) {
+                            ASSERT_LT(path, blocks.size());
+                            EXPECT_FALSE(isNullBlockIdx(blocks[path]));
+                        }
+                    }
+                }
+            }
+
+            const auto failure_descriptors = engine->descriptors();
+            ASSERT_GE(failure_descriptors.size(), descriptors_before_failure + failed_host_loads + 1);
+            for (size_t index = descriptors_before_failure; index < descriptors_before_failure + failed_host_loads;
+                 ++index) {
+                EXPECT_EQ(failure_descriptors[index].source_tier, Tier::HOST);
+                EXPECT_EQ(failure_descriptors[index].target_tier, Tier::DEVICE);
+            }
+            EXPECT_EQ(failure_descriptors[descriptors_before_failure + failed_host_loads].source_tier, Tier::DISK);
+            EXPECT_EQ(failure_descriptors[descriptors_before_failure + failed_host_loads].target_tier, Tier::DEVICE);
+
+            if (crc_enabled) {
+                // Only the ready DEVICE prefix remains reusable. A fresh request must
+                // allocate the rest for recomputation without retrying quarantined sources.
+                const size_t descriptors_before_retry = engine->submittedDescriptorCount();
+                auto         retry_resource           = makeResource(cache_config_);
+                auto         retry_tokens             = makeTokenIds(0, 4 * block_size, 4 * block_size, block_size);
+                MallocInfo   retry_info{retry_resource, retry_tokens};
+                retry_info.reuse_cache         = true;
+                retry_info.enable_cache_lookup = true;
+                const auto retry               = manager_->malloc(retry_info);
+                ASSERT_TRUE(retry.success);
+                EXPECT_EQ(retry.reuse_len, block_size);
+                EXPECT_EQ(retry.async_context, nullptr);
+                EXPECT_EQ(retry_resource->cacheResource(0).deviceReuseBlockNum(), 1u);
+                EXPECT_EQ(retry_resource->cacheResource(0).memoryReuseBlockNum(), 0u);
+                EXPECT_EQ(retry_resource->cacheResource(0).diskReuseBlockNum(), 0u);
+                EXPECT_EQ(engine->submittedDescriptorCount(), descriptors_before_retry);
+                ASSERT_TRUE(requestReusesExpectedPath(
+                    *cache, cache_config_, seed.cache_keys, retry_resource, /*logical_reuse_blocks=*/1));
+                manager_->free(FreeInfo{retry_resource, retry_tokens});
+            } else {
+                prefill_stream->reportError(ErrorCode::CANCELLED, "test cleanup");
+                ASSERT_TRUE(scheduler->schedule().ok());
+                EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
+            }
         } else {
-            EXPECT_EQ(descriptor.source_tier, Tier::DISK);
-            EXPECT_EQ(descriptor.singleBlockAt(Tier::DISK), disk_sources[descriptor.group_set_id]);
-            ++disk_loads[descriptor.group_set_id];
-        }
-    }
-    auto loaded = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(loaded.has_value());
-    for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        const auto&  group_set   = cache->groupSets()[group_set_id];
-        const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
-        const size_t reuse_begin = 3 - reuse_count;
-        EXPECT_EQ(host_loads[group_set_id], expected_host_loads[group_set_id]);
-        EXPECT_EQ(disk_loads[group_set_id], expected_disk_loads[group_set_id]);
-        for (size_t path = 0; path < 3; ++path) {
-            const auto& state = (*loaded)[path][group_set_id];
-            EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
-            const Tier expected = path >= reuse_begin || path == 0 ? Tier::DEVICE : Tier::HOST;
-            EXPECT_EQ(state.getTopTier(), expected) << "path=" << path << " group_set=" << group_set_id;
-            if (expected == Tier::DEVICE) {
-                ASSERT_EQ(state.device_blocks.size(), group_set->groupIds().size());
-                for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-                    const int group_id = static_cast<int>(group_set->groupIds()[member_index]);
-                    EXPECT_TRUE(groupBlockPayloadMatches(
-                        manager_, cache_config_, group_id, state.device_blocks[member_index], path));
+            const size_t descriptors_before_load = engine->submittedDescriptorCount();
+            ASSERT_TRUE(engine->armPause());
+            ScopedTransferRelease load_release(engine);
+            auto                  load_resource = makeResource(cache_config_);
+            auto                  load_tokens   = makeTokenIds(0,
+                                            4 * cache_config_.seq_size_per_block,
+                                            4 * cache_config_.seq_size_per_block,
+                                            cache_config_.seq_size_per_block);
+            MallocInfo            load_info{load_resource, load_tokens};
+            load_info.reuse_cache         = true;
+            load_info.enable_cache_lookup = true;
+            const auto load_result        = manager_->malloc(load_info);
+            ASSERT_TRUE(load_result.success);
+            EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+
+            ASSERT_NE(load_result.async_context, nullptr);
+            const bool entered = engine->waitUntilEnteredFor(
+                std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
+            if (!entered) {
+                engine->release();
+            }
+            ASSERT_TRUE(entered);
+            EXPECT_FALSE(load_result.async_context->done());
+
+            const auto found = cache->tree()->findNode(seed.cache_keys);
+            ASSERT_EQ(found.size(), seed.cache_keys.size());
+            std::vector<size_t> expected_host_loads(cache->groupSets().size(), 0);
+            std::vector<size_t> expected_disk_loads(cache->groupSets().size(), 1);
+            size_t              expected_load_descriptors = 0;
+            auto                loading                   = snapshotPathResources(*cache, seed.cache_keys);
+            ASSERT_TRUE(loading.has_value());
+            for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
+                const auto&  group_set   = cache->groupSets()[group_set_id];
+                const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+                ASSERT_GT(reuse_count, 0u);
+                ASSERT_LE(reuse_count, 3u);
+                const size_t reuse_begin          = 3 - reuse_count;
+                expected_host_loads[group_set_id] = reuse_begin <= 1 ? 1u : 0u;
+                expected_load_descriptors += expected_host_loads[group_set_id] + expected_disk_loads[group_set_id];
+                for (size_t path = 1; path < 3; ++path) {
+                    const bool  reused = path >= reuse_begin;
+                    const auto& state  = (*loading)[path][group_set_id];
+                    EXPECT_EQ(state.transfer_state,
+                              reused ? GroupSetTransferState::LOADING : GroupSetTransferState::IDLE)
+                        << "path=" << path << " group_set=" << group_set_id;
+                    if (!reused) {
+                        EXPECT_EQ(state.getTopTier(), Tier::HOST);
+                        EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 1u);
+                        continue;
+                    }
+                    for (const size_t raw_group_id : group_set->groupIds()) {
+                        const int               group_id = static_cast<int>(raw_group_id);
+                        const BlockIndicesType& blocks   = load_resource->blocks(0, group_id);
+                        ASSERT_GE(blocks.size(), 3u);
+                        ASSERT_FALSE(isNullBlockIdx(blocks[path]));
+                        ASSERT_TRUE(fillGroupBlockPayload(
+                            manager_, cache_config_, group_id, blocks[path], path, /*poison=*/true));
+                    }
                 }
             }
+
+            engine->release();
+            ASSERT_TRUE(waitForAsyncContextDoneFor(
+                load_result.async_context,
+                std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
+            load_result.async_context->waitDone();
+            ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
+            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+
+            const auto descriptors = engine->descriptors();
+            ASSERT_EQ(descriptors.size(), descriptors_before_load + expected_load_descriptors);
+            std::vector<size_t> host_loads(cache->groupSets().size(), 0);
+            std::vector<size_t> disk_loads(cache->groupSets().size(), 0);
+            for (size_t index = descriptors_before_load; index < descriptors.size(); ++index) {
+                const auto& descriptor = descriptors[index];
+                ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
+                EXPECT_EQ(descriptor.target_tier, Tier::DEVICE);
+                if (descriptor.source_tier == Tier::HOST) {
+                    EXPECT_EQ(descriptor.singleBlockAt(Tier::HOST), host_sources[descriptor.group_set_id]);
+                    ++host_loads[descriptor.group_set_id];
+                } else {
+                    EXPECT_EQ(descriptor.source_tier, Tier::DISK);
+                    EXPECT_EQ(descriptor.singleBlockAt(Tier::DISK), disk_sources[descriptor.group_set_id]);
+                    ++disk_loads[descriptor.group_set_id];
+                }
+            }
+            auto loaded = snapshotPathResources(*cache, seed.cache_keys);
+            ASSERT_TRUE(loaded.has_value());
+            for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
+                const auto&  group_set   = cache->groupSets()[group_set_id];
+                const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+                const size_t reuse_begin = 3 - reuse_count;
+                EXPECT_EQ(host_loads[group_set_id], expected_host_loads[group_set_id]);
+                EXPECT_EQ(disk_loads[group_set_id], expected_disk_loads[group_set_id]);
+                for (size_t path = 0; path < 3; ++path) {
+                    const auto& state = (*loaded)[path][group_set_id];
+                    EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
+                    const Tier expected = path >= reuse_begin || path == 0 ? Tier::DEVICE : Tier::HOST;
+                    EXPECT_EQ(state.getTopTier(), expected) << "path=" << path << " group_set=" << group_set_id;
+                    if (expected == Tier::DEVICE) {
+                        ASSERT_EQ(state.device_blocks.size(), group_set->groupIds().size());
+                        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
+                            const int group_id = static_cast<int>(group_set->groupIds()[member_index]);
+                            EXPECT_TRUE(groupBlockPayloadMatches(
+                                manager_, cache_config_, group_id, state.device_blocks[member_index], path));
+                        }
+                    }
+                }
+            }
+            ASSERT_TRUE(requestReusesExpectedPath(
+                *cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/3));
+            ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(
+                manager_, *cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/3));
+            manager_->free(FreeInfo{load_resource, load_tokens});
         }
+        ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
     }
-    ASSERT_TRUE(
-        requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/3));
-    ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(
-        manager_, *cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/3));
-    manager_->free(FreeInfo{load_resource, load_tokens});
-    ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
 TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapacity) {

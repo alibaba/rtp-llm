@@ -540,13 +540,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostSourceMatchableAndCanRetry) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailurePreservesOwnershipAndRecovers) {
     if (GetParam() != TierLayout::HOST_DISK) {
         GTEST_SKIP() << "HOST-to-DISK failure serviceability requires HostDisk layout";
     }
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     ASSERT_NE(manager_, nullptr);
-    auto cache = manager_->blockTreeCache();
+    auto       cache             = manager_->blockTreeCache();
+    const bool protected_records = std::any_of(
+        cache->groupSets().begin(), cache->groupSets().end(), [](const auto& group) { return group->crcEnabled(); });
 
     auto recording_engine =
         std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
@@ -588,6 +590,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         const auto& group_set = cache->groupSets()[group_set_id];
         const auto& resource  = (*after_device_failure)[0][group_set_id];
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_FALSE(resource.integrity_quarantined);
+        EXPECT_TRUE(resource.isMatchUsable());
         ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
         EXPECT_FALSE(resource.hasTier(Tier::HOST));
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
@@ -682,6 +686,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             const auto& group_set = cache->groupSets()[group_set_id];
             const auto& resource  = (*after_host_failure)[0][group_set_id];
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+            EXPECT_EQ(resource.integrity_quarantined, group_set->crcEnabled());
+            EXPECT_EQ(resource.isMatchUsable(), !group_set->crcEnabled());
             ASSERT_TRUE(resource.hasTier(Tier::HOST));
             EXPECT_FALSE(resource.hasTier(Tier::DISK));
             EXPECT_EQ(resource.getTopTier(), Tier::HOST);
@@ -694,10 +700,18 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         }
         expectPoolSnapshotsEq(lower_before_host_failure, snapshotLowerPools(*cache, GetParam()));
 
-        // Prove the preserved HOST copy remains manager-serviceable before the
-        // demotion retry. A successful load consumes that HOST copy, so the
-        // same cached path is demoted back to HOST below before retrying H2Dk.
         recording_engine->clearScriptedResults();
+        if (protected_records) {
+            ASSERT_NO_FATAL_FAILURE(expectQuarantinedPrefixMissAndRecompute(seed.cache_keys, recording_engine));
+            const auto submits_before_reclaim = recording_engine->submittedDescriptorCount();
+            ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
+            EXPECT_EQ(recording_engine->submittedDescriptorCount(), submits_before_reclaim);
+            return;
+        }
+
+        // Without CRC, the preserved HOST copy remains manager-serviceable
+        // before the demotion retry. A successful load consumes that HOST copy,
+        // so demote the same cached path back to HOST before retrying H2Dk.
         const size_t submits_before_host_hit = recording_engine->submittedDescriptorCount();
         auto         host_hit_resource       = makeResource(cache_config_);
         auto         host_hit_tokens         = makeTokenIds(

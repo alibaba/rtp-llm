@@ -1636,10 +1636,70 @@ protected:
         }
     }
 
+    void expectQuarantinedPrefixMissAndRecompute(const CacheKeysType&                                    keys,
+                                                 const std::shared_ptr<PausableRecordingTransferEngine>& engine) {
+        auto       cache       = manager_->blockTreeCache();
+        const auto quarantined = snapshotPathResources(*cache, keys);
+        ASSERT_TRUE(quarantined.has_value());
+        for (const auto& path : *quarantined) {
+            for (const auto& resource : path) {
+                EXPECT_TRUE(resource.integrity_quarantined);
+                EXPECT_FALSE(resource.isMatchUsable());
+            }
+        }
+        const auto   device_before  = snapshotDevicePools(manager_);
+        const auto   lower_before   = snapshotLowerPools(*cache, GetParam());
+        const size_t submits_before = engine->submittedDescriptorCount();
+        const int    block_size     = static_cast<int>(cache_config_.seq_size_per_block);
+        auto         resource       = makeResource(cache_config_);
+        auto         tokens         = makeTokenIds(0, 2 * block_size, 2 * block_size, block_size);
+        MallocInfo   info{resource, tokens};
+        info.reuse_cache         = true;
+        info.enable_cache_lookup = true;
+        const auto result        = manager_->malloc(info);
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.reuse_len, 0);
+        ASSERT_EQ(result.async_context, nullptr);
+        EXPECT_EQ(resource->cacheResource(0).deviceReuseBlockNum(), 0u);
+        EXPECT_EQ(resource->cacheResource(0).memoryReuseBlockNum(), 0u);
+        EXPECT_EQ(resource->cacheResource(0).diskReuseBlockNum(), 0u);
+        ASSERT_FALSE(resource->cacheKeys(0).empty());
+        EXPECT_EQ(resource->cacheKeys(0).front(), keys.front());
+        EXPECT_EQ(engine->submittedDescriptorCount(), submits_before);
+
+        // A new request can recompute into its allocated device blocks without
+        // loading or trusting any of the quarantined lower-tier records.
+        for (const auto& group : cache->groupSets()) {
+            for (const size_t raw_group_id : group->groupIds()) {
+                const int   group_id = static_cast<int>(raw_group_id);
+                const auto& blocks   = resource->blocks(0, group_id);
+                size_t      written  = 0;
+                for (size_t path = 0; path < blocks.size(); ++path) {
+                    if (isNullBlockIdx(blocks[path])) {
+                        continue;
+                    }
+                    ASSERT_TRUE(
+                        fillGroupBlockPayload(manager_, cache_config_, group_id, blocks[path], path, /*poison=*/false));
+                    EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, group_id, blocks[path], path));
+                    ++written;
+                }
+                EXPECT_GT(written, 0u);
+            }
+        }
+        EXPECT_EQ(engine->submittedDescriptorCount(), submits_before);
+        expectPoolSnapshotsEq(lower_before, snapshotLowerPools(*cache, GetParam()));
+        manager_->free(FreeInfo{resource, tokens});
+        expectPoolSnapshotsEq(device_before, snapshotDevicePools(manager_));
+        expectPoolSnapshotsEq(lower_before, snapshotLowerPools(*cache, GetParam()));
+    }
+
     void runLowerTierLoadFailureScenario(LoadFailureSource failure_source) {
         ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/8));
         ASSERT_NE(manager_, nullptr);
-        auto cache = manager_->blockTreeCache();
+        auto       cache          = manager_->blockTreeCache();
+        const bool protected_load = std::any_of(cache->groupSets().begin(),
+                                                cache->groupSets().end(),
+                                                [](const auto& group) { return group->crcEnabled(); });
 
         auto pausable_engine =
             std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
@@ -1781,9 +1841,13 @@ protected:
         }
 
         pausable_engine->release();
+        ASSERT_TRUE(waitForAsyncContextDoneFor(
+            failed_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
         failed_result.async_context->waitDone();
         ASSERT_TRUE(failed_result.async_context->done());
         EXPECT_FALSE(failed_result.async_context->success());
+        EXPECT_EQ(failed_result.async_context->errorInfo().code(),
+                  protected_load ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::EXECUTION_EXCEPTION);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
         const auto descriptors_after_failure = pausable_engine->descriptors();
@@ -1803,6 +1867,8 @@ protected:
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
             EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
             EXPECT_EQ(resource.getTopTier(), source_tiers[group_set_id]);
+            EXPECT_EQ(resource.integrity_quarantined, protected_load);
+            EXPECT_EQ(resource.isMatchUsable(), !protected_load);
             if (source_tiers[group_set_id] == Tier::HOST) {
                 EXPECT_EQ(resource.host_block, source_blocks[group_set_id]);
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
@@ -1834,6 +1900,12 @@ protected:
                 EXPECT_FALSE(group_set->devicePools()[member_group_id]->isAllocated(
                     failed_targets[group_set_id][member_group_id]));
             }
+        }
+
+        if (protected_load) {
+            ASSERT_NO_FATAL_FAILURE(expectQuarantinedPrefixMissAndRecompute(seed.cache_keys, pausable_engine));
+            ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
+            return;
         }
 
         ASSERT_TRUE(pausable_engine->armPause());
@@ -1875,6 +1947,8 @@ protected:
         }
 
         pausable_engine->release();
+        ASSERT_TRUE(waitForAsyncContextDoneFor(
+            retry_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
         retry_result.async_context->waitDone();
         ASSERT_TRUE(retry_result.async_context->done());
         ASSERT_TRUE(retry_result.async_context->success()) << retry_result.async_context->errorInfo().ToString();
@@ -1895,7 +1969,10 @@ protected:
         ASSERT_EQ(GetParam(), source_tier == Tier::DISK ? TierLayout::HOST_DISK : TierLayout::HOST_ONLY);
         ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
         ASSERT_NE(manager_, nullptr);
-        auto cache = manager_->blockTreeCache();
+        auto       cache          = manager_->blockTreeCache();
+        const bool protected_load = std::any_of(cache->groupSets().begin(),
+                                                cache->groupSets().end(),
+                                                [](const auto& group) { return group->crcEnabled(); });
 
         auto engine =
             std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
@@ -2126,6 +2203,10 @@ protected:
         } else {
             EXPECT_FALSE(first_result.async_context->success());
             EXPECT_FALSE(second_result.async_context->success());
+            const auto expected_error =
+                protected_load ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::EXECUTION_EXCEPTION;
+            EXPECT_EQ(first_result.async_context->errorInfo().code(), expected_error);
+            EXPECT_EQ(second_result.async_context->errorInfo().code(), expected_error);
             auto maybe_failed = snapshotPathResources(*cache, seed.cache_keys);
             ASSERT_TRUE(maybe_failed.has_value());
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -2135,6 +2216,8 @@ protected:
                 ASSERT_NE(source_pool, nullptr);
                 EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
                 ASSERT_TRUE(resource.hasTier(source_tier));
+                EXPECT_EQ(resource.integrity_quarantined, protected_load);
+                EXPECT_EQ(resource.isMatchUsable(), !protected_load);
                 EXPECT_EQ(lowerBlockForTier(resource, source_tier), lower_sources[group_set_id]);
                 EXPECT_EQ(source_pool->treeRefCount(lower_sources[group_set_id]), 1u);
                 ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
@@ -2159,6 +2242,13 @@ protected:
             }
             manager_->free(FreeInfo{second_resource, second_tokens});
             expectPoolSnapshotsEq(device_before_load, snapshotDevicePools(manager_));
+
+            if (protected_load) {
+                ASSERT_NO_FATAL_FAILURE(expectQuarantinedPrefixMissAndRecompute(seed.cache_keys, engine));
+                ASSERT_NO_FATAL_FAILURE(
+                    reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
+                return;
+            }
 
             auto retry_resource = makeResource(cache_config_);
             auto retry_tokens =

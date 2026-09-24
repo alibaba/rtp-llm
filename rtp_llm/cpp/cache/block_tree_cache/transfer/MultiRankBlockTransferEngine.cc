@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 
 #include <condition_variable>
+#include <cstdlib>
 #include <exception>
 #include <mutex>
 #include <string>
@@ -23,10 +24,10 @@ class MultiRankTransferAsyncContext final:
     public AsyncContext,
     public std::enable_shared_from_this<MultiRankTransferAsyncContext> {
 public:
-    static std::shared_ptr<MultiRankTransferAsyncContext> create(std::shared_ptr<TransferBroadcastResult> result,
-                                                                 size_t worker_count) {
+    static std::shared_ptr<MultiRankTransferAsyncContext>
+    create(std::shared_ptr<TransferBroadcastResult> result, size_t worker_count, bool protected_transfer) {
         auto context = std::shared_ptr<MultiRankTransferAsyncContext>(
-            new MultiRankTransferAsyncContext(std::move(result), worker_count));
+            new MultiRankTransferAsyncContext(std::move(result), worker_count, protected_transfer));
         context->start();
         return context;
     }
@@ -80,8 +81,10 @@ public:
     }
 
 private:
-    MultiRankTransferAsyncContext(std::shared_ptr<TransferBroadcastResult> result, size_t worker_count):
-        result_(std::move(result)), worker_count_(worker_count) {}
+    MultiRankTransferAsyncContext(std::shared_ptr<TransferBroadcastResult> result,
+                                  size_t                                   worker_count,
+                                  bool                                     protected_transfer):
+        result_(std::move(result)), worker_count_(worker_count), protected_transfer_(protected_transfer) {}
 
     void start() {
         std::shared_ptr<MultiRankTransferAsyncContext> self = shared_from_this();
@@ -89,6 +92,13 @@ private:
     }
 
     void evaluate(ErrorInfo forced_error = ErrorInfo::OkStatus()) {
+        // An RPC failure/deadline does not prove the remote GPU stopped writing
+        // our targets. Until there is a remote drain acknowledgement protocol,
+        // protected transfers must fail-stop instead of releasing those targets.
+        if (protected_transfer_ && (!forced_error.ok() || (result_->done() && !result_->success()))) {
+            RTP_LLM_LOG_ERROR("protected cache transfer lost remote completion; refusing unsafe target reuse");
+            std::abort();
+        }
         ErrorInfo error = std::move(forced_error);
         if (error.ok()) {
             if (!result_->done()) {
@@ -99,23 +109,34 @@ private:
                     RTP_LLM_FAIL("multi-rank transfer aborted, at least one worker RPC status is not OK");
                 }
                 error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer RPC failed");
-            } else {
-                const auto responses = result_->responses();
-                if (responses.size() != worker_count_) {
-                    error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer response count mismatch");
-                } else {
-                    for (size_t rank = 0; rank < responses.size(); ++rank) {
-                        if (!responses[rank].has_mem_response()
-                            || responses[rank].mem_response().code() != MemoryOperationResponsePB::OK) {
-                            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
-                                              "multi-rank transfer failed, rank=" + std::to_string(rank));
-                            break;
-                        }
-                    }
+            }
+            // Inspect every completed response even if another rank had an RPC
+            // failure. A typed integrity failure must dominate a generic error.
+            const auto responses = result_->responses();
+            if (protected_transfer_ && responses.size() != worker_count_) {
+                RTP_LLM_LOG_ERROR("protected cache transfer response count mismatch; completion is ambiguous");
+                std::abort();
+            }
+            if (responses.size() != worker_count_ && error.ok()) {
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer response count mismatch");
+            }
+            for (size_t rank = 0; rank < responses.size(); ++rank) {
+                if (responses[rank].has_mem_response()
+                    && responses[rank].mem_response().code() == MemoryOperationResponsePB::CACHE_INTEGRITY_ERROR) {
+                    error = ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR,
+                                      "multi-rank cache integrity failure, rank=" + std::to_string(rank));
+                } else if (error.ok()
+                           && (!responses[rank].has_mem_response()
+                               || responses[rank].mem_response().code() != MemoryOperationResponsePB::OK)) {
+                    error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                      "multi-rank transfer failed, rank=" + std::to_string(rank));
                 }
             }
         }
 
+        if (protected_transfer_ && !error.ok()) {
+            error = ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, error.ToString());
+        }
         std::vector<DoneCallback> callbacks;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -134,6 +155,7 @@ private:
 
     std::shared_ptr<TransferBroadcastResult> result_;
     size_t                                   worker_count_{0};
+    bool                                     protected_transfer_{false};
     mutable std::mutex                       mutex_;
     std::condition_variable                  cv_;
     ErrorInfo                                error_{ErrorInfo::OkStatus()};
@@ -148,9 +170,17 @@ MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<GroupSetP
     group_sets_(std::move(group_sets)), broadcast_manager_(std::move(broadcast_manager)) {}
 
 std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask task) const {
-    const auto deadline_exceeded = []() {
+    bool protected_transfer = false;
+    for (const auto& desc : task.descriptors()) {
+        if (desc.group_set_id < group_sets_.size() && group_sets_[desc.group_set_id]->crcEnabled()) {
+            protected_transfer = true;
+            break;
+        }
+    }
+    const auto deadline_exceeded = [protected_transfer]() {
         return std::make_shared<CompletedAsyncContext>(
-            ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before multi-rank submission"));
+            ErrorInfo(protected_transfer ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::DEADLINE_EXCEEDED,
+                      "transfer deadline exceeded before multi-rank submission"));
     };
     MemoryOperationRequestPB request;
     if (!BlockTransferRequestConverter::encodeTransfer(request, task, group_sets_)) {
@@ -159,7 +189,8 @@ std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask
         }
         RTP_LLM_LOG_WARNING("failed to encode transfer batch, item_count=%zu", task.descriptors().size());
         return std::make_shared<CompletedAsyncContext>(
-            ErrorInfo(ErrorCode::INVALID_PARAMS, "failed to encode transfer batch"));
+            ErrorInfo(protected_transfer ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::INVALID_PARAMS,
+                      "failed to encode transfer batch"));
     }
     const size_t      worker_count = broadcast_manager_->workerNum();
     FunctionRequestPB function_request;
@@ -173,21 +204,41 @@ std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask
     for (auto& rank_request : requests) {
         rank_request.mutable_mem_request()->set_timeout_ms(broadcast_timeout_ms);
     }
-    auto broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests,
-        broadcast_timeout_ms,
-        [](const std::shared_ptr<RpcService::Stub>&    stub,
-           const std::shared_ptr<grpc::ClientContext>& context,
-           const FunctionRequestPB&                    rpc_request,
-           grpc::CompletionQueue*                      completion_queue) {
-            return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
-        });
+    std::shared_ptr<TransferBroadcastResult> broadcast_result;
+    try {
+        broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+            requests,
+            broadcast_timeout_ms,
+            [](const std::shared_ptr<RpcService::Stub>&    stub,
+               const std::shared_ptr<grpc::ClientContext>& context,
+               const FunctionRequestPB&                    rpc_request,
+               grpc::CompletionQueue*                      completion_queue) {
+                return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
+            });
+    } catch (...) {
+        // BroadcastManager can throw after submitting an earlier rank. With no
+        // result object there is no way to drain those remote writes safely.
+        if (protected_transfer) {
+            RTP_LLM_LOG_ERROR("protected cache RPC dispatch threw; remote completion is ambiguous");
+            std::abort();
+        }
+        throw;
+    }
     if (broadcast_result == nullptr) {
         RTP_LLM_LOG_WARNING("failed to start broadcast");
         return std::make_shared<CompletedAsyncContext>(
-            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "failed to start transfer broadcast"));
+            ErrorInfo(protected_transfer ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::EXECUTION_EXCEPTION,
+                      "failed to start transfer broadcast"));
     }
-    return MultiRankTransferAsyncContext::create(std::move(broadcast_result), worker_count);
+    try {
+        return MultiRankTransferAsyncContext::create(std::move(broadcast_result), worker_count, protected_transfer);
+    } catch (...) {
+        if (protected_transfer) {
+            RTP_LLM_LOG_ERROR("protected cache completion context creation failed after RPC submission");
+            std::abort();
+        }
+        throw;
+    }
 }
 
 }  // namespace rtp_llm

@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
 
 #include <cstring>
+#include <algorithm>
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -9,8 +11,10 @@ namespace rtp_llm {
 
 HostDiskTransferExecutor::HostDiskTransferExecutor(BlockTreeTaskPool& transfer_task_pool,
                                                    size_t             max_descriptors_per_batch,
-                                                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
-    TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)) {}
+                                                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                                                   std::shared_ptr<CrcTransferService>            crc_service):
+    TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)),
+    crc_service_(std::move(crc_service)) {}
 
 const char* HostDiskTransferExecutor::blockIOStatusName(BlockIOStatus status) {
     switch (status) {
@@ -48,9 +52,20 @@ TransferStatus HostDiskTransferExecutor::blockIOStatusToTransferStatus(BlockIOSt
 TransferStatus HostDiskTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
                                                       const std::vector<TransferDescriptor>& descriptors,
                                                       const std::vector<const GroupSet*>&    group_sets) {
-    const bool               write_to_disk = descriptors.front().target_tier == Tier::DISK;
-    BlockTreeDiskBlockPool*  disk_pool     = group_sets.front()->diskPool().get();
-    const size_t             disk_stride   = disk_pool->strideBytes();
+    if (hosts.empty() || hosts.size() != descriptors.size() || hosts.size() != group_sets.size()) {
+        return TransferStatus::INVALID_ARGS;
+    }
+    const bool protected_batch = std::any_of(
+        group_sets.begin(), group_sets.end(), [](const GroupSet* group) { return group && group->crcEnabled(); });
+    if (protected_batch && !crc_service_) {
+        return TransferStatus::CACHE_INTEGRITY_ERROR;
+    }
+    const bool              write_to_disk = descriptors.front().target_tier == Tier::DISK;
+    BlockTreeDiskBlockPool* disk_pool     = group_sets.front()->diskPool().get();
+    if (!disk_pool) {
+        return protected_batch ? TransferStatus::CACHE_INTEGRITY_ERROR : TransferStatus::INVALID_ARGS;
+    }
+    const size_t             disk_stride = disk_pool->strideBytes();
     BlockIdList              disk_blocks;
     std::vector<void*>       read_buffers;
     std::vector<const void*> write_buffers;
@@ -63,18 +78,27 @@ TransferStatus HostDiskTransferExecutor::executeBatch(const std::vector<HostBuff
         const auto&  host       = hosts[index];
         const auto*  group_set  = group_sets[index];
         const size_t payload    = group_set->payloadBytes();
-        if (!isValidHostBufferView(host, payload, disk_stride)) {
+        if (!group_set->diskPool() || group_set->diskPool().get() != disk_pool
+            || group_set->crcEnabled() != protected_batch || group_set->storageBytes() > disk_stride
+            || !isValidHostBufferView(host, payload, disk_stride)) {
             RTP_LLM_LOG_WARNING("invalid host-disk batch item index=%zu group=%zu", index, descriptor.group_set_id);
-            return TransferStatus::DISK_IO_ERROR;
+            return protected_batch ? TransferStatus::CACHE_INTEGRITY_ERROR : TransferStatus::DISK_IO_ERROR;
         }
-        if (write_to_disk && disk_stride > payload) {
-            std::memset(static_cast<uint8_t*>(host.base) + payload, 0, disk_stride - payload);
+        const size_t encoded_bytes = group_set->storageBytes();
+        if (write_to_disk && disk_stride > encoded_bytes) {
+            std::memset(static_cast<uint8_t*>(host.base) + encoded_bytes, 0, disk_stride - encoded_bytes);
         }
         disk_blocks.push_back(descriptor.singleBlockAt(Tier::DISK));
         read_buffers.push_back(host.base);
         write_buffers.push_back(host.base);
     }
 
+    if (protected_batch && write_to_disk) {
+        const auto status = crc_service_->validate(hosts, group_sets);
+        if (status != TransferStatus::OK) {
+            return status;
+        }
+    }
     const BlockIOStatus status = write_to_disk ? disk_pool->write(disk_blocks, write_buffers, disk_stride) :
                                                  disk_pool->read(disk_blocks, read_buffers, disk_stride);
     if (status != BlockIOStatus::OK) {
@@ -82,9 +106,9 @@ TransferStatus HostDiskTransferExecutor::executeBatch(const std::vector<HostBuff
                             write_to_disk ? "write" : "read",
                             descriptors.size(),
                             blockIOStatusName(status));
-        return blockIOStatusToTransferStatus(status);
+        return protected_batch ? TransferStatus::CACHE_INTEGRITY_ERROR : blockIOStatusToTransferStatus(status);
     }
-    return TransferStatus::OK;
+    return protected_batch && !write_to_disk ? crc_service_->validate(hosts, group_sets) : TransferStatus::OK;
 }
 
 }  // namespace rtp_llm

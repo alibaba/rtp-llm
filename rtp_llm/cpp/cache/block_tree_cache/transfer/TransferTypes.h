@@ -22,6 +22,7 @@ enum class TransferStatus {
     DEVICE_IO_ERROR,
     DISK_IO_ERROR,
     RESOURCE_EXHAUSTED,
+    CACHE_INTEGRITY_ERROR,
 };
 
 struct DeviceHostCopyOptions {

@@ -26,6 +26,8 @@ ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device block transfer failed");
         case TransferStatus::DISK_IO_ERROR:
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "disk block transfer failed");
+        case TransferStatus::CACHE_INTEGRITY_ERROR:
+            return ErrorInfo(ErrorCode::CACHE_INTEGRITY_ERROR, "cache integrity verification failed");
         case TransferStatus::RESOURCE_EXHAUSTED:
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device-disk staging pool exhausted");
     }

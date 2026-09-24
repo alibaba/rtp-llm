@@ -459,9 +459,12 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         }
 
         if (!absl::IsUnavailable(allocation_status)) {
-            const auto grpc_code = absl::IsResourceExhausted(allocation_status) ? grpc::StatusCode::RESOURCE_EXHAUSTED :
+            const auto grpc_code = absl::IsDataLoss(allocation_status)          ? grpc::StatusCode::DATA_LOSS :
+                                   absl::IsResourceExhausted(allocation_status) ? grpc::StatusCode::RESOURCE_EXHAUSTED :
                                                                                   grpc::StatusCode::INTERNAL;
-            finish_allocation_error(grpc_code, ErrorCode::MALLOC_FAILED, allocation_status.ToString());
+            const auto error_code =
+                absl::IsDataLoss(allocation_status) ? ErrorCode::CACHE_INTEGRITY_ERROR : ErrorCode::MALLOC_FAILED;
+            finish_allocation_error(grpc_code, error_code, allocation_status.ToString());
             return;
         }
 

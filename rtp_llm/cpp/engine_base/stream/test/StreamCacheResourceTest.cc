@@ -298,6 +298,22 @@ protected:
             const GroupSetPtr& group = cache->groupSets().front();
             const BlockIdxType block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
             RTP_LLM_CHECK(!isNullBlockIdx(block));
+            // Seed through the production store so the record has the integrity
+            // footer required by this build before it is published in the tree.
+            BlockIndicesType device_blocks;
+            for (const auto& pool : group->devicePools()) {
+                const auto allocated = pool->malloc(1);
+                RTP_LLM_CHECK(allocated.has_value());
+                pool->incRef(*allocated);
+                device_blocks.push_back(allocated->front());
+            }
+            const bool stored = cache->executeTransfer(
+                TransferTask({TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, block)},
+                             std::chrono::seconds(30)));
+            for (size_t member = 0; member < device_blocks.size(); ++member) {
+                group->devicePools()[member]->decRef(device_blocks[member]);
+            }
+            RTP_LLM_CHECK(stored);
             std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
             resources[0][0].host_block = block;
             RTP_LLM_CHECK(cache->tree()

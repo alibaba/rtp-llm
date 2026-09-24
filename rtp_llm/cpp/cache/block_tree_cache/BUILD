@@ -74,6 +74,7 @@ cc_library(
         "transfer/PerRankBlockTransferEngine.cc",
         "transfer/TransferExecutor.cc",
         "transfer/TransferBatchAsyncContext.cc",
+        "transfer/CrcTransferService.cc",
         "transfer/DeviceHostCopyStrategy.cc",
         "transfer/DeviceHostTransferExecutor.cc",
         "transfer/HostDiskTransferExecutor.cc",
@@ -117,6 +118,7 @@ cc_library(
         "transfer/TransferExecutor.h",
         "transfer/TransferBatchAsyncContext.h",
         "transfer/TransferStageState.h",
+        "transfer/CrcTransferService.h",
         "transfer/DeviceHostCopyStrategy.h",
         "transfer/DeviceHostTransferExecutor.h",
         "transfer/HostDiskTransferExecutor.h",
@@ -147,6 +149,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings:crc_block_copy",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "@havenask//aios/autil:thread",
     ] + torch_deps() + no_block_copy_link_deps() + select({

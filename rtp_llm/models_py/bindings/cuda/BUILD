@@ -112,6 +112,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "//rtp_llm/models_py/bindings/common/kernels:copy_tile_kernel",
         "//rtp_llm/cpp/utils:core_utils",
         ":split_kv_cache_copy",
         ":cuda_host_utils",
@@ -247,4 +248,21 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
+)
+
+cc_library(
+    name = "crc_block_copy",
+    srcs = ["CrcBlockCopy.cu"],
+    hdrs = ["CrcBlockCopyInternal.cuh"],
+    copts = cuda_copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:crc_block_copy_hdr",
+        "//rtp_llm/models_py/bindings/common/kernels:copy_tile_kernel",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "//:using_cuda13_arm": ["@nvcomp_cuda13_arm//:crc32"],
+        "//conditions:default": ["@nvcomp_cuda13_x86//:crc32"],
+    }),
+    visibility = ["//visibility:public"],
 )

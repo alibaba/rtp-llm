@@ -65,9 +65,7 @@ struct StagedMemoryCopyScratch {
     size_t host_capacity   = 0;
     void*  device_staging  = nullptr;
     size_t device_capacity = 0;
-    void*  device_ptrs     = nullptr;
-    void*  device_offsets  = nullptr;
-    void*  device_sizes    = nullptr;
+    void*  device_tiles    = nullptr;
     size_t meta_capacity   = 0;
     int    device_index    = -1;
 };

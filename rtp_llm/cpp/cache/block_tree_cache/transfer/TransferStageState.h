@@ -31,7 +31,7 @@ public:
             if (completed_ || remaining_ <= (submitting_finished_ ? 0u : 1u)) {
                 return;
             }
-            if (first_error_.ok() && !error.ok()) {
+            if (!error.ok() && (first_error_.ok() || error.code() == ErrorCode::CACHE_INTEGRITY_ERROR)) {
                 first_error_ = std::move(error);
             }
             --remaining_;
