@@ -45,12 +45,14 @@ if is_cuda():
                     logger.warning(
                         "CudaFp8VllmBlockwiseLinear unavailable on sm_120: "
                         "cutlass_scaled_mm_blockwise_sm120_fp8 was not compiled. "
-                        "Rebuild with --config=cuda12_9 to enable this backend."
+                        "Rebuild on x86 with --config=cuda12_9 or "
+                        "--config=cuda13, plus --config=sm12x, to enable this backend."
                     )
             except ImportError as e:
                 logger.warning(
                     "CudaFp8VllmBlockwiseLinear unavailable on sm_120: %s; "
-                    "rebuild with --config=cuda12_9 to enable this backend.",
+                    "rebuild on x86 with --config=cuda12_9 or --config=cuda13, "
+                    "plus --config=sm12x, to enable this backend.",
                     e,
                 )
 

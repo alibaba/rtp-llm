@@ -138,6 +138,7 @@ py_library(
         "kernels/*.py",
         "kernels/**/*.py",
     ]),
+    visibility = ["//rtp_llm/models_py/modules/factory/linear/impl/cuda/test:__pkg__"],
 )
 
 py_library(

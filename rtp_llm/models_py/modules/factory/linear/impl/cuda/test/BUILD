@@ -124,3 +124,21 @@ py_test(
     }),
     exec_properties = {'gpu':'RTX_5000_PRO'},
 )
+
+# Keep execution properties literal: the repository's py_test prelude inspects
+# this dictionary before passing it to native.py_test, so select is unsupported.
+py_test(
+    name = "fp8_vllm_blockwise_sm120_linear_cu13_test",
+    srcs = ["fp8_vllm_blockwise_sm120_linear_test.py"],
+    main = "fp8_vllm_blockwise_sm120_linear_test.py",
+    deps = py_test_deps + [
+        ":sm120_test_utils",
+        "//rtp_llm/test/utils:test_util",
+    ],
+    tags = ["RTX_5000_PRO_CU13"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
+)
