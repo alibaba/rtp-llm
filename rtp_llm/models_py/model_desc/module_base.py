@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
@@ -13,6 +13,10 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_attention_inputs_for_tag,
 )
 from rtp_llm.models_py.modules import AttnImplFactory
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    copy_embedding_span,
+    embedding_location_values,
+)
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
@@ -25,6 +29,9 @@ from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
+    # Models opt in only when their forward injects request embeddings.
+    supports_input_embeddings = False
+
     def __init__(
         self,
         config: ModelConfig,
@@ -57,9 +64,7 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
@@ -213,9 +218,7 @@ class GptModelBase(nn.Module):
             : self._mtp_aux_capture_rows
         ]
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None
@@ -227,6 +230,97 @@ class GptModelBase(nn.Module):
                 f"{hidden.shape[0]} captured rows"
             )
         return hidden[:num_tokens]
+
+    def get_inputs_embeds(self, input_ids: Tensor, inputs: PyModelInputs) -> Tensor:
+        inputs_embeds = self.embed_tokens(input_ids)
+        return self.apply_input_embeddings(inputs_embeds, inputs)
+
+    def apply_input_embeddings(
+        self, inputs_embeds: Tensor, inputs: PyModelInputs
+    ) -> Tensor:
+        graph_overrides = inputs.cuda_graph_input_embedding_overrides
+        graph_mask = inputs.cuda_graph_input_embedding_mask
+        if graph_overrides is not None and graph_overrides.numel() > 0:
+            if (
+                graph_mask is None
+                or graph_mask.dim() != 1
+                or graph_mask.dtype != torch.bool
+                or graph_mask.numel() != inputs_embeds.size(0)
+            ):
+                raise ValueError(
+                    "CUDA graph input embedding mask must be bool [tokens]"
+                )
+            if graph_overrides.shape != inputs_embeds.shape:
+                raise ValueError("CUDA graph input embedding overrides shape mismatch")
+            # Capture the overlay even when no request embeddings are present.
+            # Replay updates fixed-address buffers; it never re-runs Python's
+            # request-dependent span loop below.
+            return torch.where(graph_mask.unsqueeze(1), graph_overrides, inputs_embeds)
+
+        if inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0:
+            locs = inputs.input_embeddings_locs
+            if locs is None:
+                raise ValueError("input_embeddings_locs must be set")
+            if inputs_embeds.dim() != 2:
+                raise ValueError(
+                    "inputs_embeds must be a 2D tensor of shape [tokens, hidden_size]"
+                )
+            loc_values = embedding_location_values(locs)
+            if len(inputs.input_embeddings) != len(loc_values):
+                raise ValueError(
+                    f"input_embeddings count ({len(inputs.input_embeddings)}) "
+                    f"!= input_embeddings_locs count ({len(loc_values)})"
+                )
+            token_num = inputs_embeds.size(0)
+            hidden_size = inputs_embeds.size(1)
+            normalized_embeddings = []
+            previous_end = 0
+            for i, (emb, loc) in enumerate(zip(inputs.input_embeddings, loc_values)):
+                if loc < 0:
+                    raise ValueError(f"input_embeddings_locs[{i}]={loc} must be >= 0")
+                if emb.dim() == 1:
+                    emb = emb.unsqueeze(0)
+                if emb.dim() != 2:
+                    raise ValueError(
+                        f"input_embeddings[{i}] must be 1D or 2D, got dim={emb.dim()}"
+                    )
+                if not emb.is_floating_point():
+                    raise ValueError(
+                        f"input_embeddings[{i}] must be floating point, got dtype={emb.dtype}"
+                    )
+                if emb.numel() == 0:
+                    raise ValueError(f"input_embeddings[{i}] must not be empty")
+                if emb.size(1) != hidden_size:
+                    raise ValueError(
+                        f"input_embeddings[{i}] hidden size {emb.size(1)} "
+                        f"!= model hidden size {hidden_size}"
+                    )
+                emb_len = emb.size(0)
+                if loc + emb_len > token_num:
+                    raise ValueError(
+                        f"input_embeddings[{i}] at loc {loc} with length {emb_len} "
+                        f"exceeds token count {token_num}"
+                    )
+                if loc < previous_end:
+                    raise ValueError(
+                        f"input_embeddings_locs[{i}]={loc} overlaps or is out of order; "
+                        f"previous interval ends at {previous_end}"
+                    )
+                normalized_embeddings.append((loc, emb))
+                previous_end = loc + emb_len
+            for loc, emb in normalized_embeddings:
+                copy_embedding_span(inputs_embeds, emb, loc)
+        return inputs_embeds
+
+    @staticmethod
+    def _has_input_embeddings(inputs: PyModelInputs) -> bool:
+        return inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0
+
+    def _reject_input_embeddings(self, inputs: PyModelInputs) -> None:
+        if self._has_input_embeddings(inputs):
+            raise RuntimeError(
+                f"{type(self).__name__} does not support input_embeddings."
+            )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

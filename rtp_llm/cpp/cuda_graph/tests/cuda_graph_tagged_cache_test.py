@@ -11,6 +11,7 @@ from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
     CudaGraphRunner,
     DirtyCudaGraphCaptureError,
 )
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     CudaGraphSelectionMode,
 )
@@ -109,8 +110,7 @@ class StaticTokenMetadataTailModel:
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         tail_signature = torch.stack(
             (
-                inputs.input_ids[-1]
-                + inputs.input_hiddens[-1].sum().to(torch.int32),
+                inputs.input_ids[-1] + inputs.input_hiddens[-1].sum().to(torch.int32),
                 inputs.combo_position_ids[-3],
                 inputs.combo_position_ids[-2],
                 inputs.combo_position_ids[-1],
@@ -217,6 +217,14 @@ class TextOnlyMultimodalCapableModel:
             HIDDEN_SIZE, dtype=torch.bfloat16, device=inputs.input_ids.device
         ).unsqueeze(0)
         return PyModelOutputs(token_values * 10 + hidden_offsets)
+
+
+class InputEmbeddingOverrideModel(TextOnlyMultimodalCapableModel):
+    """Exercise the production embedding injector inside the captured graph."""
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        base = super().forward(inputs, fmha_impl).hidden_states
+        return PyModelOutputs(GptModelBase.apply_input_embeddings(self, base, inputs))
 
 
 class BertWeightAwareModel(TextOnlyMultimodalCapableModel):
@@ -830,6 +838,128 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         ).unsqueeze(0)
         torch.testing.assert_close(output.hidden_states, expected)
 
+    def test_generation_prefill_replays_dynamic_input_embeddings(self) -> None:
+        runner = CudaGraphRunner()
+        model = InputEmbeddingOverrideModel()
+        runner.init_generation_prefill(
+            model,
+            2,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4, TOKENS_PER_BLOCK],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            3,
+        )
+
+        def replay(seq_lens, spans, prepare):
+            inputs = _with_mrope_positions(
+                _build_prefill_inputs(
+                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=seq_lens
+                )
+            )
+            inputs.input_embeddings = [
+                torch.full((length, HIDDEN_SIZE), value, dtype=dtype, device="cuda")
+                for _, length, value, dtype in spans
+            ]
+            inputs.input_embeddings_locs = torch.tensor(
+                [loc for loc, _, _, _ in spans], dtype=torch.int32
+            )
+            self.assertTrue(runner.canPrepare(inputs))
+            if prepare:
+                # The wrapper removes input_ids just like async production prepare.
+                self.assertTrue(runner.prepare(inputs))
+            self.assertTrue(runner.canRun(inputs))
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            expected = (
+                inputs.input_ids.to(torch.bfloat16).unsqueeze(1)
+                + inputs.combo_position_ids[:, :1]
+            ) * 10 + torch.arange(
+                HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+            ).unsqueeze(
+                0
+            )
+            for loc, length, value, _ in spans:
+                expected[loc : loc + length] = value
+            torch.testing.assert_close(output.hidden_states, expected)
+            self.assertEqual(runner.getGenerationPrefillStatus(), "not_requested")
+            self.assertEqual(model.input_hiddens_numel, 0)
+
+        # Change values, locations, lengths, source dtype and segment count.
+        replay([2, 2], [(1, 2, 7, torch.float32)], prepare=False)
+        replay([2, 2], [], prepare=True)
+        replay(
+            [2, 2],
+            [(0, 1, -2, torch.bfloat16), (3, 1, 9, torch.float32)],
+            prepare=True,
+        )
+        # Shared storage must reset masks across graph shrink/growth too.
+        replay([3, 3], [(4, 2, 11, torch.float16)], prepare=False)
+        self.assertEqual(runner.getCurrentRealGraphSize(), TOKENS_PER_BLOCK)
+        replay([3], [], prepare=True)
+        self.assertEqual(runner.getCurrentRealGraphSize(), 4)
+        replay([3, 3], [], prepare=False)
+
+        embedding = torch.ones((2, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        invalid_cases = [
+            ("missing_locations", [embedding], None),
+            ("location_dtype", [embedding], torch.tensor([0], dtype=torch.int64)),
+            (
+                "device_locations",
+                [embedding],
+                torch.tensor([0], dtype=torch.int32, device="cuda"),
+            ),
+            ("location_rank", [embedding], torch.tensor([[0]], dtype=torch.int32)),
+            ("location_count", [embedding], torch.tensor([0, 2], dtype=torch.int32)),
+            (
+                "noncontiguous_locations",
+                [embedding, embedding],
+                torch.tensor([0, 9, 2, 9], dtype=torch.int32)[::2],
+            ),
+            ("negative_location", [embedding], torch.tensor([-1], dtype=torch.int32)),
+            ("out_of_bounds", [embedding], torch.tensor([3], dtype=torch.int32)),
+            (
+                "overlap",
+                [embedding, embedding],
+                torch.tensor([0, 1], dtype=torch.int32),
+            ),
+            (
+                "out_of_order",
+                [embedding, embedding],
+                torch.tensor([2, 0], dtype=torch.int32),
+            ),
+            ("cpu_embedding", [embedding.cpu()], torch.tensor([0], dtype=torch.int32)),
+            ("embedding_rank", [embedding[0]], torch.tensor([0], dtype=torch.int32)),
+            ("empty_embedding", [embedding[:0]], torch.tensor([0], dtype=torch.int32)),
+            ("hidden_width", [embedding[:, :1]], torch.tensor([0], dtype=torch.int32)),
+            (
+                "embedding_dtype",
+                [embedding.to(torch.int32)],
+                torch.tensor([0], dtype=torch.int32),
+            ),
+        ]
+        for name, embeddings, locations in invalid_cases:
+            with self.subTest(name=name):
+                inputs = _with_mrope_positions(
+                    _build_prefill_inputs(
+                        GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=[2, 2]
+                    )
+                )
+                inputs.input_embeddings = embeddings
+                # Leave the bound C++ tensor undefined for missing metadata;
+                # its pybind setter accepts tensors, not Python None.
+                if locations is not None:
+                    inputs.input_embeddings_locs = locations
+                for check in (runner.canPrepare, runner.canRun):
+                    self.assertFalse(check(inputs))
+                    self.assertEqual(
+                        runner.getGenerationPrefillStatus(), "input_metadata_invalid"
+                    )
+        # Fallback must not leave stale status or data on the next valid request.
+        replay([2, 2], [(2, 1, 3, torch.bfloat16)], prepare=True)
+
     def test_generation_prefill_uses_bucket_capacity_without_ratio_gate(self) -> None:
         runner = CudaGraphRunner()
         model = TextOnlyMultimodalCapableModel()
@@ -1302,21 +1432,16 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     expected_signature = torch.tensor(
                         [
                             graph_size * query_len,
-                            total_kv_length
-                            + (graph_size - batch_size) * query_len,
+                            total_kv_length + (graph_size - batch_size) * query_len,
                             graph_size * query_len,
-                            prefix_len + 1
-                            if batch_size == graph_size
-                            else query_len,
+                            prefix_len + 1 if batch_size == graph_size else query_len,
                         ],
                         dtype=output.hidden_states.dtype,
                         device=output.hidden_states.device,
                     )
                     torch.testing.assert_close(
                         output.hidden_states,
-                        expected_signature.unsqueeze(0).expand_as(
-                            output.hidden_states
-                        ),
+                        expected_signature.unsqueeze(0).expand_as(output.hidden_states),
                     )
 
     def test_target_verify_clears_static_token_metadata_after_shrink(self) -> None:
@@ -1416,9 +1541,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.forward(full_inputs)
         torch.cuda.synchronize()
 
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
         self.assertTrue(runner.canRun(inputs))
         self.assertEqual(runner.getCurrentRealGraphSize(), 4)
 
@@ -1454,9 +1577,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.forward(full_inputs)
         torch.cuda.synchronize()
 
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
         self.assertTrue(runner.canRun(inputs))
         output = runner.forward(inputs)
         torch.cuda.synchronize()
@@ -1500,9 +1621,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     (batch_size, HIDDEN_SIZE * 2),
                     tuple(output.mtp_target_hidden_states.shape),
                 )
-                torch.testing.assert_close(
-                    output.mtp_target_hidden_states, expected
-                )
+                torch.testing.assert_close(output.mtp_target_hidden_states, expected)
 
 
 if __name__ == "__main__":

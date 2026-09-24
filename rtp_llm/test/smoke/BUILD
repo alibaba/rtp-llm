@@ -1,3 +1,5 @@
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
+
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
@@ -130,5 +132,30 @@ test_suite(
         ":smoke_sm100_moe",
         ":smoke_sm120_dense",
         ":smoke_sm120_moe",
+    ],
+)
+
+custom_smoke_test(
+    name = "input_embedding_rpc_test",
+    main = "input_embedding_rpc_test.py",
+    smoke_args = "--load_method scratch --act_type BF16 --max_seq_len 256 --enable_cuda_graph 0 --reuse_cache 0 --tp_size 1 --world_size 1 --concurrency_limit 2 --reserver_runtime_mem_mb 2048 --test_block_num 128 --frontend_server_count 0 --enable_prompt_generator false --enable_prompt_generator_mps false",
+    gpu_type = ["H20"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:safetensors",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+    ],
+)
+
+custom_smoke_test(
+    name = "input_embedding_prefill_cuda_graph_rpc_test",
+    main = "input_embedding_rpc_test.py",
+    args = ["--prefill-cuda-graph"],
+    smoke_args = "--load_method scratch --act_type BF16 --max_seq_len 256 --enable_cuda_graph 1 --warm_up 0 --decode_capture_config '1,2' --generation_prefill_cuda_graph_max_requests 2 --generation_prefill_capture_config '16,64' --max_context_batch_size 2 --reuse_cache 0 --tp_size 1 --world_size 1 --concurrency_limit 2 --reserver_runtime_mem_mb 2048 --test_block_num 128 --frontend_server_count 0 --enable_prompt_generator false --enable_prompt_generator_mps false",
+    gpu_type = ["H20"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:safetensors",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
     ],
 )

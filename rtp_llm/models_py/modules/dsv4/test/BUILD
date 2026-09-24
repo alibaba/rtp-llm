@@ -124,9 +124,13 @@ _PAIRED_GPU_TESTS = [
     "//rtp_llm/models_py/triton_kernels/moe/test:test_mega_moe_gate_pack_cuda13",
 ]
 
+_INPUT_EMBEDDINGS_TESTS = [
+    "//rtp_llm/models_py/model_desc/test:dsv4_input_embeddings_reject_test",
+]
+
 test_suite(
     name = "dsv4_cuda13_unit",
-    tests = [":" + name for name in _CP_HELPER_TESTS + _MODEL_CONTRACT_TESTS + _GPU_TESTS] + _MOVED_CONTRACT_TESTS + _PAIRED_GPU_TESTS,
+    tests = [":" + name for name in _CP_HELPER_TESTS + _MODEL_CONTRACT_TESTS + _GPU_TESTS] + _MOVED_CONTRACT_TESTS + _PAIRED_GPU_TESTS + _INPUT_EMBEDDINGS_TESTS,
 )
 
 # The ARM lane covers every runnable ordinary target. x86 additionally checks
@@ -137,5 +141,5 @@ test_suite(
         ":test_dsv4_kernel_jit_warmup",
         ":test_layer_profiler_ranges",
         ":test_hc_impl",
-    ] + [name + "_x86" for name in _PAIRED_GPU_TESTS],
+    ] + [name + "_x86" for name in _PAIRED_GPU_TESTS] + _INPUT_EMBEDDINGS_TESTS,
 )

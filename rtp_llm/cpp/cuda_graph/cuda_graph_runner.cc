@@ -309,6 +309,23 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     }
 
     if (isGenerationPrefillCudaGraph()) {
+        // Capture always executes a static-shaped overlay. Only these buffers'
+        // contents change between requests, never the captured tensor addresses.
+        auto& overrides = py_model_inputs.cuda_graph_input_embedding_overrides;
+        auto& mask      = py_model_inputs.cuda_graph_input_embedding_mask;
+        RTP_LLM_CHECK_WITH_INFO(overrides.defined() && mask.defined(),
+                                "generation prefill CUDA graph requires input embedding buffers");
+        // Also clear padding and token-only requests after an embedded request.
+        mask.zero_();
+        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+            const auto* locs = inputs.input_embeddings_locs.data_ptr<int32_t>();
+            for (size_t i = 0; i < inputs.input_embeddings->size(); ++i) {
+                const auto& embedding = inputs.input_embeddings->at(i);
+                const auto  length    = embedding.size(0);
+                overrides.narrow(0, locs[i], length).copy_(embedding, /*non_blocking=*/true);
+                mask.narrow(0, locs[i], length).fill_(true);
+            }
+        }
         const auto copy_dynamic_bert_ids = [&](const torch::Tensor& src, torch::Tensor& dst, const char* name) {
             if (!dst.defined() || dst.numel() == 0) {
                 return;
@@ -1374,6 +1391,10 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
     if (!enable_cuda_graph_) {
         return false;
     }
+    const bool has_input_embeddings = inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty();
+    if (has_input_embeddings && !isGenerationPrefillCudaGraph()) {
+        return false;
+    }
     if (isGenerationPrefillCudaGraph()) {
         state.generation_prefill_status = GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
         auto fallback                   = [&](const char* reason, GenerationPrefillCudaGraphStatus status) {
@@ -1437,6 +1458,24 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
         }
         if (inferred_tokens <= 0 || length_sum != static_cast<int64_t>(inferred_tokens)) {
             return fallback("metadata_mismatch", GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID);
+        }
+        if (has_input_embeddings) {
+            if (!host_i32_vector(inputs.input_embeddings_locs, inputs.input_embeddings->size())) {
+                return fallback("input_embeddings_metadata", GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID);
+            }
+            const auto* locs         = inputs.input_embeddings_locs.data_ptr<int32_t>();
+            int64_t     previous_end = 0;
+            for (size_t i = 0; i < inputs.input_embeddings->size(); ++i) {
+                const auto&   embedding = inputs.input_embeddings->at(i);
+                const int64_t loc       = locs[i];
+                if (!embedding.defined() || !embedding.is_cuda() || !embedding.is_floating_point()
+                    || embedding.dim() != 2 || embedding.size(0) <= 0 || embedding.size(1) != hidden_size_
+                    || loc < previous_end || loc > inferred_tokens || embedding.size(0) > inferred_tokens - loc) {
+                    return fallback("input_embeddings_metadata",
+                                    GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID);
+                }
+                previous_end = loc + embedding.size(0);
+            }
         }
         if (mode == CudaGraphCheckMode::FORWARD && !inputs.input_ids.defined()) {
             return fallback("metadata_mismatch", GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID);
@@ -1803,6 +1842,10 @@ void CudaGraphRunner::initCapture() {
             // DSpARK transport buffer and can be hundreds of MiB for long
             // prompt buckets, so do not allocate it for this role.
             inputs.input_hiddens = torch::empty({0}, options_cuda_float_);
+            inputs.cuda_graph_input_embedding_overrides =
+                torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
+            inputs.cuda_graph_input_embedding_mask =
+                torch::zeros({max_num_token_}, options_cuda_int32_.dtype(torch::kBool));
         } else {
             RTP_LLM_CHECK_WITH_INFO(
                 input_hidden_size_ > 0, "CUDA graph input_hidden_size must be positive, got %zu", input_hidden_size_);
@@ -2047,6 +2090,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         // transport-only tensor empty, matching initCapture(), instead of
         // relying on an oversized slice of an empty tensor being clamped.
         inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens;
+        inputs.cuda_graph_input_embedding_overrides =
+            capture_mem_hold_.py_model_inputs_.cuda_graph_input_embedding_overrides.slice(0, 0, token_slice_len);
+        inputs.cuda_graph_input_embedding_mask =
+            capture_mem_hold_.py_model_inputs_.cuda_graph_input_embedding_mask.slice(0, 0, token_slice_len);
     } else {
         inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     }

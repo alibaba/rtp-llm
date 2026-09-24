@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -91,6 +92,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints[GptModelInputIndex::inputEmbeddingsRejected] =
+        inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty() ? 1 : 0;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
@@ -204,6 +207,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
     // contract for cross-node TP.
     execBroadcastCpu({{shape_hints_t}, 0});
+    RTP_LLM_CHECK_WITH_INFO(shape_hints_ptr[GptModelInputIndex::inputEmbeddingsRejected] == 0,
+                            "input_embeddings is not supported with tp_size > 1 (got tp_size=%ld); "
+                            "send the request to a TP=1 deployment or omit input_embeddings.",
+                            (long)parallelism_config.tp_size);
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -211,7 +218,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // extra-input (model-specific, treated as opaque flat 1-D tensors) per-tensor element count
     torch::Tensor mm_extra_input_shape_t;
     int64_t*      mm_extra_input_shape_ptr = nullptr;
-    auto checkedHint = [&](GptModelInputIndex index, const char* name) -> int64_t {
+    auto          checkedHint              = [&](GptModelInputIndex index, const char* name) -> int64_t {
         const auto value = shape_hints_ptr[index];
         RTP_LLM_CHECK_WITH_INFO(
             value >= 0, "tpSyncModelInputs received negative %s shape hint: %lld", name, static_cast<long long>(value));
@@ -325,16 +332,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         };
 
         inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                       {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
+                                           {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
         inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                        {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
+                                           {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
         inputs.sequence_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {checkedHint(GptModelInputIndex::sequenceLengths, "sequenceLengths")},
                                            pickAlloc(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
         inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                         {context_batch_size},
+                                           {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
@@ -378,7 +385,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                 {request_length},
                                                 pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestPdSeparation));
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                            {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
+                                                {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 #include <sstream>
+#include <algorithm>
 
 namespace rtp_llm {
 
@@ -52,9 +53,15 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     start_check_seq_length_ = seq_length_;
 
     size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
+    if (generate_input->generate_config->max_new_tokens > 0) {
+        const size_t request_max_token_num = static_cast<size_t>(seq_length_)
+                                             + generate_input->generate_config->max_new_tokens
+                                             + extra_reserve_token_num;
+        max_token_num = std::min(max_token_num, request_max_token_num);
+    }
 
     complete_token_ids_ = torch::zeros({(int64_t)max_batch_size_, (int64_t)max_token_num}, torch::kInt32);
-    for (int i = 0; i < batch_size_; ++i) {
+    for (int i = 0; i < max_batch_size_; ++i) {
         memcpy(complete_token_ids_.data_ptr<int32_t>() + i * max_token_num,
                generate_input->input_ids.data_ptr<int32_t>(),
                generate_input->input_ids.nbytes());
@@ -146,29 +153,63 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
                               int                  vocab_size,
                               bool                 is_beam_search,
                               int64_t              stream_id,
-                              int&                 error_token_id) {
+                              int&                 error_token_id,
+                              const torch::Tensor& src_batch_indices) {
+    RTP_LLM_CHECK(new_tokens.dim() == 2 && new_tokens.device().is_cpu());
+    RTP_LLM_CHECK(new_tokens.scalar_type() == torch::kInt32 && new_tokens.is_contiguous());
     int new_batch_size = new_tokens.size(0);
     RTP_LLM_CHECK_WITH_INFO(
         new_batch_size <= max_batch_size_, "too many batches, expect < %d, found %d", max_batch_size_, new_batch_size);
 
+    const int provided_num_new_tokens = num_new_tokens;
     if (seq_length_ + num_new_tokens > max_token_num) {
         num_new_tokens = max_token_num - seq_length_;
     }
+    RTP_LLM_CHECK(num_new_tokens >= 0 && seq_length_ + num_new_tokens <= complete_token_ids_.size(1));
     const bool commits_first_token = seq_length_ == input_length && num_new_tokens > 0;
 
     // # NOTE: new tokens indicate num of newly genearted tokens
     // # typically 1 but can be > 1 under speculative decoding
-    // # This differs from new_tokens.shape[-1] under beam search case,
-    // # which needs to update all the generated tokens each update.
+    // # Legacy beam callers may still provide the complete history; compact
+    // # beam callers supply only new tokens plus parent indices.
     RTP_LLM_CHECK(new_tokens.dim() == 2);
 
     auto       new_tokens_ptr     = new_tokens.data_ptr<int>();  // [batch_size, max_num_new_tokens]
     auto       max_num_new_tokens = new_tokens.size(1);
-    const auto get_token_id       = [&](auto batch_idx, auto token_idx) {
-        if (is_beam_search) {
+    const bool compact_beam_tokens =
+        is_beam_search && max_num_new_tokens == provided_num_new_tokens && src_batch_indices.defined();
+
+    torch::Tensor  old_generated_tokens;
+    const int32_t* src_batch_indices_ptr = nullptr;
+    if (compact_beam_tokens) {
+        RTP_LLM_CHECK(src_batch_indices.device().is_cpu());
+        RTP_LLM_CHECK(src_batch_indices.scalar_type() == torch::kInt32);
+        RTP_LLM_CHECK(src_batch_indices.dim() == 1 && src_batch_indices.numel() == new_batch_size);
+        RTP_LLM_CHECK(src_batch_indices.is_contiguous());
+        src_batch_indices_ptr = src_batch_indices.data_ptr<int32_t>();
+
+        const int generated_token_count = seq_length_ - common_len_;
+        if (generated_token_count > 0) {
+            old_generated_tokens =
+                complete_token_ids_.narrow(0, 0, batch_size_).narrow(1, common_len_, generated_token_count).clone();
+        }
+        for (int i = 0; i < new_batch_size; ++i) {
+            RTP_LLM_CHECK_WITH_INFO(src_batch_indices_ptr[i] >= 0 && src_batch_indices_ptr[i] < batch_size_,
+                                    "beam parent index out of range: %d, old batch size: %d",
+                                    src_batch_indices_ptr[i],
+                                    batch_size_);
+        }
+    }
+
+    RTP_LLM_CHECK(max_num_new_tokens
+                  >= (is_beam_search && !compact_beam_tokens ? seq_length_ + num_new_tokens : num_new_tokens));
+    const auto get_token_id = [&](auto batch_idx, auto token_idx) {
+        if (compact_beam_tokens) {
+            return (new_tokens_ptr + max_num_new_tokens * batch_idx)[token_idx];
+        } else if (is_beam_search) {
             return (new_tokens_ptr + max_num_new_tokens * batch_idx)[seq_length_ + token_idx];
         } else {
-            return (new_tokens_ptr + num_new_tokens * batch_idx)[token_idx];
+            return (new_tokens_ptr + max_num_new_tokens * batch_idx)[token_idx];
         }
     };
 
@@ -180,13 +221,28 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
                 return false;
             }
         }
-        if (is_beam_search) {
-            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
+        if (compact_beam_tokens) {
+            // After a variable beam collapses to one row, common_len_ can grow.
+            // Newly reactivated rows must inherit that enlarged common prefix.
+            if (i >= static_cast<size_t>(batch_size_)) {
+                memcpy(data(i), data(0), sizeof(int32_t) * common_len_);
+            }
+            const int generated_token_count = seq_length_ - common_len_;
+            if (generated_token_count > 0) {
+                memcpy(data(i) + common_len_,
+                       old_generated_tokens.data_ptr<int32_t>() + src_batch_indices_ptr[i] * generated_token_count,
+                       sizeof(int32_t) * generated_token_count);
+            }
+            memcpy(data(i) + seq_length_, new_tokens_ptr + i * max_num_new_tokens, sizeof(int32_t) * num_new_tokens);
+        } else if (is_beam_search) {
+            // Sampler batches may be padded to another request's sequence
+            // length; do not overflow this request's bounded history buffer.
+            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * (seq_length_ + num_new_tokens));
         } else {
             if (batch_size_ != new_batch_size && i > 0) {
                 memcpy(data(i), data(0), sizeof(int) * seq_length_);
             }
-            memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
+            memcpy(data(i) + seq_length_, new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * num_new_tokens);
         }
     }
     batch_size_ = new_batch_size;

@@ -167,6 +167,8 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_dense",
         tests = [
+            ":input_embedding_rpc_test",
+            ":input_embedding_prefill_cuda_graph_rpc_test",
             smoke_test(
                 name="dense_generation_prefill_cuda_graph",
                 task_info="data/model/qwen25/q_r_generation_prefill_cuda_graph.json",

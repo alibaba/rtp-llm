@@ -127,6 +127,18 @@ py_test(
     ],
 )
 
+py_test(
+    name = "grpc_util_test",
+    srcs = [
+        "grpc_util_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm:protobuf",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
 
 py_test(
     name = "util_test",

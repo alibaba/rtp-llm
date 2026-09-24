@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test")
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -74,6 +76,17 @@ py_test(
 )
 
 py_test(
+    name = "input_embeddings_reject_test",
+    srcs = ["input_embeddings_reject_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    # CPU tensor assertions still import the CUDA-linked model bindings.
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+)
+
+py_test(
     name = "qwen3_next_qkvz_ba_fusion_test",
     srcs = ["qwen3_next_qkvz_ba_fusion_test.py"],
     deps = [
@@ -101,4 +114,10 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["rocm"],
     exec_properties = {'gpu': 'MI308X-ROCM7', 'gpu_count': '1'},
+)
+
+dsv4_py_test(
+    name = "dsv4_input_embeddings_reject_test",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
 )

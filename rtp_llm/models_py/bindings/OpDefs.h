@@ -358,9 +358,14 @@ struct PyModelInputs {
     PyMultimodalInputs multimodal_inputs;
     // C++ common/single-group fast path. Python sees this field through a
     // property which returns either this object or attention_inputs_by_tag.
-    PyAttentionInputs    attention_inputs;
-    AttentionInputsByTag attention_inputs_by_tag;
-    BertEmbeddingInputs  bert_embedding_inputs;
+    PyAttentionInputs                         attention_inputs;
+    AttentionInputsByTag                      attention_inputs_by_tag;
+    BertEmbeddingInputs                       bert_embedding_inputs;
+    std::optional<std::vector<torch::Tensor>> input_embeddings;
+    torch::Tensor                             input_embeddings_locs;
+    // Fixed-address, bucket-sized buffers used only by generation-prefill CUDA graphs.
+    torch::Tensor cuda_graph_input_embedding_overrides;
+    torch::Tensor cuda_graph_input_embedding_mask;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

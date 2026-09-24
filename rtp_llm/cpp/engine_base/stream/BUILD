@@ -20,9 +20,26 @@ cc_library(
         "GenerateTypes.h",
     ],
     deps = [
+        ":generate_config",
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//:rtp_compute_ops",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "input_embeddings_utils",
+    srcs = [
+        "InputEmbeddingsUtils.cc",
+    ],
+    hdrs = [
+        "InputEmbeddingsUtils.h",
+    ],
+    deps = [
+        ":generate_types",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
     visibility = ["//visibility:public"],
 )
@@ -44,10 +61,10 @@ cc_library(
     name = "stream",
     hdrs = glob([
         "*.h",
-    ], exclude = ["GenerateTypes.h", "CompleteTokenIds.h"]),
+    ], exclude = ["GenerateTypes.h", "CompleteTokenIds.h", "InputEmbeddingsUtils.h"]),
     srcs = glob([
         "*.cc",
-    ], exclude = ["CompleteTokenIds.cc"]),
+    ], exclude = ["CompleteTokenIds.cc", "InputEmbeddingsUtils.cc"]),
     deps = [
         ":generate_types",
         ":generate_config",

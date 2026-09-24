@@ -89,6 +89,7 @@ public:
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string     waitCacheStorePublication() override;
+    static void rejectContextParallelInputEmbeddings(const ExecProperties& device_props, const GptModelInputs& inputs);
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -108,10 +109,10 @@ private:
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1);
     // Compact context rows prepared once by input gathering.
-    torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
-    void                            initializeCustomOutput();
-    torch::Tensor                   runCustomOutput(const torch::Tensor& rows);
-    torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    torch::Tensor customOutputIndexes(const GptModelInputs& inputs);
+    void          initializeCustomOutput();
+    torch::Tensor runCustomOutput(const torch::Tensor& rows);
+    torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -447,8 +448,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // clang-format on
 
         if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle
-                                             + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
+            graph_params.num_tokens_per_bs =
+                params.sp_config.gen_num_per_cycle + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
         } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
         } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {

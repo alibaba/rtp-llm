@@ -265,7 +265,15 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("input_embeddings", &PyModelInputs::input_embeddings, "Input embeddings tensors")
+        .def_readwrite("input_embeddings_locs", &PyModelInputs::input_embeddings_locs, "Input embeddings locations")
+        .def_readwrite("cuda_graph_input_embedding_overrides",
+                       &PyModelInputs::cuda_graph_input_embedding_overrides,
+                       "Capture-owned input embedding overrides")
+        .def_readwrite("cuda_graph_input_embedding_mask",
+                       &PyModelInputs::cuda_graph_input_embedding_mask,
+                       "Capture-owned input embedding override mask");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
