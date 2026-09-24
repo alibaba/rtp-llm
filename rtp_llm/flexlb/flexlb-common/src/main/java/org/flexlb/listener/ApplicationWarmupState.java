@@ -1,10 +1,20 @@
 package org.flexlb.listener;
 
+import org.springframework.stereotype.Component;
+
 /**
  * Exposes whether application warm-up has completed.
  */
-@SuppressWarnings("BooleanMethodIsAlwaysInverted")
-public interface ApplicationWarmupState {
+@Component
+public class ApplicationWarmupState {
 
-    boolean isWarmupFinished();
+    private volatile boolean warmupFinished;
+
+    public boolean isWarmupFinished() {
+        return warmupFinished;
+    }
+
+    public void setWarmupFinished(boolean warmupFinished) {
+        this.warmupFinished = warmupFinished;
+    }
 }
