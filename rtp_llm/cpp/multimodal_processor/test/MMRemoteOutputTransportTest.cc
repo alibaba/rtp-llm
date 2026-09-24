@@ -34,9 +34,8 @@ torch::Tensor rows(int64_t n, int64_t cols = 4) {
 
 // A receipt with one descriptor per handle, each declaring a single EMBEDDING chunk of `chunk_rows`
 // rows. split_size describes the un-chunked per-image row counts, as the encoder sends it.
-MultimodalOutputPB rdmaReceipt(const std::vector<std::string>& handles,
-                               int64_t                         chunk_rows,
-                               const std::vector<int64_t>&     split_size) {
+MultimodalOutputPB
+rdmaReceipt(const std::vector<std::string>& handles, int64_t chunk_rows, const std::vector<int64_t>& split_size) {
     MultimodalOutputPB receipt;
     for (const auto& handle : handles) {
         auto* slot = receipt.add_output_rdma_slots();
@@ -75,10 +74,10 @@ public:
     std::vector<MultimodalOutputPB>       responses;
     std::vector<bool>                     advertised_rdma;
     std::vector<std::vector<std::string>> released;
-    std::vector<std::string>*             log      = nullptr;
-    size_t                                requests = 0;
+    std::vector<std::string>*             log           = nullptr;
+    size_t                                requests      = 0;
     size_t                                failure_round = std::numeric_limits<size_t>::max();
-    ErrorInfo                             failure = ErrorInfo::OkStatus();
+    ErrorInfo                             failure       = ErrorInfo::OkStatus();
 
     ErrorResult<MultimodalOutputPB>
     request(const std::string&, MultimodalInputsPB& request_pb, DeadlineBudget&) override {
@@ -122,6 +121,7 @@ public:
     std::vector<std::string>* log        = nullptr;
     size_t                    reads      = 0;
     bool                      block_read = false;
+    std::vector<int64_t>      read_timeouts;
 
     bool waitUntilReadEntered(std::chrono::milliseconds timeout) {
         std::unique_lock<std::mutex> lock(block_mutex_);
@@ -136,9 +136,10 @@ public:
         block_cv_.notify_all();
     }
 
-    rdma_transport::RdmaReadResult
-    read(const std::vector<rdma_transport::RdmaDescriptor>& descriptors, int64_t) override {
+    rdma_transport::RdmaReadResult read(const std::vector<rdma_transport::RdmaDescriptor>& descriptors,
+                                        int64_t                                            timeout_ms) override {
         ++reads;
+        read_timeouts.push_back(timeout_ms);
         if (block_read) {
             std::unique_lock<std::mutex> lock(block_mutex_);
             read_entered_ = true;
@@ -197,9 +198,9 @@ public:
 };
 
 struct Harness {
-    FakeControlClient*                       control    = nullptr;
-    FakeRdmaTransport*                       transport  = nullptr;
-    FakeTerminalReader*                      terminal   = nullptr;
+    FakeControlClient*                       control   = nullptr;
+    FakeRdmaTransport*                       transport = nullptr;
+    FakeTerminalReader*                      terminal  = nullptr;
     std::unique_ptr<MMRemoteOutputTransport> under_test;
     std::vector<std::string>                 log;
 
@@ -207,9 +208,9 @@ struct Harness {
     // still registered (only it can recognise a descriptor receipt) but advertises nothing, which
     // is exactly what createMMRemoteOutputTransport() sets up.
     explicit Harness(bool with_transport = true, std::optional<RdmaConfig> validated_config = std::nullopt) {
-        auto control_up = std::make_unique<FakeControlClient>();
-        control         = control_up.get();
-        control->log    = &log;
+        auto control_up  = std::make_unique<FakeControlClient>();
+        control          = control_up.get();
+        control->log     = &log;
         auto terminal_up = std::make_unique<FakeTerminalReader>();
         terminal         = terminal_up.get();
         terminal->log    = &log;
@@ -265,14 +266,14 @@ TEST(MMRemoteOutputTransportTest, rdmaReceiptIsReadAndSlotsAreReleasedOnce) {
 TEST(MMRemoteOutputTransportTest, invalidDescriptorsAreRejectedBeforeProviderRead) {
     using MutateReceipt = std::function<void(MultimodalOutputPB*)>;
     const std::vector<std::pair<std::string, MutateReceipt>> cases{
-        {"zero address", [](auto* receipt) { receipt->mutable_output_rdma_slots(0)
-                                                  ->mutable_rdma_descriptor()
-                                                  ->set_remote_addr(0); }},
-        {"tensor outside payload", [](auto* receipt) { receipt->mutable_output_rdma_slots(0)
-                                                             ->mutable_rdma_descriptor()
-                                                             ->mutable_tensors(0)
-                                                             ->set_offset(256); }},
-        {"overlapping tensors", [](auto* receipt) {
+        {"zero address",
+         [](auto* receipt) { receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->set_remote_addr(0); }},
+        {"tensor outside payload",
+         [](auto* receipt) {
+             receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->mutable_tensors(0)->set_offset(256);
+         }},
+        {"overlapping tensors",
+         [](auto* receipt) {
              auto* slot   = receipt->mutable_output_rdma_slots(0);
              auto* tensor = slot->mutable_rdma_descriptor()->add_tensors();
              tensor->add_shape(1);
@@ -282,18 +283,21 @@ TEST(MMRemoteOutputTransportTest, invalidDescriptorsAreRejectedBeforeProviderRea
              tensor->set_nbytes(16);
              slot->add_roles(MMRdmaSlotPB::EMBEDDING);
          }},
-        {"oversized payload", [](auto* receipt) { receipt->mutable_output_rdma_slots(0)
-                                                        ->mutable_rdma_descriptor()
-                                                        ->set_payload_bytes(65); }},
-        {"duplicate NIC key", [](auto* receipt) {
+        {"oversized payload",
+         [](auto* receipt) {
+             receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->set_payload_bytes(65);
+         }},
+        {"duplicate NIC key",
+         [](auto* receipt) {
              auto* key = receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->add_nic_keys();
              key->set_nic_id(0);
              key->set_rkey(2);
          }},
-        {"invalid dtype", [](auto* receipt) { receipt->mutable_output_rdma_slots(0)
-                                                    ->mutable_rdma_descriptor()
-                                                    ->mutable_tensors(0)
-                                                    ->set_data_type(static_cast<::TensorDataTypePB>(99)); }},
+        {"invalid dtype",
+         [](auto* receipt) {
+             receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->mutable_tensors(0)->set_data_type(
+                 static_cast<::TensorDataTypePB>(99));
+         }},
     };
 
     RdmaConfig config;
@@ -318,21 +322,21 @@ TEST(MMRemoteOutputTransportTest, invalidDescriptorsAreRejectedBeforeProviderRea
 }
 
 TEST(MMRemoteOutputTransportTest, readerLockWaitHonorsDeadlineAndReleasesLeaseAsync) {
-    auto transport       = std::make_shared<FakeRdmaTransport>();
+    auto transport        = std::make_shared<FakeRdmaTransport>();
     transport->block_read = true;
-    MMRdmaReader reader(transport);
+    MMRdmaReader      reader(transport);
     FakeControlClient control;
-    const std::string endpoint = uniqueEndpoint("reader-lock-deadline");
-    auto first_receipt  = rdmaReceipt({"first"}, /*chunk_rows=*/1, /*split_size=*/{1});
-    auto second_receipt = rdmaReceipt({"second"}, /*chunk_rows=*/1, /*split_size=*/{1});
-    bool first_succeeded = false;
+    const std::string endpoint        = uniqueEndpoint("reader-lock-deadline");
+    auto              first_receipt   = rdmaReceipt({"first"}, /*chunk_rows=*/1, /*split_size=*/{1});
+    auto              second_receipt  = rdmaReceipt({"second"}, /*chunk_rows=*/1, /*split_size=*/{1});
+    bool              first_succeeded = false;
 
     std::thread first([&] {
         DeadlineBudget  budget(1000);
         DeliveryContext context{endpoint, budget, control};
         first_succeeded = reader.consume(first_receipt, context).succeeded();
     });
-    const bool read_entered = transport->waitUntilReadEntered(std::chrono::milliseconds(500));
+    const bool  read_entered = transport->waitUntilReadEntered(std::chrono::milliseconds(500));
     if (!read_entered) {
         transport->unblockRead();
         first.join();
@@ -341,9 +345,9 @@ TEST(MMRemoteOutputTransportTest, readerLockWaitHonorsDeadlineAndReleasesLeaseAs
 
     DeadlineBudget  short_budget(20);
     DeliveryContext short_context{endpoint, short_budget, control};
-    const auto      begin = std::chrono::steady_clock::now();
+    const auto      begin         = std::chrono::steady_clock::now();
     auto            second_result = reader.consume(second_receipt, short_context);
-    const auto elapsed =
+    const auto      elapsed =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin);
     const auto reads_before_unblock    = transport->reads;
     const auto released_before_unblock = control.released;
@@ -358,6 +362,96 @@ TEST(MMRemoteOutputTransportTest, readerLockWaitHonorsDeadlineAndReleasesLeaseAs
     ASSERT_EQ(released_before_unblock.size(), 1u);
     EXPECT_EQ(released_before_unblock[0], std::vector<std::string>({"second"}));
     EXPECT_TRUE(first_succeeded);
+}
+
+TEST(MMRemoteOutputTransportTest, readBudgetIsRefreshedAfterQueueingAndCappedByRequestDeadline) {
+    for (const int64_t request_timeout_ms : {2000, 250}) {
+        SCOPED_TRACE(request_timeout_ms);
+        auto transport        = std::make_shared<FakeRdmaTransport>();
+        transport->block_read = true;
+        RdmaConfig config;
+        config.read_timeout_ms = 500;
+        MMRdmaReader      reader(transport, config);
+        FakeControlClient first_control;
+        FakeControlClient second_control;
+        const std::string endpoint        = uniqueEndpoint("reader-refreshed-budget");
+        auto              first_receipt   = rdmaReceipt({"first"}, 1, {1});
+        auto              second_receipt  = rdmaReceipt({"second"}, 1, {1});
+        bool              first_succeeded = false;
+        std::thread       first([&] {
+            DeadlineBudget  budget(2000);
+            DeliveryContext context{endpoint, budget, first_control};
+            first_succeeded = reader.consume(first_receipt, context).succeeded();
+        });
+        const bool        entered = transport->waitUntilReadEntered(std::chrono::milliseconds(500));
+        if (!entered) {
+            transport->unblockRead();
+            first.join();
+        }
+        ASSERT_TRUE(entered);
+
+        DeadlineBudget  budget(request_timeout_ms);
+        DeliveryContext context{endpoint, budget, second_control};
+        std::thread     release([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            transport->unblockRead();
+        });
+        auto            result = reader.consume(second_receipt, context);
+        release.join();
+        first.join();
+
+        ASSERT_TRUE(first_succeeded);
+        ASSERT_TRUE(result.succeeded());
+        ASSERT_EQ(transport->read_timeouts.size(), 2u);
+        if (request_timeout_ms > config.read_timeout_ms) {
+            EXPECT_EQ(transport->read_timeouts[1], config.read_timeout_ms);
+        } else {
+            EXPECT_GT(transport->read_timeouts[1], 0);
+            EXPECT_LE(transport->read_timeouts[1], request_timeout_ms - 90);
+        }
+        ASSERT_EQ(first_control.released.size(), 1u);
+        ASSERT_EQ(second_control.released.size(), 1u);
+        EXPECT_EQ(second_control.released[0], std::vector<std::string>({"second"}));
+    }
+}
+
+TEST(MMRemoteOutputTransportTest, queueWaitRemainsBoundedByConfiguredReadLimit) {
+    auto transport        = std::make_shared<FakeRdmaTransport>();
+    transport->block_read = true;
+    RdmaConfig config;
+    config.read_timeout_ms = 20;
+    MMRdmaReader      reader(transport, config);
+    FakeControlClient first_control;
+    FakeControlClient second_control;
+    const std::string endpoint       = uniqueEndpoint("reader-queue-limit");
+    auto              first_receipt  = rdmaReceipt({"first"}, 1, {1});
+    auto              second_receipt = rdmaReceipt({"second"}, 1, {1});
+    std::thread       first([&] {
+        DeadlineBudget  budget(1000);
+        DeliveryContext context{endpoint, budget, first_control};
+        reader.consume(first_receipt, context);
+    });
+    const bool        entered = transport->waitUntilReadEntered(std::chrono::milliseconds(500));
+    if (!entered) {
+        transport->unblockRead();
+        first.join();
+    }
+    ASSERT_TRUE(entered);
+
+    DeadlineBudget  budget(1000);
+    DeliveryContext context{endpoint, budget, second_control};
+    const auto      begin   = std::chrono::steady_clock::now();
+    auto            result  = reader.consume(second_receipt, context);
+    const auto      elapsed = std::chrono::steady_clock::now() - begin;
+    transport->unblockRead();
+    first.join();
+
+    EXPECT_FALSE(result.succeeded());
+    EXPECT_FALSE(budget.exhausted());
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 500);
+    EXPECT_EQ(transport->reads, 1u);
+    ASSERT_EQ(second_control.released.size(), 1u);
+    EXPECT_EQ(second_control.released[0], std::vector<std::string>({"second"}));
 }
 
 TEST(MMRemoteOutputTransportTest, readFailureReturnsErrorWithoutAnotherVitRequest) {

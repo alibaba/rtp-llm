@@ -325,21 +325,22 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                             remaining);
         return false;
     }
-    int64_t read_timeout_ms = remaining;
-    if (rdma_config_.has_value() && rdma_config_->read_timeout_ms > 0) {
-        read_timeout_ms = std::min(read_timeout_ms, rdma_config_->read_timeout_ms);
-    }
-    const auto                         wait_start    = std::chrono::steady_clock::now();
-    const auto                         read_deadline = wait_start + std::chrono::milliseconds(read_timeout_ms);
+    const int64_t read_limit_ms =
+        rdma_config_.has_value() && rdma_config_->read_timeout_ms > 0 ? rdma_config_->read_timeout_ms : remaining;
+    // Bound queueing separately so waiting behind another read cannot consume this
+    // read's entire transfer budget. Both budgets are capped by the request's remaining time.
+    const int64_t                      queue_timeout_ms = std::min(remaining, read_limit_ms);
+    const auto                         wait_start       = std::chrono::steady_clock::now();
+    const auto                         queue_deadline   = wait_start + std::chrono::milliseconds(queue_timeout_ms);
     std::unique_lock<std::timed_mutex> provider_lock(provider_mutex_, std::defer_lock);
-    if (!provider_lock.try_lock_until(read_deadline)) {
+    if (!provider_lock.try_lock_until(queue_deadline)) {
         *deadline_exhausted = context.budget.exhausted();
         RTP_LLM_LOG_WARNING(
             "[MM-RDMA-READ] request_id=%ld endpoint=%s stage=lock_timeout "
             "timeout_ms=%ld lock_wait_ms=%.3f remaining_ms=%ld slots=%zu",
             context.request_id,
             context.endpoint.c_str(),
-            read_timeout_ms,
+            queue_timeout_ms,
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count(),
             context.budget.remainingMs(),
             descriptors.size());
@@ -358,19 +359,7 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                             remaining);
         return false;
     }
-    const int64_t read_remaining_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(read_deadline - std::chrono::steady_clock::now()).count();
-    if (read_remaining_ms <= 0) {
-        *deadline_exhausted = context.budget.exhausted();
-        RTP_LLM_LOG_WARNING("[MM-RDMA-READ] request_id=%ld endpoint=%s stage=read_budget_exhausted "
-                            "lock_wait_ms=%.3f remaining_ms=%ld",
-                            context.request_id,
-                            context.endpoint.c_str(),
-                            lock_wait_ms,
-                            remaining);
-        return false;
-    }
-    read_timeout_ms = std::min(remaining, read_remaining_ms);
+    const int64_t                  read_timeout_ms = std::min(remaining, read_limit_ms);
     rdma_transport::RdmaReadResult result;
     try {
         result = reader_->read(descriptors, read_timeout_ms);
@@ -406,6 +395,15 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
             "rdma batch returned %zu tensors for %zu manifest entries", result.tensors.size(), parsed_roles.size());
         return false;
     }
+    RTP_LLM_LOG_INFO("[MM-RDMA-READ] request_id=%ld endpoint=%s stage=complete "
+                     "slots=%zu lock_wait_ms=%.3f read_ms=%.3f timeout_ms=%ld remaining_ms=%ld",
+                     context.request_id,
+                     context.endpoint.c_str(),
+                     descriptors.size(),
+                     lock_wait_ms,
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - read_start).count(),
+                     read_timeout_ms,
+                     context.budget.remainingMs());
     *roles      = std::move(parsed_roles);
     *mm_tensors = std::move(result.tensors);
     return true;
