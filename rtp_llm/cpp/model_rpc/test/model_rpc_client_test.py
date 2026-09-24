@@ -38,7 +38,12 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType, ThinkingMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    RoleAddr,
+    RoleType,
+    ThinkingMode,
+)
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -650,6 +655,76 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(run_and_close_after_finished())
 
         self.assertFalse(stub.fetch_iterator.cancelled)
+
+    def test_enqueue_cancels_generate_stream_on_early_close(self):
+        # The non-master-enqueue path (what a PD leg uses) streams via GenerateStreamCall. Closing the
+        async def run_and_close():
+            gen = client.enqueue(input_py)
+            await gen.__anext__()
+            await gen.aclose()
+
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(
+            generate_responses=[
+                _make_response(finished=False),
+                _make_response(finished=True),
+            ]
+        )
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(timeout_ms=1000),
+            request_id=325,
+            mm_inputs=[],
+            enqueued_by_master=False,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(run_and_close())
+
+        self.assertEqual(len(stub.generate_calls), 1)
+        self.assertTrue(stub.generate_iterator.cancelled)
+
+    def test_enqueue_does_not_cancel_generate_stream_after_normal_completion(self):
+        # The complement: a stream consumed to the end is marked done, so closing it afterwards must
+        # not cancel a call that already completed successfully.
+        async def run_to_end_then_close():
+            gen = client.enqueue(input_py)
+            async for _ in gen:
+                pass
+            await gen.aclose()
+
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(timeout_ms=1000),
+            request_id=326,
+            mm_inputs=[],
+            enqueued_by_master=False,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(run_to_end_then_close())
+
+        self.assertFalse(stub.generate_iterator.cancelled)
 
 
 if __name__ == "__main__":

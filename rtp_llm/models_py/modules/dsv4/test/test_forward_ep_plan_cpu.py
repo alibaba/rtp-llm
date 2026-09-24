@@ -85,6 +85,15 @@ strategy_methods = extract(
     "NcclEpMxfp8Strategy",
 )
 
+strategy_methods.update(
+    extract(
+        ROOT / "moe/strategies/base.py",
+        {"prepare_dispatch", "run_dispatch_prepared"},
+        {},
+        "RoutedExpertsStrategy",
+    )
+)
+
 MOE_ENV = dict(
     torch=torch,
     os=os,
@@ -253,6 +262,12 @@ def run_model(model):
 
 
 class ForwardPlanTests(unittest.TestCase):
+    def test_real_default_prepared_dispatch_contract(self):
+        strategy = make_model()[0].layers[0].ffn._strategy
+        self.assertIsNone(strategy.prepare_dispatch(None, None, None))
+        with self.assertRaisesRegex(NotImplementedError, "run_dispatch_prepared"):
+            strategy.run_dispatch_prepared({})
+
     def setUp(self):
         self.env = patch.dict(
             os.environ, {"DSV4_MOE_FORWARD_COUNT_PLAN": "1"}, clear=False

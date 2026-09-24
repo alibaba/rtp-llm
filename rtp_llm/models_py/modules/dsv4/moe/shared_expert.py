@@ -15,12 +15,13 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-
-from .warmup_sync import cuda_graph_warmup_forward_enabled
 from rtp_llm.models_py.utils.arch import is_sm120
 
+from .warmup_sync import cuda_graph_warmup_forward_enabled
 
-_SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
+_SHARED_EXPERT_WORKSPACE_CACHE: dict[
+    tuple, dict[str, torch.Tensor | int | torch.device]
+] = {}
 _SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
 
 
@@ -30,6 +31,8 @@ def _mode() -> str:
 
 def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
+
+
 def _requires_sm120_linear(x: torch.Tensor) -> bool:
     return x.is_cuda and is_sm120(x.device)
 
@@ -80,7 +83,9 @@ def _get_shared_expert_stream(
 
 
 def _find_module_cuda_device(module: nn.Module) -> torch.device | None:
-    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
+    for tensor in list(module.parameters(recurse=True)) + list(
+        module.buffers(recurse=True)
+    ):
         if tensor.is_cuda:
             return tensor.device
 
@@ -286,7 +291,9 @@ class FusedSharedExpertFastPath:
         if self.dim is None:
             self.dim = D
         if D != self.dim:
-            raise RuntimeError(f"shared expert dim mismatch: got {D}, expected {self.dim}")
+            raise RuntimeError(
+                f"shared expert dim mismatch: got {D}, expected {self.dim}"
+            )
         if self.inter_dim is None:
             w13, _ = self._linear_parts(self._shared.w13)  # type: ignore[attr-defined]
             self.inter_dim = w13.shape[0] // 2
@@ -322,7 +329,9 @@ class FusedSharedExpertFastPath:
             dtype=torch.float8_e4m3fn,
             device=x.device,
         )
-        self._x_scale_storage = self._scale_storage((D // 128 + 3) // 4, capacity, x.device)
+        self._x_scale_storage = self._scale_storage(
+            (D // 128 + 3) // 4, capacity, x.device
+        )
         self._gate_up_bf16 = torch.empty(
             (capacity, 2 * inter),
             dtype=torch.bfloat16,
@@ -381,9 +390,10 @@ class FusedSharedExpertFastPath:
         if T == 0:
             return out
 
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+
         from ._shared_expert_triton import quant_bf16_fp8_packed_ue8m0
         from ._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
 
         quant_bf16_fp8_packed_ue8m0(x, x_fp8, x_scale, group_size=128, eps=1.0e-4)
         w13 = self._linear_parts(shared_experts.w13)
@@ -519,7 +529,24 @@ def _run_shared_expert(
         raise RuntimeError(
             "DSV4_MOE_STRICT_FUSED=1 forbids generic Expert.forward shared path"
         )
-    return shared_experts(x).float()
+    if os.environ.get("DSV4_MOE_STRATEGY") != "sm120_decode":
+        return shared_experts(x).float()
+    try:
+        out = shared_experts(x)
+        # Small/decode paths keep the fp32 upcast (captured-graph consistency);
+        # at big T return the module dtype — the combine epilogue upcasts, and
+        # halving the held shared buffer (256 -> 128 MiB @16K) matters when the
+        # routed a2a transients run alongside it.
+        return out.float() if int(x.size(0)) <= 8192 else out
+    except torch.OutOfMemoryError:
+        if os.environ.get("DSV4_EMPTY_CACHE_MODE", "all") != "all":
+            raise
+        # At big T the routed path's freed a2a transients sit in the cache
+        # too fragmented for this layer's [T, dim] output. The shared expert
+        # is collective-free at tp_size <= 1 — flush and re-run once; the DP
+        # peers simply wait at the next MoE count-AllGather.
+        torch.cuda.empty_cache()
+        return shared_experts(x).float()
 
 
 def get_shared_expert_executor(

@@ -362,6 +362,10 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# The canonical, runnable settings of every release profile are packaged as data (see
+# //rtp_llm/config/release_profiles): a runfiles-only deployment must ship the settings artifact it
+# validated against, or `profile_json_path()` resolves beside the module to a file that is not there.
+
 py_library(
     name = "release_version",
     srcs = ["release_version.py"],
@@ -379,7 +383,10 @@ py_library(
         "//rtp_llm/models_py/distributed:rank_layout",
         ":multimodal"
     ],
-    data = [":alog_config"]
+    data = [
+        ":alog_config",
+        "//rtp_llm/config/release_profiles:all_profiles",
+    ]
 )
 
 py_library(

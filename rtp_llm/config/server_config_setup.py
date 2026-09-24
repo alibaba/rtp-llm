@@ -777,3 +777,9 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+
+    # Validate after all defaults resolve, before spawning model processes.
+    # Unset release profiles leave normal startup unchanged.
+    from rtp_llm.config.release_profile import enforce_release_profile
+
+    enforce_release_profile(py_env_configs)

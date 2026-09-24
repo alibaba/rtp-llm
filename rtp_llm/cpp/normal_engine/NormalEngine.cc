@@ -731,17 +731,30 @@ void NormalEngine::loop() {
         RTP_LLM_LOG_INFO("PP system prompt build done");
         publishStartupReady();
     }
+    int64_t consecutive_failures = 0;
     while (should_loop_()) {
-        absl::Status status;
         try {
-            status = parallelism_config.pp_size > 1 ? pp_step() : step();
+            auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+                THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+            consecutive_failures = 0;
         } catch (const PPCommWatchdogTimeout& e) {
             RTP_LLM_LOG_ERROR("PP comm watchdog fired, peer rank unreachable: %s", e.what());
             RTP_LLM_FAIL("PP comm watchdog timeout - forcing process exit");
-        }
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
-            THROW_IF_STATUS_ERROR(trySaveStepError());
+        } catch (const std::exception& e) {
+            if (parallelism_config.pp_size > 1) {
+                RTP_LLM_FAIL("PP execution failed: %s", e.what());
+            }
+            ++consecutive_failures;
+            if (consecutive_failures <= 20 || consecutive_failures % 1000 == 0) {
+                RTP_LLM_LOG_ERROR("engine step failed (%ld consecutive): %s", consecutive_failures, e.what());
+            }
+            if (consecutive_failures >= 5) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(std::min<int64_t>(1000, 20 * consecutive_failures)));
+            }
         }
     }
 }
@@ -952,6 +965,15 @@ bool NormalEngine::isDSpark() {
     return sp_config.type == SP_TYPE_DSPARK;
 }
 
+// A fixed decode batch keeps graph keys rank-uniform. Zero disables padding.
+static int decodeFixedBs() {
+    static const int value = [] {
+        const char* e = getenv("RTP_LLM_DECODE_FIXED_BS");
+        return (e && *e) ? atoi(e) : 0;
+    }();
+    return value;
+}
+
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (parallelism_config.pp_size > 1) {
         /** PP executes one scheduled phase, so only an empty batch needs a placeholder. */
@@ -976,9 +998,25 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::PREFILL:
                 need_prefill = streams.empty();
                 break;
-            case RoleType::DECODE:
-                need_decode = streams.empty();
+            case RoleType::DECODE: {
+                const int fixed_bs = decodeFixedBs();
+                if (fixed_bs > 0) {
+                    RTP_LLM_CHECK_WITH_INFO(static_cast<int>(streams.size()) <= fixed_bs,
+                                            "decode batch exceeds RTP_LLM_DECODE_FIXED_BS");
+                    const int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+                    while (static_cast<int>(streams.size()) < fixed_bs) {
+                        streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(sp_config.gen_num_per_cycle,
+                                                                                    model_config_,
+                                                                                    runtime_config,
+                                                                                    resource_context_,
+                                                                                    mtp_vocab_size,
+                                                                                    isDSpark()));
+                    }
+                } else {
+                    need_decode = streams.empty();
+                }
                 break;
+            }
             case RoleType::PDFUSION: {
                 bool has_prefill = false;
                 bool has_decode  = false;

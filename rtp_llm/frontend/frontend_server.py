@@ -38,6 +38,9 @@ from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
 
+# How often a non-streaming request polls for client disconnect while the backend generates. This poll
+DISCONNECT_POLL_INTERVAL_S = 0.1
+
 
 class FrontendServer(object):
     def __init__(
@@ -493,6 +496,18 @@ class FrontendServer(object):
 
         return complete_response
 
+    @staticmethod
+    async def _drain_responses(res: Any) -> None:
+        """Drive a response generator to completion; the items are collected inside it."""
+        async for _ in res:
+            pass
+
+    @staticmethod
+    async def _wait_for_disconnect(raw_request: RawRequest) -> None:
+        """Return once the client has disconnected, polling independently of any yield cadence."""
+        while not await raw_request.is_disconnected():
+            await asyncio.sleep(DISCONNECT_POLL_INTERVAL_S)
+
     async def _infer_impl(
         self,
         req: Dict[Any, Any],
@@ -519,11 +534,31 @@ class FrontendServer(object):
             return StreamingResponse(
                 self.stream_response(req, res), media_type="text/event-stream"
             )
-        async for x in res:
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await res.aclose()
-                raise asyncio.CancelledError("client disconnects")
+        # Race the drain against a disconnect poller rather than checking for disconnect between
+        # items: for a non-streaming request the backend buffers every output and yields only once
+        # generation is complete, so an in-loop check cannot observe a disconnect earlier than that,
+        # and a stalled generation would never be observed at all.
+        drain = asyncio.ensure_future(self._drain_responses(res))
+        watcher = asyncio.ensure_future(self._wait_for_disconnect(raw_request))
+        done, _ = await asyncio.wait(
+            {drain, watcher}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if drain not in done:
+            # The client went away first. Cancelling the drain throws into the generator, which runs
+            logging.warning(
+                "request [%s] client disconnected during generation; cancelling the backend call",
+                req.get(request_id_field_name),
+            )
+            drain.cancel()
+            try:
+                await drain
+            except asyncio.CancelledError:
+                pass
+            await res.aclose()
+            raise asyncio.CancelledError("client disconnects")
+        watcher.cancel()
+        # Surface a generation error unchanged so the caller's error-to-status mapping still holds.
+        drain.result()
 
         complete_response = await self._collect_complete_response_and_record_access_log(
             req, res

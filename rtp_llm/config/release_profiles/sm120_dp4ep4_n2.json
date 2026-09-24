@@ -1,0 +1,44 @@
+{
+  "per_leg": {
+    "decode": {
+      "capture_batch_sizes": [
+        1,
+        2
+      ],
+      "concurrency_limit": 2,
+      "cp_rotate_method": "PREFILL_CP",
+      "dp_size": 4,
+      "enable_cuda_graph": true,
+      "ep_size": 4,
+      "fixed_bs": 2,
+      "kernel_seq_size_per_block": 256,
+      "max_seq_len": 32832,
+      "prefill_cp_size": 4,
+      "reuse_cache": false,
+      "tp_size": 1,
+      "world_size": 4
+    },
+    "prefill": {
+      "cp_rotate_method": "ALL_GATHER",
+      "dp_size": 1,
+      "ep_size": 4,
+      "kernel_seq_size_per_block": 256,
+      "max_batch_tokens_size": 64000,
+      "prefill_cp_kv_cache_sharded": true,
+      "reuse_cache": false,
+      "tp_size": 4,
+      "world_size": 4
+    }
+  },
+  "profile": "sm120_dp4ep4_n2",
+  "shared": {
+    "expected_decode_ranks": 4,
+    "expected_prefill_ranks": 4,
+    "gen_num_per_cycle": 3,
+    "moe_backend": "default",
+    "nccl_transport": "default",
+    "pd_kv_cache_sharded": true,
+    "reuse_cache": false,
+    "speculative_type": "DSPARK"
+  }
+}

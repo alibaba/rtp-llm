@@ -192,8 +192,8 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputData");
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto& py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    const int token_num   = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
+    auto&     py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    const int token_num       = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
     optimizedCopyAsync(inputs.input_ids, py_model_inputs.input_ids, token_num * sizeof(int));
 
@@ -293,7 +293,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // async strided D2H copy that the pre-callPrepareCudaGraph synchronize below
     // waits for; host sources keep main's synchronous row-by-row memcpy.
     bool pending_host_mirror_d2h = false;
-    auto stridedCopyHost = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst) {
+    auto stridedCopyHost         = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() <= 0 || !dst.defined() || dst.is_cuda())
             return;
         if (src.is_cuda()) {
@@ -458,8 +458,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined()
-                && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
+            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
                 dst_inputs.kv_cache_kernel_block_id.zero_();
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
@@ -523,8 +522,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             // whole captured range - not just the padding tail - would otherwise
             // keep the capture-time max_seq_len values.
             const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
-                                                  && inputs.attention_inputs.sequence_lengths.numel() > 0;
-            const int  fill_start                = has_live_sequence_lengths ? state.current_batch_size : 0;
+                                                   && inputs.attention_inputs.sequence_lengths.numel() > 0;
+            const int fill_start = has_live_sequence_lengths ? state.current_batch_size : 0;
             if (fill_start < selected_graph_batch_size) {
                 py_model_inputs_.attention_inputs.sequence_lengths.slice(0, fill_start, selected_graph_batch_size)
                     .fill_(0);
@@ -544,10 +543,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                 const auto& input_lengths_host = live_input_lengths_on_cuda ?
                                                      py_model_inputs_.attention_inputs.input_lengths :
                                                      inputs.attention_inputs.input_lengths;
-                auto* input_lengths      = input_lengths_host.data_ptr<int32_t>();
-                auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
-                int   cumulative_padding = 0;
-                int   token_idx          = 0;
+                auto*       input_lengths      = input_lengths_host.data_ptr<int32_t>();
+                auto*       padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
+                int         cumulative_padding = 0;
+                int         token_idx          = 0;
                 for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
                     const int input_length = input_lengths[batch_idx];
                     std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
@@ -663,8 +662,7 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             RTP_LLM_CHECK_WITH_INFO(dst_it != py_model_inputs.attention_inputs_by_tag.end(),
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
-            add_block_table(src_inputs.kv_cache_kernel_block_id_device,
-                            dst_it->second.kv_cache_kernel_block_id_device);
+            add_block_table(src_inputs.kv_cache_kernel_block_id_device, dst_it->second.kv_cache_kernel_block_id_device);
         }
     }
     fusedCopy(d2d_copies);
@@ -742,6 +740,13 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
 }
 
 bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state) {
+    // Eager fallback is opt-in: a rank-local graph/eager decision can select
+    // different MoE collectives across ranks. Enable only with rank-uniform admission.
+    static const bool soft_degrade = [] {
+        const char* e        = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
+        const char* strategy = getenv("DSV4_MOE_STRATEGY");
+        return !strategy || std::string(strategy) != "sm120_decode" || (e && std::string(e) == "1");
+    }();
     int cuda_graph_bs        = inputs.attention_inputs.input_lengths.size(0);
     state.current_batch_size = cuda_graph_bs;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
@@ -752,10 +757,18 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_batch_size);
     // No captured graph for batch >= current (all captures smaller)
     if (it == capture_range_.end()) {
-        RTP_LLM_LOG_WARNING("decode batch size %d exceeds max captured %d, fallback to normal run",
-                            state.current_batch_size,
-                            capture_range_.back());
-        return false;
+        if (soft_degrade) {
+            RTP_LLM_LOG_WARNING("decode batch size %d exceeds max captured %d — soft-degrading to eager "
+                                "(extend decode_capture_batch_sizes to graph this size)",
+                                state.current_batch_size,
+                                capture_range_.back());
+            return false;
+        }
+        RTP_LLM_CHECK_WITH_INFO(false,
+                                "decode batch size %d exceeds max captured %d "
+                                "(extend decode_capture_batch_sizes or reduce batch size)",
+                                state.current_batch_size,
+                                capture_range_.back());
     }
     state.current_real_graph_bs = *it;
     RTP_LLM_LOG_DEBUG(
@@ -850,9 +863,52 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             RTP_LLM_LOG_WARNING("Target-verify CUDA graph requires prefill attention inputs, fallback to normal run.");
             return false;
         }
-        // Target-verify must also respect captured decode range. Otherwise we
-        // may replay an uncaptured graph key.
-        return tryGetRealGraphDecodeBatchSize(inputs, state) && canReplaySelectedGraph(inputs, state);
+        if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
+            return false;
+        }
+        const int expected_tokens = state.current_batch_size * num_tokens_per_bs_;
+        if (state.seq_len_sum != expected_tokens) {
+            static const bool soft_degrade_tv = [] {
+                const char* e        = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
+                const char* strategy = getenv("DSV4_MOE_STRATEGY");
+                return !strategy || std::string(strategy) != "sm120_decode" || (e && std::string(e) == "1");
+            }();
+            if (soft_degrade_tv) {
+                // Eager execution accepts mixed fresh/steady stream geometry.
+                RTP_LLM_LOG_WARNING("target-verify decode graph expects %d tokens (%d batches * %d), got %d "
+                                    "— soft-degrading to eager",
+                                    expected_tokens,
+                                    state.current_batch_size,
+                                    num_tokens_per_bs_,
+                                    state.seq_len_sum);
+                return false;
+            }
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "target-verify decode graph expects %d tokens (%d batches * %d), got %d",
+                                    expected_tokens,
+                                    state.current_batch_size,
+                                    num_tokens_per_bs_,
+                                    state.seq_len_sum);
+        }
+        if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0
+            && inputs.input_hiddens.size(0) != expected_tokens) {
+            static const bool soft_degrade_ih = [] {
+                const char* e        = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
+                const char* strategy = getenv("DSV4_MOE_STRATEGY");
+                return !strategy || std::string(strategy) != "sm120_decode" || (e && std::string(e) == "1");
+            }();
+            if (soft_degrade_ih) {
+                RTP_LLM_LOG_WARNING(
+                    "target-verify decode graph expects %d input-hidden rows, got %ld — soft-degrading to eager",
+                    expected_tokens,
+                    inputs.input_hiddens.size(0));
+                return false;
+            }
+            RTP_LLM_FAIL("target-verify decode graph expects %d input-hidden rows, got %ld",
+                         expected_tokens,
+                         inputs.input_hiddens.size(0));
+        }
+        return canReplaySelectedGraph(inputs, state);
     }
 
     if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
