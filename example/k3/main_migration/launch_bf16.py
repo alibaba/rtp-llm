@@ -36,6 +36,9 @@ def launch_config(args):
         "LOAD_METHOD": "fastsafetensors",
         "LOAD_PYTHON_MODEL": "1",
         "ACT_TYPE": "BF16",
+        # Match native Blackwell batch invariance: prevent split-K from
+        # changing dense down-projection results after prefix-cache reuse.
+        "CUBLAS_WORKSPACE_CONFIG": ":16:8",
         "SP_TYPE": "mtp",
         "SP_MODEL_TYPE": "kimi_k3_mtp",
         "SP_CHECKPOINT_PATH": str(draft),

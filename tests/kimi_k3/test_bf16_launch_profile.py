@@ -39,6 +39,8 @@ def test_fixed_full_profile(tmp_path, role):
     options = dict(zip(command[1::2], command[2::2]))
     assert environment["ACT_TYPE"] == environment["SP_ACT_TYPE"] == "BF16"
     assert environment["LOAD_METHOD"] == "fastsafetensors"
+    assert environment["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+    assert "CUBLASLT_WORKSPACE_SIZE" not in environment
     assert environment["GEN_NUM_PER_CIRCLE"] == "3"
     for key in ("FP8_GEMM", "FP8_MLA", "FP8_KV_CACHE"):
         assert environment[key] == "0"
