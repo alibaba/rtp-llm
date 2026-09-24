@@ -652,12 +652,13 @@ class KimiK3Weight(ModelDeployWeightInfo):
         return None
 
     def _dense_weights(self) -> List[WeightModule]:
-        # Dense forward gathers SP tokens and sums TP partials with reduce-scatter.
-        # Use TP shards even when RTP sets ffn_tp_size=1 for sequence parallelism.
+        # Each SP rank runs the complete dense MLP on its local token shard.
+        # Replicate these weights to preserve the native model's single BF16
+        # down projection, without rounding and summing TP partial outputs.
         return [
-            self._linear(W.ffn_w1, "mlp.gate_proj.weight", split_func=sp_neg1),
-            self._linear(W.ffn_w3, "mlp.up_proj.weight", split_func=sp_neg1),
-            self._linear(W.ffn_w2, "mlp.down_proj.weight", split_func=sp_0),
+            self._linear(W.ffn_w1, "mlp.gate_proj.weight"),
+            self._linear(W.ffn_w3, "mlp.up_proj.weight"),
+            self._linear(W.ffn_w2, "mlp.down_proj.weight"),
         ]
 
     def _moe_weights(self) -> List[WeightModule]:

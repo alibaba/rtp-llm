@@ -23,7 +23,6 @@ from rtp_llm.models_py.model_desc.block_map import (
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearMetadata
 from rtp_llm.models_py.modules import Embedding, RMSNorm
-from rtp_llm.models_py.modules.kimi_k3.collectives import reduce_scatter
 from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA, KimiK3MLA, linear
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE, situ
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
@@ -36,9 +35,10 @@ from rtp_llm.utils.model_weight import W
 
 
 class KimiK3DenseMLP(nn.Module):
+    """Replicated dense weights applied to the local sequence-parallel tokens."""
+
     def __init__(self, config, parallelism, weights, hardware):
         super().__init__()
-        self.tp_size = parallelism.tp_size
         self.gate = linear(weights, W.ffn_w1, hardware)
         self.up = linear(weights, W.ffn_w3, hardware)
         self.down = linear(weights, W.ffn_w2, hardware)
@@ -46,14 +46,12 @@ class KimiK3DenseMLP(nn.Module):
         self.linear_beta = config.k3_runtime_config.activation_situ_linear_beta
 
     def forward(self, hidden, valid_mask=None):
-        full = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
-        out = self.down(
+        return self.down(
             situ(
-                self.gate(full), self.up(full), self.beta, self.linear_beta,
+                self.gate(hidden), self.up(hidden), self.beta, self.linear_beta,
                 inplace=True,
             )
         )
-        return reduce_scatter(out, Group.TP) if self.tp_size > 1 else out
 
 
 class KimiK3DecoderLayer(nn.Module):
