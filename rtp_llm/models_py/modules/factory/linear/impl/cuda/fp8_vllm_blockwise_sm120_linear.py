@@ -143,7 +143,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         if not sm120_blockwise_backend_available(weight.device):
             return False, (
                 "SM120 FP8_PER_BLOCK backend is unavailable; rebuild on x86 "
-                "with --config=cuda12_9 (ENABLE_FP8_SM120)"
+                "with --config=cuda12_9 or --config=cuda13, plus "
+                "--config=sm12x (ENABLE_FP8_SM120)"
             )
         if weight.dim() != 2 or weight_scales.dim() != 2:
             return False, (
@@ -201,7 +202,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         if self._gemm_op is None:
             raise RuntimeError(
                 "cutlass_scaled_mm_blockwise_sm120_fp8 op is not available; "
-                "this backend requires a cuda12_9_x86 build with -DENABLE_FP8_SM120."
+                "this backend requires an x86 cuda12_9 or cuda13 build "
+                "with --config=sm12x and -DENABLE_FP8_SM120."
             )
 
         self.weight = weight

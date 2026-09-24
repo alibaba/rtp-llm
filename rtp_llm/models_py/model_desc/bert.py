@@ -27,6 +27,21 @@ from rtp_llm.utils.model_weight import W
 
 
 class BertDecoderLayer(nn.Module):
+    @staticmethod
+    def _can_fuse_layernorm_quant(hidden_states: torch.Tensor, linear) -> bool:
+        # This is a BERT-only producer capability, deliberately narrower than
+        # the linear backend's ability to consume prequantized activations.
+        return (
+            linear.supports_prequantized_activation
+            and linear.fused_activation_quant_format == "fp8_ue8m0_block128_colmajor"
+            and hidden_states.is_cuda
+            and hidden_states.dtype in (torch.float16, torch.bfloat16)
+            and hidden_states.ndim == 2
+            and hidden_states.is_contiguous()
+            and 0 < hidden_states.shape[1] <= 1024
+            and hidden_states.shape[1] % 128 == 0
+        )
+
     def __init__(
         self,
         config: ModelConfig,
@@ -87,7 +102,9 @@ class BertDecoderLayer(nn.Module):
             if attention_bias is not None
             else empty_bias
         )
-        use_quantized_mlp_input = self.mlp.up_proj.supports_prequantized_activation
+        use_quantized_mlp_input = self._can_fuse_layernorm_quant(
+            hidden_states, self.mlp.up_proj
+        )
         if use_quantized_mlp_input:
             hidden_states, mlp_input, mlp_input_scales = (
                 self.input_layernorm.forward_quantized(
@@ -108,7 +125,9 @@ class BertDecoderLayer(nn.Module):
         ffn_bias_tensor = (
             ffn_bias.to(hidden_states.dtype) if ffn_bias is not None else empty_bias
         )
-        if quantize_output and self.self_attn.qkv_proj.supports_prequantized_activation:
+        if quantize_output and self._can_fuse_layernorm_quant(
+            hidden_states, self.self_attn.qkv_proj
+        ):
             hidden_states, output_fp8, output_scales = (
                 self.post_attention_layernorm.forward_quantized(
                     hidden_states, residual, ffn_bias_tensor
