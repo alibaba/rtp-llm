@@ -1,4 +1,8 @@
+import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -6,12 +10,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+from PIL import Image
 
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl import (
+    minimax_m3_vl_mixin as mixin_module,
+)
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl import (
     minimax_m3_vl_rope as rope_module,
 )
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl import (
     minimax_m3_vl_vit as vit_module,
+)
+from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
+    IMAGE_MAX_TOTAL_PIXELS,
+    MiniMaxM3VLImageProcessor,
 )
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
     MiniMaxM3VLDeployWeightInfo,
@@ -34,7 +47,7 @@ class MiniMaxM3VLWorkEstimateTest(unittest.TestCase):
         self.embedding.mm_processor = SimpleNamespace(
             patch_size=14,
             max_pixels=451584,
-            max_total_pixels=451584,
+            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
         )
         self.embedding.temporal_patch_size = 2
         self.embedding.merge_size = 2
@@ -76,6 +89,104 @@ class MiniMaxM3VLWorkEstimateTest(unittest.TestCase):
         self.assertEqual(budget.max_attention_segment, 4 * 2304)
         self.assertEqual(budget.attention_work, 32 * (2304**2))
         self.assertIsNone(self.embedding.get_batch_work_budget(1 << 30))
+
+
+class MiniMaxM3VLCheckpointPreprocessTest(unittest.TestCase):
+    def _init_embedding(self, ckpt_path):
+        with mock.patch.object(
+            mixin_module.AutoConfig, "from_pretrained", return_value=SimpleNamespace()
+        ), mock.patch.object(
+            mixin_module.AutoTokenizer, "from_pretrained", return_value=mock.Mock()
+        ), mock.patch.object(
+            mixin_module, "MiniMaxM3VLVisionTower", return_value=nn.Identity()
+        ), mock.patch.object(
+            MiniMaxM3VLImageEmbedding,
+            "_load_word_embedding",
+            return_value=torch.zeros(
+                max(
+                    MiniMaxM3VLImageEmbedding.START_IMAGE_TOKEN_ID,
+                    MiniMaxM3VLImageEmbedding.END_IMAGE_TOKEN_ID,
+                )
+                + 1,
+                1,
+            ),
+        ):
+            return MiniMaxM3VLImageEmbedding(
+                SimpleNamespace(config={"ckpt_path": ckpt_path})
+            )
+
+    def test_checkpoint_video_settings_reach_preprocess_params(self):
+        with tempfile.TemporaryDirectory() as ckpt:
+            root = Path(ckpt)
+            (root / "preprocessor_config.json").write_text(
+                json.dumps({"max_pixels": 451584})
+            )
+            nested = {"fps": 2.0, "max_frames": 48, "max_pixels": 451584}
+            (root / "processor_config.json").write_text(
+                json.dumps({"video_processor": nested})
+            )
+            # Bundled-only checkpoints also work.
+            embedding = self._init_embedding(ckpt)
+            params = embedding.get_preprocess_params()
+            self.assertEqual(params["video_fps"], 2.0)
+            self.assertEqual(params["video_max_frames"], 48)
+            self.assertEqual(params["video_processor_config"], nested)
+
+            dedicated = {"fps": 1.0, "max_frames": 768, "total_pixels": 45158400}
+            (root / "video_preprocessor_config.json").write_text(json.dumps(dedicated))
+            params = self._init_embedding(ckpt).get_preprocess_params()
+            self.assertEqual(params["processor"].max_pixels, 451584)
+            self.assertEqual(params["video_fps"], 1.0)
+            self.assertEqual(params["video_max_frames"], 768)
+            self.assertEqual(params["video_processor_config"], {**nested, **dedicated})
+
+    def test_legacy_checkpoint_keeps_existing_defaults(self):
+        with tempfile.TemporaryDirectory() as ckpt:
+            (Path(ckpt) / "preprocessor_config.json").write_text("{}")
+            params = self._init_embedding(ckpt).get_preprocess_params()
+        self.assertEqual(params["processor"].max_pixels, IMAGE_MAX_TOTAL_PIXELS)
+        self.assertEqual(params["video_processor_config"], {})
+        self.assertEqual(params["video_fps"], 1.0)
+        self.assertEqual(params["video_max_frames"], 768)
+
+    def test_image_processor_grid_and_estimate_honor_checkpoint_and_request(self):
+        processor = MiniMaxM3VLImageProcessor(max_pixels=451584)
+        image = torch.zeros(3, 1008, 1008, dtype=torch.uint8)
+        for overrides, edge in (({}, 672), ({"max_pixels": 1008**2}, 1008)):
+            with self.subTest(overrides=overrides):
+                output = processor.preprocess(image, return_tensors="pt", **overrides)
+                self.assertEqual(
+                    output["image_grid_thw"].tolist(), [[1, edge // 14, edge // 14]]
+                )
+                self.assertEqual(
+                    processor.get_number_of_image_patches(1008, 1008, overrides),
+                    output["pixel_values"].shape[0],
+                )
+
+    def test_production_image_preprocess_honors_checkpoint_and_request(self):
+        processor = MiniMaxM3VLImageProcessor(max_pixels=451584)
+        data = io.BytesIO()
+        Image.new("RGB", (1008, 1008)).save(data, format="PNG")
+        for overrides, edge in (
+            ({}, 672),
+            ({"max_pixels": 1008**2}, 1008),
+            ({"max_long_side_pixel": 896}, 896),
+        ):
+            with self.subTest(overrides=overrides), mock.patch.object(
+                mixin_module,
+                "get_bytes_io_from_url",
+                return_value=io.BytesIO(data.getvalue()),
+            ):
+                raw, target, timestamps = MiniMaxM3VLImageEmbedding._preprocess_image(
+                    SimpleNamespace(
+                        url="image", mm_preprocess_config=SimpleNamespace(**overrides)
+                    ),
+                    VitConfig(),
+                    processor,
+                )
+            self.assertEqual(raw.shape, (3, 1008, 1008))
+            self.assertEqual(target, (edge, edge))
+            self.assertIsNone(timestamps)
 
 
 class MiniMaxM3VLGpuFoldTest(unittest.TestCase):

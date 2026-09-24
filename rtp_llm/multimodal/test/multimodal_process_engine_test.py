@@ -2208,12 +2208,20 @@ class MiniMaxM3VLPreprocessTest(TestCase):
         source_height=28,
         source_width=28,
         max_long_side_pixel=-1,
+        requested_max_pixels=-1,
+        requested_min_pixels=-1,
+        requested_max_frames=0,
+        default_fps=1.0,
+        default_max_frames=768,
+        video_processor_config=None,
+        captured=None,
     ):
         from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
             MiniMaxM3VLImageEmbedding,
         )
 
-        captured = {}
+        if captured is None:
+            captured = {}
 
         class _VideoReader:
             def __init__(self, _data, width=None, height=None, **_kwargs):
@@ -2246,8 +2254,10 @@ class MiniMaxM3VLPreprocessTest(TestCase):
             url="video",
             mm_preprocess_config=SimpleNamespace(
                 fps=requested_fps,
-                max_frames=0,
+                max_frames=requested_max_frames,
                 max_long_side_pixel=max_long_side_pixel,
+                max_pixels=requested_max_pixels,
+                min_pixels=requested_min_pixels,
             ),
         )
         config = VitConfig()
@@ -2265,8 +2275,9 @@ class MiniMaxM3VLPreprocessTest(TestCase):
                 config,
                 processor,
                 tokenizer,
-                video_fps=1.0,
-                video_max_frames=768,
+                video_fps=default_fps,
+                video_max_frames=default_max_frames,
+                video_processor_config=video_processor_config or {},
                 merge_size=2,
                 temporal_patch_size=2,
             )
@@ -2281,6 +2292,59 @@ class MiniMaxM3VLPreprocessTest(TestCase):
             ),
             MMErr.VIDEO_INVALID,
         )
+
+    def test_video_checkpoint_uses_area_budget_and_request_overrides(self):
+        for config, overrides, expected in (
+            ({}, {}, (84, 168)),
+            ({"max_pixels": 6272}, {}, (56, 112)),
+            ({"max_pixels": 6272}, {"requested_max_pixels": 14112}, (84, 168)),
+            ({"max_pixels": 6272}, {"max_long_side_pixel": 168}, (112, 224)),
+        ):
+            with self.subTest(config=config, overrides=overrides):
+                (frames, target, _), _ = self._run_video_preprocess(
+                    total_frames=4,
+                    video_fps=1,
+                    source_height=84,
+                    source_width=168,
+                    video_processor_config=config,
+                    **overrides,
+                )
+                self.assertEqual(target, expected)
+                self.assertEqual(tuple(frames.shape), (4, *expected, 3))
+
+    def test_video_checkpoint_budget_is_checked_before_batch_decode(self):
+        captured = {}
+        with self.assertRaises(FtRuntimeException) as context:
+            self._run_video_preprocess(
+                total_frames=4,
+                video_fps=1,
+                source_height=56,
+                source_width=56,
+                video_processor_config={"max_pixels": 3136, "total_pixels": 9408},
+                captured=captured,
+            )
+        self.assertIn("exceeds max_total_pixels 9408", context.exception.message)
+        self.assertNotIn("indices", captured)
+
+    def test_video_sampling_defaults_request_overrides_and_service_cap(self):
+        for overrides, expected_indices in (
+            ({}, [0, 150, 299]),
+            (
+                {"requested_fps": 1.0},
+                [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 299],
+            ),
+            ({"default_max_frames": 2}, [0, 299]),
+            ({"default_max_frames": 2, "requested_max_frames": 3}, [0, 150, 299]),
+            ({"requested_max_frames": 3, "configured_max_frames": 2}, [0, 299]),
+        ):
+            with self.subTest(overrides=overrides):
+                _, captured = self._run_video_preprocess(
+                    total_frames=300,
+                    video_fps=30,
+                    default_fps=0.2,
+                    **overrides,
+                )
+                self.assertEqual(captured["indices"], expected_indices)
 
     def test_video_duration_is_not_rejected(self):
         for total_frames in (30, 1500):

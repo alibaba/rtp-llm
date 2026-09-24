@@ -11,11 +11,12 @@ from torchvision.transforms import InterpolationMode
 from transformers import BatchFeature
 from transformers.image_processing_utils_fast import (
     BaseImageProcessorFast,
+    DefaultFastImageProcessorKwargs,
     group_images_by_shape,
     reorder_images,
 )
 from transformers.image_utils import PILImageResampling, SizeDict
-from transformers.processing_utils import ImagesKwargs, Unpack
+from transformers.processing_utils import Unpack
 from transformers.utils import TensorType
 
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
@@ -226,7 +227,7 @@ def compute_sampled_frame_indices(
 # ==============================================================================
 
 
-class MiniMaxM3VLImageProcessorKwargs(ImagesKwargs, total=False):
+class MiniMaxM3VLImageProcessorKwargs(DefaultFastImageProcessorKwargs, total=False):
     patch_size: int
     temporal_patch_size: int
     merge_size: int
@@ -267,7 +268,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
     def preprocess(
         self, images, **kwargs: Unpack[MiniMaxM3VLImageProcessorKwargs]
     ) -> BatchFeature:
-        kwargs.setdefault("max_pixels", self.max_total_pixels)
+        kwargs.setdefault("max_pixels", self.max_pixels)
         return super().preprocess(images, **kwargs)
 
     def _preprocess(
@@ -391,7 +392,8 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
         images_kwargs = images_kwargs or {}
         patch_size = images_kwargs.get("patch_size", self.patch_size)
         merge_size = images_kwargs.get("merge_size", self.merge_size)
-        max_pixels = images_kwargs.get("max_pixels", self.max_total_pixels)
+        max_pixels = images_kwargs.get("max_pixels", self.max_pixels)
+        min_pixels = images_kwargs.get("min_pixels", self.min_pixels)
         max_long_side_pixel = images_kwargs.get(
             "max_long_side_pixel", self.max_long_side_pixel
         )
@@ -400,6 +402,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
             height,
             width,
             factor=patch_size * merge_size,
+            min_pixels=min_pixels,
             max_pixels=max_pixels,
             max_long_side_pixel=max_long_side_pixel,
             min_short_side_pixel=self.min_short_side_pixel,

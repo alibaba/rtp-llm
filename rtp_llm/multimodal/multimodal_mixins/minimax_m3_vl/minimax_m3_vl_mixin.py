@@ -26,7 +26,7 @@ import math
 import os
 import threading
 from collections import OrderedDict
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -380,11 +380,37 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         self._bracket_embs_on_device = False
 
         # --- Video sampling defaults (from HF video processor config) ---
-        self.video_fps = float(getattr(self.hf_config, "fps", 1.0))
-        self.video_max_frames = int(getattr(self.hf_config, "max_frames", 768))
-        self.video_min_frames = int(getattr(self.hf_config, "min_frames", 4))
+        self.video_processor_config = self._load_video_processor_config(ckpt_path)
+        self.video_fps = float(
+            self.video_processor_config.get("fps", getattr(self.hf_config, "fps", 1.0))
+        )
+        self.video_max_frames = int(
+            self.video_processor_config.get(
+                "max_frames", getattr(self.hf_config, "max_frames", 768)
+            )
+        )
+        self.video_min_frames = int(
+            self.video_processor_config.get(
+                "min_frames", getattr(self.hf_config, "min_frames", 4)
+            )
+        )
         self.temporal_patch_size = self.mm_processor.temporal_patch_size
         self.merge_size = self.mm_processor.merge_size
+
+    @staticmethod
+    def _load_video_processor_config(ckpt_path: str) -> Dict[str, Any]:
+        # Newer checkpoints bundle the video settings with the processor or
+        # save them separately. The dedicated video config takes precedence.
+        config: Dict[str, Any] = {}
+        processor_path = os.path.join(ckpt_path, "processor_config.json")
+        if os.path.isfile(processor_path):
+            with open(processor_path) as f:
+                config.update(json.load(f).get("video_processor", {}))
+        video_path = os.path.join(ckpt_path, "video_preprocessor_config.json")
+        if os.path.isfile(video_path):
+            with open(video_path) as f:
+                config.update(json.load(f))
+        return config
 
     @staticmethod
     def _load_word_embedding(ckpt_path: str) -> torch.Tensor:
@@ -521,7 +547,7 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         patch_size = int(self.mm_processor.patch_size)
         merge_size = int(self.merge_size)
         max_pixels = int(
-            getattr(self.mm_processor, "max_total_pixels", IMAGE_MAX_TOTAL_PIXELS)
+            getattr(self.mm_processor, "max_pixels", IMAGE_MAX_TOTAL_PIXELS)
         )
         reference_patches = max(1, max_pixels // (patch_size**2))
         reference_output_tokens = reference_patches // (merge_size**2) + 2
@@ -548,6 +574,7 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             "video_fps": self.video_fps,
             "video_max_frames": self.video_max_frames,
             "video_min_frames": self.video_min_frames,
+            "video_processor_config": self.video_processor_config,
             "temporal_patch_size": self.temporal_patch_size,
             "merge_size": self.merge_size,
         }
@@ -603,9 +630,8 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         _, height, width = raw.shape
         factor = processor.patch_size * processor.merge_size
         min_pixels = processor.min_pixels
-        # M3-VL's total image-pixel limit is the default area budget. A
-        # request-level max_pixels remains an explicit override below.
-        max_pixels = getattr(processor, "max_total_pixels", IMAGE_MAX_TOTAL_PIXELS)
+        # Honor the checkpoint's area budget, with request-level overrides.
+        max_pixels = getattr(processor, "max_pixels", IMAGE_MAX_TOTAL_PIXELS)
         pre_cfg = mm_input.mm_preprocess_config
         if getattr(pre_cfg, "max_pixels", -1) > 0:
             max_pixels = int(pre_cfg.max_pixels)
@@ -648,6 +674,7 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             raise_mm(MMErr.VIDEO_INVALID)
 
         pre_cfg = mm_input.mm_preprocess_config
+        video_config = kwargs.get("video_processor_config", {})
         target_fps = float(getattr(pre_cfg, "fps", 0))
         if not target_fps or target_fps <= 0:
             target_fps = float(kwargs.get("video_fps", 1.0))
@@ -691,6 +718,17 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         factor = patch_size * merge_size
 
+        min_pixels = video_config.get("min_pixels", 4 * factor * factor)
+        max_pixels = video_config.get(
+            "max_pixels", getattr(processor, "max_pixels", None)
+        )
+        requested_min_pixels = getattr(pre_cfg, "min_pixels", -1)
+        requested_max_pixels = getattr(pre_cfg, "max_pixels", -1)
+        if requested_min_pixels > 0:
+            min_pixels = int(requested_min_pixels)
+        if requested_max_pixels > 0:
+            max_pixels = int(requested_max_pixels)
+
         max_long_side_pixel = getattr(pre_cfg, "max_long_side_pixel", -1)
         if max_long_side_pixel > 0:
             target_h, target_w = smart_resize(
@@ -700,6 +738,19 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
                 max_long_side_pixel=int(max_long_side_pixel),
                 min_short_side_pixel=MIN_SHORT_SIDE_PIXEL,
                 max_total_pixels=None,
+            )
+        elif (
+            "max_pixels" in video_config
+            or "min_pixels" in video_config
+            or requested_min_pixels > 0
+            or requested_max_pixels > 0
+        ):
+            target_h, target_w = smart_resize(
+                src_h,
+                src_w,
+                factor=factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
             )
         else:
             # Preserve the released processor's legacy per-frame area behavior
@@ -712,11 +763,12 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
                 target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, None)
 
         total_pixels = target_h * target_w * num_frames
-        if total_pixels > VIDEO_MAX_TOTAL_PIXELS:
+        max_total_pixels = int(video_config.get("total_pixels", VIDEO_MAX_TOTAL_PIXELS))
+        if total_pixels > max_total_pixels:
             raise_mm(
                 MMErr.VIDEO_REQ.format(
                     f"video area {total_pixels} (width * height * frames) "
-                    f"exceeds max_total_pixels {VIDEO_MAX_TOTAL_PIXELS} "
+                    f"exceeds max_total_pixels {max_total_pixels} "
                     "after resizing"
                 )
             )
