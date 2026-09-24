@@ -1,4 +1,4 @@
-"""K3 SP reduction precision matching the pinned native deployment."""
+"""K3 SP reductions use BF16 NCCL for every input size."""
 
 import torch
 
@@ -8,17 +8,10 @@ from rtp_llm.models_py.distributed.collective_torch import (
     reduce_scatter as default_reduce_scatter,
 )
 
-# vLLM c3b48446349569512749db7f6e2164aa8a33437d, CustomAllreduce:
-# MNNVL accumulates small reductions in FP32; larger inputs use BF16 NCCL.
-_NATIVE_MNNVL_REDUCE_SCATTER_MAX_BYTES = 16 * 1024 * 1024
-
-
 def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
-    """Preserve native K3 accumulation precision through RTP's collective.
+    """Keep BF16 communication without size-dependent widening or extra casts.
 
-    BF16 rank-ordered manual sums differ from both native paths: MNNVL uses
-    FP32 accumulation, while NCCL's BF16 reduction order depends on the owner.
-    Keep this policy local to K3; other dtypes and models retain RTP's behavior.
+    Other dtypes retain RTP's existing collective behavior.
     """
     if input_tensor.dtype != torch.bfloat16:
         return default_reduce_scatter(input_tensor, group)
@@ -33,6 +26,4 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
             (input_tensor.shape[0] // world_size, *input_tensor.shape[1:])
         )
     source = input_tensor.contiguous()
-    if source.nbytes <= _NATIVE_MNNVL_REDUCE_SCATTER_MAX_BYTES:
-        return default_reduce_scatter(source.float(), group).to(input_tensor.dtype)
     return default_reduce_scatter(source, group)

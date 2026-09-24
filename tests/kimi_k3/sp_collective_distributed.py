@@ -31,10 +31,10 @@ def main():
                 .float().div_(256).bfloat16())
     report = {'rank': rank, 'world_size': 8, 'scope': 'K3 collective correctness only', 'shapes': {}}
 
-    for name, offset, count, fp32 in [
-        ('full', 0, 5032, False), ('reuse', 4096, 936, True),
-        ('below_native_boundary', 0, 1168, True),
-        ('above_native_boundary', 0, 1176, False), ('decode', 0, 8, True),
+    for name, offset, count in [
+        ('full', 0, 5032), ('reuse', 4096, 936),
+        ('below_old_boundary', 0, 1168),
+        ('above_old_boundary', 0, 1176), ('decode', 0, 8),
     ]:
         cpu = operands[rank, offset:offset+count].repeat(1, 56)
         backing = torch.empty((count, 14336), device='cuda', dtype=torch.bfloat16)
@@ -44,20 +44,16 @@ def main():
         assert x.shape == (count, 7168)
 
         def expected(scale=1.):
-            start = offset + rank * (count // 8)
-            values = (operands[:, start:start+count//8] * scale).bfloat16()
-            # Independently verified against actual pinned vLLM SP collectives:
-            # small MNNVL = FP32 accumulation; large NCCL = cyclic BF16 rounding.
-            if fp32:
-                result = values.double().sum(0).bfloat16()
-            else:
-                result = values[(rank+1) % 8].clone()
-                for step in range(1, 8):
-                    result = (result.double() + values[(rank+1+step) % 8].double()).bfloat16()
-            return result.repeat(1, 56)
+            # Compare with direct BF16 NCCL. Its reduction order is backend-owned,
+            # so do not assume a ring order or replace it with an FP32 sum.
+            source = (cpu * scale).bfloat16().cuda().contiguous()
+            result = torch.empty((count // 8, 7168), device='cuda',
+                                 dtype=torch.bfloat16)
+            dist.reduce_scatter_tensor(result, source, group=dist.group.WORLD)
+            return result.cpu()
 
         eager = reduce_scatter(x, collective.Group.TP)
-        assert torch.equal(eager.cpu(), expected()), (name, 'native precision oracle')
+        assert torch.equal(eager.cpu(), expected()), (name, 'BF16 NCCL oracle')
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
@@ -81,12 +77,11 @@ def main():
         assert actual_fp32.dtype == torch.float32
         assert torch.equal(actual_fp32.cpu(), expected_fp32)
         report['shapes'][name] = {'physical_tokens': count, 'width': 7168,
-                                 'native_accumulation': 'FP32' if fp32 else 'BF16 NCCL',
-                                 'noncontiguous': True, 'native_oracle_equal': True,
+                                 'communication_dtype': 'BF16', 'backend': 'NCCL',
+                                 'noncontiguous': True, 'bf16_nccl_oracle_equal': True,
                                  'replay_scales': [1., .5, 1.25], 'fp32_fallback_equal': True}
         del graph, captured, eager, x, backing
-    # Reference changes accumulation across shapes. Full/reuse equality is a
-    # separate model-level measurement, not a valid operator oracle here.
+    # Full/reuse equality is checked separately at model level.
     for member in range(8):
         subgroup = dist.new_group([member])
         if member == rank:
@@ -101,7 +96,7 @@ def main():
         json.dump(report, out, indent=2)
     dist.barrier()
     if rank == 0:
-        print('PASS: TP8 native precision, boundary shapes, strided inputs, 15 graph replays per rank, FP32 fallback, TP1', flush=True)
+        print('PASS: TP8 BF16 NCCL, boundary shapes, strided inputs, 15 graph replays per rank, FP32 fallback, TP1', flush=True)
     dist.destroy_process_group()
 
 
