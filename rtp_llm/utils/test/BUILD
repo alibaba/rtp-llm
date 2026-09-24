@@ -14,6 +14,23 @@ filegroup(
 )
 
 py_test(
+    name = "jit_cache_local_dir_test",
+    srcs = ["jit_cache_local_dir_test.py"],
+    deps = ["//rtp_llm:jit_cache_manager_lib"],
+)
+
+py_test(
+    name = "jit_cache_remote_e2e_test",
+    size = "large",
+    srcs = ["jit_cache_remote_e2e_test.py"],
+    deps = [
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     srcs = [
         "jit_cache_manager_test.py",

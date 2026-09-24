@@ -69,11 +69,16 @@ def _send_pipe_status(pipe_writer, status: str, message: str, traceback: str = "
         logging.warning(f"Failed to send status via pipe: {e}")
 
 
-def _setup_jit_cache(remote_jit_dir: str, local_rank: int, jit_cache_ready):
+def _setup_jit_cache(
+    remote_jit_dir: str, local_rank: int, jit_cache_ready, local_jit_dir: str = ""
+):
     from rtp_llm.utils import jit_cache_manager as jit
     from rtp_llm.utils.jit_cache_store import restore_lock
 
-    components, compatible = jit.setup_jit_cache_env()
+    local_root = (
+        jit.resolve_local_root(local_jit_dir) if local_jit_dir.strip() else None
+    )
+    components, compatible = jit.setup_jit_cache_env(local_root)
     if local_rank != 0:
         # Only wait when rank 0 may restore the shared tree.
         if remote_jit_dir and jit_cache_ready is not None:
@@ -88,7 +93,9 @@ def _setup_jit_cache(remote_jit_dir: str, local_rank: int, jit_cache_ready):
         if not compatible:
             logging.warning("JIT remote cache disabled: incomplete scope or directory")
             return None
-        with restore_lock(Path(jit.LOCAL_JIT_DIR)):
+        with restore_lock(
+            local_root if local_root is not None else Path(jit.LOCAL_JIT_DIR)
+        ):
             manager_out, commit_lock, cancel = None, threading.Lock(), threading.Event()
 
             def _worker():
@@ -98,7 +105,7 @@ def _setup_jit_cache(remote_jit_dir: str, local_rank: int, jit_cache_ready):
                     remote_root = jit.resolve_remote_root(remote_jit_dir)
                     if not remote_root or cancel.is_set():
                         return
-                    manager = jit.JitCacheManager(remote_root, components)
+                    manager = jit.JitCacheManager(remote_root, components, local_root)
                     manager.start_background_sync(cancel=cancel, commit=commit_lock)
                     with commit_lock:
                         if not cancel.is_set():
@@ -409,6 +416,7 @@ def local_rank_start(
             str(py_env_configs.jit_config.remote_jit_dir or "").strip(),
             local_rank,
             jit_cache_ready,
+            local_jit_dir=py_env_configs.jit_config.local_jit_dir,
         )
 
         # Import after rank 0 finished/abandoned setup: BackendManager pulls in
