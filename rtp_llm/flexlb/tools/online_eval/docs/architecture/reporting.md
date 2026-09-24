@@ -11,3 +11,5 @@
 输入归档保持各自的历史格式。`reporting.core.load_analysis` 接受旧分析 JSON 与带 manifest 的新 bundle；cache 和性能证据仍由对应分析器按原格式读取。不得因为呈现格式统一，就把不同证据类型混作同一分析输入。
 
 独立的 `traffic_fidelity_report.py` 保留自包含 `fidelity.html` 作为显式例外：它提供可调阈值、ECDF 和三幅联合密度热图，通用 renderer 尚无等价交互组件。该例外只影响合成输入保真度诊断，不进入运行门禁或 `discover_reports`。若迁入 bundle，先为这些交互补齐通用组件并逐项核对信息完整性。压测的 `aggregate.py` 子进程链路属于证据生成，不改变装配契约；它继续经 `write_bundle` 发布报告。
+
+`stress_report.py`、`compare_twin.py`、`monitoring/session.py` 的专属装配保留：其图表或监控视图重复度低，整体迁移成本高，均经 `write_bundle` 和 panel 适配入口发布。豁免只覆盖各自的专属布局，不允许新增独立配色、配对或落盘规则；需要复用的呈现决策仍应进入 `reporting/`。
