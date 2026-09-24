@@ -909,6 +909,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        request.setBlockSize(pb.getCacheKeyBlockSize());
         if (pb.getInputIdsCount() > 0) {
             request.setInputIds(TokenIds.wrap(pb.getInputIdsCount(), pb::getInputIds));
         }
