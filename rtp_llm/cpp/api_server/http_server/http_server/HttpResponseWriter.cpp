@@ -100,6 +100,9 @@ bool HttpResponseWriter::PostHttpResponse(const std::shared_ptr<HttpResponse>& r
         return false;
     }
 
+    if (_sender)
+        return _sender(response);
+
     auto packet = response->Encode();
     if (!packet) {
         AUTIL_LOG(WARN, "post http response failed, http response encode failed");

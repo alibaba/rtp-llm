@@ -14,3 +14,125 @@ index 3774514c..78d172c5 100644
 +    linkopts=['-ldl'],
      alwayslink=True
  )
+diff --git aios/network/anet/connection.cpp aios/network/anet/connection.cpp
+--- aios/network/anet/connection.cpp
++++ aios/network/anet/connection.cpp
+@@ -394,0 +395,8 @@
++void Connection::beginApplicationRequest(int idleMs) { _iocomponent->beginApplicationRequest(idleMs); }
++
++void Connection::completePostedResponses(size_t count) { _iocomponent->completePostedResponses(count); }
++
++void Connection::noteInboundBytesLocked() { _iocomponent->noteInboundBytesLocked(); }
++
++void Connection::finishInboundParseLocked() { _iocomponent->finishInboundParseLocked(); }
++
+diff --git aios/network/anet/connection.h aios/network/anet/connection.h
+--- aios/network/anet/connection.h
++++ aios/network/anet/connection.h
+@@ -169,0 +170,7 @@
++    // Opt-in request-aware HTTP idle state. The inbound hook is called only
++    // while the I/O worker already holds the component mutex.
++    void beginApplicationRequest(int idleMs);
++    void completePostedResponses(size_t count);
++    void noteInboundBytesLocked();
++    void finishInboundParseLocked();
++
+diff --git aios/network/anet/iocomponent.cpp aios/network/anet/iocomponent.cpp
+--- aios/network/anet/iocomponent.cpp
++++ aios/network/anet/iocomponent.cpp
+@@ -170,0 +171,47 @@
++void IOComponent::beginApplicationRequest(int idleMs) {
++    if (idleMs <= 0) {
++        return;
++    }
++    MutexGuard guard(&_mutex);
++    if (_state != ANET_CONNECTED) {
++        return;
++    }
++    _requestAwareIdleMs.store(idleMs, std::memory_order_relaxed);
++    ++_outstandingResponses;
++    _acceptedReadGeneration = _readGeneration;
++    setMaxIdleTime(-1);
++}
++
++void IOComponent::completePostedResponses(size_t count) {
++    if (count == 0) {
++        return;
++    }
++    MutexGuard guard(&_mutex);
++    if (_requestAwareIdleMs.load(std::memory_order_relaxed) == 0 || count > _outstandingResponses) {
++        return;
++    }
++    _outstandingResponses -= count;
++    if (_outstandingResponses == 0 && !_parsingInboundBytes && _state == ANET_CONNECTED &&
++        _acceptedReadGeneration == _readGeneration) {
++        _lastUseTime = TimeUtil::getTime();
++        setMaxIdleTime(_requestAwareIdleMs.load(std::memory_order_relaxed));
++    }
++}
++
++void IOComponent::noteInboundBytesLocked() {
++    _parsingInboundBytes = true;
++    if (_requestAwareIdleMs.load(std::memory_order_relaxed) != 0) {
++        ++_readGeneration;
++        setMaxIdleTime(-1);
++    }
++}
++
++void IOComponent::finishInboundParseLocked() {
++    _parsingInboundBytes = false;
++    if (_requestAwareIdleMs.load(std::memory_order_relaxed) != 0 && _outstandingResponses == 0 &&
++        _state == ANET_CONNECTED && _acceptedReadGeneration == _readGeneration) {
++        _lastUseTime = TimeUtil::getTime();
++        setMaxIdleTime(_requestAwareIdleMs.load(std::memory_order_relaxed));
++    }
++}
++
+diff --git aios/network/anet/iocomponent.h aios/network/anet/iocomponent.h
+--- aios/network/anet/iocomponent.h
++++ aios/network/anet/iocomponent.h
+@@ -18,0 +19 @@
++#include <atomic>
+@@ -169 +170,13 @@
+-    inline void updateUseTime(int64_t now) { _lastUseTime = now; }
++    // Legacy transport activity updates are ignored for opt-in HTTP connections.
++    // Their idle interval starts only after the final response is posted.
++    inline void updateUseTime(int64_t now) {
++        if (_requestAwareIdleMs.load(std::memory_order_relaxed) == 0) {
++            _lastUseTime = now;
++        }
++    }
++
++    void beginApplicationRequest(int idleMs);
++    void completePostedResponses(size_t count);
++    // Called by TCPConnection::readData while the component mutex is held.
++    void noteInboundBytesLocked();
++    void finishInboundParseLocked();
+@@ -284,0 +298,7 @@
++    // Only this opt-in flag is read by the I/O worker without _mutex. The
++    // remaining application-idle state is protected by _mutex.
++    std::atomic<int> _requestAwareIdleMs{0};
++    size_t _outstandingResponses{0};
++    uint64_t _readGeneration{0};
++    uint64_t _acceptedReadGeneration{0};
++    bool _parsingInboundBytes{false};
+diff --git aios/network/anet/tcpconnection.cpp aios/network/anet/tcpconnection.cpp
+--- aios/network/anet/tcpconnection.cpp
++++ aios/network/anet/tcpconnection.cpp
+@@ -208,0 +209,5 @@
++        if (ret > 0) {
++            // Cancel post-response idle even when this read is only a prefix
++            // of the next HTTP request. The component mutex is held here.
++            noteInboundBytesLocked();
++        }
+@@ -210,0 +216,6 @@
++                // A single read can contain complete requests followed by a
++                // partial request. Distinguish that trailing prefix from an
++                // empty parser pass after a fully consumed read.
++                if (ret > 0 && (_input.getDataLen() > 0 || _context->getPacket())) {
++                    noteInboundBytesLocked();
++                }
+@@ -226,0 +238,3 @@
++        if (ret > 0) {
++            finishInboundParseLocked();
++        }
