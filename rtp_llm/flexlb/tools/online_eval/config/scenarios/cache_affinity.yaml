@@ -185,7 +185,7 @@ parameters:
       - prefill-0
       - prefill-1
       perf:
-        # 测试专用时延覆盖；基线为 synthetic_baseline，非真实采集值。
+        # 测试专用时延覆盖；基线为 default 的 DSv4 mock 刻度，非真实采集值。
         prefill_fixed_ms: 2000
     perf_sync:
       seconds: 1.5
@@ -229,7 +229,7 @@ parameters:
       - prefill-0
       - prefill-1
       perf:
-        # 测试专用时延覆盖；基线为 synthetic_baseline，非真实采集值。
+        # 测试专用时延覆盖；基线为 default 的 DSv4 mock 刻度，非真实采集值。
         prefill_fixed_ms: 100
     cache_sync:
       seconds: 2
@@ -705,7 +705,7 @@ parameters:
       - prefill-0
       - prefill-1
       perf:
-        # 测试专用时延覆盖；基线为 synthetic_baseline，非真实采集值。
+        # 测试专用时延覆盖；基线为 default 的 DSv4 mock 刻度，非真实采集值。
         prefill_fixed_ms: 2000
     perf_sync:
       seconds: 1.5
@@ -749,7 +749,7 @@ parameters:
       - prefill-0
       - prefill-1
       perf:
-        # 测试专用时延覆盖；基线为 synthetic_baseline，非真实采集值。
+        # 测试专用时延覆盖；基线为 default 的 DSv4 mock 刻度，非真实采集值。
         prefill_fixed_ms: 100
     cache_sync:
       seconds: 2

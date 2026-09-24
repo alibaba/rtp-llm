@@ -14,6 +14,8 @@ from scripts.pipeline.execute_cases import STRESS_BAND_FLOOR
 
 class StressRuntimeTest(unittest.TestCase):
     def test_performance_file_compatibility_default_and_cli_precedence(self):
+        self.assertEqual("deepseek_v4_flash_l20c.json",
+                         stress.parse_args(["--dry-run"]).performance.name)
         with mock.patch.dict("os.environ", {"PERFORMANCE_FILE": "/tmp/from-env.json"}):
             self.assertEqual(Path("/tmp/from-env.json"),
                              stress.parse_args(["--dry-run"]).performance)

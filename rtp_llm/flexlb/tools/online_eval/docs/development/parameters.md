@@ -47,4 +47,4 @@
 
 ## Mock 性能模型
 
-`--performance` 读取 P/D 时间、KV 容量和可选噪声 JSON，默认 `data/performance/deepseek_v4_flash_decode_table.json`；`PERFORMANCE_FILE` 环境变量可覆盖缺省值，显式 `--performance` 优先。`--mock-heap`、`--master-heap`、`--client-heap` 设置 JVM heap；`--decode-max-concurrency`、`--prefill-cache-blocks`、`--decode-cache-blocks` 设置 mock 资源。性能模型说明见 [`flexlb-mock-engine/README.md`](../../../../flexlb-mock-engine/README.md)。修改模型后，报告必须记录文件内容或摘要；同名文件不保证内容相同。
+`--performance` 读取 P/D 时间、KV 容量和可选噪声 JSON，默认 `data/performance/deepseek_v4_flash_l20c.json`；`PERFORMANCE_FILE` 环境变量可覆盖缺省值，显式 `--performance` 优先。`--mock-heap`、`--master-heap`、`--client-heap` 设置 JVM heap；`--decode-max-concurrency`、`--prefill-cache-blocks`、`--decode-cache-blocks` 设置 mock 资源。性能模型说明见 [`flexlb-mock-engine/README.md`](../../../../flexlb-mock-engine/README.md)。修改模型后，报告必须记录文件内容或摘要；同名文件不保证内容相同。

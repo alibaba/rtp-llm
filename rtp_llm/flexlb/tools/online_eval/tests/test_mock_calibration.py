@@ -64,7 +64,7 @@ class MockCalibrationTest(unittest.TestCase):
         config = json.loads(render_env("single-nonbatch"))
         expression = config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"]
         self.assertEqual(expression, calibration["prefill_expression"])
-        self.assertTrue((ROOT / "data/performance/synthetic_baseline.json").is_file())
+        self.assertEqual(load_preset("default")[0]["block_size"], calibration["block_size"])
 
     def test_run_files_expose_effective_default_and_fault_calibration(self):
         calibration = load_mock_calibration()

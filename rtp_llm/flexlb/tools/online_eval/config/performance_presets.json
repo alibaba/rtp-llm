@@ -1,7 +1,6 @@
 {
   "default": {
-    "performance": "data/performance/synthetic_baseline.json",
-    "calibration": "../data/performance/dsv4_l20_mock_calibration.json"
+    "performance": "data/performance/dsv4_l20_mock_calibration.json"
   },
   "fault_env": {
     "performance": "data/performance/synthetic_prefill_100ms.json",

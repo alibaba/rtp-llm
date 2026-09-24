@@ -53,6 +53,13 @@ def load_performance_bundle(path):
     document = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise ValueError("performance document must be an object")
+    if "schema_version" in document:
+        from flexlb_profile_data import load_mock_calibration
+
+        load_mock_calibration(path)
+        for key in ("schema_version", "id", "model", "hardware", "status", "source", "prefill_expression"):
+            document.pop(key)
+        document["calibration"] = Path(path).name
     capture = document.pop("capture", None)
     if capture is not None:
         if not isinstance(capture, dict) or capture.get("status") not in (

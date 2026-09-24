@@ -16,6 +16,9 @@ def load_mock_calibration(path=_CALIBRATION_PATH):
     """Read the auditable test calibration; no measured values live in code."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if (data.get("schema_version") != 1 or data.get("id") != "dsv4_l20_legacy_mock"
+            or type(data.get("block_size")) is not int or data["block_size"] <= 0
+            or type(data.get("sleep_scale")) not in (int, float)
+            or not math.isfinite(data["sleep_scale"]) or data["sleep_scale"] <= 0
             or data.get("status") != "legacy_unverified"
             or not isinstance(data.get("model"), str) or not data["model"].strip()
             or not isinstance(data.get("hardware"), str) or not data["hardware"].strip()
@@ -25,10 +28,10 @@ def load_mock_calibration(path=_CALIBRATION_PATH):
         raise ValueError(f"invalid mock calibration: {path}")
     decode = data.get("decode")
     if (not isinstance(decode, dict)
-            or set(decode) != {"step_base_ms", "step_per_running_ms", "tokens_per_step"}
+            or set(decode) != {"scale", "step_base_ms", "step_per_running_ms", "tokens_per_step"}
             or any(type(value) not in (int, float) or not math.isfinite(value)
                    or value < 0 for value in decode.values())
-            or decode["tokens_per_step"] == 0):
+            or decode["tokens_per_step"] == 0 or decode["scale"] == 0):
         raise ValueError(f"invalid mock decode calibration: {path}")
     return data
 
