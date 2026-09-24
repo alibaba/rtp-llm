@@ -307,19 +307,49 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         inputs.push_back(input);
     }
 
-    // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
-    // Streams that failed checkInputLength carry an error reported via reportError() and surface
-    // it through collectStreamOutput → nextOutput → ErrorInfo path below.
     auto streams = engine_->batchEnqueue(inputs);
+    // RPC failure must release every retained member, including siblings that
+    // have not yet reached the serial collector. Cleanup must not mask an error.
+    bool              completed = false;
+    autil::ScopeGuard cleanup([&] {
+        if (!completed) {
+            for (auto& stream : streams) {
+                if (stream) {
+                    try {
+                        stream->reportError(ErrorCode::CANCELLED, "batch collection aborted");
+                    } catch (...) {}
+                }
+            }
+        }
+    });
+    // A scheduler can return only admitted members. Reject that result instead
+    // of pairing a surviving stream with another member's configuration.
+    if (streams.size() != inputs.size()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "batchEnqueue result count differs from input count");
+    }
+    for (const auto& stream : streams) {
+        if (!stream) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "batchEnqueue returned a null stream");
+        }
+    }
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
     // mixed-length batches.
+    bool cancellation_reported = false;
     for (int i = 0; i < (int)streams.size(); i++) {
         auto* result = response->add_results();
 
         GenerateOutputs last_outputs;
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
+        if (!cancellation_reported && isCancelled(context)) {
+            cancellation_reported = true;
+            // Wake all idle siblings now; each must not wait another RPC poll
+            // interval before observing the same client cancellation.
+            for (auto& stream : streams) {
+                stream->reportError(ErrorCode::CANCELLED, "batch cancelled during collection");
+            }
+        }
         if (!err.ok()) {
             auto* err_pb = result->mutable_error_info();
             err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
@@ -342,6 +372,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         }
     }
 
+    completed = true;
     RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
     return grpc::Status::OK;
 }

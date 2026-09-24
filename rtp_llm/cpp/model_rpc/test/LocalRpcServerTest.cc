@@ -5,6 +5,7 @@
 #include <chrono>
 #include <future>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -46,6 +47,10 @@ public:
 
     std::future<void> cancellationChecked() {
         return cancellation_checked_.get_future();
+    }
+
+    void setEngine(std::shared_ptr<EngineBase> engine) {
+        engine_ = std::move(engine);
     }
 
     std::atomic<bool> cancelled{false};
@@ -313,6 +318,124 @@ TEST(LocalRpcServerTest, TerminalRpcPackingIsOutsideStreamLockAndCancellationSto
             EXPECT_EQ(output.output_ids().shape_size(), 3);
             EXPECT_EQ(output.output_ids().int32_data(), std::string("\x07\0\0\0", 4));
         }
+    }
+}
+
+// Controls the scheduler's return vector while exercising the real gRPC
+// handler, request conversion, collection and cancellation paths.
+class BatchResultEngine: public EngineBase {
+public:
+    BatchResultEngine(): EngineBase(EngineInitParams{}) {}
+    std::vector<GenerateStreamPtr>              streams;
+    std::vector<std::shared_ptr<GenerateInput>> inputs;
+
+    std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& values) override {
+        inputs = values;
+        return streams;
+    }
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void         enqueue(GenerateStreamPtr&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused by batch RPC test");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+};
+
+BatchGenerateInputPB batchRequest(size_t count) {
+    BatchGenerateInputPB request;
+    for (size_t i = 0; i < count; ++i) {
+        auto* input = request.add_inputs();
+        input->set_request_id(100 + i);
+        input->add_token_ids(1);
+        input->mutable_generate_config()->set_max_new_tokens(1);
+        input->mutable_generate_config()->set_is_streaming(false);
+    }
+    return request;
+}
+
+TEST(LocalRpcServerTest, BatchRpcRejectsFilteredEnqueueWithoutReadingOrMisconfiguringSurvivor) {
+    TestLocalRpcServer server;
+    auto               engine   = std::make_shared<BatchResultEngine>();
+    auto               survivor = createMockStream();
+    engine->streams             = {survivor};
+    server.setEngine(engine);
+    EXPECT_CALL(*survivor, nextOutput(_)).Times(0);
+    auto request = batchRequest(2);
+    request.mutable_inputs(0)->mutable_generate_config()->set_return_logits(true);
+    request.mutable_inputs(1)->mutable_generate_config()->set_return_logits(false);
+    BatchGenerateOutputsPB response;
+    const auto             status = server.BatchGenerateCall(nullptr, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(response.results_size(), 0);
+    ASSERT_EQ(engine->inputs.size(), 2);
+    EXPECT_TRUE(engine->inputs[0]->generate_config->return_logits);
+    EXPECT_FALSE(engine->inputs[1]->generate_config->return_logits);
+    EXPECT_EQ(survivor->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST(LocalRpcServerTest, BatchRpcRejectsNullEnqueueAndCancelsEveryRetainedMember) {
+    TestLocalRpcServer server;
+    auto               engine   = std::make_shared<BatchResultEngine>();
+    auto               survivor = createMockStream();
+    engine->streams             = {nullptr, survivor};
+    server.setEngine(engine);
+    EXPECT_CALL(*survivor, nextOutput(_)).Times(0);
+    auto                   request = batchRequest(2);
+    BatchGenerateOutputsPB response;
+    const auto             status = server.BatchGenerateCall(nullptr, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(response.results_size(), 0);
+    EXPECT_EQ(survivor->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST(LocalRpcServerTest, BatchRpcCollectorExceptionCancelsEveryEnqueuedStream) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<BatchResultEngine>();
+    auto               first  = createMockStream();
+    auto               second = createMockStream();
+    engine->streams           = {first, second};
+    server.setEngine(engine);
+    EXPECT_CALL(*first, nextOutput(_)).WillOnce(Throw(std::runtime_error("collection failed")));
+    EXPECT_CALL(*second, nextOutput(_)).Times(0);
+    auto                   request = batchRequest(2);
+    BatchGenerateOutputsPB response;
+    EXPECT_THROW(server.BatchGenerateCall(nullptr, &request, &response), std::runtime_error);
+    EXPECT_EQ(first->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(second->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST(LocalRpcServerTest, BatchRpcCancellationWakesAllIdleSiblingsBeforeCollectingNext) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<BatchResultEngine>();
+    auto               first  = createMockStream();
+    auto               second = createMockStream();
+    auto               third  = createNormalStream();
+    engine->streams           = {first, second, third};
+    server.setEngine(engine);
+    EXPECT_CALL(*first, nextOutput(_)).WillOnce(InvokeWithoutArgs([&] {
+        server.cancelled = true;
+        return ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_NO_UPDATE, "waiting");
+    }));
+    EXPECT_CALL(*second, nextOutput(_)).WillOnce(InvokeWithoutArgs([&] {
+        // Both idle siblings must already be terminal before either is read;
+        // merely cancelling the next member after its poll interval is too late.
+        EXPECT_EQ(second->statusInfo().code(), ErrorCode::CANCELLED);
+        EXPECT_EQ(third->statusInfo().code(), ErrorCode::CANCELLED);
+        return ErrorResult<GenerateOutputs>(ErrorCode::CANCELLED, "cancelled");
+    }));
+    auto                   request = batchRequest(3);
+    BatchGenerateOutputsPB response;
+    EXPECT_TRUE(server.BatchGenerateCall(nullptr, &request, &response).ok());
+    ASSERT_EQ(response.results_size(), 3);
+    for (const auto& result : response.results()) {
+        EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::CANCELLED);
     }
 }
 
