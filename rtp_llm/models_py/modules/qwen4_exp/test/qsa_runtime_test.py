@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.qwen4_exp.indexer import (
 from rtp_llm.models_py.modules.qwen4_exp.norm import exact_head_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.qsa_runtime import (
     Qwen4ExpQSARuntimeContext,
+    _validate_required_blocks,
     select_qsa_paged_tokens,
 )
 from rtp_llm.ops import RopeStyle
@@ -26,6 +27,61 @@ class Qwen4ExpQSARuntimeTest(TestCase):
     RATIO = 4
     KV_TOKENS_PER_BLOCK = 8
     STATE_TOKENS_PER_BLOCK = 8
+
+    def test_required_block_validation_preserves_error_cases(self):
+        devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                table = torch.tensor([[1, 2]], dtype=torch.int32, device=device)
+                required = torch.tensor([2], dtype=torch.int32, device=device)
+                _validate_required_blocks(
+                    table, required, pool_blocks=3, tag=INDEXER_KV_TAG
+                )
+                _validate_required_blocks(
+                    table[:, :0],
+                    torch.zeros_like(required),
+                    pool_blocks=3,
+                    tag=INDEXER_KV_TAG,
+                )
+                for count, message in (
+                    (-1, "negative required-column count"),
+                    (3, "does not cover"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        _validate_required_blocks(
+                            table,
+                            torch.tensor([count], dtype=torch.int32, device=device),
+                            pool_blocks=3,
+                            tag=INDEXER_KV_TAG,
+                        )
+                with self.assertRaisesRegex(RuntimeError, "unallocated"):
+                    _validate_required_blocks(
+                        torch.tensor([[1, 0]], dtype=torch.int32, device=device),
+                        required,
+                        pool_blocks=3,
+                        tag=INDEXER_KV_TAG,
+                    )
+                with self.assertRaisesRegex(RuntimeError, "out-of-range physical"):
+                    _validate_required_blocks(
+                        torch.tensor([[1, 3]], dtype=torch.int32, device=device),
+                        torch.tensor([1], dtype=torch.int32, device=device),
+                        pool_blocks=3,
+                        tag=INDEXER_KV_TAG,
+                    )
+
+    def test_token_selection_rejects_invalid_lengths(self):
+        logits = torch.zeros(1, 1)
+        for length, message in (
+            (-1, "non-negative"),
+            (8, "do not cover every completed block"),
+        ):
+            with self.assertRaisesRegex(ValueError, message):
+                select_qsa_paged_tokens(
+                    logits,
+                    torch.tensor([length], dtype=torch.int32),
+                    compress_ratio=4,
+                    token_budget=4,
+                )
 
     def setUp(self):
         torch.manual_seed(17)
