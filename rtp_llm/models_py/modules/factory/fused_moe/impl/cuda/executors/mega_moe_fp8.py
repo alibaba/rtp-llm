@@ -38,10 +38,33 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.input_packer imp
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
     mega_moe_jit_warmup_enabled,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.snapshot import (
+    mega_moe_snapshot_active,
+    record_mega_moe_launch,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
 from rtp_llm.utils.model_weight import W
+
+
+def _input_metadata(value):
+    """Describe tensor inputs without reading device data or synchronizing CUDA."""
+    if isinstance(value, torch.Tensor):
+        return {
+            "shape": tuple(value.shape),
+            "dtype": str(value.dtype),
+            "device": str(value.device),
+            "stride": tuple(value.stride()),
+            "contiguous": value.is_contiguous(),
+        }
+    if isinstance(value, (tuple, list)):
+        return [_input_metadata(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _input_metadata(item) for key, item in value.items()}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return repr(value)
 
 
 def mega_moe_fp8_available():
@@ -194,8 +217,50 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
                 f"smaller than input tokens={tokens}"
             )
 
-    def _launch(self, y: torch.Tensor, tokens: int, device: torch.device, **kwargs):
+    def _launch(
+        self,
+        y: torch.Tensor,
+        tokens: int,
+        device: torch.device,
+        diagnostic_inputs=None,
+        **kwargs,
+    ):
         from deep_gemm import mega_fp8
+
+        # Keep a bounded snapshot of the current prefill on each rank.
+        # The DeepGEMM sync-id=1 diagnostic reports per-SM progress on timeout.
+        if mega_moe_snapshot_active():
+            cfg = self.config
+            buf = self._mega_buf
+            record_mega_moe_launch(
+                _input_metadata(
+                    {
+                        "layer_id": getattr(cfg, "layer_id", -1),
+                        "world_rank": cfg.world_rank,
+                        "ep_rank": cfg.ep_rank,
+                        "ep_size": cfg.ep_size,
+                        "expert_num": cfg.expert_num,
+                        "moe_k": cfg.moe_k,
+                        "hidden_size": cfg.hidden_size,
+                        "moe_inter_dim": cfg.moe_inter_dim,
+                        "max_tokens_per_rank": buf.num_max_tokens_per_rank,
+                        "tokens": tokens,
+                        "recipe": (1, 1, 32),
+                        "weight_recipe": (1, 32),
+                        "activation": "swiglu",
+                        "fast_math": False,
+                        "source": diagnostic_inputs,
+                        "y": y,
+                        "l1": self.l1,
+                        "l2": self.l2,
+                        "buffer_x": buf.x,
+                        "buffer_x_sf": buf.x_sf,
+                        "buffer_topk_idx": buf.topk_idx,
+                        "buffer_topk_weights": buf.topk_weights,
+                        "shared": kwargs,
+                    }
+                ),
+            )
 
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
@@ -243,7 +308,22 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
             tid2eid=gate_payload.tid2eid,
         )
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(
+            y,
+            tokens,
+            x.device,
+            diagnostic_inputs={
+                "x": x,
+                "scores": gate_payload.scores,
+                "topk": gate_payload.topk,
+                "score_func": gate_payload.score_func,
+                "route_scale": gate_payload.route_scale,
+                "norm_eps": gate_payload.norm_eps,
+                "bias": gate_payload.bias,
+                "input_ids": gate_payload.input_ids,
+                "tid2eid": gate_payload.tid2eid,
+            },
+        )
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
     def forward(self, x, weights, indices):
@@ -253,5 +333,10 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         self._validate_capacity(tokens)
         self._input_packer.pack(x, weights, indices, buf, tokens)
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(
+            y,
+            tokens,
+            x.device,
+            diagnostic_inputs={"x": x, "weights": weights, "indices": indices},
+        )
         return y

@@ -28,6 +28,9 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.snapshot import (
+    mega_moe_prefill_snapshot,
+)
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -1562,23 +1565,28 @@ class Qwen3NextModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
 
-        for i, decoder_layer in enumerate(self.layers):
-            layer_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, i
-            )
-            layer_fmha_impl = (
-                None
-                if decoder_layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
-            )
-            hidden_states, residual = decoder_layer(
-                hidden_states,
-                residual,
-                layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=layer_attention_inputs,
-                attn_meta=attn_meta,
-            )
+        with (
+            mega_moe_prefill_snapshot(
+                attention_inputs.is_prefill and not is_target_verify
+            ),
+        ):
+            for i, decoder_layer in enumerate(self.layers):
+                layer_attention_inputs = select_attention_inputs_for_layer(
+                    inputs, self.kv_cache, i
+                )
+                layer_fmha_impl = (
+                    None
+                    if decoder_layer.layer_type == HybridAttentionType.LINEAR
+                    else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+                )
+                hidden_states, residual = decoder_layer(
+                    hidden_states,
+                    residual,
+                    layer_fmha_impl,
+                    kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                    attention_inputs=layer_attention_inputs,
+                    attn_meta=attn_meta,
+                )
 
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states)

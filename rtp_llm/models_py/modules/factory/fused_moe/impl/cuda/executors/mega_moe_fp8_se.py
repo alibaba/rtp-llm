@@ -248,6 +248,7 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             y,
             tokens,
             x.device,
+            diagnostic_inputs={"x": x, "weights": weights, "indices": indices},
             **self._shared_kwargs(extra_expert_args, tokens, x.device),
         )
         return y
@@ -298,6 +299,17 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             y,
             tokens,
             x.device,
+            diagnostic_inputs={
+                "x": x,
+                "scores": gate_payload.scores,
+                "topk": gate_payload.topk,
+                "score_func": gate_payload.score_func,
+                "route_scale": gate_payload.route_scale,
+                "norm_eps": gate_payload.norm_eps,
+                "bias": gate_payload.bias,
+                "input_ids": gate_payload.input_ids,
+                "tid2eid": gate_payload.tid2eid,
+            },
             **self._shared_kwargs(extra_expert_args, tokens, x.device),
         )
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
