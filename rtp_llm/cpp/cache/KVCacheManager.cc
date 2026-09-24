@@ -710,10 +710,9 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
                                          cp_slot_mapper_->virtualBlockSize() :
                                          config_.seq_size_per_block;
 
-    const auto capacity     = allocator_->tokenCapacity(block_size_tokens);
     info.block_size         = block_size_tokens;
-    info.total_kv_cache     = capacity.total_tokens;
-    info.available_kv_cache = capacity.available_tokens;
+    info.total_kv_cache     = allocator_->totalTokensNum();
+    info.available_kv_cache = allocator_->availableTokensNum();
 
     return info;
 }

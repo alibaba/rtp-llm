@@ -416,23 +416,7 @@ size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
 
 KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
     (void)default_seq_size_per_block;
-    if (group_block_pools_.empty()) {
-        return {};
-    }
-    size_t total_tokens     = std::numeric_limits<size_t>::max();
-    size_t available_tokens = std::numeric_limits<size_t>::max();
-    bool   has_pool         = false;
-    for (size_t group_id = 0; group_id < group_block_pools_.size(); ++group_id) {
-        const auto& pool = group_block_pools_[group_id];
-        if (!pool) {
-            continue;
-        }
-        const size_t seq_size = config_.seqSizePerBlockForGroup(group_id);
-        total_tokens          = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
-        available_tokens      = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
-        has_pool              = true;
-    }
-    return has_pool ? KVCacheTokenCapacity{total_tokens, available_tokens} : KVCacheTokenCapacity{};
+    return {totalTokensNum(), availableTokensNum()};
 }
 
 size_t HybridPoolKVCacheAllocator::reserveBlocksForPoolMetrics(size_t pool_index) const {
