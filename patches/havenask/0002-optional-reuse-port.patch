@@ -1,0 +1,39 @@
+diff --git aios/network/anet/transport.h aios/network/anet/transport.h
+--- aios/network/anet/transport.h
++++ aios/network/anet/transport.h
+@@ -179,7 +179,8 @@
+                         IServerAdapter *serverAdapter,
+                         int postPacketTimeout = DEFAULT_POSTPACKET_TIMEOUT,
+                         int maxIdleTime = MAX_IDLE_TIME_IN_MILLSECONDS,
+-                        int backlog = LISTEN_BACKLOG);
++                        int backlog = LISTEN_BACKLOG,
++                        bool reusePort = false);
+
+     /**
+      * connect to server at address spec
+diff --git aios/network/anet/transport.cpp aios/network/anet/transport.cpp
+--- aios/network/anet/transport.cpp
++++ aios/network/anet/transport.cpp
+@@ -250,7 +250,8 @@
+                                IServerAdapter *serverAdapter,
+                                int postPacketTimeout,
+                                int maxIdleTime,
+-                               int backlog) {
++                               int backlog,
++                               bool reusePort) {
+     MutexGuard guard(&_stopMutex);
+     if (_stop) {
+         ANET_LOG(SPAM, "Transport(%p) Stoped!", this);
+@@ -266,6 +267,12 @@
+     DBGASSERT(socket);
+     socket->setAddrSpec(spec);
+     if (socket->getProtocolType() == (int)SOCK_STREAM) {
++        // Configure before TCPAcceptor::init binds the listening socket.
++        if (reusePort && (!socket->checkSocketHandle() || !socket->setIntOption(SO_REUSEPORT, 1))) {
++            ANET_LOG(ERROR, "Cannot enable SO_REUSEPORT for listener %s", spec);
++            delete socket;
++            return NULL;
++        }
+         // TCPAcceptor
+         TCPAcceptor *acceptor =
+             new TCPAcceptor(this, socket, streamer, serverAdapter, postPacketTimeout, maxIdleTime, backlog);
