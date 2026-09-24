@@ -356,3 +356,19 @@ cc_library(
         "--cuda-gpu-arch=sm_100f",
     ],
 )
+
+# vLLM native fused sigmoid/grouped-top-k, with K3-only Tensor bindings.
+# Keep scoring arithmetic and PDL dispatch local to this translation unit.
+cc_library(
+    name = "kimi_k3_topk",
+    srcs = ["kimi_k3_topk.cu"],
+    hdrs = ["kimi_k3_topk.h", "kimi_k3_topk_native.cuh"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        "--cuda-gpu-arch=sm_100f",
+    ],
+)

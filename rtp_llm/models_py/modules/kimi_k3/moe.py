@@ -13,6 +13,7 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import MoeConfig
 from .attention import linear
 from .router import KimiK3RouterProjection
+from .routing import grouped_topk
 from .moe_backend import get_k3_moe_backend
 from .linear import KimiK3Bf16Linear, bf16_linear
 
@@ -104,23 +105,15 @@ class KimiK3LatentMoE(nn.Module):
         self.experts = FusedMoeFactory().create_fused_moe(cfg, packed)
 
     def forward(self, hidden, valid_mask=None):
-        scores = self.router(hidden).sigmoid()
-        choice = scores + self.correction
-        if self.groups > self.top_groups:
-            grouped = choice.reshape(hidden.shape[0], self.groups, -1)
-            group_scores = grouped.topk(2, dim=-1).values.sum(-1)
-            selected = group_scores.topk(self.top_groups, sorted=False).indices
-            mask = torch.zeros_like(group_scores, dtype=torch.bool).scatter_(
-                1, selected, True
-            )
-            choice = choice.masked_fill(
-                ~mask.unsqueeze(-1).expand_as(grouped).reshape_as(choice), float("-inf")
-            )
-        ids = choice.topk(self.top_k, sorted=False).indices
-        routing = scores.gather(1, ids)
-        if self.renormalize and self.top_k > 1:
-            routing = routing / (routing.sum(-1, keepdim=True) + 1e-20)
-        routing = routing * self.route_scale
+        routing, ids = grouped_topk(
+            self.router(hidden),
+            self.correction,
+            top_k=self.top_k,
+            groups=self.groups,
+            top_groups=self.top_groups,
+            renormalize=self.renormalize,
+            scale=self.route_scale,
+        )
         if valid_mask is not None:
             ids = torch.where(valid_mask[:, None], ids, 0)
             routing = torch.where(valid_mask[:, None], routing, 0)

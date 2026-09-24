@@ -6,6 +6,10 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_attn_res.h"
 #endif
 
+#ifdef RTP_K3_NATIVE_ROUTING
+#include "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_topk.h"
+#endif
+
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
 #include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_scaled_mm.h"
@@ -17,6 +21,14 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+#ifdef RTP_K3_NATIVE_ROUTING
+    rtp_ops_m.def("kimi_k3_grouped_topk", &kimi_k3_grouped_topk,
+                 "Native K3 fused sigmoid, grouped top-k and routing normalization",
+                 py::arg("scores"), py::arg("bias"), py::arg("n_group"),
+                 py::arg("topk_group"), py::arg("topk"), py::arg("renormalize"),
+                 py::arg("scale"));
+#endif
+
 #ifdef RTP_K3_NATIVE_ATTNRES
     rtp_ops_m.def("kimi_k3_attn_res", &kimi_k3_attn_res,
                  "Native Blackwell K3 AttnRes with optional fused RMSNorm",
