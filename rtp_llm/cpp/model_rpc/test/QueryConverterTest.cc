@@ -240,6 +240,22 @@ TEST_F(QueryConverterTest, EnableMemoryCacheIsPreservedFromProto) {
     }
 }
 
+TEST_F(QueryConverterTest, CompactOutputAcceptanceDefaultsToLegacy) {
+    GenerateConfigPB empty;
+    const auto       defaults = QueryConverter::transGenerateConfig(&empty);
+    EXPECT_FALSE(defaults->accept_compact_output);
+    EXPECT_EQ(GenerateConfigPB::kAcceptCompactOutputFieldNumber, 75);
+    for (const bool enabled : {false, true}) {
+        GenerateInputPB input;
+        auto*           config = input.mutable_generate_config();
+        config->set_accept_compact_output(enabled);
+        const auto parsed = QueryConverter::transQuery(&input)->generate_config;
+        EXPECT_EQ(parsed->accept_compact_output, enabled);
+        EXPECT_FALSE(parsed->return_all_hidden_states);
+        EXPECT_FALSE(parsed->return_softmax_probs);
+    }
+}
+
 TEST_F(QueryConverterTest, TransGenerateConfigResolvesThinkingState) {
     using Case = std::tuple<GenerateConfigPB::ThinkingModePB, bool, ThinkingMode, bool>;
     const std::array<Case, 5> cases{{
@@ -405,97 +421,106 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
 }
 
-TEST_F(QueryConverterTest, SharedPromptStatesUseOnlyOneInputRow) {
-    GenerateOutputs outputs;
-    const auto      states = torch::arange(28, torch::kFloat32).reshape({14, 2});
-    for (int i = 0; i < 2; ++i) {
-        GenerateOutput output;
-        output.finished                        = true;
-        output.all_hidden_states               = states;
-        output.shared_all_hidden_states_length = 7;
-        outputs.generate_outputs.push_back(output);
-    }
-    GenerateOutputsPB response;
-    QueryConverter::transResponse(&response, &outputs, false, "", 10000);
-    const auto shared = QueryConverter::transTensor(response.flatten_output().all_hidden_states());
-    ASSERT_EQ(shared.dim(), 3);
-    EXPECT_EQ(shared.size(0), 1);
-    EXPECT_EQ(shared.size(1), 7);
-    EXPECT_TRUE(torch::equal(shared[0], states.narrow(0, 0, 7)));
-}
-
-TEST_F(QueryConverterTest, TransOutputSerializesAllHiddenStatesWithSingletonOutputDimension) {
-    GenerateOutputs outputs;
-
-    auto first_all_hidden_states = torch::empty({2, 2}, torch::kFloat32);
-    auto first_data              = first_all_hidden_states.data_ptr<float>();
-    for (int i = 0; i < 4; ++i) {
-        first_data[i] = i + 1;
-    }
-    GenerateOutput first_output;
-    first_output.finished = true;
-    first_output.all_hidden_states.emplace(first_all_hidden_states);
-    outputs.generate_outputs.push_back(first_output);
-
-    GenerateOutput second_output;
-    second_output.finished = true;
-    second_output.all_hidden_states.emplace(first_all_hidden_states);
-    outputs.generate_outputs.push_back(second_output);
-
-    GenerateOutputsPB outputs_pb;
-    QueryConverter::transResponse(&outputs_pb, &outputs, false, "", 10000);
-
-    const auto& output_pb = outputs_pb.flatten_output();
-    ASSERT_EQ(output_pb.finished_size(), 2);
-    const auto& all_hidden_states_pb = output_pb.all_hidden_states();
-    ASSERT_EQ(all_hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
-    ASSERT_EQ(all_hidden_states_pb.shape_size(), 3);
-    ASSERT_EQ(all_hidden_states_pb.shape(0), 1);
-    ASSERT_EQ(all_hidden_states_pb.shape(1), 2);
-    ASSERT_EQ(all_hidden_states_pb.shape(2), 2);
-
-    const auto&   all_hidden_states_string = all_hidden_states_pb.fp32_data();
-    vector<float> all_hidden_states_vector;
-    all_hidden_states_vector.resize(all_hidden_states_string.size() / sizeof(float));
-    std::memcpy(all_hidden_states_vector.data(), all_hidden_states_string.data(), all_hidden_states_string.size());
-    ASSERT_EQ(all_hidden_states_vector.size(), 4);
-    for (int i = 0; i < 4; ++i) {
-        ASSERT_FLOAT_EQ(all_hidden_states_vector[i], i + 1);
+TEST_F(QueryConverterTest, SharedPromptCapabilityKeepsLegacyStatesUnlessAccepted) {
+    for (const int num_outputs : {1, 2, 4}) {
+        for (const bool shared : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "num_outputs=" << num_outputs << " shared=" << shared);
+            GenerateOutputs outputs;
+            // Two executed prompt rows; only opted-in requests get the shared first row.
+            const auto states = torch::arange(28, torch::kFloat32).reshape({14, 2});
+            for (int i = 0; i < num_outputs; ++i) {
+                GenerateOutput output;
+                output.finished                        = true;
+                output.all_hidden_states               = states + i;
+                output.shared_all_hidden_states_length = 7;
+                outputs.generate_outputs.push_back(output);
+            }
+            GenerateOutputsPB response;
+            QueryConverter::transResponse(&response, &outputs, false, "", 10000, shared);
+            const auto actual = QueryConverter::transTensor(response.flatten_output().all_hidden_states());
+            ASSERT_EQ(actual.dim(), 3);
+            EXPECT_EQ(actual.size(0), shared ? 1 : num_outputs);
+            EXPECT_EQ(actual.size(1), shared ? 7 : 14);
+            EXPECT_EQ(actual.size(2), 2);
+            for (int i = 0; i < actual.size(0); ++i) {
+                EXPECT_TRUE(torch::equal(actual[i], shared ? states.narrow(0, 0, 7) : states + i));
+            }
+        }
     }
 }
 
-TEST_F(QueryConverterTest, TransOutputAggregatesSoftmaxProbsAndKeepsLegacyAuxInfo) {
-    GenerateOutputs outputs;
-    for (const auto& values : {std::vector<float>{0.1f, 0.9f}, std::vector<float>{0.25f, 0.75f}}) {
-        GenerateOutput output;
-        output.finished               = true;
-        output.aux_info.softmax_probs = torch::tensor(values, torch::kFloat32);
-        outputs.generate_outputs.push_back(std::move(output));
+TEST_F(QueryConverterTest, PackedSoftmaxCapabilityReusesFirstAuxFieldWithoutDuplicatingPayloads) {
+    for (const int num_outputs : {1, 2, 4}) {
+        for (const bool packed : {false, true}) {
+            for (const bool dump_aux : {false, true}) {
+                for (const bool with_probs : {false, true}) {
+                    SCOPED_TRACE(testing::Message() << "outputs=" << num_outputs << " packed=" << packed
+                                                    << " aux=" << dump_aux << " probs=" << with_probs);
+                    GenerateOutputs            outputs;
+                    std::vector<torch::Tensor> expected;
+                    for (int i = 0; i < num_outputs; ++i) {
+                        GenerateOutput output;
+                        output.finished            = true;
+                        output.aux_info.input_len  = 7;
+                        output.aux_info.output_len = 2;
+                        expected.push_back(torch::tensor({0.1f + i, 0.9f + i}, torch::kFloat32));
+                        if (with_probs) {
+                            output.aux_info.softmax_probs = expected.back();
+                        }
+                        outputs.generate_outputs.push_back(std::move(output));
+                    }
+                    GenerateOutputsPB response;
+                    QueryConverter::transResponse(&response, &outputs, dump_aux, "", 10000, packed);
+                    const auto& flatten = response.flatten_output();
+                    ASSERT_EQ(flatten.aux_info_size(), dump_aux ? num_outputs : 0);
+                    for (int i = 0; i < flatten.aux_info_size(); ++i) {
+                        const auto& aux = flatten.aux_info(i);
+                        EXPECT_EQ(aux.input_len(), 7);
+                        EXPECT_EQ(aux.output_len(), 2);
+                        const bool has_probs = with_probs && (!packed || i == 0);
+                        ASSERT_EQ(aux.has_softmax_probs(), has_probs);
+                        if (has_probs) {
+                            const auto probs = QueryConverter::transTensor(aux.softmax_probs());
+                            EXPECT_TRUE(torch::equal(probs, packed ? torch::stack(expected, 0) : expected[i]));
+                        }
+                    }
+                }
+            }
+        }
     }
+}
 
-    GenerateOutputsPB outputs_pb;
-    QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
-
-    const auto& flatten = outputs_pb.flatten_output();
-    ASSERT_TRUE(flatten.has_all_softmax_probs());
-    ASSERT_EQ(flatten.all_softmax_probs().shape_size(), 2);
-    EXPECT_EQ(flatten.all_softmax_probs().shape(0), 2);
-    EXPECT_EQ(flatten.all_softmax_probs().shape(1), 2);
-    const auto& data = flatten.all_softmax_probs().fp32_data();
-    ASSERT_EQ(data.size(), 4 * sizeof(float));
-    const auto* probs = reinterpret_cast<const float*>(data.data());
-    EXPECT_FLOAT_EQ(probs[0], 0.1f);
-    EXPECT_FLOAT_EQ(probs[1], 0.9f);
-    EXPECT_FLOAT_EQ(probs[2], 0.25f);
-    EXPECT_FLOAT_EQ(probs[3], 0.75f);
-
-    ASSERT_EQ(flatten.aux_info_size(), 2);
-    EXPECT_TRUE(flatten.aux_info(0).has_softmax_probs());
-    EXPECT_TRUE(flatten.aux_info(1).has_softmax_probs());
-
-    GenerateOutputsPB outputs_without_aux;
-    QueryConverter::transResponse(&outputs_without_aux, &outputs, false, "", 10000);
-    EXPECT_FALSE(outputs_without_aux.flatten_output().has_all_softmax_probs());
+TEST_F(QueryConverterTest, UnequalOrEmptySoftmaxLengthsKeepPerOutputTensors) {
+    for (const auto& lengths : std::vector<std::vector<int64_t>>{{2, 3}, {0, 2}, {2, 0}, {0, 0}}) {
+        for (const bool packed : {false, true}) {
+            for (const bool dump_aux : {false, true}) {
+                SCOPED_TRACE(testing::Message() << "lengths=" << lengths[0] << "," << lengths[1] << " packed=" << packed
+                                                << " aux=" << dump_aux);
+                GenerateOutputs            outputs;
+                std::vector<torch::Tensor> expected;
+                for (size_t i = 0; i < lengths.size(); ++i) {
+                    GenerateOutput output;
+                    output.finished            = true;
+                    output.aux_info.input_len  = 7;
+                    output.aux_info.output_len = lengths[i];
+                    expected.push_back(torch::arange(lengths[i], torch::kFloat32) + i);
+                    output.aux_info.softmax_probs = expected.back();
+                    outputs.generate_outputs.push_back(std::move(output));
+                }
+                GenerateOutputsPB response;
+                QueryConverter::transResponse(&response, &outputs, dump_aux, "", 10000, packed);
+                const auto& flatten = response.flatten_output();
+                ASSERT_EQ(flatten.aux_info_size(), dump_aux ? static_cast<int>(lengths.size()) : 0);
+                for (int i = 0; i < flatten.aux_info_size(); ++i) {
+                    const auto& aux = flatten.aux_info(i);
+                    EXPECT_EQ(aux.input_len(), 7);
+                    EXPECT_EQ(aux.output_len(), lengths[i]);
+                    ASSERT_TRUE(aux.has_softmax_probs());
+                    EXPECT_TRUE(torch::equal(QueryConverter::transTensor(aux.softmax_probs()), expected[i]));
+                }
+            }
+        }
+    }
 }
 
 TEST_F(QueryConverterTest, TransTensorPB_FP32) {
