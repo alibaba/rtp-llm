@@ -62,6 +62,35 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# C++ tensor/archive support without libtorch_python or Python headers/libraries.
+cc_library(
+    name = "torch_native",
+    srcs = [
+        "torch/lib/libtorch.so",
+        "torch/lib/libtorch_cpu.so",
+        "torch/lib/libc10.so",
+    ] + glob(["torch/lib/libgomp*.so*"]) + select({
+        "@//:using_cuda": [
+            "torch/lib/libtorch_cuda.so",
+            "torch/lib/libc10_cuda.so",
+        ] + glob(["torch/lib/libcudart*.so*", "torch/lib/libnvToolsExt*.so*"]),
+        "@//:using_rocm": [
+            "torch/lib/libtorch_hip.so",
+            "torch/lib/libc10_hip.so",
+        ],
+        "//conditions:default": [],
+    }),
+    hdrs = glob([
+        "torch/include/*.h",
+        "torch/include/**/*.h",
+        "torch/include/**/*.cuh",
+        "torch/include/**/*.hpp",
+    ], exclude = ["torch/include/google/**"]),
+    linkopts = ["-pthread", "-ldl"],
+    strip_include_prefix = "torch/include",
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "torch_api",
     hdrs = glob([

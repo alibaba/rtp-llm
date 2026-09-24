@@ -5,6 +5,12 @@ def clean_dep(dep):
 
 def http_deps():
     http_archive(
+        name = "rules_rust",
+        urls = ["https://github.com/bazelbuild/rules_rust/releases/download/0.49.3/rules_rust-v0.49.3.tar.gz"],
+        sha256 = "dd006b77221d59e4d141207c0e7adf11b1fb60d1440b8fca03bf925617932a60",
+    )
+
+    http_archive(
         name = "rules_pkg",
         urls = [
             "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",
