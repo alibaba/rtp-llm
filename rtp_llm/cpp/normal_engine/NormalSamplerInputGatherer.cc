@@ -44,7 +44,7 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
                    complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len,
                    seq_len * sizeof(int));
             reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] =
-                stream->isSubGenerateDoneWithoutLock(i);
+                stream->isSubGenerateDoneWithoutLock(cur_batch);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
@@ -95,10 +95,11 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
             auto sampler_batch_size =
                 stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
             for (int i = 0; i < sampler_batch_size; ++i) {
-                logits_tensor[input_offset].copy_(model_output.logits[logits_offset]);
+                const int source_row = stream->needTilingForSampling() ? 0 : i;
+                logits_tensor[input_offset].copy_(model_output.logits[logits_offset + source_row]);
                 input_offset += 1;
             }
-            logits_offset += 1;
+            logits_offset += stream->currentBatchSize();
         }
     } else if (return_logits || calculate_softmax_probs) {
         logits_tensor = model_output.logits.clone();
@@ -189,9 +190,15 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
         }
         if (sampler_inputs.cum_log_probs.defined()) {
             const auto& cum_log_probs = stream->cumLogProbs();
-            memcpy(sampler_inputs.cum_log_probs.data_ptr<float>() + batch_idx,
-                   cum_log_probs.data_ptr<float>(),
-                   cum_log_probs.numel() * sizeof(float));
+            if (stream->needTilingForSampling()) {
+                std::fill_n(sampler_inputs.cum_log_probs.data_ptr<float>() + batch_idx,
+                            sampler_batch_size,
+                            cum_log_probs.data_ptr<float>()[0]);
+            } else {
+                memcpy(sampler_inputs.cum_log_probs.data_ptr<float>() + batch_idx,
+                       cum_log_probs.data_ptr<float>(),
+                       cum_log_probs.numel() * sizeof(float));
+            }
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
@@ -223,7 +230,8 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
     size_t                   idx       = 0;
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, &idx](auto& stream) {
-        const size_t batch_size = stream->currentBatchSize();
+        const size_t batch_size =
+            stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             if (processor) {
                 state_ptr->insert(processor, idx, idx + batch_size);

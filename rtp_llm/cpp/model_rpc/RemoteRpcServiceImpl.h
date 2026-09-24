@@ -99,6 +99,10 @@ public:
         return decode_server_->RemoteGenerate(context, stream);
     }
 
+    grpc::Status RemoteGenerateWithInputEmbeddings(grpc::ServerContext* context, ServerStream* stream) override {
+        return this->RemoteGenerate(context, stream);
+    }
+
     grpc::Status RemoteGenerateNew(grpc::ServerContext*              context,
                                    const RemoteGenerateRequestPBNew* request,
                                    RemoteGenerateResponsePBNew*      response) override {

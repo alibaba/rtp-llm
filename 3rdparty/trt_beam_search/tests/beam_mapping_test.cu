@@ -161,7 +161,7 @@ int runCase(int nBS, int nBMIn, int nBMOut, int nV, char const* label)
 
     // Stage B: add cumLogProbs in place.
     launchAddCumLogProbs<float>(dStage1Vals, dCumLogProbs, /*finished=*/nullptr, /*endIds=*/nullptr,
-        /*diversityRates=*/nullptr, /*batchSlots=*/nullptr, nBS, nBMIn, nBMOut, /*nThread=*/32, stream);
+        /*diversityRates=*/nullptr, /*batchSlots=*/nullptr, nBS, nBMIn, nBMOut, nCand, /*nThread=*/32, stream);
 
     // Stage C: merged top-nBMOut per batch.
     size_t const wsCBytes = invokeComputeTopkLastDimWorkspaceSize<float>(nBS, nCand, nBMOut, true, 0);
@@ -178,7 +178,7 @@ int runCase(int nBS, int nBMIn, int nBMOut, int nV, char const* label)
     auto devStage2Vals = fromDevice(dStage2Vals, nBS * nBMOut);
 
     // Stage D: gatherId rewrites stage-2 ids into final logProbs indices.
-    gatherId<<<nBS, 32, 0, stream>>>(dStage1Ids, dStage2Ids, nBS, nBMIn, nBMOut, nV);
+    gatherId<<<nBS, 32, 0, stream>>>(dStage1Ids, dStage2Ids, nBS, nBMIn, nBMOut, nBMOut, nV);
     CHECK_CUDA(lastError());
     auto devFinalIds = fromDevice(dStage2Ids, nBS * nBMOut);
 
