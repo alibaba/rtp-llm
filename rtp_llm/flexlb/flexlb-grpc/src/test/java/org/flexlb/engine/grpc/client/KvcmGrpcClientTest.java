@@ -7,6 +7,7 @@ import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.core.GrpcTarget;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
+import org.flexlb.engine.grpc.monitor.KvcmMetricsReporter;
 import org.flexlb.exception.KvcmQueryException;
 import org.flexlb.kvcm.grpc.CommonResponseHeader;
 import org.flexlb.kvcm.grpc.ErrorCode;
@@ -15,6 +16,8 @@ import org.flexlb.kvcm.grpc.GetHostCacheStateResponse;
 import org.flexlb.kvcm.grpc.HostCacheMatch;
 import org.flexlb.kvcm.grpc.QueryType;
 import org.flexlb.kvcm.grpc.Status;
+import org.flexlb.listener.ApplicationWarmupState;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -87,7 +90,7 @@ class KvcmGrpcClientTest {
                 });
 
         GrpcReporter reporter = mock(GrpcReporter.class);
-        client = new KvcmGrpcClient(
+        client = createClient(
                 configuration,
                 metaServiceClient,
                 leaderResolver,
@@ -141,7 +144,7 @@ class KvcmGrpcClientTest {
                         .setHeader(okHeader())
                         .build());
 
-        client = new KvcmGrpcClient(
+        client = createClient(
                 configuration,
                 metaServiceClient,
                 leaderResolver,
@@ -162,7 +165,7 @@ class KvcmGrpcClientTest {
     void skipsQueriesWhenDisabled() {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         when(configuration.isKvcmEnabled()).thenReturn(false);
-        client = new KvcmGrpcClient(
+        client = createClient(
                 configuration,
                 mock(KvcmMetaServiceClient.class),
                 mock(KvcmLeaderResolver.class),
@@ -200,7 +203,7 @@ class KvcmGrpcClientTest {
                         .setHeader(okHeader())
                         .build());
 
-        client = new KvcmGrpcClient(
+        client = createClient(
                 configuration,
                 metaServiceClient,
                 leaderResolver,
@@ -276,7 +279,7 @@ class KvcmGrpcClientTest {
                             .build();
                 });
 
-        client = new KvcmGrpcClient(
+        client = createClient(
                 configuration,
                 metaServiceClient,
                 leaderResolver,
@@ -321,7 +324,7 @@ class KvcmGrpcClientTest {
             initialRefresh.countDown();
             return null;
         }).when(metadataResolver).refreshNamespacesAndQueryTypes();
-        client = new KvcmGrpcClient(
+        client = createClient(
                 configuration,
                 mock(KvcmMetaServiceClient.class),
                 leaderResolver,
@@ -371,7 +374,7 @@ class KvcmGrpcClientTest {
                 RoleType.PREFILL, "default")).thenReturn(QueryType.QT_PREFIX_MATCH);
         when(metaServiceClient.getHostCacheState(any(), any(), anyLong()))
                 .thenThrow(io.grpc.Status.UNAVAILABLE.asRuntimeException());
-        client = new KvcmGrpcClient(
+        client = createClient(
                 configuration,
                 metaServiceClient,
                 leaderResolver,
@@ -386,6 +389,17 @@ class KvcmGrpcClientTest {
                 "request-7", List.of(11L), 2192L, RoleType.PREFILL, "default"));
 
         assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+    }
+
+    private static KvcmGrpcClient createClient(CacheMatchConfiguration configuration,
+                                               KvcmMetaServiceClient metaServiceClient,
+                                               KvcmLeaderResolver leaderResolver,
+                                               KvcmWorkerMetadataResolver workerMetadataResolver,
+                                               GrpcReporter grpcReporter) {
+        ApplicationWarmupState warmupState = new ApplicationWarmupState();
+        warmupState.setWarmupFinished(true);
+        return new KvcmGrpcClient(configuration, metaServiceClient, leaderResolver, workerMetadataResolver,
+                warmupState, grpcReporter, new KvcmMetricsReporter(NoOpFlexMonitor.getInstance()));
     }
 
     private static CommonResponseHeader okHeader() {

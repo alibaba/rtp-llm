@@ -100,6 +100,17 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 - `fix(grpc): handle connection timeout gracefully`
 - `refactor(LoadBalancer): rename method getLoadBalanceStrategy to getLoadBalancer`
 
+## Java Javadoc 格式
+
+新增或修改 Javadoc 时，统一使用多行格式，即使只有一句说明也不压缩成单行。
+`/**` 和 `*/` 各自独占一行，说明文字放在中间以 ` * ` 开头的行上。
+
+```java
+/**
+ * Exposes whether application warm-up has completed.
+ */
+```
+
 ## Testing Strategy
 
 - 单元测试用 JUnit 5 + Mockito 5.20.0（Java 21 下无需 PowerMock）。

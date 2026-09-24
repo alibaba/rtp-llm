@@ -1,56 +1,59 @@
 # Lifecycle and Consistency
 
-FlexLB 的优雅上下线不靠 Spring 生命周期或 JVM 信号，而由**同机 sidecar 通过本机 HTTP hook
-端点驱动**；高可用由 ZooKeeper LeaderSelector 主选举 + slave 请求转发实现。
+FlexLB 的上线由同机 HTTP hook 驱动；下线由 HTTP hook 或 Spring 容器关闭事件驱动。
+高可用由 ZooKeeper LeaderSelector 主选举与 follower 请求转发实现。
 
-主要代码：`flexlb-sync/src/main/java/org/flexlb/service/grace/`、`consistency/`，
-`flexlb-api/.../AppStateHookServer.java`、`HealthCheckServer.java`。
+主要代码：`flexlb-api/src/main/java/org/flexlb/service/grace/ApplicationLifecycle.java`、
+`flexlb-common/.../listener/ApplicationWarmupState.java`，`flexlb-api/.../AppStateHookServer.java`、
+`HealthCheckServer.java`、`FlexlbGrpcServer.java`，以及 `flexlb-sync/.../consistency/`。
 
 ## 生命周期 Hook
 
-### 接口（flexlb-common `listener/`）
+### 预热状态
 
-| 接口 | 方法 | 备注 |
-|---|---|---|
-| `AppOnlineHooker` | `afterStartUp()` + `priority()` | `priority()` 已声明但**无调用方**——实际执行顺序硬编码在编排服务里 |
-| `AppShutDownHooker` | `beforeShutdown()` | 无优先级方法 |
-| `ApplicationWarmupState` | `isWarmupFinished()` | 供健康检查与 gRPC 客户端预热判断 |
+`flexlb-common` 中的 `ApplicationWarmupState` 是独立 Spring Bean，使用 volatile 字段
+共享预热状态。`ApplicationLifecycle` 通过 `setWarmupFinished()` 更新状态，
+KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 gRPC 服务、调度器
+或生命周期编排器。
 
-失败语义：各 Hook 内部自行 catch（`LbConsistencyHooker` 上线 catch Exception、下线 catch
-Throwable；`ActiveRequestShutdownHooker` catch InterruptedException），实践中单个 Hook 失败
-不会中断链；若真有未捕获异常，`AppStateHookServer` 返回 HTTP 500。
+`ApplicationLifecycle` 在上线开始时将状态置为 false，等待初始 Worker 同步后置为 true；
+健康检查读取同一状态，并同时检查下线标志。`KvcmGrpcClient` 注入
+`ApplicationWarmupState`，在预热完成前不累计心跳和查询失败次数，避免提前触发容灾切换。
+生命周期编排器依赖 `FlexlbGrpcServer` 完成请求排空；KVCM 客户端只依赖独立状态 Bean，
+不反向依赖生命周期编排器。
 
 ### 编排与触发
 
-**触发点是三个仅限本机调用的 HTTP 端点**（`AppStateHookServer`，非 loopback/本机地址一律 403）：
+以下 HTTP 端点由 `AppStateHookServer` 提供，仅允许 loopback 或本机地址访问：
 
 | 端点 | 行为 |
 |---|---|
 | `GET /hook/process_ok` | `ApplicationReadyEvent` 后返回 200，否则 503 |
-| `GET /hook/after_start` | 同步执行 `GracefulOnlineService.online()`（故意阻塞事件循环），上报 `online_complete` |
-| `GET /hook/pre_stop` | 在 boundedElastic 上执行 `GracefulShutdownService.offline()`；活跃请求排干成功返回 200，否则 503 |
+| `GET /hook/after_start` | 同步执行 `ApplicationLifecycle.online()`，上报 `online_complete` |
+| `GET /hook/pre_stop` | 在 boundedElastic 上执行 `ApplicationLifecycle.offline()`，排空完成后返回 200 |
 
-**上线顺序**（`GracefulOnlineService.online()`，`test` profile 下整体跳过）：
-1. `LbConsistencyHooker.afterStartUp()`——`LBStatusConsistencyService.start()` → ZK
-   LeaderSelector 启动（`zk_node_online`）；
-2. `QueryWarmerHooker.afterStartUp()`——**固定 sleep 10 秒**等依赖就绪（并有 10s 兜底
-   Timer 强制置位），完成后 `warmupFinished=true`（`warmer_complete`）。名字里的
-   "warm" 目前不预热任何查询路径。
+**上线顺序**（`test` profile 下跳过）：
 
-**下线顺序**（`GracefulShutdownService.offline()`）：
-1. `HealthCheckHooker`——置静态 volatile `isShutDownSignalReceived=true`，`/health` 立即
-   开始返回 404，摘除流量（`health_check_offline`）；
-2. `LbConsistencyHooker`——ZK 下线/让主（`zk_node_offline`）；
-3. `ActiveRequestShutdownHooker`——排干在途请求：每 500ms 轮询
-   `ActiveRequestCounter.getCount()`，需要**连续 5s 静默**（quietPeriodMs，期间任何活跃请求
-   重置窗口）才算成功；硬超时 300s（`shutdown_timeout`）。计数来源：每个
-   `/rtp_llm/schedule` 请求通过 `Mono.using(activeRequestCounter::acquire, ...,
-   RequestToken::close)` 包裹（token 幂等关闭）。
+1. 重置下线标志和预热状态，调用 `LBStatusConsistencyService.start()` 启动主选举。
+2. 等待 3 秒供初始 Worker 同步，然后标记预热完成；等待被中断时恢复线程中断标志，
+   预热完成标志仍在 finally 中置位。
+
+**下线顺序**：
+
+1. 置下线标志，使健康检查返回不可用。
+2. 调用 `LBStatusConsistencyService.offline()` 下线并让主。
+3. 调用 `FlexlbGrpcServer.drain()`，等待没有新 Schedule 请求的静默期；期间仍处理迟到请求。
+   静默期由 `grpcServer.shutdownQuietPeriodMs` 控制，默认 5 秒。
+4. 关闭 gRPC 新请求入口，等待已接受的 RPC 完成，再允许 Spring 销毁服务资源。
+   强制终止期限由平台管理。
+
+`ApplicationLifecycle` 以最高优先级处理所属 Spring 容器的 `ContextClosedEvent`，
+同步执行下线流程；子容器的关闭事件不触发服务下线。成功完成后的重复下线调用直接返回。
 
 ### 健康检查
 
-`GET /health`（`HealthCheckServer`）：`isShutDownSignalReceived` → 404 "shutdown received"；
-warmup 未完成 → 404 "warm not finish"；否则 200 "success"。
+`GET /health` 通过 `ApplicationLifecycle.isHealthy()` 判断状态：
+预热完成且未收到下线信号时返回 200，否则返回 404。
 
 ### 指标
 

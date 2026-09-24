@@ -19,8 +19,6 @@ import org.flexlb.kvcm.grpc.GetHostCacheStateResponse;
 import org.flexlb.kvcm.grpc.HostCacheMatch;
 import org.flexlb.kvcm.grpc.QueryType;
 import org.flexlb.listener.ApplicationWarmupState;
-import org.flexlb.metric.NoOpFlexMonitor;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -67,26 +65,13 @@ public class KvcmGrpcClient {
             new AtomicReference<>(INITIAL_HEALTH_REASON);
     private volatile Consumer<KvcmHealthSnapshot> healthSnapshotListener = ignored -> { };
 
-    public KvcmGrpcClient(
-            CacheMatchConfiguration configuration,
-            KvcmMetaServiceClient metaServiceClient,
-            KvcmLeaderResolver leaderResolver,
-            KvcmWorkerMetadataResolver workerMetadataResolver,
-            GrpcReporter grpcReporter) {
-        this(configuration, metaServiceClient, leaderResolver, workerMetadataResolver,
-                () -> true, grpcReporter,
-                new KvcmMetricsReporter(NoOpFlexMonitor.getInstance()));
-    }
-
-    @Autowired
-    public KvcmGrpcClient(
-            CacheMatchConfiguration configuration,
-            KvcmMetaServiceClient metaServiceClient,
-            KvcmLeaderResolver leaderResolver,
-            KvcmWorkerMetadataResolver workerMetadataResolver,
-            ApplicationWarmupState applicationWarmupState,
-            GrpcReporter grpcReporter,
-            KvcmMetricsReporter metricsReporter) {
+    public KvcmGrpcClient(CacheMatchConfiguration configuration,
+                          KvcmMetaServiceClient metaServiceClient,
+                          KvcmLeaderResolver leaderResolver,
+                          KvcmWorkerMetadataResolver workerMetadataResolver,
+                          ApplicationWarmupState applicationWarmupState,
+                          GrpcReporter grpcReporter,
+                          KvcmMetricsReporter metricsReporter) {
         this.configuration = configuration;
         this.metaServiceClient = metaServiceClient;
         this.leaderResolver = leaderResolver;
