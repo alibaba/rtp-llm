@@ -69,32 +69,15 @@ cc_library(
     name = "cache_config_test_utils",
     hdrs = [
         "CacheConfigTestUtils.h",
+        "TestLayoutSpec.h",
     ],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:model_config",
     ],
     visibility = ["//visibility:public"],
-)
-
-cc_test(
-    name = "hybrid_pool_config_creator_test",
-    srcs = ["HybridPoolConfigCreatorTest.cc"],
-    copts = test_copts,
-    deps = [
-        ":cache_config_test_utils",
-        "//rtp_llm/cpp/cache:cache_core",
-        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
-        "//rtp_llm/models_py/bindings/core:exec_ctx_state",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-    env = {},
-    exec_properties = select({
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
-        "//conditions:default": {"gpu": "A10"},
-    }),
 )
 
 cc_test(
@@ -127,6 +110,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/models_py/bindings:op_defs",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -256,7 +240,7 @@ cc_test(
 cc_test(
     name = "single_type_kv_cache_allocator_test",
     srcs = [
-        "SingleTypeKVCacheAllocatorTest.cc",
+        "SingleTypeCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -278,6 +262,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/testing:device_test_utils",
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
@@ -325,7 +310,7 @@ cc_test(
 cc_test(
     name = "hybrid_kv_cache_allocator_test",
     srcs = [
-        "HybridTypeKVCacheAllocatorTest.cc",
+        "HybridTypeCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -342,7 +327,7 @@ cc_test(
 cc_test(
     name = "hybrid_kv_cache_allocator_cp_shard_test",
     srcs = [
-        "HybridKVCacheAllocatorCPShardTest.cc",
+        "HybridCoordinatorCacheManagerCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -358,7 +343,7 @@ cc_test(
 cc_test(
     name = "hybrid_pool_kv_cache_allocator_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorTest.cc",
+        "HybridPoolCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -417,14 +402,14 @@ cc_test(
 )
 
 cc_test(
-    name = "single_type_kv_cache_allocator_update_test",
-    srcs = ["SingleTypeKVCacheAllocatorUpdateTest.cc"],
+    name = "coordinator_cache_manager_atomic_update_test",
+    srcs = ["CoordinatorCacheManagerAtomicUpdateTest.cc"],
     copts = copts(),
     deps = [
         ":cache_config_test_utils",
         ":block_tree_cache_allocator_test_helper",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
-        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + select({
         "@//:using_rocm": [

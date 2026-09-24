@@ -34,6 +34,7 @@ from typing import Any, Optional, Tuple
 
 import torch
 
+from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -204,7 +205,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         return int(self._dspark_aux_feature_dim)
 
     def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
     ) -> Any:
         """Build the per-graph DSpARK metadata owner.
 
@@ -215,6 +219,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         the graph (via ``get_or_build_sched_meta``), so the schedule-build
         kernels replay with the current device-side ``topk_length`` values.
         """
+        if cuda_graph_selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
+            # DSpARK's owner namespace is decode-graph specific; generation-prefill
+            # capture must degrade via the factory's unsupported-backend channel
+            # instead of crashing on the extra keyword.
+            raise GenerationPrefillCudaGraphUnsupportedBackend(
+                "DSpARK does not support generation prefill CUDA graphs"
+            )
         if not is_cuda_graph:
             return None
         return SimpleNamespace(

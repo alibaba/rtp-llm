@@ -3,10 +3,7 @@ import os
 from typing import Any, Dict, List
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
-from rtp_llm.config.model_config import (
-    ModelConfig,
-    ssm_state_dtype_str_to_data_type,
-)
+from rtp_llm.config.model_config import ModelConfig, ssm_state_dtype_str_to_data_type
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
@@ -55,21 +52,14 @@ class Qwen3NextBase(BaseModel):
         if not remote_cache_enabled:
             return
 
-        # The legacy remote connector registers one contiguous KV-cache
-        # allocation. Qwen3 Next normally uses one allocation per cache group,
-        # but its BF16 layout is also supported by the shared HybridType pool.
-        # build_model_config resolves SSM_STATE_DTYPE=auto to BF16 before this
-        # hook when remote cache is enabled, restoring the legacy-compatible
-        # layout without changing the default FP32 path used elsewhere.
-        if (
-            model_config.linear_attention_config.ssm_state_dtype
-            != DataType.TYPE_BF16
-        ):
+        # build_model_config resolves SSM_STATE_DTYPE=auto before this hook.
+        # Validate explicit dtype overrides here; connector initialization
+        # validates whether the resulting cache topology is supported.
+        if model_config.linear_attention_config.ssm_state_dtype != DataType.TYPE_BF16:
             raise ValueError(
                 "Qwen3 Next remote cache requires BF16 SSM state storage; "
                 "use --ssm_state_dtype bf16 or auto"
             )
-        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = False
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -150,7 +140,6 @@ class Qwen3NextBase(BaseModel):
         # physical layouts.  Use the generic per-group allocator so each group
         # keeps its native block representation while sharing the same logical
         # 64-token cache/reuse granularity.
-        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         hybrid_layer_types: List[HybridAttentionType] = []
         for i in range(config.num_layers):
             if (i + 1) % attention_step == 0:

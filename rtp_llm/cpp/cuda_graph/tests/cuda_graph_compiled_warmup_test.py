@@ -49,8 +49,7 @@ class TestCudaGraphCompiledWarmup(unittest.TestCase):
             model,
             HIDDEN_SIZE,
             64,
-            64,
-            64,
+            1,
             [1],
         )
 

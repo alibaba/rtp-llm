@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/EnvUtil.h"
+#include <limits>
 #include <map>
 #include <sstream>
 #include <algorithm>
@@ -201,8 +203,7 @@ std::string LinearAttentionConfig::to_string() const {
 // HybridAttentionConfig
 std::string HybridAttentionConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n"
-        << "enable_independent_kv_cache_pools: " << enable_independent_kv_cache_pools << "\n";
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
     return oss.str();
 }
 
@@ -266,6 +267,21 @@ std::string ModelSpecificConfig::to_string() const {
 }
 
 // SpeculativeExecutionConfig
+size_t SpeculativeExecutionConfig::speculativeReserveStep() const {
+    if (type == SP_TYPE_NONE) {
+        return 0;
+    }
+    const int64_t gamma = gen_num_per_cycle;
+    const int64_t limit = std::numeric_limits<int>::max();
+    RTP_LLM_CHECK_WITH_INFO(gamma >= 0, "speculative gen_num_per_cycle must be non-negative: %ld", gamma);
+    if (type == SP_TYPE_DSPARK) {
+        RTP_LLM_CHECK_WITH_INFO(gamma <= limit / 3, "DSpARK gen_num_per_cycle is too large: %ld", gamma);
+        return static_cast<size_t>(3 * gamma);
+    }
+    RTP_LLM_CHECK_WITH_INFO(gamma < limit, "gen_num_per_cycle is too large: %ld", gamma);
+    return static_cast<size_t>(gamma + 1);
+}
+
 SpeculativeType SpeculativeExecutionConfig::from_string(const std::string& str) {
     if (str.empty() || str == "none") {
         return SP_TYPE_NONE;

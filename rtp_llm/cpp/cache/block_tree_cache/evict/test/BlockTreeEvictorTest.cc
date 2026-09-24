@@ -196,14 +196,16 @@ DeviceBlockPoolPtr makeTestDevicePool(size_t usable_blocks, const std::string& n
     return pool;
 }
 
-void initializeGroups(const std::vector<GroupSetPtr>&        groups,
-                      const std::vector<DeviceBlockPoolPtr>& device_pools,
-                      std::vector<GroupBase>                 group_bases) {
+void initializeGroups(const std::vector<GroupSetPtr>&                          groups,
+                      const std::vector<DeviceBlockPoolPtr>&                   device_pools,
+                      std::vector<block_transfer_engine_test::TestGroupConfig> group_bases) {
     RTP_LLM_CHECK(groups.size() == device_pools.size());
     RTP_LLM_CHECK(groups.size() == group_bases.size());
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
-    for (size_t group_set_id = 0; group_set_id < groups.size(); ++group_set_id) {
-        groups[group_set_id]->initialize(group_set_id, topology, {group_set_id});
+    size_t group_set_id = 0;
+    for (const auto& tag : topology->groupTags()) {
+        groups[group_set_id]->initialize(group_set_id, topology, {tag});
+        ++group_set_id;
     }
 }
 
@@ -525,7 +527,7 @@ public:
         }
         const std::string test_name = test_info->name();
         device_pools_               = {makeTestDevicePool(4, test_name + "_device_0"),
-                                       makeTestDevicePool(4, test_name + "_device_1")};
+                         makeTestDevicePool(4, test_name + "_device_1")};
         host_pools_                 = {makePinnedHostPool(4), makePinnedHostPool(4)};
         disk_pools_ = {makeTestDiskPool(4, test_name + "_disk_0"), makeTestDiskPool(4, test_name + "_disk_1")};
         if (device_pools_[0] == nullptr || device_pools_[1] == nullptr || host_pools_[0] == nullptr
@@ -535,7 +537,7 @@ public:
 
         groups_                           = {std::make_shared<FullGroupSet>(
                        std::vector<DeviceBlockPoolPtr>{device_pools_[0]}, host_pools_[0], disk_pools_[0]),
-                                             std::make_shared<LinearGroupSet>(
+                   std::make_shared<LinearGroupSet>(
                        std::vector<DeviceBlockPoolPtr>{device_pools_[1]}, host_pools_[1], disk_pools_[1])};
         auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
         auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
@@ -1159,7 +1161,7 @@ TEST_F(BlockTreeEvictorTest, PendingReleasesCountEveryDeviceMemberBlock) {
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ =
         std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool_, device_pool_}, nullptr, nullptr);
-    group_->initialize(0, std::move(topology), {0, 1});
+    group_->initialize(0, topology, topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());
@@ -1219,7 +1221,7 @@ TEST_F(BlockTreeEvictorTest, PendingReleaseSettlementIsTransactionalAcrossDevice
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{device_pool_, second_device_pool}, nullptr, nullptr);
-    group_->initialize(0, std::move(topology), {0, 1});
+    group_->initialize(0, topology, topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());
@@ -1312,9 +1314,7 @@ TEST_F(BlockTreeEvictorTest, ComputeWatermarkEvictCountRejectsPendingReleasesAbo
     try {
         (void)evictor_->computeWatermarkEvictCount(
             *group_, Tier::DEVICE, TierWatermark{/*low_ratio=*/0.4, /*high_ratio=*/0.5});
-    } catch (const std::runtime_error& error) {
-        error_message = error.what();
-    }
+    } catch (const std::runtime_error& error) { error_message = error.what(); }
     {
         std::lock_guard<std::mutex> lock(evictor_->pending_release_mutex_);
         evictor_->pending_release_counts_.clear();
@@ -1987,7 +1987,7 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkUsesMaximumDeficitAcrossMemberPools)
         block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(policy, {0}, 16),
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{narrow_pool, wide_pool}, nullptr, nullptr);
-    group_->initialize(0, std::move(topology), {0, 1});
+    group_->initialize(0, topology, topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());
@@ -2554,7 +2554,7 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     const BlockIdxType                         leaf_block   = (*allocated)[1];
     const BlockIdxType                         rival_block  = (*allocated)[2];
     std::vector<std::vector<GroupSetResource>> resources    = {{makeResource(Tier::DEVICE, parent_block)},
-                                                               {makeResource(Tier::DEVICE, leaf_block)}};
+                                                            {makeResource(Tier::DEVICE, leaf_block)}};
     auto                                       result       = insert({100, 200}, resources);
     ASSERT_EQ(result.inserted_nodes.size(), 2u);
     auto rival = insert({300}, {{makeResource(Tier::DEVICE, rival_block)}});

@@ -1,5 +1,6 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
+#include <algorithm>
 #include <cstdlib>
 
 #define private public
@@ -7,8 +8,10 @@
 #undef private
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
@@ -25,6 +28,115 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
+TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
+    class CopyPayloadProcessor: public NormalBatchStreamProcessor {
+    public:
+        CopyPayloadProcessor(const ModelConfig& model, const CacheConfig& config, torch::Tensor mapping):
+            NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, false),
+            mapping_(std::move(mapping)) {}
+
+        absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
+                                                        TensorHolder&       holder) const override {
+            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder);
+            if (!result.ok()) {
+                return result.status();
+            }
+            auto& inputs = result.value();
+            std::reverse(inputs.kv_cache_group_tags.begin(), inputs.kv_cache_group_tags.end());
+            inputs.kv_cache_block_id        = inputs.kv_cache_block_id.flip({0});
+            inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.flip({0});
+            inputs.kv_cache_group_types     = inputs.kv_cache_group_types.flip({0});
+            inputs.kv_cache_update_mapping  = mapping_;
+            return result;
+        }
+
+    private:
+        torch::Tensor mapping_;
+    };
+    struct StopBeforeSampling {};
+
+    ModelConfig model;
+    model.num_layers                          = 2;
+    model.max_seq_len                         = 128;
+    model.vocab_size                          = 16;
+    model.input_vocab_size                    = 16;
+    model.hidden_size                         = 4;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 4;
+    model.attn_config.tokens_per_block        = 2;
+    model.attn_config.kernel_tokens_per_block = 2;
+    CacheConfig config;
+    config.layer_num          = 2;
+    config.seq_size_per_block = 2;
+    config.dtype              = DataType::TYPE_FP16;
+    config.fromGroupedSpecs({test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "first"),
+                             test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "second")},
+                            {{0}, {1}},
+                            {CacheGroupType::FULL, CacheGroupType::FULL});
+    config.finalizeBlockNums(4, RuntimeConfig{});
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+
+    auto blockBytes = [&](int layer, const std::string& tag, int block) {
+        auto addr = manager->convertIndexToAddr(layer, tag, block);
+        return torch::from_blob(addr.kv_addr,
+                                {static_cast<int64_t>(config.group(tag).kvBlockStrideBytes())},
+                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    };
+    auto first_src  = blockBytes(0, "first", 1);
+    auto first_dst  = blockBytes(0, "first", 2);
+    auto second_src = blockBytes(1, "second", 1);
+    auto second_dst = blockBytes(1, "second", 2);
+    first_src.fill_(11);
+    second_src.fill_(22);
+
+    EngineInitParams params;
+    params.model_id      = 0;
+    params.model_config_ = model;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, manager, false);
+    bool           reached_model = false;
+    executor.setModel(std::make_unique<MockModel>(model.vocab_size, [&](const GptModelInputs& inputs) {
+        reached_model = true;
+        EXPECT_EQ(inputs.kv_cache_group_tags, (std::vector<std::string>{"second", "first"}));
+        throw StopBeforeSampling{};
+    }));
+
+    for (const bool invalid_row : {false, true}) {
+        SCOPED_TRACE(invalid_row);
+        first_dst.fill_(33);
+        second_dst.fill_(44);
+        reached_model = false;
+        auto mapping  = invalid_row ? torch::tensor({0, 1, 2, 2, 1, 2}, torch::kInt32).reshape({2, 3}) :
+                                      torch::tensor({0, 1, 2}, torch::kInt32).reshape({1, 3});
+        executor.setBatchProcessor(std::make_unique<CopyPayloadProcessor>(model, config, mapping));
+        auto query                   = std::make_shared<GenerateInput>();
+        query->input_ids             = torch::tensor({1, 2, 3}, torch::kInt32);
+        query->generate_config       = std::make_shared<GenerateConfig>();
+        query->need_release_resource = false;
+        auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(1);
+        resource.initGroups(config.topologyPtr());
+        resource.mutableBlockIds(0, "first").assign({1, 2});
+        resource.mutableBlockIds(0, "second").assign({1, 2});
+        stream->setKVCache(resource);
+        if (invalid_row) {
+            EXPECT_ANY_THROW((void)executor.process({stream}));
+            EXPECT_FALSE(reached_model);
+        } else {
+            EXPECT_THROW((void)executor.process({stream}), StopBeforeSampling);
+            EXPECT_TRUE(reached_model);
+        }
+        runtimeSyncAndCheck();
+        EXPECT_TRUE(first_src.cpu().eq(11).all().item<bool>());
+        EXPECT_TRUE(second_src.cpu().eq(22).all().item<bool>());
+        EXPECT_TRUE(first_dst.cpu().eq(33).all().item<bool>());
+        EXPECT_TRUE(second_dst.cpu().eq(invalid_row ? 44 : 22).all().item<bool>());
+    }
+}
+
 TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterAddition) {
     EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
     EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);
@@ -32,6 +144,72 @@ TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterA
     EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
     EXPECT_ANY_THROW(
         NormalEngine::warmUpReservedBlockCount(/*seq_len=*/1, /*reserve_tokens=*/1, /*tokens_per_block=*/0));
+}
+
+TEST_F(NormalEngineTest, testWarmUpInputLengthAccountsForReserve) {
+    EXPECT_EQ(warmUpInputLength(64, 0), 63u);
+    EXPECT_EQ(warmUpInputLength(64, 17), 47u);
+    EXPECT_ANY_THROW((void)warmUpInputLength(1, 0));
+    EXPECT_ANY_THROW((void)warmUpInputLength(17, 17));
+}
+
+TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
+    CustomConfig config;
+
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    runtime_config.warm_up         = true;
+    auto params                    = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.pd_sep_config.role_type = RoleType::DECODE;
+
+    bool saw_decode_warmup             = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+            if (!inputs.warmup) {
+                return;
+            }
+            saw_decode_warmup = true;
+            EXPECT_EQ(inputs.kv_cache_group_tags, (std::vector<std::string>{"full"}));
+            ASSERT_TRUE(inputs.kv_cache_block_id.defined());
+            ASSERT_TRUE(inputs.kv_cache_kernel_block_id.defined());
+            EXPECT_EQ(inputs.kv_cache_block_id.size(0), 1);
+            EXPECT_EQ(inputs.kv_cache_kernel_block_id.size(0), 1);
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+
+    EXPECT_TRUE(saw_decode_warmup);
+}
+
+TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
+    ModelConfig model;
+    model.num_layers                   = 1;
+    model.attn_config.head_num         = 1;
+    model.attn_config.kv_head_num      = 1;
+    model.attn_config.size_per_head    = 1;
+    model.attn_config.tokens_per_block = 1;
+    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+
+    auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+    auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+    ResourceContext resource_context;
+    resource_context.cache_manager = previous;
+    resource_context.role_type     = RoleType::PREFILL;
+    int group_num                  = 17;
+
+    EXPECT_ANY_THROW(NormalEngine::initializeAndPublishCacheManager(
+        resource_context, group_num, RoleType::DECODE, candidate, [](KVCacheManager&) { return false; }));
+    EXPECT_EQ(resource_context.cache_manager, previous);
+    EXPECT_EQ(resource_context.role_type, RoleType::PREFILL);
+    EXPECT_EQ(group_num, 17);
 }
 
 TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerCreation) {
@@ -70,6 +248,32 @@ TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerC
     }
 }
 
+TEST_F(NormalEngineTest, testRejectMismatchedSpeculativeProposalBeforeWarmup) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up = false;
+
+    const auto check_error = [&](SpeculativeType config_type,
+                                 int64_t         config_gamma,
+                                 SpeculativeType proposal_type,
+                                 size_t          proposal_gamma,
+                                 const char*     expected) {
+        params.sp_config.type              = config_type;
+        params.sp_config.gen_num_per_cycle = config_gamma;
+        try {
+            NormalEngine engine(params, std::make_unique<ProposeModelEngineInitParams>(proposal_type, proposal_gamma));
+            FAIL() << "mismatched speculative parameters must fail initialization";
+        } catch (const std::exception& error) {
+            EXPECT_NE(std::string(error.what()).find(expected), std::string::npos) << error.what();
+        }
+    };
+    check_error(SP_TYPE_MTP, 2, SP_TYPE_EAGLE, 2, "speculative type mismatch");
+    check_error(SP_TYPE_MTP, 2, SP_TYPE_MTP, 3, "speculative gamma mismatch");
+    check_error(SP_TYPE_MTP, -1, SP_TYPE_MTP, 2, "speculative gen_num_per_cycle must be non-negative");
+}
+
 TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculativeConfig) {
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
@@ -101,6 +305,50 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
             EXPECT_NO_THROW({ NormalEngine engine(params, nullptr); });
         }
     }
+}
+
+TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
+    CustomConfig config;
+
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    runtime_config.warm_up = true;
+    auto params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+
+    const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
+    KVCacheSpecDesc       indexer_desc{"indexer_kv", KVCacheSpecType::OpaqueKV};
+    indexer_desc.entry_dtype       = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems       = 132;  // 128 indexer bytes and one FP32 scale per token.
+    indexer_desc.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    indexer_desc.compression_ratio = 1;
+    params.model_config_.kv_cache_spec_descs.assign(static_cast<size_t>(params.model_config_.num_layers),
+                                                    {default_desc, indexer_desc});
+
+    bool saw_cacheless_warmup          = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init_params) {
+        if (init_params.cache_manager == nullptr) {
+            EXPECT_FALSE(init_params.kv_cache_layer_layout.has_value());
+            return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+                EXPECT_FALSE(saw_cacheless_warmup);
+                saw_cacheless_warmup = true;
+                EXPECT_TRUE(inputs.warmup);
+                EXPECT_TRUE(inputs.kv_cache_group_tags.empty());
+                EXPECT_FALSE(inputs.kv_cache_block_id.defined());
+                EXPECT_FALSE(inputs.kv_cache_kernel_block_id.defined());
+            });
+        }
+        return std::make_unique<MockModel>(model_config.vocab_size);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+
+    EXPECT_TRUE(saw_cacheless_warmup);
 }
 
 TEST_F(NormalEngineTest, testFp8KVCache) {

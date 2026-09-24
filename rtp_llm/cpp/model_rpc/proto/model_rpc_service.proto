@@ -32,8 +32,10 @@ message IntMatrix {
 // rollout across this protocol change is intentionally unsupported; no legacy
 // dual-read/write fallback is provided.
 message GroupBlockPB {
-    int32 group_id = 1;
+    // Legacy numeric identity. T8 decoders intentionally reject numeric-only payloads.
+    int32 deprecated_group_id = 1;
     int32 block_id = 2;
+    string tag = 3;
 }
 
 message TaggedBlockIdsPB {
@@ -655,7 +657,9 @@ message MemoryOperationRequestPB {
         int32 mem_block = 1;
         int32 disk_block = 2;
         repeated GroupBlockPB group_blocks = 3;
-        uint64 group_set_id = 4;
+        // Legacy numeric identity. T8 decoders intentionally reject numeric-only payloads.
+        uint64 deprecated_group_set_id = 4;
+        repeated string group_tags = 5;
     }
     enum CopyDirection {
         H2D = 0;

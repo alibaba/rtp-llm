@@ -31,6 +31,43 @@ constexpr size_t kScaleFactor     = 256;
 constexpr size_t kMinScaledStride = 64;
 constexpr size_t kScaledAlignment = 64;
 
+class BenchmarkLayoutSpec final: public KVCacheSpec {
+public:
+    BenchmarkLayoutSpec(std::string tag, uint32_t tokens_per_block, size_t block_stride_bytes):
+        KVCacheSpec(std::move(tag), tokens_per_block, tokens_per_block, 1), block_stride_bytes_(block_stride_bytes) {}
+
+    size_t block_size() const override {
+        return block_stride_bytes_;
+    }
+    size_t k_block_size() const override {
+        return block_stride_bytes_;
+    }
+    size_t v_block_size() const override {
+        return 0;
+    }
+    size_t block_size_bytes() const override {
+        return block_stride_bytes_;
+    }
+    size_t k_block_size_bytes() const override {
+        return block_stride_bytes_;
+    }
+    size_t v_block_size_bytes() const override {
+        return 0;
+    }
+    DataType memoryLayoutDType() const override {
+        return DataType::TYPE_UINT8;
+    }
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<BenchmarkLayoutSpec>(*this);
+    }
+    std::string debugString(size_t indent = 0) const override {
+        return commonDebugString(indent);
+    }
+
+private:
+    size_t block_stride_bytes_;
+};
+
 size_t alignUp(size_t value, size_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
@@ -115,9 +152,9 @@ GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>
                                                  BlockTreeDiskBlockPoolPtr            disk_pool,
                                                  size_t                               group_set_id,
                                                  std::shared_ptr<const CacheTopology> topology,
-                                                 const std::vector<size_t>&           group_ids) {
-    auto group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_ids);
+                                                 const std::vector<std::string>&      group_tags) {
+    auto                     group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
+    group_set->initialize(group_set_id, std::move(topology), group_tags);
     return group_set;
 }
 
@@ -126,12 +163,12 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
                                                 BlockTreeDiskBlockPoolPtr            disk_pool,
                                                 size_t                               group_set_id,
                                                 std::shared_ptr<const CacheTopology> topology,
-                                                const std::vector<size_t>&           group_ids,
+                                                const std::vector<std::string>&      group_tags,
                                                 size_t                               sliding_window_size,
                                                 size_t                               tokens_per_block) {
     auto group_set =
         std::make_shared<SWAGroupSet>(sliding_window_size, tokens_per_block, device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_ids);
+    group_set->initialize(group_set_id, std::move(topology), group_tags);
     return group_set;
 }
 
@@ -157,23 +194,17 @@ BenchmarkFixture::createTopology(const std::vector<std::pair<std::string, rtp_ll
         const size_t layer_count = layer_counts_per_group.empty() ? 1 : layer_counts_per_group[i];
 
         GroupBase group_base;
-        group_base.tag    = tag;
-        auto spec         = std::make_shared<MHAKVCacheSpec>();
-        spec->tag         = tag;
+        group_base.tag = tag;
+        auto spec      = std::make_shared<BenchmarkLayoutSpec>(
+            tag, static_cast<uint32_t>(tokens_per_block), layer_stride_bytes_per_group[i]);
         group_base.spec   = spec;
         group_base.policy = defaultCacheGroupPolicy(type);
         if (type == rtp_llm::CacheGroupType::SWA) {
             RTP_LLM_CHECK(!sliding_windows.empty() && sliding_windows[i] > 0);
             group_base.policy.sliding_window_size = sliding_windows[i];
         }
-        group_base.block_num                 = 0;
-        group_base.local_kv_head_num         = 1;
-        group_base.seq_size_per_block        = tokens_per_block;
-        group_base.kernel_seq_size_per_block = tokens_per_block;
-        group_base.kv_block_stride_bytes     = layer_stride_bytes_per_group[i];
-        group_base.kv_scale_stride_bytes     = 0;
+        group_base.block_num = 0;
         for (size_t l = 0; l < layer_count; ++l) {
-            group_base.layer_ids.push_back(next_layer_id);
             LayerBase layer;
             layer.layer_id = next_layer_id;
             layer.group_tags.push_back(tag);

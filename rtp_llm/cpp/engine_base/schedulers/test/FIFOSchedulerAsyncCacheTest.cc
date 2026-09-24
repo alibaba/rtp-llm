@@ -23,7 +23,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -64,7 +64,7 @@ protected:
 
     void TearDown() override {
         if (real_allocator_) {
-            cache_manager_->allocator_ = real_allocator_;
+            cache_manager_->coordinator_manager_ = real_allocator_;
         }
         DeviceTestBase::TearDown();
     }
@@ -127,8 +127,8 @@ protected:
     }
 
     void installReadinessAllocator(ContextSelector selector) {
-        real_allocator_       = cache_manager_->allocator_;
-        mock_allocator_       = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        real_allocator_ = cache_manager_->coordinator_manager_;
+        mock_allocator_ = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
         initial_malloc_calls_ = 0;
         free_calls_           = 0;
         insert_calls_         = 0;
@@ -166,12 +166,12 @@ protected:
             return real_allocator_->maxAvailableTokensNum();
         }));
 
-        cache_manager_->allocator_ = mock_allocator_;
+        cache_manager_->coordinator_manager_ = mock_allocator_;
     }
 
     void installRetryableAllocator() {
-        real_allocator_       = cache_manager_->allocator_;
-        mock_allocator_       = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        real_allocator_ = cache_manager_->coordinator_manager_;
+        mock_allocator_ = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
         initial_malloc_calls_ = 0;
 
         ON_CALL(*mock_allocator_, totalBlocksNum()).WillByDefault(testing::Return(64));
@@ -182,19 +182,19 @@ protected:
                 return MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
             }));
 
-        cache_manager_->allocator_ = mock_allocator_;
+        cache_manager_->coordinator_manager_ = mock_allocator_;
     }
 
 protected:
-    autil::EnvGuard                                          perf_scope;
-    CacheConfig                                              cache_config_;
-    std::shared_ptr<KVCacheManager>                          cache_manager_;
-    int64_t                                                  next_request_id_{1};
-    KVCacheAllocatorPtr                                      real_allocator_;
-    std::shared_ptr<testing::NiceMock<MockKVCacheAllocator>> mock_allocator_;
-    size_t                                                   initial_malloc_calls_{0};
-    size_t                                                   free_calls_{0};
-    size_t                                                   insert_calls_{0};
+    autil::EnvGuard                                                 perf_scope;
+    CacheConfig                                                     cache_config_;
+    std::shared_ptr<KVCacheManager>                                 cache_manager_;
+    int64_t                                                         next_request_id_{1};
+    CoordinatorCacheManagerPtr                                      real_allocator_;
+    std::shared_ptr<testing::NiceMock<MockCoordinatorCacheManager>> mock_allocator_;
+    size_t                                                          initial_malloc_calls_{0};
+    size_t                                                          free_calls_{0};
+    size_t                                                          insert_calls_{0};
 };
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning) {

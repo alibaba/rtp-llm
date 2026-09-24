@@ -4,6 +4,8 @@
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <limits>
 #include <optional>
@@ -328,20 +330,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources                               init_resources;
 
     if (params.kv_cache_layer_layout.has_value()) {
-        // Block geometry travels on GptModelInitParams (filled from
-        // cache_manager->cacheConfig() in NormalExecutor/MtpExecutor) rather
-        // than the model-static attention_conf — for DSV4 the cache manager
-        // promotes seq_size_per_block to a 256-token physical block while
-        // attention_conf still reflects the 64-token --seq_size_per_block
-        // CLI flag, causing the fused compressor to index state block_table
-        // with the wrong stride and trap on unallocated ring slots.
-        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0
-                                    && params.tokens_per_block % params.kernel_tokens_per_block == 0,
-                                "GptModelInitParams must carry valid tokens_per_block / kernel_tokens_per_block "
-                                "from CacheConfig before constructing PyWrappedModel KVCache; got tokens_per_block=%zu "
-                                "kernel_tokens_per_block=%zu",
-                                params.tokens_per_block,
-                                params.kernel_tokens_per_block);
+        // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
@@ -366,24 +355,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                       "forward";
     py_forward_method_             = py_model_.attr(forward_method);
-    const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
-    const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
-                                             || py_model_class_name == "DeepSeekV4MtpModel"
-                                             || py_model_class_name == "DeepSeekV4DSparkModel";
-    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !is_prefill_cuda_graph_mode) {
+    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
+        // No published topology means there is no trustworthy model geometry
+        // for any graph role (including prefill warmup). Keep the eager path.
         RTP_LLM_LOG_WARNING(
-            "CUDA graph enabled but kv_cache_layer_layout not available (warmup?), skipping graph capture");
+            "CUDA graph enabled but kv_cache_layer_layout not available; skipping graph capture and using eager path");
         enable_cuda_graph_ = false;
         if (owns_generation_prefill_cuda_graph_) {
             generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
         }
-    } else if (enable_cuda_graph_ && is_deepseek_v4_python_model && !params.kv_cache_layer_layout.has_value()) {
-        // DeepSeekV4 also refuses to capture prefill graphs during warmup: the
-        // real executor captures once the CacheManager exists.
-        RTP_LLM_LOG_WARNING(
-            "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
-            "CacheManager is initialized.");
-        enable_cuda_graph_ = false;
     }
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
@@ -395,8 +375,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;
-        graph_params.tokens_per_block             = params.tokens_per_block;
-        graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
         graph_params.hc_mult                      = params.hc_mult;
         // Default input_hiddens row width for MTP: hc_mult * hidden_size. DSpARK
@@ -420,7 +398,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
-            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
+            RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
+            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
@@ -447,8 +426,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // clang-format on
 
         if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle
-                                             + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
+            graph_params.num_tokens_per_bs =
+                params.sp_config.gen_num_per_cycle + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
         } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
         } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
@@ -475,9 +454,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             is_prefill_cuda_graph_mode    ? (params.sp_config.type == SP_TYPE_NONE ? CudaGraphRole::EMBEDDING_PREFILL :
                                                                                      CudaGraphRole::MTP_DRAFT_PREFILL) :
                                             CudaGraphRole::DECODE;
-        if (params.sp_config.type != SP_TYPE_NONE) {
-            graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
-        }
+        graph_params.kernel_block_table_width = params.kernel_block_table_width;
+        RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
+                                "CUDA graph requires Executor to provide a positive kernel block table width");
 
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
@@ -539,7 +518,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
                 RTP_LLM_LOG_WARNING("generation prefill CUDA graph disabled reason=kv_cache_unavailable");
             } else if (!supportsGenerationPrefillCudaGraphCacheTopology(
-                           params.cache_manager->cacheConfig().groupTypesSnapshot())) {
+                           params.cache_manager->cacheConfig().topology().groups())) {
                 generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::MODEL_NOT_SUPPORTED;
                 RTP_LLM_LOG_WARNING("generation prefill CUDA graph disabled reason=unsupported_cache_topology; "
                                     "the first version requires "

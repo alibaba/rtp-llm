@@ -32,11 +32,12 @@ public:
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
 
-    // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
+    // Build only the CUDA kv_cache_kernel_block_id tensor in group_tags row order.
     // Read-only over streams: no stream->step() and no other fields.
     // Empty input returns an undefined tensor.
-    virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                     TensorHolder&       host_holder) const;
+    virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups&             stream_groups,
+                                                                     const std::vector<std::string>& group_tags,
+                                                                     TensorHolder&                   host_holder) const;
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,

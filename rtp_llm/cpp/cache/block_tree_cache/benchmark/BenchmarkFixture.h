@@ -57,14 +57,14 @@ public:
                                                         std::shared_ptr<BlockTreeDiskBlockPool>       disk_pool,
                                                         size_t                                        group_set_id,
                                                         std::shared_ptr<const CacheTopology>          topology,
-                                                        const std::vector<size_t>&                    group_ids);
+                                                        const std::vector<std::string>&               group_tags);
 
     static std::shared_ptr<GroupSet> createSWAGroupSet(std::vector<std::shared_ptr<DeviceBlockPool>> device_pools,
                                                        std::shared_ptr<HostBlockPool>                host_pool,
                                                        std::shared_ptr<BlockTreeDiskBlockPool>       disk_pool,
                                                        size_t                                        group_set_id,
                                                        std::shared_ptr<const CacheTopology>          topology,
-                                                       const std::vector<size_t>&                    group_ids,
+                                                       const std::vector<std::string>&               group_tags,
                                                        size_t sliding_window_size,
                                                        size_t tokens_per_block);
 

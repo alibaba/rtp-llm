@@ -596,7 +596,17 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
                                     stream->streamId());
             const auto& physical = state.next_kv_cache_block_id_gpu;
             const auto& kernel   = state.next_kv_cache_kernel_block_id_gpu;
+            RTP_LLM_CHECK_WITH_INFO(
+                physical.defined() && physical.is_cuda() && physical.scalar_type() == torch::kInt32
+                    && physical.dim() == 3 && physical.size(1) == 1 && kernel.defined() && kernel.is_cuda()
+                    && kernel.scalar_type() == torch::kInt32 && kernel.dim() == 3
+                    && kernel.size(1) == 1,
+                "MTP cache snapshots require CUDA int32 [group,1,blocks] physical/kernel tensors");
             auto&       bucket   = buckets[{physical.size(2), kernel.size(2)}];
+            // Keep the immutable device snapshots alive through the asynchronous
+            // overlay copies below, without reading their mutable host rows.
+            host_holder.hold(physical);
+            host_holder.hold(kernel);
             bucket.physical_tables.push_back(physical);
             bucket.kernel_tables.push_back(kernel);
             bucket.rows.push_back(row);
@@ -631,11 +641,14 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
                                 "MTP cache snapshot group mismatch: source=%ld destination=%ld",
                                 source.size(0),
                                 destination.size(0));
-        const int64_t copy_width  = std::min(source.size(2), destination.size(2));
+        RTP_LLM_CHECK_WITH_INFO(source.size(2) <= destination.size(2),
+                                "MTP cache snapshot exceeds destination width: source=%ld destination=%ld",
+                                source.size(2),
+                                destination.size(2));
+        const int64_t copy_width = source.size(2);
         auto row_indices = torch::tensor(rows, torch::TensorOptions().dtype(torch::kInt64))
                                .to(destination.device(), /*non_blocking=*/true);
-        destination.narrow(2, 0, copy_width)
-            .index_copy_(1, row_indices, source.narrow(2, 0, copy_width));
+        destination.narrow(2, 0, copy_width).index_copy_(1, row_indices, source);
     };
 
     for (auto& [widths, bucket] : buckets) {

@@ -99,6 +99,7 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
     ctx.matched_device_blocks    = outcome.matched_device_blocks;
     ctx.host_matched_blocks      = outcome.host_matched_blocks;
     ctx.request_blocks            = std::move(outcome.request_blocks);
+    ctx.request_group_tags        = std::move(outcome.request_group_tags);
     ctx.joined_target_block_count = outcome.joined_target_block_count;
 
     const size_t suffix_block_count = ctx.path.size() - ctx.matched_depth;
@@ -141,7 +142,8 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
         // allocations and wait for the cache's event-driven watermark
         // eviction to free capacity. The scheduler never evicts directly.
         std::vector<BlockIndicesType> no_request_blocks;
-        cache_.rollback(ctx.prepared, no_request_blocks);
+        std::vector<std::string>      no_request_group_tags;
+        cache_.rollback(ctx.prepared, no_request_blocks, no_request_group_tags);
     }
 
     if (failure != AdmissionFailure::NONE) {
@@ -191,9 +193,9 @@ void OnlineTreeScheduler::cleanupRequest(OnlineRequestContext& ctx) {
         return;
     }
     if (ctx.prepared.holdsBlocks()) {
-        cache_.rollback(ctx.prepared, ctx.request_blocks);
+        cache_.rollback(ctx.prepared, ctx.request_blocks, ctx.request_group_tags);
     } else if (!ctx.request_blocks.empty()) {
-        cache_.releaseRequestBlocks(ctx.request_blocks);
+        cache_.releaseRequestBlocks(ctx.request_blocks, ctx.request_group_tags);
     }
     if (ctx.tokens_counted) {
         active_tokens_ -= ctx.target_tokens;
@@ -349,7 +351,8 @@ bool OnlineTreeScheduler::runPhase(const std::vector<OnlineRequestDescriptor>& t
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.forward_sleep_ms));
             for (auto* ctx : batch) {
                 const auto insert_start = std::chrono::steady_clock::now();
-                cache_.publishInsert(ctx->path, ctx->matched_depth, ctx->prepared, ctx->request_blocks);
+                cache_.publishInsert(
+                    ctx->path, ctx->matched_depth, ctx->prepared, ctx->request_blocks, ctx->request_group_tags);
                 metrics_.insert_ns.push_back(elapsedNs(insert_start, std::chrono::steady_clock::now()));
                 if (ctx->tokens_counted) {
                     active_tokens_ -= ctx->target_tokens;

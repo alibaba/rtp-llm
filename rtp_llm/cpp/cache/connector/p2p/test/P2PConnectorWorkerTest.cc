@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <thread>
 #include <gtest/gtest.h>
 #include <memory>
 #include <vector>
 #include <chrono>
 #include <map>
+#include <tuple>
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorker.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
@@ -19,7 +21,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 namespace rtp_llm {
@@ -33,10 +35,43 @@ TEST(P2PKeyUtilTest, LayerCacheBufferUsesTagIdentity) {
     EXPECT_NE(key, P2PKeyUtil::makePartitionLayerTagKey("request", 3, "linear", 1));
 }
 
+class RecordingLayerBlockConverter: public LayerBlockConverter {
+public:
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
+        calls.emplace_back(layer_id, tag, block_id, partition_count, partition_id);
+        BlockInfo info;
+        info.addr       = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
+        info.size_bytes = static_cast<size_t>(block_id + 4);
+        return {info};
+    }
+
+    std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
+        return {};
+    }
+
+    mutable std::vector<std::tuple<int, std::string, int, int, int>> calls;
+};
+
+TEST(P2PKeyUtilTest, BufferConversionCarriesLayerTagAndBlockIdentity) {
+    auto converter = std::make_shared<RecordingLayerBlockConverter>();
+    auto buffer    = std::make_shared<LayerCacheBuffer>(/*layer_id=*/3, "linear");
+    buffer->addBlockId(/*cache_key=*/101, /*block_id=*/7);
+
+    const auto infos =
+        LayerCacheBufferUtil::buildKeyBlockInfos(converter, buffer, /*partition_count=*/2, /*partition_id=*/1);
+
+    ASSERT_EQ(converter->calls.size(), 1u);
+    EXPECT_EQ(converter->calls.front(), std::make_tuple(3, std::string("linear"), 7, 2, 1));
+    ASSERT_EQ(infos.size(), 1u);
+    ASSERT_EQ(infos.at(101)->blocks.size(), 1u);
+    EXPECT_EQ(infos.at(101)->blocks.front().addr, reinterpret_cast<void*>(8));
+}
+
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBufferByTag(int, const std::string&, int, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
         return {};
     }
 
@@ -150,9 +185,7 @@ private:
             const auto layer_begin = has_identity && third_last != std::string::npos ? third_last + 1 : second_last + 1;
             const auto layer_end   = has_identity ? second_last : last;
             return std::stoi(layer_key.substr(layer_begin, layer_end - layer_begin));
-        } catch (...) {
-            return -1;
-        }
+        } catch (...) { return -1; }
     }
 
     static std::string parseCacheTag(const std::string& layer_key) {
@@ -316,7 +349,7 @@ protected:
         for (int i = 0; i < layer_num; ++i) {
             if (i == layer_id) {
                 for (int j = 0; j < num_blocks; ++j) {
-                    resource->mutableBlockIds(i).add({j});
+                    resource->mutableBlockIds("group" + std::to_string(i)).add({j});
                 }
             }
         }
@@ -398,7 +431,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     auto    resource   = std::make_shared<KVCacheResource>();
     resource->initGroups(::rtp_llm::test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0, 1}, {1}}));
     for (int group_id = 0; group_id < 2; ++group_id) {
-        resource->mutableBlockIds(group_id).add({0, 1});
+        resource->mutableBlockIds("group" + std::to_string(group_id)).add({0, 1});
     }
     resource->cacheKeys() = {0, 1};
 
@@ -420,8 +453,8 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayerCountsOnlyTransferableSparseGroups) {
     constexpr int64_t request_id = 1003;
     auto              resource   = std::make_shared<KVCacheResource>();
     resource->initGroups(::rtp_llm::test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0, 1}, {1}}));
-    resource->mutableBlockIds(/*group_id=*/0).add({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
-    resource->mutableBlockIds(/*group_id=*/1).add({3, 4});
+    resource->mutableBlockIds("group" + std::to_string(0)).add({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource->mutableBlockIds("group" + std::to_string(1)).add({3, 4});
     resource->cacheKeys() = {10, 11};
 
     EXPECT_TRUE(prefill_->writeByLayer(/*layer_id=*/0, resource, request_id, std::nullopt));
@@ -1151,7 +1184,7 @@ protected:
         resource->initGroups(::rtp_llm::test::makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
         for (int layer = 0; layer < num_layers; ++layer) {
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer).add({i});
+                resource->mutableBlockIds("group" + std::to_string(layer)).add({i});
             }
         }
         for (int i = 0; i < blocks_per_layer; ++i) {
@@ -1206,20 +1239,20 @@ TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnAll_BlockCountNegativeOne) {
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_SkipsSparseNullBlocks) {
     auto resource = createResource(2, 3);
-    resource->mutableBlockIds(0).assign({NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX});
+    resource->mutableBlockIds("group" + std::to_string(0)).assign({NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX});
 
     auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -1);
     ASSERT_NE(buf, nullptr);
     ASSERT_EQ(buf->blockIdMap().size(), 1u);
     EXPECT_EQ(buf->blockIdMap().at(1001), 7);
 
-    resource->mutableBlockIds(0).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource->mutableBlockIds("group" + std::to_string(0)).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     EXPECT_EQ(LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -1), nullptr);
 }
 
 TEST_F(LayerCacheBufferUtilTest, HasTransferableBlocksHonorsSparseStartAndCountWindow) {
     auto resource = createResource(1, 3);
-    resource->mutableBlockIds(0).assign({NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX});
+    resource->mutableBlockIds("group" + std::to_string(0)).assign({NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX});
     const auto& tag = resource->soleGroupTagForLayer(0);
 
     EXPECT_TRUE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, 0, 1));
@@ -1227,13 +1260,13 @@ TEST_F(LayerCacheBufferUtilTest, HasTransferableBlocksHonorsSparseStartAndCountW
     EXPECT_TRUE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 1, 1, 0, 1));
     EXPECT_FALSE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 2, -1, 0, 1));
 
-    resource->mutableBlockIds(0).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource->mutableBlockIds("group" + std::to_string(0)).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     EXPECT_FALSE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, 0, 1));
 }
 
 TEST_F(LayerCacheBufferUtilTest, HasTransferableBlocksHonorsCpKeyBoundsAndValidation) {
     auto resource = createResource(1, 3);
-    resource->mutableBlockIds(0).assign({NULL_BLOCK_IDX, 7, 8});
+    resource->mutableBlockIds("group" + std::to_string(0)).assign({NULL_BLOCK_IDX, 7, 8});
     resource->cacheKeys().resize(1);
     const auto& tag = resource->soleGroupTagForLayer(0);
 
@@ -1245,7 +1278,7 @@ TEST_F(LayerCacheBufferUtilTest, HasTransferableBlocksHonorsCpKeyBoundsAndValida
     EXPECT_FALSE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, 0, 0));
     EXPECT_FALSE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, 2, 2));
 
-    resource->mutableBlockIds(0).setAt(0, 9);
+    resource->mutableBlockIds("group" + std::to_string(0)).setAt(0, 9);
     EXPECT_TRUE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, 0, 2));
 }
 

@@ -58,14 +58,14 @@ class TestCudaGraphPrefill(unittest.TestCase):
         assert (
             hidden_size > 0
         ), "hidden_size must be set for CudaGraphRunner prefill (from model_config in engine build path)"
+        self.kernel_block_table_width = 1
 
         self.op = CudaGraphRunner()
         self.op.init_prefill(
             model,
             self.max_context_batch_size,
             self.max_seq_len,
-            self.tokens_per_block,
-            self.kernel_tokens_per_block,
+            self.kernel_block_table_width,
             self.prefill_capture_seq_lens,
             hidden_size,
         )

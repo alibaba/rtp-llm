@@ -19,18 +19,23 @@ inline TransferTask makeTransferTask(std::vector<TransferDescriptor> descriptors
     return TransferTask(std::move(descriptors), timeout);
 }
 
-GroupBase makeTestGroupBase(CacheGroupPolicy policy                = defaultCacheGroupPolicy(CacheGroupType::FULL),
-                            std::vector<int> layer_ids             = {0},
-                            size_t           kv_block_stride_bytes = 16,
-                            size_t           kv_scale_stride_bytes = 0,
-                            uint32_t         block_num             = 128,
-                            size_t           seq_size_per_block    = 1);
+struct TestGroupConfig {
+    GroupBase        group;
+    std::vector<int> layer_ids;
+};
 
-std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<GroupBase> groups);
+TestGroupConfig makeTestGroupBase(CacheGroupPolicy policy    = defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  std::vector<int> layer_ids = {0},
+                                  size_t           kv_block_stride_bytes = 16,
+                                  size_t           kv_scale_stride_bytes = 0,
+                                  uint32_t         block_num             = 128,
+                                  size_t           seq_size_per_block    = 1);
+
+std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfig> groups);
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
-                             std::vector<size_t>                  group_ids,
+                             std::vector<std::string>             group_tags,
                              std::vector<DeviceBlockPoolPtr>      device_pools,
                              std::shared_ptr<HostBlockPool>       host_pool = nullptr,
                              BlockTreeDiskBlockPoolPtr            disk_pool = nullptr);
@@ -46,7 +51,7 @@ public:
     explicit TempDirGuard(const char* name);
     ~TempDirGuard();
 
-    TempDirGuard(const TempDirGuard&)            = delete;
+    TempDirGuard(const TempDirGuard&) = delete;
     TempDirGuard& operator=(const TempDirGuard&) = delete;
 
     std::string path;

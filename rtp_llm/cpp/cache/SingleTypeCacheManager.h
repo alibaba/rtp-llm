@@ -18,7 +18,7 @@
 
 namespace rtp_llm {
 
-class KVCacheAllocator;
+class CoordinatorCacheManager;
 
 using RequiredPositions = std::unordered_set<size_t>;
 
@@ -27,30 +27,35 @@ struct NeedBlocksInfo {
     int extra_blocks  = 0;  // extra blocks per batch
 };
 
-class KVCacheGroup {
+class SingleTypeCacheManager {
 public:
-    KVCacheGroup(GroupBase cache_group, DeviceBlockPoolPtr block_pool, int group_id):
+    SingleTypeCacheManager(GroupBase cache_group, DeviceBlockPoolPtr block_pool, int group_id):
         cache_group_(std::move(cache_group)), block_pool_(std::move(block_pool)), group_id_(group_id) {}
 
     // Transition-only constructor for HybridPool and existing focused tests.
-    KVCacheGroup(const LayerIdsType& layer_ids,
-                 KVCacheSpecPtr      kvcache_spec,
-                 DeviceBlockPoolPtr  block_pool,
-                 int                 group_id,
-                 CacheGroupPolicy    policy = CacheGroupPolicy{}):
-        KVCacheGroup(makeLegacyCacheGroup(layer_ids, std::move(kvcache_spec), policy), std::move(block_pool), group_id) {}
+    SingleTypeCacheManager(const LayerIdsType& layer_ids,
+                           KVCacheSpecPtr      kvcache_spec,
+                           DeviceBlockPoolPtr  block_pool,
+                           int                 group_id,
+                           CacheGroupPolicy    policy = CacheGroupPolicy{}):
+        SingleTypeCacheManager(makeLegacyCacheGroup(std::move(kvcache_spec), policy), std::move(block_pool), group_id) {
+        initializeLayerMapping(layer_ids);
+    }
 
-    virtual ~KVCacheGroup() = default;
+    virtual ~SingleTypeCacheManager() = default;
 
-    bool                init();
-    virtual bool        malloc(BlockIds&                  block_ids,
-                               int                        seq_len,
-                               bool                       enable_reuse_cache   = false,
-                               int                        reserve_step         = 0,
-                               std::vector<size_t>*       backfilled_positions = nullptr,
-                               const RequiredPositions&  required_positions = {}) = 0;
-    virtual void
-    removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    bool init();
+    bool init(const LayerIdsType& layer_ids) {
+        initializeLayerMapping(layer_ids);
+        return init();
+    }
+    virtual bool malloc(BlockIds&                block_ids,
+                        int                      seq_len,
+                        bool                     enable_reuse_cache   = false,
+                        int                      reserve_step         = 0,
+                        std::vector<size_t>*     backfilled_positions = nullptr,
+                        const RequiredPositions& required_positions   = {})                                        = 0;
+    virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
     virtual int estimatePeakNeedBlocks(int                     seq_len,
@@ -60,19 +65,18 @@ public:
                                        bool                    enable_reuse_cache) const = 0;
     // Estimate the physical-block peak of a fresh batch by following initMalloc's real order:
     // allocate the common prefix once, reference it from every sequence, then allocate each private suffix.
-    virtual int            estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                                              int  common_seq_len,
-                                                              int  remaining_tokens,
-                                                              int  reserve_step,
-                                                              bool enable_reuse_cache,
-                                                              int  target_batch_size) const = 0;
-    virtual NeedBlocksInfo getNeedBlocks(
-        int                      common_seq_len,
-        int                      seq_len,
-        int                      reserve_step,
-        int                      reuse_blocks_len,
-        bool                     reuse_enabled     = false,
-        const RequiredPositions& required_positions = {}) const = 0;
+    virtual int                            estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                                              int  common_seq_len,
+                                                                              int  remaining_tokens,
+                                                                              int  reserve_step,
+                                                                              bool enable_reuse_cache,
+                                                                              int  target_batch_size) const       = 0;
+    virtual NeedBlocksInfo                 getNeedBlocks(int                      common_seq_len,
+                                                         int                      seq_len,
+                                                         int                      reserve_step,
+                                                         int                      reuse_blocks_len,
+                                                         bool                     reuse_enabled      = false,
+                                                         const RequiredPositions& required_positions = {}) const = 0;
     void                                   reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices);
     void                                   reference(const BlockIndicesType& block_indices);
     void                                   unreference(const BlockIndicesType& block_indices);
@@ -106,18 +110,19 @@ public:
     virtual CacheMemoryPlacement memoryPlacement() const;
 
 protected:
-    static GroupBase
-    makeLegacyCacheGroup(const LayerIdsType& layer_ids, KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
+    static GroupBase makeLegacyCacheGroup(KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
         GroupBase group;
-        group.tag                       = spec == nullptr ? std::string{} : spec->tag;
-        group.spec                      = std::move(spec);
-        group.policy                    = policy;
-        group.layer_ids                 = layer_ids;
-        group.seq_size_per_block        = group.spec == nullptr ? 1 : group.spec->seq_size_per_block;
-        group.kernel_seq_size_per_block = group.seq_size_per_block;
-        group.kv_block_stride_bytes     = group.spec == nullptr ? 0 : group.spec->block_size_bytes();
-        group.kv_scale_stride_bytes     = group.spec == nullptr ? 0 : group.spec->scale_block_size_bytes();
+        group.tag    = spec == nullptr ? std::string{} : spec->tag;
+        group.spec   = std::move(spec);
+        group.policy = policy;
         return group;
+    }
+
+    void initializeLayerMapping(const LayerIdsType& layer_ids) {
+        global_layer_to_local_layer.clear();
+        for (size_t i = 0; i < layer_ids.size(); ++i) {
+            global_layer_to_local_layer.emplace(layer_ids[i], static_cast<int>(i));
+        }
     }
 
     GroupBase          cache_group_;
@@ -130,10 +135,10 @@ protected:
     std::unordered_map<int, int>           global_layer_to_local_layer;
 
 private:
-    friend class KVCacheAllocator;
+    friend class CoordinatorCacheManager;
     void setEvictCallback(EvictCallback callback);
 };
 
-using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
+using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
 
 }  // namespace rtp_llm

@@ -69,6 +69,8 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
@@ -88,6 +90,7 @@ cc_test(
     copts = test_copts,
     deps =  [
         ":mock_engine",
+        "//rtp_llm/cpp/cache:cache",
     ] + cuda13_torch_link_deps,
     env = device_test_envs(),
     exec_properties = {'gpu':'A10'},

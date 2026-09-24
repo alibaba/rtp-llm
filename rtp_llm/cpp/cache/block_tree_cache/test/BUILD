@@ -63,7 +63,8 @@ cc_test(
     deps = pool_test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
-        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/testing:device_test_utils",
     ],
     env = {},
@@ -136,9 +137,9 @@ cc_test(
 )
 
 cc_test(
-    name = "device_full_kv_cache_group_test",
+    name = "device_full_cache_manager_test",
     srcs = [
-        "DeviceFullKVCacheGroupTest.cc",
+        "DeviceFullCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -150,9 +151,9 @@ cc_test(
 )
 
 cc_test(
-    name = "device_linear_kv_cache_group_test",
+    name = "device_linear_cache_manager_test",
     srcs = [
-        "DeviceLinearKVCacheGroupTest.cc",
+        "DeviceLinearCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -164,9 +165,9 @@ cc_test(
 )
 
 cc_test(
-    name = "device_swa_kv_cache_group_test",
+    name = "device_swa_cache_manager_test",
     srcs = [
-        "DeviceSWAKVCacheGroupTest.cc",
+        "DeviceSWACacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -178,10 +179,10 @@ cc_test(
 )
 
 cc_test(
-    name = "device_swa_kv_cache_group_malloc_range_test",
+    name = "device_swa_cache_manager_malloc_range_test",
     exec_properties = {"gpu": "A10"},
     srcs = [
-        "DeviceSWAKVCacheGroupMallocRangeTest.cc",
+        "DeviceSWACacheManagerMallocRangeTest.cc",
     ],
     data = [],
     copts = test_copts,

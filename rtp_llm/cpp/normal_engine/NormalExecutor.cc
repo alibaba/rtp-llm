@@ -4,8 +4,10 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
@@ -20,6 +22,31 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor&            copy_mapping,
+                                                        const std::vector<std::string>& group_tags) {
+    RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
+                                && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
+                                && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
+                            "cache update mapping must be a contiguous CPU int32 [N,3] tensor");
+    std::unordered_set<std::string> seen;
+    for (const auto& tag : group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && seen.insert(tag).second,
+                                "cache update mapping tags must be non-empty and unique: tag=%s",
+                                tag.c_str());
+    }
+    std::vector<TaggedBlockIdPair> mappings;
+    mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
+    const auto* rows = copy_mapping.data_ptr<int32_t>();
+    for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
+        const auto row = rows[3 * i];
+        RTP_LLM_CHECK_WITH_INFO(row >= 0 && static_cast<size_t>(row) < group_tags.size(),
+                                "cache update mapping payload row is out of range: row=%d",
+                                row);
+        mappings.push_back({group_tags[row], rows[3 * i + 1], rows[3 * i + 2]});
+    }
+    return mappings;
+}
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -117,12 +144,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
-    const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
-                                                                   params.model_config_.attn_config.tokens_per_block;
-    const size_t runtime_kernel_tokens_per_block = cache_manager ?
-                                                       cache_manager->cacheConfig().kernel_seq_size_per_block :
-                                                       params.model_config_.attn_config.kernel_tokens_per_block;
-
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -141,12 +162,42 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         runtime_tokens_per_block,
-         runtime_kernel_tokens_per_block,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+#if USING_CUDA || USING_ROCM
+    if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
+        const auto& model_cache_config =
+            is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) : cache_manager->cacheConfig();
+        const size_t runtime_tokens_per_block = model_cache_config.seq_size_per_block;
+        const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
+        const auto& topology = model_init_params.kv_cache_layer_layout->topology();
+        RTP_LLM_CHECK_WITH_INFO(params.model_config_.max_seq_len > 0,
+                                "CUDA graph max sequence length must be positive");
+        const size_t max_seq_len = static_cast<size_t>(params.model_config_.max_seq_len);
+        const size_t real_width =
+            CudaGraphRunner::captureKernelBlockTableWidth(topology, max_seq_len, max_reserved_step);
+
+        // Fake callers use one uniform physical count for every group: decode
+        // warmup reserves seq+reserve with model pages, generation-prefill
+        // warmup reserves the same fake input length with cache pages, and idle batches use one.
+        const size_t warmup_span = params.model_config_.attn_config.tokens_per_block;
+        RTP_LLM_CHECK_WITH_INFO(warmup_span > 0 && runtime_tokens_per_block > 0,
+                                "CUDA graph fake block spans must be positive");
+        const size_t warmup_len = warmUpInputLength(max_seq_len, max_reserved_step);
+        const size_t decode_tokens = warmup_len + max_reserved_step;
+        const size_t decode_warmup_blocks = decode_tokens / warmup_span + (decode_tokens % warmup_span != 0);
+        const size_t prefill_warmup_blocks = warmup_len / runtime_tokens_per_block
+                                             + (warmup_len % runtime_tokens_per_block != 0);
+        const size_t fake_count = std::max<size_t>({1, decode_warmup_blocks, prefill_warmup_blocks});
+        const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
+        RTP_LLM_CHECK_WITH_INFO(std::max(real_width, fake_width)
+                                    <= std::numeric_limits<int64_t>::max(),
+                                "CUDA graph kernel block table width exceeds int64 range");
+        model_init_params.kernel_block_table_width = std::max(real_width, fake_width);
+    }
+#endif
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -264,9 +315,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         // update kv cache
-        if (model_input.kv_cache_update_mapping.defined()) {
+        if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
-            cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+            RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
+            cache_manager_->blockBatchCopyByGroup(
+                decodeCacheUpdateMapping(model_input.kv_cache_update_mapping, model_input.kv_cache_group_tags));
         }
     }
     {

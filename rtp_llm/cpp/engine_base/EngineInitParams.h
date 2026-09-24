@@ -9,11 +9,24 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace th = torch;
 
 namespace rtp_llm {
+
+inline size_t warmUpInputLength(size_t max_seq_len, size_t reserve_step) {
+    if (reserve_step > 0) {
+        RTP_LLM_CHECK_WITH_INFO(max_seq_len > reserve_step,
+                                "max_seq_len [%zu] should be greater than speculative reserve_step [%zu]",
+                                max_seq_len,
+                                reserve_step);
+        return max_seq_len - reserve_step;
+    }
+    RTP_LLM_CHECK_WITH_INFO(max_seq_len > 1, "max_seq_len [%zu] should be greater than 1", max_seq_len);
+    return max_seq_len - 1;
+}
 
 using TensorMap  = std::unordered_map<std::string, th::Tensor>;
 using TensorMaps = std::vector<TensorMap>;

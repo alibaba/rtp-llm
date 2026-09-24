@@ -33,8 +33,11 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
 
         if (insert_kv_cache) {
             auto& kv_cache = stream->kvCacheMutable();
-            auto& blocks   = kv_cache.blocks(0, 0);
-            RTP_LLM_CHECK(blocks.size() > 0);
+            std::unordered_map<std::string, std::vector<int>> blocks_by_group;
+            for (const auto& tag : kv_cache.cacheResource().groupTags()) {
+                blocks_by_group.emplace(tag, kv_cache.blocks(0, tag));
+            }
+            RTP_LLM_CHECK(kv_cache.curBlocksNum() > 0);
             rtp_llm::InsertInfo insert_info{stream->kvCachePtr(),
                                             stream->completeTokenIdsPtr(),
                                             /*is_resident=*/true,
@@ -43,10 +46,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
             cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             size_t                              expected_prefix_length = kv_cache.cacheKeys(0).size();
             const std::shared_ptr<CPSlotMapper> mapper                 = cache_manager->cpSlotMapper();
-            const CacheConfig&                  config                 = cache_manager->cacheConfig();
-            if (mapper && mapper->isSharded()
-                && (config.use_independent_block_pools || config.groupNums() > 1
-                    || mapper->usesCpCanonicalKeys(config, 0))) {
+            if (mapper && mapper->isSharded()) {
                 expected_prefix_length /= static_cast<size_t>(mapper->cpSize());
             }
             if (resident_prefix_length != expected_prefix_length) {
@@ -55,7 +55,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
                     + " resident_prefix_length=" + std::to_string(resident_prefix_length)
                     + " expected_prefix_length=" + std::to_string(expected_prefix_length));
             }
-            multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);
+            multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks_by_group);
         }
         prepared_streams.push_back(std::move(stream));
     }

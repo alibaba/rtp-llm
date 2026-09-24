@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cuda_graph/generation_prefill_cuda_graph_replay_metadata.h"
@@ -20,6 +21,50 @@
 #endif
 using namespace torch_ext;
 namespace rtp_llm {
+
+namespace {
+int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) {
+    const size_t expansion =
+        group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;
+    const size_t limit = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+    RTP_LLM_CHECK_WITH_INFO(physical > 0 && physical <= limit / expansion,
+                            "CUDA graph block table capacity overflow");
+    return static_cast<int64_t>(physical * expansion);
+}
+}  // namespace
+
+int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topology,
+                                                      size_t               max_seq_len,
+                                                      size_t               max_reserved_step) {
+    RTP_LLM_CHECK_WITH_INFO(!topology.groups().empty(), "CUDA graph requires a non-empty cache topology");
+    const size_t limit = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+    RTP_LLM_CHECK_WITH_INFO(max_seq_len > 0 && max_seq_len <= limit && max_reserved_step <= limit - max_seq_len,
+                            "CUDA graph sequence/reserve size overflow");
+    int64_t width = 0;
+    for (const auto& group : topology.groups()) {
+        const size_t span = group.seqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(span > 0, "CUDA graph requires a positive group block span");
+        const size_t tokens =
+            group.policy.group_type == CacheGroupType::LINEAR ? max_seq_len : max_seq_len + max_reserved_step;
+        size_t physical = tokens / span + (tokens % span != 0);
+        if (group.policy.group_type == CacheGroupType::LINEAR && max_reserved_step > 0) {
+            physical += max_reserved_step - 1;
+        }
+        width = std::max(width, expandedCaptureBlockTableWidth(group, physical));
+    }
+    return width;
+}
+
+int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topology,
+                                                      size_t               fake_physical_block_count) {
+    RTP_LLM_CHECK_WITH_INFO(!topology.groups().empty(), "CUDA graph requires a non-empty cache topology");
+    int64_t width = 0;
+    for (const auto& group : topology.groups()) {
+        width = std::max(width,
+                         expandedCaptureBlockTableWidth(group, std::max<size_t>(1, fake_physical_block_count)));
+    }
+    return width;
+}
 
 namespace {
 
@@ -202,9 +247,9 @@ struct BlockTableCopyGeometry {
 };
 
 // Hybrid cache groups may expose a common staging row width even though a
-// selected graph stores a narrower model-local table.  The graph buffers are
-// cleared before every replay, so copying the intersection is both sufficient
-// and prevents a wider live staging table from overwriting adjacent storage.
+// selected graph stores a narrower model-local table. Copying the bounded
+// intersection keeps a wider live staging table from overwriting the capture
+// buffer; consumers read only lengths they are explicitly given.
 BlockTableCopyGeometry blockTableCopyGeometry(const torch::Tensor& src, const torch::Tensor& dst) {
     RTP_LLM_CHECK_WITH_INFO(src.defined() && dst.defined(), "CUDA graph block-table copy requires defined tensors");
     RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == dst.scalar_type(),
@@ -1609,9 +1654,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs - 1);
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
 
-    const int64_t max_kv_blocks =
-        static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
-
     // Allocate combo_position_ids capture buffer only when the model actually uses
     // combo position ids (Mrope etc.). The factor is sourced from the C++ rope_config
     // by PyWrappedModel — 0 means "no combo_position_ids" and the buffer stays unset
@@ -1624,7 +1666,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
-    const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
+    const int64_t max_blocks = max_kernel_block_table_width_;
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
