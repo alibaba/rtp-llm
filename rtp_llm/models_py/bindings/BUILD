@@ -2,6 +2,13 @@ load("//:def.bzl", "copts", "rocm_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "host_input_metadata",
+    hdrs = ["HostInputMetadata.h"],
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "op_defs",
     hdrs = [
         "CacheStoreWriter.h",
@@ -13,6 +20,7 @@ cc_library(
         "OpDefs.cc",
     ],
     deps = torch_deps() + [
+        ":host_input_metadata",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:kv_cache_specs",

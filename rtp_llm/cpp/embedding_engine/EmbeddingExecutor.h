@@ -23,6 +23,7 @@ enum class Arg : uint32_t {
     INPUT_IDS,
     ATTENTION_MASK,
     MOE_GATING,
+    TEXT_TOKENS_MASK,
     // reserve as number marker
     NUM_INPUT_TYPES
 };
@@ -43,6 +44,7 @@ private:
     std::unique_ptr<ModelBase>   model_;
     py::object                   handler_;
     HandlerArgs::Flag            handler_args_;
+    bool                        requires_host_input_metadata_ = false;
     py::handle                   torch_type_;
     torch::Tensor                max_position_ids_tensor_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
@@ -60,7 +62,9 @@ private:
     sliceTensor(py::object gpu_outputs, const std::list<EmbeddingStreamPtr>& streams, int total_batch_size) const;
     absl::Status
     slicePyList(py::object gpu_outputs, const std::list<EmbeddingStreamPtr>& streams, int total_batch_size) const;
-    absl::StatusOr<py::object> postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs);
+    absl::StatusOr<py::object> postProcess(const ModelRequest& model_request,
+                                         const GptModelOutputs& gpu_outputs,
+                                         const torch::Tensor& text_tokens_mask = torch::Tensor());
     void calcTokenNum(const std::list<EmbeddingStreamPtr>& streams, int64_t& token_num, int64_t& batch_size) const;
     void init_position_ids(int max_seq_len);
     void reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const;

@@ -122,6 +122,12 @@ class CudaFp8GEMMLinear(LinearBase):
         self.K = self._deepgemm_linear.K
         self.N = self._deepgemm_linear.N
         self.scale_ue8m0 = getattr(self._deepgemm_linear, "scale_ue8m0", False)
+        # The BERT fused LayerNorm produces packed UE8M0, not Hopper's
+        # float32 activation scales. Ordinary forward dispatch is unchanged.
+        self.supports_prequantized_activation = self.scale_ue8m0
+        self.fused_activation_quant_format = (
+            "fp8_ue8m0_block128_colmajor" if self.scale_ue8m0 else None
+        )
         self.cached_scales = getattr(self._deepgemm_linear, "cached_scales", None)
         self.cached_scales_max_len = getattr(
             self._deepgemm_linear, "cached_scales_max_len", 0

@@ -3,6 +3,28 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "bert_fp8_fusion_gpu_test",
+    srcs = ["bert_fp8_fusion_test.py"],
+    main = "bert_fp8_fusion_test.py",
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    timeout = "long",
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "bert_fp8_fusion_sm120_test",
+    srcs = ["bert_fp8_fusion_test.py"],
+    main = "bert_fp8_fusion_test.py",
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    timeout = "long",
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "bert_multimodal_embedding_test",
     srcs = ["bert_multimodal_embedding_test.py"],
     deps = py_test_deps,
