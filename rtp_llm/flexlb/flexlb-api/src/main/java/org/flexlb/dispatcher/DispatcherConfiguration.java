@@ -33,7 +33,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.Callable;
 
-/** Lazy HTTP ingress resources, enabled only through FLEXLB_CONFIG.httpDispatcher.enabled. */
+/** Lazy HTTP ingress resources, enabled through the effective Master HTTP Dispatcher configuration. */
 @Configuration
 @Lazy
 public class DispatcherConfiguration {

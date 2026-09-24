@@ -21,6 +21,60 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
     @Test
+    void dispatcherEnvironmentOverridePreservesPlatformConfig() {
+        String document = ConfigTestFixtures.document("""
+                {"httpDispatcher":{"enabled":false},
+                 "scheduler":{"type":"DIRECT"},
+                 "dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":7},
+                 "router":{"batchScheduleMaxCount":23},"workerRegistry":{"engineType":"EMBEDDING"}}
+                """);
+        FlexlbConfig config = new ConfigService(Map.of(
+                ConfigService.FLEXLB_CONFIG_ENV, document,
+                ConfigService.DISPATCH_ENABLED_ENV, "true")).loadBalanceConfig();
+
+        assertTrue(config.getHttpDispatcher().isEnabled());
+        assertTrue(config.isDirect());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, config.getDispatcher().getType());
+        assertEquals(7, config.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(23, config.getRouter().getBatchScheduleMaxCount());
+        assertEquals(EngineType.EMBEDDING, config.getWorkerRegistry().getEngineType());
+        assertEquals(60000L, config.getRequestLifecycle().getRequest().getTimeoutMs());
+    }
+
+    @Test
+    void dispatcherEnvironmentOverrideCanDisableAndAbsencePreservesJsonValue() {
+        for (boolean enabled : new boolean[]{false, true}) {
+            String document = ConfigTestFixtures.document(
+                    "{\"httpDispatcher\":{\"enabled\":" + enabled + "}}");
+            assertEquals(enabled, new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, document))
+                    .loadBalanceConfig().getHttpDispatcher().isEnabled());
+            assertFalse(new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, document,
+                    ConfigService.DISPATCH_ENABLED_ENV, "false"))
+                    .loadBalanceConfig().getHttpDispatcher().isEnabled());
+        }
+        assertFalse(new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, ConfigTestFixtures.REQUIRED))
+                .loadBalanceConfig().getHttpDispatcher().isEnabled());
+    }
+
+    @Test
+    void dispatcherEnvironmentOverrideValidatesBooleanAndStillRequiresValidMasterConfig() {
+        for (String value : new String[]{"", " ", "1", "yes", "enabled", "tru"}) {
+            ConfigValidationException error = assertThrows(ConfigValidationException.class,
+                    () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, ConfigTestFixtures.REQUIRED,
+                            ConfigService.DISPATCH_ENABLED_ENV, value)));
+            assertTrue(error.getMessage().contains(ConfigService.DISPATCH_ENABLED_ENV), error.getMessage());
+        }
+        assertTrue(new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, ConfigTestFixtures.REQUIRED,
+                ConfigService.DISPATCH_ENABLED_ENV, " TRUE ")).loadBalanceConfig().getHttpDispatcher().isEnabled());
+        for (String document : new String[]{"", "{}", "{\"httpDispatcher\":{\"enabled\":true}}"}) {
+            assertThrows(ConfigValidationException.class, () -> new ConfigService(Map.of(
+                    ConfigService.FLEXLB_CONFIG_ENV, document, ConfigService.DISPATCH_ENABLED_ENV, "true")));
+        }
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(ConfigService.DISPATCH_ENABLED_ENV, "true")));
+    }
+
+    @Test
     void batchPlacementConfigUsesTheV3Document() {
         FlexlbConfig defaults = ConfigTestFixtures.parse("{}");
         assertEquals(1000, defaults.getRouter().getBatchScheduleMaxCount());

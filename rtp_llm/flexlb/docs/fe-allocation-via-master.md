@@ -17,17 +17,20 @@ Existing RTP callers send `{"batch_count":5}` for worker placement without confi
 ## HTTP dispatcher configuration
 
 ```sh
-# Merge httpDispatcher.enabled into the deployment's existing FLEXLB_CONFIG.
-export FLEXLB_CONFIG='{"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},"httpDispatcher":{"enabled":true}}'
-export DISPATCH_ROUTING_TOKEN=your-shared-token
+# Keep the complete FLEXLB_CONFIG already supplied by the deployment platform.
+export DISPATCH_ENABLED=true
+export DISPATCH_PRE_ASSIGN_BE=false
 java -jar flexlb-api.jar
 ```
-`FLEXLB_CONFIG.httpDispatcher.enabled` defaults to false. Enable it explicitly; it is independent of Master-to-BE `dispatcher.type`. Disabled ingress does not create Dispatcher clients or discovery tasks and does not require a routing token. No `DISPATCH_ENABLED` environment variable is introduced.
+`DISPATCH_ENABLED` optionally overrides only `FLEXLB_CONFIG.httpDispatcher.enabled` after the complete Master configuration is parsed. Set it to `true` to enable ingress or `false` to disable it. When absent, the JSON setting remains authoritative (default false). The value must be `true` or `false` (case-insensitive, surrounding whitespace allowed); blank or invalid values fail startup. The override preserves all other platform-injected settings and does not replace or relax validation of the required `FLEXLB_CONFIG`. Do not overwrite that variable with a partial JSON document. This switch is independent of Master-to-BE `dispatcher.type`. Disabled ingress does not create Dispatcher clients or discovery tasks and does not require a routing token.
+
+In Whale, set these environment variables in the Master role's advanced settings; no edit to the platform-generated JSON is needed. The example disables BE preassignment, so receiving FEs keep their existing BE routing and no routing token is required. For colocated preassignment, use `DISPATCH_PRE_ASSIGN_BE=true` and configure the same nonempty `DISPATCH_ROUTING_TOKEN` on Master and the receiving FEs. See the [Whale user guide](dispatcher-user-guide.zh-CN.md) for deployment steps and client examples.
 
 Without an FE service override, Dispatcher reuses `WorkerAddressService` and the existing model's worker HTTP endpoints, including its HTTP/gRPC port conversion. This requires exactly one non-VIT worker role and an FE serving on that worker's HTTP port. For independent FEs, workers without an HTTP FE, or ambiguous P/D ingress, set `DISPATCH_FE_POOL_SERVICE_ID` to the receiving FE HTTP service and `DISPATCH_PRE_ASSIGN_BE=false`. An FE override with BE preassignment enabled fails configuration validation. No new cluster or discovery implementation is needed. Ordinary Dispatcher settings remain:
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
+| `DISPATCH_ENABLED` | Unset: use `FLEXLB_CONFIG.httpDispatcher.enabled` | Override only HTTP Dispatcher enablement; accepts `true` or `false` |
 | `DISPATCH_FE_POOL_SERVICE_ID` | Empty: reuse worker HTTP endpoints | Optional FE HTTP service override; requires preassignment off |
 | `DISPATCH_ROUTING_TOKEN` | Empty | Shared credential on Master and receiving FEs; required for BE preassignment |
 | `DISPATCH_SUB_BATCH` | `count:5` | `count:N` balances at most N nonempty chunks; `size:N` or bare N caps items per chunk |
@@ -35,7 +38,7 @@ Without an FE service override, Dispatcher reuses `WorkerAddressService` and the
 | `DISPATCH_BATCH_TIMEOUT_MS` | `30000` | FE response read timeout in milliseconds |
 | `DISPATCH_PROBE_PATH` | `/frontend_health` | Health endpoint; use `/health` for FEs exposing that route |
 
-The five ordinary settings also support native Spring `dispatch.*` command-line or configuration-file properties; for example, `dispatch.sub-batch` and `dispatch.pre-assign-be`. Command-line properties override environment values, which override configuration-file values; all use the same binding and validation. This support is limited to Dispatcher and does not restore removed Master variables or `DISPATCH_CONFIG`. The credential `DISPATCH_ROUTING_TOKEN` is read directly from the environment on both Master and FE; keep it out of command-line arguments, which Master logs at startup.
+The five ordinary settings (FE service, sub-batch, preassignment, timeout and probe path) also support native Spring `dispatch.*` command-line or configuration-file properties; for example, `dispatch.sub-batch` and `dispatch.pre-assign-be`. Command-line properties override environment values, which override configuration-file values; all use the same binding and validation. This support is limited to Dispatcher and does not restore removed Master variables or `DISPATCH_CONFIG`. `DISPATCH_ENABLED` is read directly by the Master config loader; it has no `dispatch.enabled` Spring property. The credential `DISPATCH_ROUTING_TOKEN` is read directly from the environment on both Master and FE; keep it out of command-line arguments, which Master logs at startup.
 
 Each split batch uses one Master batch-schedule coordinator call. With BE preassignment, worker round-robin selects one colocated PDFUSION worker per chunk: its HTTP port receives the FE request, and its RPC address is written into `role_addrs`. This path does not also select from the FE pool. Without preassignment, FE round-robin selects HTTP destinations from the default worker endpoints or the explicit FE service; each receiving FE schedules its own BE. There is no local allocation mode or fallback. Invalid allocation returns 400; unavailable master assignments return 503. Streaming and other passthrough requests retain their existing local FE routing. In P/D deployments, disable preassignment and specify the receiving FE HTTP service; this can be an existing colocated FE service, without deploying a separate FE cluster. Splitting distributes FE work, while existing per-request scheduling determines P/D placement; chunks are not pinned to distinct P/D workers.
 

@@ -35,10 +35,13 @@ class DispatcherStartupTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"true,false,false,http", "true,true,false,grpc", "true,false,true,http", "false,false,true,http"})
+    @CsvSource({"true,,false,false,http", "true,,true,false,grpc", "true,,false,true,http", "false,,false,true,http",
+            "false,true,false,true,http", "true,false,false,false,http"})
     @Timeout(60)
-    void applicationMainUsesSchemaEnablementAndExistingDiscovery(boolean enabled, boolean override,
+    void applicationMainUsesEffectiveEnablementAndExistingDiscovery(boolean jsonEnabled, String environmentEnabled,
+                                                                 boolean override,
                                                                  boolean separateFe, String protocol) throws Exception {
+        boolean enabled = environmentEnabled == null ? jsonEnabled : Boolean.parseBoolean(environmentEnabled);
         int port;
         try (var socket = new ServerSocket(0)) {
             port = socket.getLocalPort();
@@ -69,7 +72,12 @@ class DispatcherStartupTest {
         builder.environment().put("FLEXLB_CONFIG", """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "grpcServer":{"shutdownQuietPeriodMs":1},"httpDispatcher":{"enabled":%s}}
-                """.formatted(enabled));
+                """.formatted(jsonEnabled));
+        if (environmentEnabled == null) {
+            builder.environment().remove("DISPATCH_ENABLED");
+        } else {
+            builder.environment().put("DISPATCH_ENABLED", environmentEnabled);
+        }
         builder.environment().put("MODEL_SERVICE_CONFIG", """
                 {"service_id":"aigc.text-generation.generation.startup-test",
                  "role_endpoints":[{"group":"default","pd_fusion_endpoint":
@@ -114,6 +122,19 @@ class DispatcherStartupTest {
                 assertEquals(200, echoed.statusCode());
                 assertEquals("frontend-ok", echoed.body());
                 assertEquals(1, delivered.get());
+                if (separateFe) {
+                    var allocation = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port
+                                    + "/rtp_llm/batch_schedule"))
+                            .timeout(Duration.ofSeconds(5)).header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(
+                                    "{\"batch_count\":2,\"allocation_type\":\"FE\"}")).build();
+                    HttpResponse<String> allocated = client.send(allocation, HttpResponse.BodyHandlers.ofString());
+                    assertEquals(200, allocated.statusCode(), allocated.body());
+                    var targets = new ObjectMapper().readTree(allocated.body()).get("server_status");
+                    assertEquals(2, targets.size());
+                    assertEquals("FRONTEND", targets.get(0).get("role").asText());
+                    assertEquals(frontend.getPort(), targets.get(0).get("http_port").asInt());
+                }
             }
         } finally {
             process.destroy();
