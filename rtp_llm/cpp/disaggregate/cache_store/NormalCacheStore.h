@@ -24,6 +24,8 @@ public:
     void store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                CacheStoreStoreDoneCallback                callback) override;
 
+    std::shared_ptr<RequestBlockBuffer> getOrCreateRequestBlockBuffer(const std::string& request_id) override;
+
     void load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
               CacheStoreLoadDoneCallback                 callback,
               const std::string&                         ip,

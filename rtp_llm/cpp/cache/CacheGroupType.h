@@ -81,7 +81,8 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                                             int                     cp_rank,
                                                             int                     cp_size,
                                                             size_t                  key_blocks_per_logical_block = 1,
-                                                            size_t                  cache_key_count              = 0) {
+                                                            size_t                  cache_key_count              = 0,
+                                                            size_t                  published_block_count        = 0) {
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;
@@ -120,6 +121,9 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
     if (use_hybrid && transfer_tail_blocks) {
         start = total_logical_blocks > tail_count ? total_logical_blocks - tail_count : 0;
     }
+    // Publication progress is separate from decode-side prefix reuse. FULL
+    // groups in a hybrid model also skip blocks already published by P.
+    start = std::max(start, std::min(published_block_count, total_logical_blocks));
     plan.reserve(total_logical_blocks - std::min(start, total_logical_blocks));
     for (size_t pos = start; pos < total_logical_blocks; ++pos) {
         const int block_pos = static_cast<int>(pos);

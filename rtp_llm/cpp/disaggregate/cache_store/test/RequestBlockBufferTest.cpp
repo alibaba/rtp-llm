@@ -1,5 +1,9 @@
 #include "gtest/gtest.h"
 
+#include <chrono>
+#include <future>
+#include <stdexcept>
+
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 
 namespace rtp_llm {
@@ -195,6 +199,43 @@ TEST_F(RequestBlockBufferTest, testWatchFunc_ReleaseBlock) {
     ASSERT_TRUE(watched_called);
     ASSERT_FALSE(watched_success);
     ASSERT_TRUE(watched_blocks.empty());
+}
+
+TEST_F(RequestBlockBufferTest, PublicationWaitStopsWhenRequestEnds) {
+    RequestBlockBuffer buffer("request-1");
+    buffer.beginPublication("full");
+
+    std::promise<void> started;
+    auto               waiter = std::async(std::launch::async, [&] {
+        started.set_value();
+        try {
+            buffer.beginPublication("full");
+            return false;
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+    });
+    started.get_future().wait();
+    buffer.notifyRequestDone();
+
+    const auto status = waiter.wait_for(std::chrono::seconds(1));
+    if (status != std::future_status::ready) {
+        // Let the old implementation exit so a failed assertion cannot hang the suite.
+        buffer.finishPublication("full", false, 0);
+    }
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_TRUE(waiter.get());
+}
+
+TEST_F(RequestBlockBufferTest, PublicationWaitTimesOutWithoutLosingConfirmedProgress) {
+    RequestBlockBuffer buffer("request-1");
+    ASSERT_EQ(buffer.beginPublication("full", std::chrono::milliseconds(20)), 0u);
+
+    EXPECT_THROW(buffer.beginPublication("full", std::chrono::milliseconds(20)), std::runtime_error);
+
+    buffer.finishPublication("full", true, 2);
+    EXPECT_EQ(buffer.beginPublication("full", std::chrono::milliseconds(20)), 2u);
+    buffer.finishPublication("full", true, 2);
 }
 
 }  // namespace rtp_llm

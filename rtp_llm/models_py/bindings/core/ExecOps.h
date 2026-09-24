@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -146,7 +147,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             int                                  cp_rank,
                             int                                  cp_size,
                             std::shared_ptr<torch::Event>        pre_created_event,
-                            CacheStoreCompletionRegistrar        register_store_completion = nullptr);
+                            CacheStoreCompletionRegistrar        register_store_completion = nullptr,
+                            std::chrono::milliseconds            publication_timeout = std::chrono::seconds(30));
 
 // ===================================================================
 // Static ops (weight preprocessing)

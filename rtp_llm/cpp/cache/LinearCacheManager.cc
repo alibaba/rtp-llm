@@ -284,17 +284,31 @@ bool LinearCacheManager::malloc(BlockIds&                block_ids,
 }
 
 void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    const int last_position = static_cast<int>(block_ids.blocksNum()) - retainedTailBlockCount() - 1 - reserve_step;
+    removeSkippedBlocksThrough(block_ids, last_position, enable_reuse_cache);
+}
+
+void LinearCacheManager::removeSkippedBlocksBefore(
+    BlockIds& block_ids, int prefix_len, int next_seq_len, bool enable_reuse_cache) {
+    // Keep the last computed state for this forward and every state in the
+    // next grant's active tail. A short grant can need states older than the
+    // last computed block when active_tail_blocks is greater than two.
+    const int last_computed_position = needBlocksNum(prefix_len, 0) - 1;
+    const int first_tail_position    = std::max(0, needBlocksNum(next_seq_len, 0) - materializedTailBlockCount());
+    const int last_position          = std::min(last_computed_position, first_tail_position) - 1;
+    removeSkippedBlocksThrough(block_ids, last_position, enable_reuse_cache);
+}
+
+void LinearCacheManager::removeSkippedBlocksThrough(BlockIds& block_ids, int last_position, bool enable_reuse_cache) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;
     }
-    const int step                 = std::max(1, linear_step_);
-    const int retained_tail_blocks = retainedTailBlockCount();
-    const int block_size           = static_cast<int>(block_indices.size());
+    const int step = std::max(1, linear_step_);
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - retained_tail_blocks - 1 - reserve_step; i >= 0; i--) {
+    for (int i = std::min(last_position, static_cast<int>(block_indices.size()) - 1); i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }

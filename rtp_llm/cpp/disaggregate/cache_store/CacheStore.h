@@ -20,6 +20,12 @@ public:
     virtual void store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                        CacheStoreStoreDoneCallback                callback) = 0;
 
+    // Publication state lives with the request's local cache. Backends without
+    // this state keep the conservative full-prefix write behavior.
+    virtual std::shared_ptr<RequestBlockBuffer> getOrCreateRequestBlockBuffer(const std::string&) {
+        return nullptr;
+    }
+
     virtual void load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                       CacheStoreLoadDoneCallback                 callback,
                       const std::string&                         ip,

@@ -144,6 +144,36 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
 // CacheStore (cache_store passed explicitly from CacheStoreAsyncWriter)
 // ============================================================
 
+class CacheStorePublicationTicket {
+public:
+    CacheStorePublicationTicket(std::shared_ptr<RequestBlockBuffer> stored,
+                                std::string                         cache_namespace,
+                                std::chrono::milliseconds           timeout):
+        stored_(std::move(stored)), cache_namespace_(std::move(cache_namespace)) {
+        published_block_count_ = stored_->beginPublication(cache_namespace_, timeout);
+    }
+
+    ~CacheStorePublicationTicket() {
+        finish(false, 0);
+    }
+
+    size_t publishedBlockCount() const {
+        return published_block_count_;
+    }
+
+    void finish(bool success, size_t complete_block_count) {
+        if (!finished_.exchange(true, std::memory_order_acq_rel)) {
+            stored_->finishPublication(cache_namespace_, success, complete_block_count);
+        }
+    }
+
+private:
+    std::shared_ptr<RequestBlockBuffer> stored_;
+    std::string                         cache_namespace_;
+    size_t                              published_block_count_{0};
+    std::atomic<bool>                   finished_{false};
+};
+
 void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                             const torch_ext::LayerKVCache&       layer_kv,
                             const CacheConfig&                   cache_config,
@@ -152,7 +182,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             int                                  cp_rank,
                             int                                  cp_size,
                             std::shared_ptr<torch::Event>        pre_created_event,
-                            CacheStoreCompletionRegistrar        register_store_completion) {
+                            CacheStoreCompletionRegistrar        register_store_completion,
+                            std::chrono::milliseconds            publication_timeout) {
     const auto& param = cache_store_inputs;
     const auto  requireHostTensor =
         [](const torch::Tensor& tensor, const char* name, int64_t expected_dim, c10::ScalarType expected_type) {
@@ -333,9 +364,29 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
         const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
-        const int64_t        request_id     = request_ids[context_index];
-        auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        const int64_t request_id       = request_ids[context_index];
+        const bool    incremental_full = group.policy.group_type == CacheGroupType::FULL
+                                         && group.policy.active_tail_blocks == 0
+                                         && group.policy.cp_mapping != CpBlockMappingMode::COMPACT_LAST_RANK;
+        const std::string publication_namespace =
+            makeCacheKey(cache_model_id, "published", layer_kv.layer_id, layer_kv.tag)
+            + "_cp_" + std::to_string(cp_rank) + "_" + std::to_string(cp_size);
+        size_t published_block_count = 0;
+        std::shared_ptr<CacheStorePublicationTicket> publication_ticket;
+        // A computed prefix is not necessarily published. Wait for the previous
+        // store of this layer before deciding what the next chunk must resend.
+        if (incremental_full) {
+            if (auto stored = cache_store->getOrCreateRequestBlockBuffer(std::to_string(request_id))) {
+                publication_ticket =
+                    std::make_shared<CacheStorePublicationTicket>(stored, publication_namespace, publication_timeout);
+                published_block_count = std::min(publication_ticket->publishedBlockCount(),
+                                                 static_cast<size_t>(prefix_length) / seq_size_per_block);
+            }
+        }
+        size_t publication_end_block = std::min(
+            total_logical_blocks, (static_cast<size_t>(prefix_length) + input_length) / seq_size_per_block);
+        auto event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -359,6 +410,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.
             if (block_id == -1) {
+                // Do not commit past a hole: a later retry must still publish it.
+                publication_end_block = std::min(publication_end_block,
+                                                 static_cast<size_t>(key_index) / key_blocks_per_logical_block);
                 RTP_LLM_LOG_DEBUG(
                     "PD_CACHE_KEY_WRITE_SKIP_NULL key=kv_%s request_id=%ld tag=%s layer=%d cp_rank=%d cp_size=%d "
                     "key_index=%d offset_index=%d block_id=%d",
@@ -456,7 +510,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                                     cp_rank,
                                                     planner_cp_size,
                                                     key_blocks_per_logical_block,
-                                                    request_cache_key_count);
+                                                     request_cache_key_count,
+                                                     published_block_count);
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }
@@ -472,6 +527,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                    tag = layer_kv.tag,
                                    request_id,
                                    request_blocks,
+                                   publication_ticket,
+                                   publication_end_block,
                                    store_completion](bool success, CacheStoreErrorCode ec) {
                 if (!success) {
                     RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d "
@@ -483,6 +540,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                         static_cast<int>(ec),
                                         ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str(),
                                         request_blocks->debugInfo().c_str());
+                }
+                if (publication_ticket) {
+                    publication_ticket->finish(success, publication_end_block);
                 }
                 if (store_completion) {
                     if (success) {
@@ -498,13 +558,16 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             try {
                 cache_store->store(request_blocks, std::move(store_callback));
             } catch (...) {
+                if (publication_ticket) {
+                    publication_ticket->finish(false, 0);
+                }
                 if (store_completion) {
                     store_completion(std::current_exception());
                 }
                 throw;
             }
         } else {
-            RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
+            RTP_LLM_LOG_DEBUG("skip cache store because no blocks require publication, request id [%ld], layer id [%d]",
                               static_cast<long>(request_id),
                               layer_kv.layer_id);
         }

@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -14,6 +16,11 @@ RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, std::shared
 RequestBlockBuffer::~RequestBlockBuffer() {}
 
 void RequestBlockBuffer::notifyRequestDone() {
+    {
+        std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+        publication_cancelled_ = true;
+    }
+    publication_cv_.notify_all();
     // request block buffer 关联的request已经结束，触发所有回调
     triggerWatchFunc(false, {});
 }
@@ -53,6 +60,39 @@ size_t RequestBlockBuffer::getBlocksCount() const {
 size_t RequestBlockBuffer::getBlocksSize() const {
     std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
     return blocks_size_;
+}
+
+size_t RequestBlockBuffer::beginPublication(const std::string& cache_namespace, std::chrono::milliseconds timeout) {
+    if (timeout <= std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("cache-store publication wait timeout must be positive");
+    }
+    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+    auto& state = publication_states_[cache_namespace];
+    if (!publication_cv_.wait_for(lock, timeout, [&] { return !state.pending || publication_cancelled_; })) {
+        throw std::runtime_error("cache-store publication timed out after " + std::to_string(timeout.count())
+                                 + " ms waiting for previous store callback, request " + requestid_ + ", namespace "
+                                 + cache_namespace);
+    }
+    if (publication_cancelled_) {
+        throw std::runtime_error("cache-store publication cancelled for request " + requestid_);
+    }
+    state.pending = true;
+    return state.published_block_count;
+}
+
+void RequestBlockBuffer::finishPublication(const std::string& cache_namespace,
+                                           bool               success,
+                                           size_t             complete_block_count) {
+    std::unique_lock<std::shared_mutex> lock(blocks_mutex_);
+    auto it = publication_states_.find(cache_namespace);
+    if (it != publication_states_.end()) {
+        if (success) {
+            it->second.published_block_count = std::max(it->second.published_block_count, complete_block_count);
+        }
+        it->second.pending = false;
+    }
+    lock.unlock();
+    publication_cv_.notify_all();
 }
 
 void RequestBlockBuffer::addBlock(const std::shared_ptr<BlockBuffer>& block) {

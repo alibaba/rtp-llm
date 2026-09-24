@@ -433,6 +433,7 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                 cache_config,
                 cache_store,
                 register_store_completion,
+                publication_timeout = store_completion_timeout_,
                 cache_model_id = cache_model_id_,
                 cp_rank        = cp_rank_,
                 cp_size        = cp_size_,
@@ -445,7 +446,8 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                                cp_rank,
                                cp_size,
                                std::move(event),
-                               register_store_completion);
+                               register_store_completion,
+                               publication_timeout);
     };
     submit(std::move(run));
 }

@@ -2213,6 +2213,119 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillInitSkipsSparseCleanupAndPr
     EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ChunkPrefillStateSlotLifecycle) {
+    auto config      = makeTinyHybridConfig();
+    // 16 usable slots across independent pools: two requests, each with 5 FULL and at most 3 LINEAR.
+    setGroupBlockCounts(config, 7, 11);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    const auto                           free_before = allocator->freeBlocksNum();
+    std::vector<BatchKVCacheResourcePtr> resources;
+    std::vector<MallocInfo>              infos;
+    auto                                 tokens = makeCompleteTokenIds(1, 18, 4);
+    for (int request = 0; request < 2; ++request) {
+        resources.push_back(makeBatchResource(1, config, CacheKeysType{}));
+        infos.push_back(MallocInfo{resources.back(), tokens});
+        infos.back().reuse_cache                  = false;
+        infos.back().enable_cache_lookup          = false;
+        infos.back().enable_remove_skipped_blocks = false;
+        ASSERT_TRUE(allocator->malloc(infos.back()).success);
+        ASSERT_TRUE(isNullBlockIdx(resources.back()->blocks(0, "linear")[0]));
+    }
+    const auto full0 = resources[0]->blocks(0, "full1");
+    const auto full1 = resources[1]->blocks(0, "full1");
+    // Block size 4 keeps this allocator test small; GPU coverage uses 64/128/130.
+    int prefix_len = 0;
+    for (int end : {4, 12, 16, 18}) {
+        for (int request : {1, 0}) {
+            auto expected                        = resources[request]->blocks(0, "linear");
+            infos[request].incr_seq_len_override = end;
+            infos[request].computed_prefix_len   = prefix_len;
+            ASSERT_TRUE(allocator->malloc(infos[request]).success);
+            const auto&  after    = resources[request]->blocks(0, "linear");
+            const size_t boundary = (end - 1) / 4;
+            ASSERT_EQ(after.size(), expected.size());
+            ASSERT_LT(boundary, after.size());
+            ASSERT_FALSE(isNullBlockIdx(after[boundary]));
+            // Only obsolete states and the newly materialized boundary may change.
+            if (prefix_len > 0) {
+                std::fill(expected.begin(), expected.begin() + (prefix_len - 1) / 4, NULL_BLOCK_IDX);
+            }
+            if (isNullBlockIdx(expected[boundary])) {
+                expected[boundary] = after[boundary];
+            }
+            EXPECT_EQ(after, expected);
+            for (auto slot : resources[1 - request]->blocks(0, "linear")) {
+                EXPECT_NE(after[boundary], slot);
+            }
+        }
+        if (end == 12) {
+            // The next chunk must reclaim obsolete states before allocating its boundary.
+            EXPECT_EQ(allocator->freeBlocksNum(), 0u);
+        }
+        prefix_len = end;
+    }
+    EXPECT_EQ(resources[0]->blocks(0, "full1"), full0);
+    EXPECT_EQ(resources[1]->blocks(0, "full1"), full1);
+    for (int request : {0, 1}) {
+        allocator->free(FreeInfo{resources[request], tokens});
+    }
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ChunkPrefillPreservesActiveLinearTailUntilItLeavesWindow) {
+    auto config = makeTinyHybridConfig();
+    auto groups = config.topology().groups();
+    ASSERT_EQ(groups.size(), 2u);
+    ASSERT_EQ(groups[0].policy.group_type, CacheGroupType::LINEAR);
+    groups[0].policy.active_tail_blocks = 4;
+    config.setTopology(std::move(groups), config.topology().layers());
+    setGroupBlockCounts(config, 24, 24);
+
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    const auto free_before = allocator->freeBlocksNum();
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
+    auto tokens   = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    MallocInfo info{resource, tokens};
+    info.reuse_cache                  = false;
+    info.enable_cache_lookup          = false;
+    info.enable_remove_skipped_blocks = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+
+    const auto& initial_linear_blocks = resource->blocks(0, "linear");
+    ASSERT_EQ(initial_linear_blocks.size(), 3u);
+    const auto first_block = initial_linear_blocks[0];
+    ASSERT_FALSE(isNullBlockIdx(first_block));
+
+    // Hold a second reference so a wrongly released block cannot be recycled
+    // into the same slot and make the identity check pass accidentally.
+    auto linear_group = allocator->cacheGroups()[0];
+    linear_group->reference(BlockIndicesType{first_block});
+    info.computed_prefix_len   = 8;
+    info.incr_seq_len_override = 12;
+    const auto next_result = allocator->malloc(info);
+    linear_group->unreference(BlockIndicesType{first_block});
+    ASSERT_TRUE(next_result.success);
+    const auto& retained_blocks = resource->blocks(0, "linear");
+    ASSERT_EQ(retained_blocks.size(), 3u);
+    EXPECT_EQ(retained_blocks[0], first_block);
+
+    // A longer grant moves the four-block tail past position zero, so it can
+    // now be reclaimed while the final four positions remain materialized.
+    info.incr_seq_len_override = 20;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    const auto& linear_blocks = resource->blocks(0, "linear");
+    ASSERT_EQ(linear_blocks.size(), 5u);
+    EXPECT_TRUE(isNullBlockIdx(linear_blocks[0]));
+    for (size_t pos = 1; pos < linear_blocks.size(); ++pos) {
+        EXPECT_FALSE(isNullBlockIdx(linear_blocks[pos]));
+    }
+    allocator->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
 // Decode path (StreamCacheResource::incrKVBlock sets enable_remove_skipped_blocks=true).
 // The allocator is invoked on an already-populated resource, so malloc() dispatches directly
 // to incrMalloc(). Sparse cleanup must prune non-step blocks while preserving step hits and
