@@ -74,6 +74,8 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+    bool draft_token_ids_are_point_mass = false;
+    torch::Tensor draft_to_target_map;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -95,6 +97,14 @@ public:
     }
 
 public:
+    static torch::Tensor pointMassProbs(const torch::Tensor& token_ids, int64_t vocab_size) {
+        auto shape = token_ids.sizes().vec();
+        shape.push_back(vocab_size);
+        return torch::zeros({token_ids.numel(), vocab_size}, token_ids.options().dtype(torch::kFloat32))
+            .scatter_(1, token_ids.reshape({-1, 1}).to(torch::kInt64), 1.0)
+            .reshape(shape);
+    }
+
     torch::Tensor draftTokens() const {
         if (!tokens.defined() || tokens.dim() != 2 || tokens.size(1) < 2) {
             return torch::Tensor();
@@ -109,9 +119,12 @@ public:
     torch::Tensor propose_tokens_gpu;
     torch::Tensor hidden_states;
     torch::Tensor all_probs;
+    // Shared immutable vocabulary metadata for legacy dense P/D handoff.
+    torch::Tensor draft_to_target_map;
 
     // hold tensors from grpc
     std::vector<torch::Tensor> tensors_holder;
+    bool token_ids_are_point_mass = false;
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
 
@@ -182,6 +195,7 @@ public:
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
+    absl::Status preparePrefillChunk();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;
     int                  estimateInitialNeedBlocks() const;
@@ -255,6 +269,23 @@ public:
     int64_t prefillRemoteReuseLen() const;
     int64_t prefillMemoryReuseLen() const;
 
+    // ---- chunked prefill (PREFILL / PDFUSION roles) ----
+    // reuse_length_ is the current chunk start, and advances after each middle chunk.
+    // When useChunkWindow() is true, contextLength() returns the current chunk length.
+    // initial_reuse_length_ stays frozen for cache-hit metrics.
+    void setChunkSize(int chunk_size) { chunk_size_ = chunk_size; }
+    bool chunkedPrefillEnabled() const { return chunk_size_ > 0; }
+    void enableWarmupChunkWindow() { warmup_chunk_window_ = true; }
+    bool useChunkWindow() const;       // enabled + RUNNING/warmup + context -> window funcs return chunk view
+    int  currentChunkLen() const;      // tokens to compute in the current chunk
+    bool isLastChunk() const;          // current chunk reaches seqLength()
+    bool isMiddleChunk() const; // chunked + context + !last → no sample / no output row
+    bool checkChunkAlignment() const;
+    void advanceChunk();               // reuse_length_ += currentChunkLen()
+    // Prompt token right after the current chunk; valid only for middle chunks.
+    // Used as speculative draft prefill tail instead of a sampled token.
+    int  nextChunkBoundaryToken() const;
+
     bool                 isContextStream() const;
     const torch::Tensor& cumLogProbs() const;
 
@@ -281,6 +312,7 @@ public:
     torch::Tensor              multimodalLocations() const;
 
     int64_t getTimeoutMs() const;
+    void    checkTimeout();
     void    recordWaitLatency();
     void    recordSchedulerEnqueueTime(int64_t time_us);
     void    recordCanRunTime();
@@ -629,6 +661,7 @@ public:
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
         int next_seq_len_upper_bound = -1;
+        bool draft_token_ids_are_point_mass = false;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -716,6 +749,13 @@ public:
     torch::Tensor getDraftAllProbsGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.draft_all_probs_gpu;
+    }
+    bool draftTokenIdsArePointMass(bool use_device_state) const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        if (use_device_state && mtp_async_state_.propose_tokens_gpu.defined()) {
+            return mtp_async_state_.draft_token_ids_are_point_mass;
+        }
+        return sp_output_buffer_ && sp_output_buffer_->token_ids_are_point_mass;
     }
     void clearSpecDecodeDeviceState() {
         // Unconditional legacy/testing escape hatch. Active MTP decode paths
@@ -852,6 +892,7 @@ protected:
 
     int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
     bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void                     updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
@@ -889,18 +930,23 @@ protected:
     // Prefill-to-decode transition is committed by the output/bookkeeping
     // worker and observed by the scheduler thread. Keep this flag atomic; the
     // shared_ptr preserves the existing CopyOnWrite sharing semantics.
-    std::shared_ptr<std::atomic<bool>> is_context_stream_;
-    size_t                             iter_count_    = 0;
-    size_t                             sp_iter_count_ = 0;
-    std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
-    size_t                             last_output_pos_      = 0;
-    int                                initial_reuse_length_ = 0;
-    int                                reuse_length_         = 0;
-    int                                local_reuse_length_   = 0;
-    int                                device_reuse_length_  = 0;
-    int                                remote_reuse_length_  = 0;
-    int                                host_reuse_length_    = 0;
-    int                                disk_reuse_length_    = 0;
+    std::shared_ptr<std::atomic<bool>>    is_context_stream_;
+    size_t                                iter_count_    = 0;
+    size_t                                sp_iter_count_ = 0;
+    std::vector<int32_t>                  speculative_accepted_tokens_per_pos_;
+    size_t                                last_output_pos_      = 0;
+    int                                   initial_reuse_length_ = 0;
+    int                                   reuse_length_         = 0;
+    int                                   local_reuse_length_   = 0;
+    int                                   device_reuse_length_  = 0;
+    int                                   remote_reuse_length_  = 0;
+    int                                   memory_reuse_length_  = 0;
+    int                                   host_reuse_length_    = 0;
+    int                                   disk_reuse_length_    = 0;
+    // Chunked prefill normally gates on RUNNING so admission-time calls keep whole-segment
+    // semantics. Prefill warmup explicitly opts in because it bypasses the scheduler.
+    int                                   chunk_size_          = 0;
+    bool                                  warmup_chunk_window_ = false;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

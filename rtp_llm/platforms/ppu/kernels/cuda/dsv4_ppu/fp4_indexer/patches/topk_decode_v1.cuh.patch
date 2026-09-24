@@ -1,0 +1,21 @@
+--- csrc/deepseek_v4/topk_v1.cuh
++++ compat/topk_decode_v1.cuh
+@@ -13,0 +14 @@
++#include "topk_exact.cuh"
+@@ -84 +85 @@
+-  uint16_t bits = __half_as_ushort(h);
++  uint16_t bits = x == 0.0f ? 0u : __half_as_ushort(h);
+@@ -243,0 +245,5 @@
++
++  if (num_equal > v3::kMaxTies) {
++    rtp_topk::exact_topk<kTopK>(scores, indices, length, _smem);
++    return;
++  }
+@@ -547,0 +554,4 @@
++  if (s_num_input[0] > SMEM_INPUT_SIZE) {
++    rtp_topk::exact_topk<kTopK>(input, output, length, s_input_idx);
++    return;
++  }
+@@ -722 +732 @@
+-    const auto fptr = std::bit_cast<const void*>(f);
++    const auto fptr = reinterpret_cast<const void*>(f);

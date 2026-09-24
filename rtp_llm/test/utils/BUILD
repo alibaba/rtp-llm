@@ -29,6 +29,7 @@ py_library(
 py_library(
     name = "jit_sys_path_setup",
     srcs = ["jit_sys_path_setup.py"],
+    imports = ["."],
     deps = [":filelock"],
 )
 

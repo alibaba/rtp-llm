@@ -1,8 +1,6 @@
 import os
 from enum import IntEnum
 
-import torch
-
 
 class DeviceType(IntEnum):
     Cpu = 0
@@ -14,6 +12,9 @@ class DeviceType(IntEnum):
 
 
 def get_device_type() -> DeviceType:
+    # Descriptors may use DeviceType before a worker imports a device runtime.
+    import torch
+
     if torch.cuda.is_available():
         if hasattr(torch.version, "hip") and torch.version.hip is not None:
             return DeviceType.ROCm

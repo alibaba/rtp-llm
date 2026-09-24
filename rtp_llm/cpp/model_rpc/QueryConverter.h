@@ -27,6 +27,16 @@ public:
 
     static void transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor);
 
+    static bool useLegacyDenseMtpHandoff(const char* option) {
+        return option == nullptr || std::strcmp(option, "0") != 0;
+    }
+
+    static void transMtpProposal(GenerateRequestPB* request,
+                                 const SpeculativeExecutorStreamOutput& output,
+                                 int64_t target_vocab_size,
+                                 bool legacy_dense);
+    static torch::Tensor transMtpProposalProbs(const GenerateRequestPB& request);
+
 private:
     static std::shared_ptr<GenerateConfig> transGenerateConfig(const GenerateConfigPB* config_proto);
 

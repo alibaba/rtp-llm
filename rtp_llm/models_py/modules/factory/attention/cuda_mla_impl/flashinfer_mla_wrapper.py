@@ -86,7 +86,12 @@ class MlaFlashInferImplBase(MlaImplBase):
             self.seq_size_per_block,
             forbid_realloc,
         )
-        self.fmha_impl.plan(self.fmha_params)
+        if isinstance(self.fmha_impl, MlaFlashInferPrefillOp):
+            self.fmha_impl.plan(
+                self.fmha_params, attn_inputs.kv_cache_kernel_block_id_device
+            )
+        else:
+            self.fmha_impl.plan(self.fmha_params)
 
     def forward(
         self,

@@ -216,6 +216,38 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
         )
         self.assertIs(tag["format"]["content"]["stop_after_first"], False)
 
+    def test_parallel_tool_calls_false_stops_after_first_required_tool(self):
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Search weather"}],
+            tools=_rtp_two_tools(),
+            tool_choice="required",
+            parallel_tool_calls=False,
+        )
+        config = GenerateConfig()
+
+        self.renderer.apply_chat_completion_constraints(request, config)
+
+        tag = json.loads(config.structural_tag)
+        get_info = DeepSeekV4Detector().structure_info()
+        self.assertEqual(
+            [item["begin"] for item in tag["format"]["content"]["tags"]],
+            [get_info("get_weather").begin, get_info("search").begin],
+        )
+        self.assertIs(tag["format"]["content"]["stop_after_first"], True)
+
+    def test_parallel_tool_calls_false_does_not_force_auto_tool_choice(self):
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Search weather"}],
+            tools=_rtp_two_tools(),
+            tool_choice="auto",
+            parallel_tool_calls=False,
+        )
+        config = GenerateConfig()
+
+        self.renderer.apply_chat_completion_constraints(request, config)
+
+        self.assertIsNone(config.structural_tag)
+
     def test_forced_tool_choice_rejects_existing_grammar_constraints(self):
         request = ChatCompletionRequest(
             messages=[{"role": "user", "content": "Weather?"}],
@@ -262,6 +294,25 @@ class DeepseekV4RendererTest(TestCase):
         self.assertEqual(rendered.rendered_prompt, expected)
         self.assertEqual(self.renderer.tokenizer.encode_calls[-1], (expected, {}))
         self.assertEqual(self.renderer.tokenizer.decode(rendered.input_ids), expected)
+
+    def test_preserve_thinking_retains_history(self):
+        messages = [
+            {"role": "user", "content": "Remember the number."},
+            {"role": "assistant", "content": "Done.", "reasoning_content": "The number is 42."},
+            {"role": "user", "content": "What was the number?"},
+        ]
+        for preserve in (None, False, True):
+            with self.subTest(preserve=preserve):
+                request = ChatCompletionRequest(
+                    messages=messages, enable_thinking=True, preserve_thinking=preserve
+                )
+                rendered = self.renderer.render_chat(request)
+                expected = _rtp_expected_prompt(
+                    self.encoding, messages, thinking_mode="thinking",
+                    drop_thinking=preserve is not True,
+                )
+                self.assertEqual(rendered.rendered_prompt, expected)
+                self.assertEqual("The number is 42." in rendered.rendered_prompt, preserve is True)
 
     def test_existing_think_mode_env_path_is_unchanged(self):
         # The real renderer constructor derives both fields from THINK_MODE.
@@ -722,6 +773,105 @@ class DeepseekV4DetectorTest(TestCase):
 
 
 class DeepseekV4ReasoningToolPipelineTest(IsolatedAsyncioTestCase):
+    async def test_official_full_parser_parallel_limit(self):
+        for parallel in (False, True, None):
+            with self.subTest(parallel=parallel):
+                encoding = Mock()
+                encoding.parse_message_from_completion_text.return_value = {
+                    "role": "assistant",
+                    "content": "Weather results.",
+                    "reasoning_content": "Compare the two cities.",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": json.dumps({"city": city}),
+                            },
+                        }
+                        for city in ("Hangzhou", "Shanghai")
+                    ],
+                }
+                renderer = _make_renderer(encoding)
+                renderer._generate_log_probs = AsyncMock(return_value=None)
+                request = ChatCompletionRequest(
+                    messages=[{"role": "user", "content": "Weather?"}],
+                    tools=_rtp_tools(),
+                    parallel_tool_calls=parallel,
+                    chat_template_kwargs={"enable_thinking": True},
+                )
+                status = ReasoningToolStreamStatus(
+                    request,
+                    DeepSeekV4Detector(),
+                    ReasoningParser(model_type="deepseek-v3", force_reasoning=True),
+                )
+                # No DSML here: a parser fallback cannot satisfy these assertions.
+                status.delta_output_string = "official completion"
+                delta = await renderer._process_reasoning_and_tool_calls(
+                    status, self._output(), is_streaming=False
+                )
+                encoding.parse_message_from_completion_text.assert_called_once()
+                self.assertEqual(delta.output_str.content, "Weather results.")
+                self.assertEqual(
+                    delta.output_str.reasoning_content, "Compare the two cities."
+                )
+                calls = delta.output_str.tool_calls
+                self.assertEqual(len(calls), 1 if parallel is False else 2)
+                self.assertEqual(
+                    json.loads(calls[0].function.arguments), {"city": "Hangzhou"}
+                )
+                if parallel is not False:
+                    self.assertEqual(
+                        json.loads(calls[1].function.arguments), {"city": "Shanghai"}
+                    )
+
+    async def test_auto_tool_parallel_limit_full_and_streaming(self):
+        text = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">Hangzhou</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n"
+            '<｜DSML｜invoke name="get_weather">\n'
+            '<｜DSML｜parameter name="city" string="true">Shanghai</｜DSML｜parameter>\n'
+            "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+        )
+        for streaming in (False, True):
+            for parallel in (False, True, None):
+                with self.subTest(streaming=streaming, parallel=parallel):
+                    renderer = _make_renderer(None)
+                    renderer._generate_log_probs = AsyncMock(return_value=None)
+                    request = ChatCompletionRequest(
+                        messages=[{"role": "user", "content": "Weather?"}],
+                        tools=_rtp_tools(),
+                        parallel_tool_calls=parallel,
+                        chat_template_kwargs={"enable_thinking": False},
+                    )
+                    status = ReasoningToolStreamStatus(
+                        request,
+                        DeepSeekV4Detector(),
+                        ReasoningParser(
+                            model_type="deepseek-v3", force_reasoning=False
+                        ),
+                    )
+                    calls = {}
+                    chunks = (
+                        [text[i : i + 7] for i in range(0, len(text), 7)]
+                        if streaming
+                        else [text]
+                    )
+                    for chunk in chunks:
+                        status.delta_output_string += chunk
+                        delta = await renderer._process_reasoning_and_tool_calls(
+                            status, self._output(), is_streaming=streaming
+                        )
+                        if delta is not None:
+                            for call in delta.output_str.tool_calls or []:
+                                calls[call.index] = calls.get(call.index, "") + (
+                                    call.function.arguments or ""
+                                )
+                    self.assertEqual(len(calls), 1 if parallel is False else 2)
+                    self.assertEqual(json.loads(calls[0]), {"city": "Hangzhou"})
+
     def _output(self):
         aux_info = AuxInfo()
         aux_info.input_len = 10

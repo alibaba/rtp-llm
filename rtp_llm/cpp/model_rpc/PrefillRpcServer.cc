@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -609,8 +610,12 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer && !engine_->isDSpark()) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        const auto* legacy_env = std::getenv("RTP_LLM_MTP_LEGACY_DENSE_HANDOFF");
+        // Unknown peers may predate the marker. Omit dense probabilities only
+        // when the deployment explicitly opts in after upgrading Decode.
+        const bool legacy_dense = QueryConverter::useLegacyDenseMtpHandoff(legacy_env);
+        QueryConverter::transMtpProposal(
+            &generate_request, *sp_output_buffer, maga_init_params_.model_config_.vocab_size, legacy_dense);
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
@@ -619,7 +624,6 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
             hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
                                                                             sp_output_buffer->hidden_states;
         }
-        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 

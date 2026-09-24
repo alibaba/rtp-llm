@@ -1,6 +1,7 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from rtp_llm import start_server
 from rtp_llm.ops import SpeculativeType
@@ -44,8 +45,57 @@ class StartupRealWarmupTest(unittest.TestCase):
                 max_len=1048576,
                 reserve_step=8,
             ),
-            1048568,
+            1048567,
         )
+
+    def test_request_leaves_output_space_after_speculative_reserve(self):
+        for reserve in (0, 4, 7, 9):
+            with self.subTest(reserve=reserve):
+                length = start_server._get_startup_real_warmup_request_token_len(
+                    1048576, 1048576, reserve
+                )
+                self.assertEqual(1048576 - reserve - length, 1)
+                self.assertEqual(
+                    start_server._get_startup_real_warmup_request_token_len(
+                        8, 32, reserve
+                    ),
+                    8,
+                )
+        with self.assertRaises(ValueError):
+            start_server._get_startup_real_warmup_request_token_len(5, 5, 4)
+
+    def test_empty_warmup_cannot_mark_service_ready(self):
+        async def empty_outputs(_):
+            if False:
+                yield
+
+        client = Mock(enqueue=empty_outputs, close=AsyncMock())
+        configs = SimpleNamespace(grpc_config=None)
+        with (
+            patch.object(
+                start_server, "_get_startup_real_warmup_token_lens", return_value=[8]
+            ),
+            patch.object(
+                start_server, "_get_startup_real_warmup_max_len", return_value=32
+            ),
+            patch.object(
+                start_server,
+                "_get_startup_real_warmup_speculative_reserve_step",
+                return_value=4,
+            ),
+            patch.object(
+                start_server,
+                "_get_startup_real_warmup_grpc_addresses",
+                return_value=["localhost:1"],
+            ),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.ModelRpcClient",
+                return_value=client,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no generated tokens"):
+                asyncio.run(start_server._run_startup_real_warmup_grpc(configs))
+        client.close.assert_awaited_once()
 
 
 if __name__ == "__main__":

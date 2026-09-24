@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4 import _profiler
-from rtp_llm.models_py.modules.dsv4.block import Block
+from rtp_llm.models_py.modules.dsv4.block import Block, _prefill_fast_norm
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
 from rtp_llm.models_py.modules.factory.fused_moe.utils import profiler as moe_profiler
@@ -121,12 +121,13 @@ class _FakeV4:
         self._prefill_ws_idx_w = 0
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
-        self.norm = lambda h: h + 100
+        self.capture_aux_hidden_layer_ids = ()
+        self._norm = lambda h: h + 100
 
     def _propagate_cp_ctx(self, cp_ctx):
         self.cp_ctx = cp_ctx
 
-    def embed(self, input_ids):
+    def _embed(self, input_ids):
         return torch.stack((input_ids.float(), input_ids.float() + 0.5), dim=-1)
 
     def _hc_head_reduce(self, h):
@@ -204,7 +205,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
     def test_workspace_is_allocated_before_cp_setup_and_embedding(self):
         v4 = _FakeV4()
         events = []
-        original_embed = v4.embed
+        original_embed = v4._embed
 
         def make_workspace(*args, **kwargs):
             events.append("workspace")
@@ -222,7 +223,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         ), patch.object(
             v4, "_propagate_cp_ctx", side_effect=propagate_cp
         ), patch.object(
-            v4, "embed", side_effect=embed
+            v4, "_embed", side_effect=embed
         ), patch.object(
             prefill_forward, "build_and_propagate_prefill_meta_fp8"
         ), patch.object(
@@ -807,6 +808,198 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
 
         with self.assertRaisesRegex(RuntimeError, "no usable cu_seqlens"):
             self._run_forward_prefill_with(attn)
+
+    def test_prefill_cu_seqlens_uses_populated_host_boundaries(self):
+        host = torch.tensor([0, 2, 5], dtype=torch.int32)
+        device = torch.tensor([0, 1, 5], dtype=torch.int32)
+        attn = SimpleNamespace(cu_seqlens=host, cu_seqlens_device=device)
+
+        self.assertIs(prefill_forward._request_prefill_cu_seqlens(attn), host)
+
+    def test_prefill_cu_seqlens_falls_back_to_device_boundaries(self):
+        host = torch.empty(0, dtype=torch.int32)
+        device = torch.tensor([0, 2, 5], dtype=torch.int32)
+        attn = SimpleNamespace(cu_seqlens=host, cu_seqlens_device=device)
+
+        self.assertIs(prefill_forward._request_prefill_cu_seqlens(attn), device)
+
+    def test_cp_rebuilds_consumed_rank_local_varlen_metadata(self):
+        v4 = _FakeV4()
+        v4._cp_info = object()
+        v4._cp_size = 8
+        input_ids = torch.tensor([3, 4], dtype=torch.long)
+        positions = torch.empty(0, dtype=torch.long)
+        empty_i32 = torch.empty(0, dtype=torch.int32)
+        attn_inputs = SimpleNamespace(
+            input_lengths=empty_i32,
+            prefix_lengths=empty_i32,
+        )
+        cp_ctx = SimpleNamespace(
+            cp_size=8,
+            cp_rank=0,
+            chunk_length=2,
+            chunk_lengths_per_req=(2,),
+            global_positions=torch.tensor([0, 9], dtype=torch.long),
+            prefix_lengths=torch.tensor([0], dtype=torch.long),
+            req_id_per_token=torch.tensor([0, 0], dtype=torch.int32),
+        )
+
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(
+            prefill_forward._fwd_dbg, "enabled", lambda: False
+        ), patch.object(
+            prefill_forward, "build_cp_context_for_forward", return_value=cp_ctx
+        ), patch.object(
+            prefill_forward, "build_and_propagate_prefill_meta_fp8"
+        ) as build_meta, patch.object(
+            prefill_forward, "clear_prefill_meta_shared_fp8"
+        ):
+            prefill_forward.forward_layers(
+                v4,
+                kv_cache=None,
+                input_ids=input_ids,
+                positions=positions,
+                cu_seqlens=empty_i32,
+                block_tables_by_type=None,
+                attn_inputs=attn_inputs,
+            )
+
+        expected_cu = torch.tensor([0, 2], dtype=torch.int32)
+        torch.testing.assert_close(v4.calls[0][4], cp_ctx.global_positions)
+        torch.testing.assert_close(v4.calls[0][5], expected_cu)
+        kwargs = build_meta.call_args.kwargs
+        torch.testing.assert_close(kwargs["cu_seqlens"], expected_cu)
+        torch.testing.assert_close(
+            kwargs["input_lengths"], torch.tensor([2], dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            kwargs["prefix_lengths"], torch.tensor([0], dtype=torch.int32)
+        )
+        self.assertEqual(kwargs["batch_size"], 1)
+        self.assertEqual(kwargs["max_seqlen_q"], 2)
+
+
+
+
+class PrefillFusedHCInterfaceTest(unittest.TestCase):
+    def test_replicated_tp_keeps_cuda_inplace_norm(self):
+        from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
+
+        x = torch.ones(2, 8)
+        norm = RMSNorm(torch.ones(8))
+        with patch.object(norm, "forward", return_value=x) as forward, patch(
+            "rtp_llm.models_py.modules.dsv4.block.tp_rms_norm"
+        ) as tp_norm:
+            actual = _prefill_fast_norm(norm, x, tp_size=2, tp_rank=1)
+        self.assertIs(actual, x)
+        forward.assert_called_once_with(x, output=x)
+        tp_norm.assert_not_called()
+
+    def test_hidden_shard_keeps_tp_norm_adapter(self):
+        x = torch.ones(2, 4)
+        norm = SimpleNamespace(weight=torch.ones(8))
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.block.tp_rms_norm", return_value=x
+        ) as tp_norm:
+            actual = _prefill_fast_norm(norm, x, tp_size=2, tp_rank=1)
+        self.assertIs(actual, x)
+        tp_norm.assert_called_once_with(norm, x, tp_size=2, tp_rank=1)
+
+    def test_replicated_tp_keeps_fused_attention_norm_quant(self):
+        class Attention:
+            def can_fuse_prefill_attn_norm_input_quant(self, *_):
+                return True
+
+            def prefill_fused_attn_norm_input_quant(self, x, *_):
+                calls.append("fused_norm_quant")
+                return x, None
+
+            def forward_with_shared_input_quant(self, x, positions, quant, **kwargs):
+                return x
+
+            def __call__(self, x, *args, **kwargs):
+                calls.append("unfused_attention")
+                return x
+
+        for hidden_size, expected_fused in ((8, True), (4, False)):
+            with self.subTest(hidden_size=hidden_size):
+                calls = []
+                x = torch.ones(2, 1, hidden_size)
+                norm = SimpleNamespace(weight=torch.ones(8), variance_epsilon=1e-6)
+                pre = lambda value: (value, None, None)
+                post = lambda value, *_: value
+                block = SimpleNamespace(
+                    tp_size=2,
+                    tp_rank=0,
+                    attn_hc=object(),
+                    ffn_hc=object(),
+                    attn_norm=norm,
+                    ffn_norm=norm,
+                    attn=Attention(),
+                    ffn=lambda value, ids: value,
+                    _prefill_fast_hc_impls=lambda: (pre, pre, post, post),
+                    _sync_after_first_cp_prefill_attention=lambda: None,
+                )
+                with patch(
+                    "rtp_llm.models_py.modules.dsv4.block._prefill_fast_norm",
+                    side_effect=lambda norm, value, **kwargs: value,
+                ):
+                    Block._forward_prefill_fast_fp8(
+                        block,
+                        x,
+                        torch.tensor([1, 2]),
+                        torch.tensor([0, 1]),
+                        torch.tensor([0, 2]),
+                        kv_cache=None,
+                        block_tables_by_type=None,
+                    )
+                self.assertEqual(
+                    calls,
+                    ["fused_norm_quant"] if expected_fused else ["unfused_attention"],
+                )
+
+    def test_fused_and_fallback_use_existing_attention_and_moe_interfaces(self):
+        # The fork deliberately has no _call_attention/_call_moe or
+        # numerical_status argument. Both fused and unfused paths must retain
+        # that interface and apply normalization exactly once per boundary.
+        class Attention:
+            def can_fuse_prefill_attn_norm_input_quant(self, *_):
+                return False
+
+            def __call__(self, x, positions, *, kv_cache, block_tables_by_type):
+                return x + 3
+
+        x = torch.arange(16, dtype=torch.float32).reshape(2, 1, 8)
+        norm = SimpleNamespace(weight=torch.ones(8))
+        pre = lambda x: (x + 1, None, None)
+        post = lambda y, residual, *_: y + residual
+        for tp_size in (1, 4):
+            outputs = []
+            for fused in (False, True):
+                hc = SimpleNamespace(
+                    prefill_fast_pre_norm=lambda x, norm, **kw: (
+                        ((x + 1) * 2, None, None) if fused else None
+                    )
+                )
+                block = SimpleNamespace(
+                    tp_size=tp_size, tp_rank=0,
+                    attn_hc=hc, ffn_hc=hc, attn_norm=norm, ffn_norm=norm,
+                    attn=Attention(), ffn=lambda h, ids: h * 5,
+                    _prefill_fast_hc_impls=lambda: (pre, pre, post, post),
+                    _sync_after_first_cp_prefill_attention=lambda: None,
+                )
+                with patch(
+                    "rtp_llm.models_py.modules.dsv4.block._prefill_fast_norm",
+                    side_effect=lambda norm, x, **kw: x * 2,
+                ) as normalize:
+                    outputs.append(Block._forward_prefill_fast_fp8(
+                        block, x, torch.tensor([1, 2]), torch.tensor([0, 1]),
+                        torch.tensor([0, 2]), kv_cache=object(),
+                        block_tables_by_type=object(),
+                    ))
+                self.assertEqual(normalize.call_count, 0 if fused else 2)
+            torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
 
 
 if __name__ == "__main__":

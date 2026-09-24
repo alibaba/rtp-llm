@@ -141,35 +141,33 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.total_kv_len = mla_params.cp_total_kv_len
         # get_mla_metadata stays in Python (external flash_mla library)
         n_q = self.total_global_ids.size(0)
-        tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
-            cache_seqlens=None,
-            num_q_tokens_per_head_k=n_q * self.num_heads,
-            topk=self.top_k,
-            num_heads_q=self.num_heads,
-            num_heads_k=1,
-            is_fp8_kvcache=True,
-        )
-        self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
-            tile_sched_q0, num_splits_q0
-        )
+        self._fp8_kernel_metadata_q0 = None
+        if n_q > 0:
+            tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
+                cache_seqlens=None,
+                num_q_tokens_per_head_k=n_q * self.num_heads,
+                topk=self.top_k,
+                num_heads_q=self.num_heads,
+                num_heads_k=1,
+                is_fp8_kvcache=True,
+            )
+            self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
+                tile_sched_q0, num_splits_q0
+            )
         self.precomputed_req_ids = (
             mla_params.batch_indice_d[self.total_global_ids] if n_q > 0 else None
         )
 
-        # Build full_rope_pos_ids so the attention-side RoPE path can run
-        # in-place on the entire buffer, consistent with create_params().
+        # RoPE consumes this rank's padded rows, while positions_d describes
+        # the global new-token window. Empty ranks still need zero positions.
+        positions_d = mla_params.positions_d
+        self.full_rope_pos_ids = torch.zeros(
+            local_tokens, dtype=positions_d.dtype, device=positions_d.device
+        )
         if n_q > 0:
-            positions_d = mla_params.positions_d
-            full_rope_pos_ids = torch.zeros(
-                positions_d.size(0),
-                dtype=positions_d.dtype,
-                device=positions_d.device,
-            )
-            precomputed_positions = positions_d[self.total_global_ids]
-            full_rope_pos_ids[self.total_local_ids] = precomputed_positions
-            self.full_rope_pos_ids = full_rope_pos_ids
-        else:
-            self.full_rope_pos_ids = None
+            self.full_rope_pos_ids[self.total_local_ids] = positions_d[
+                self.total_global_ids
+            ]
 
     def _convert_topk_indices_to_global(
         self, topk_indices: torch.Tensor
@@ -251,6 +249,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
+
+        # A short tail can leave this rank with padding only. It must still
+        # gather and write KV before returning rows for the following layers.
+        if self.total_local_ids.numel() == 0:
+            return q.new_zeros((q.size(0), q.size(1), self.kv_lora_rank))
 
         if topk is None:
             return None

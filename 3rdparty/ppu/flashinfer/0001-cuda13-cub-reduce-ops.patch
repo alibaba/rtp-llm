@@ -1,0 +1,103 @@
+--- include/flashinfer/sampling.cuh
++++ include/flashinfer/sampling.cuh
+@@ -33,1 +33,16 @@ namespace sampling {
+ using namespace cub;
++
++struct PpuMaxReduceOp {
++  template <typename T>
++  __host__ __device__ __forceinline__ T operator()(const T& a, const T& b) const {
++    return (a < b) ? b : a;
++  }
++};
++
++struct PpuMinReduceOp {
++  template <typename T>
++  __host__ __device__ __forceinline__ T operator()(const T& a, const T& b) const {
++    return (b < a) ? b : a;
++  }
++};
++
+@@ -479,7 +493,7 @@ __global__ void MinPSamplingFromProbKernel(DType* probs, IdType* output,
+       probs_[j] = probs_vec[j];
+     }
+     max_p = max(max_p, BlockReduce<DType, BLOCK_THREADS>(temp_storage.block_prim.reduce)
+-                           .Reduce<VEC_SIZE>(probs_, cub::Max()));
++                           .Reduce<VEC_SIZE>(probs_, PpuMaxReduceOp()));
+     __syncthreads();
+   }
+   if (tx == 0) {
+@@ -818,7 +832,7 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renorm_probs,
+     threadlocal_max_val =
+         max(threadlocal_max_val,
+             BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-                .Reduce<VEC_SIZE>(probs_greater_than_pivot, cub::Max()));
++                .Reduce<VEC_SIZE>(probs_greater_than_pivot, PpuMaxReduceOp()));
+     __syncthreads();
+   }
+   if (tx == 0) {
+@@ -863,11 +877,11 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renorm_probs,
+       __syncthreads();
+     }
+     min_gt_low = BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-                     .Reduce(min_gt_low, cub::Min());
++                     .Reduce(min_gt_low, PpuMinReduceOp());
+     __syncthreads();
+     max_le_high =
+         BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-            .Reduce(max_le_high, cub::Max());
++            .Reduce(max_le_high, PpuMaxReduceOp());
+     if (tx == 0) {
+       temp_storage.block_aggregate.value = threadlocal_sum;
+       temp_storage.min_val = min_gt_low;
+@@ -933,12 +947,12 @@ __global__ void TopKMaskLogitsKernel(DType* logits, DType* masked_logits,
+       threadlocal_max_val =
+           max(threadlocal_max_val,
+               BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-                  .Reduce<VEC_SIZE>(logits_greater_than_pivot, cub::Max()));
++                  .Reduce<VEC_SIZE>(logits_greater_than_pivot, PpuMaxReduceOp()));
+       __syncthreads();
+       threadlocal_min_val =
+           min(threadlocal_min_val,
+               BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-                  .Reduce<VEC_SIZE>(logits_greater_than_pivot, cub::Min()));
++                  .Reduce<VEC_SIZE>(logits_greater_than_pivot, PpuMinReduceOp()));
+       __syncthreads();
+     }
+     if (tx == 0) {
+@@ -987,11 +1001,11 @@ __global__ void TopKMaskLogitsKernel(DType* logits, DType* masked_logits,
+       }
+       min_gt_low =
+           BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-              .Reduce(min_gt_low, cub::Min());
++              .Reduce(min_gt_low, PpuMinReduceOp());
+       __syncthreads();
+       max_le_high =
+           BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-              .Reduce(max_le_high, cub::Max());
++              .Reduce(max_le_high, PpuMaxReduceOp());
+       if (tx == 0) {
+         temp_storage.block_aggregate.count = threadlocal_count_sum;
+         temp_storage.min_val = min_gt_low;
+@@ -1058,7 +1072,7 @@ __global__ void TopKRenormProbKernel(DType* probs, DType* renorm_probs,
+       threadlocal_max_val =
+           max(threadlocal_max_val,
+               BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-                  .Reduce<VEC_SIZE>(probs_greater_than_pivot, cub::Max()));
++                  .Reduce<VEC_SIZE>(probs_greater_than_pivot, PpuMaxReduceOp()));
+       __syncthreads();
+     }
+     if (tx == 0) {
+@@ -1107,11 +1121,11 @@ __global__ void TopKRenormProbKernel(DType* probs, DType* renorm_probs,
+       }
+       min_gt_low =
+           BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-              .Reduce(min_gt_low, cub::Min());
++              .Reduce(min_gt_low, PpuMinReduceOp());
+       __syncthreads();
+       max_le_high =
+           BlockReduce<DType, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+-              .Reduce(max_le_high, cub::Max());
++              .Reduce(max_le_high, PpuMaxReduceOp());
+       if (tx == 0) {
+         temp_storage.block_aggregate.pair = threadlocal_sum;
+         temp_storage.min_val = min_gt_low;

@@ -31,6 +31,8 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_mla",
         tests = [
+            # Generated small MLA checkpoint; no external weights.
+            ":chunked_mla_engine_tp2_test",
             smoke_test(
                 name="mla_kernel_block_size",
                 task_info="data/model/glm5/glm_5_fp8_q_r_h20.json",
@@ -230,6 +232,13 @@ def h20_oss_suites():
                 name="dense_fp8pb_dynamic",
                 task_info="data/model/qwen3/q_r_h20.json",
                 smoke_args="--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
+                gpu_type=["H20"],
+            ),
+            # Chunked prefill regression for the normal executor.
+            smoke_test(
+                name="dense_chunked_prefill",
+                task_info="data/model/qwen3/q_r_h20_chunked_prefill.json",
+                smoke_args="--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64",
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -518,6 +527,14 @@ def h20_oss_suites():
                 gpu_type=["H20"]
             ),
             # Request tier flags remain accepted; deployments select DEVICE or HOST.
+            # Default warmup covers real FlashInfer chunks; 320 leaves MTP draft headroom for
+            # the existing 155 + 100-token golden, whose prefill runs as 64 + 64 + 27.
+            smoke_test(
+                name="eagle_mtp_chunked_prefill_tp2",
+                task_info="data/model/qwen2_14b/q_r_mtp_chunked_prefill.json",
+                smoke_args="--max_seq_len 320 --seq_size_per_block 64 --prefill_chunk_size 64 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --reserver_runtime_mem_mb 21954 --tp_size 2",
+                gpu_type=["H20"],
+            ),
             smoke_test(
                 name="eagle_mtp_reuse",
                 task_info="data/model/qwen2_14b/q_r_mtp_reuse_cache.json",

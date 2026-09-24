@@ -181,7 +181,7 @@ protected:
             desc.compression_ratio > 0, "state ring desc tag=%s requires positive compression_ratio", desc.tag.c_str());
         const uint32_t window = (1 + desc.state_ring_overlap) * desc.compression_ratio;
         const uint32_t raw    = window + (desc.state_ring_include_gen_num_per_cycle ? ctx.gen_num_per_cycle : 0);
-        return (raw + 1) & ~1U;
+        return alignUpToMultiple(raw, desc.state_ring_entry_alignment);
     }
 
     static uint32_t entryCount(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {

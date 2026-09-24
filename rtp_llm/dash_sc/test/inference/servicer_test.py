@@ -581,6 +581,29 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             {"reasoning_effort": "xhigh"},
         )
 
+    async def test_long_dsv4_default_thinking_budget_respects_explicit_budget(self) -> None:
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        for model_type, budget, expected in [
+            ("deepseek_v4", None, 384000),
+            ("deepseek_v4", 2048, 2048),
+            ("qwen2", None, 32000),
+        ]:
+            with self.subTest(model_type=model_type, budget=budget):
+                out = GenerateOutput(
+                    output_ids=torch.tensor([3], dtype=torch.int32), finished=True,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+                visitor = _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
+                await _drain(iter_real_model_stream_infer(
+                    self._minimal_request(), [7, 128821],
+                    SamplingParams(max_new_tokens=384000),
+                    DashScRequestControls(enable_thinking=True, max_new_think_tokens=budget),
+                    visitor, rtp_llm_request_id=1, tokenizer=tok, generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, model_type),
+                ))
+                self.assertEqual(visitor.last_generate_input.generate_config.max_thinking_tokens, expected)
+
     async def test_finished_at_max_new_tokens_reports_length_repro_p1(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(

@@ -17,6 +17,7 @@ import triton
 import triton.language as tl
 
 _BLACKWELL_GROUP_HEADS8_MIN_FREQ = 65536
+_M890P_DEVICE_NAME = "ZW-M890P"
 
 
 def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
@@ -25,6 +26,13 @@ def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
     except Exception:
         return False
     return major >= 10
+
+
+def _is_m890p_device(device: torch.device | int | None = None) -> bool:
+    try:
+        return torch.cuda.get_device_name(device) == _M890P_DEVICE_NAME
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +270,13 @@ def fused_rmsnorm_rope(
                 )
             )
             selected_group_heads = 8 if N_freq >= group_heads8_min_freq else 4
+        elif _is_m890p_device(x.device):
+            # Q rows share one RoPE frequency per attention head group.  Four
+            # heads per program reduces launch/index overhead on M890P while
+            # keeping enough parallel tiles for long prefill sequences.  The
+            # eligibility checks below leave the single-head KV path on the
+            # generic kernel.
+            selected_group_heads = 4
     if selected_group_heads not in (1, 2, 4, 8):
         raise ValueError(
             f"invalid DSV4_RMSNORM_ROPE_GROUP_HEADS={selected_group_heads}; "

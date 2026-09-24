@@ -161,6 +161,7 @@ def git_deps():
         name = "com_google_absl",
         remote = "https://github.com/abseil/abseil-cpp.git",
         patch_cmds = [
+            "sed -i '/#include <cstddef>/i #include <cstdint>' 'absl/strings/internal/str_format/extension.h'",
             "sed -i -e 's/^#define ABSL_OPTION_USE_STD_STRING_VIEW 2/#define ABSL_OPTION_USE_STD_STRING_VIEW 0/' 'absl/base/options.h'",
             "sed 's$@bazel_tools//platforms:(linux|osx|windows|android|freebsd|ios|os)$@platforms//os:\\1$' -E -i absl/BUILD.bazel",
             "sed 's$@bazel_tools//platforms:(cpu|x86_32|x86_64|ppc|arm|aarch64|s390x)$@platforms//cpu:\\1$' -i -E absl/BUILD.bazel",
