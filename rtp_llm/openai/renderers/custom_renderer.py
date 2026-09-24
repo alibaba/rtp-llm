@@ -1061,15 +1061,6 @@ class CustomChatRenderer:
                 think_status.in_think_mode = False
                 think_status.think_buffer = ""
                 think_status.decision_token_ids = []
-            elif think_status.in_think_mode and think_status.think_buffer:
-                # This is the last chunk, so the parked tail can no longer grow
-                # into a think tag. Hand the reasoning text it holds back to the
-                # normal delta path instead of letting the state machine park it
-                # again and lose it with the buffer.
-                pending_output = self._release_think_tail(
-                    think_status.think_buffer + pending_output
-                )
-                think_status.think_buffer = ""
             trunc_string = truncate_response_with_stop_words(
                 pending_output, stop_words_str, is_streaming
             )
@@ -1083,7 +1074,20 @@ class CustomChatRenderer:
                     multimodal_lengths=aux_info.multimodal_lengths,
                 )
             )
-        return await self._generate_stream_response(output_items, think_status_list)
+        response = await self._generate_stream_response(output_items, think_status_list)
+        for choice, think_status in zip(response.choices, think_status_list):
+            if think_status.in_think_mode and think_status.think_buffer:
+                # This was the last chunk, so whatever the state machine still
+                # parks can no longer grow into a think tag. Release the
+                # reasoning text in front of the partial tag instead of losing
+                # it with the buffer; the tag fragment itself stays dropped.
+                released = self._release_think_tail(think_status.think_buffer)
+                think_status.think_buffer = ""
+                if released:
+                    choice.delta.reasoning_content = (
+                        choice.delta.reasoning_content or ""
+                    ) + released
+        return response
 
     async def _generate_final(
         self,
