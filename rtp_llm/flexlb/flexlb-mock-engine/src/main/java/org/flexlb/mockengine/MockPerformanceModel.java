@@ -94,9 +94,9 @@ final class MockPerformanceModel {
     /** The file is packaged from the same audited calibration read by online_eval. */
     private static Calibration loadCalibration() throws IOException {
         try (var stream = MockPerformanceModel.class.getClassLoader()
-                .getResourceAsStream("mock_calibrations/dsv4_l20.json")) {
+                .getResourceAsStream("dsv4_l20_mock_calibration.json")) {
             if (stream == null) {
-                throw new IOException("missing packaged mock calibration: mock_calibrations/dsv4_l20.json");
+                throw new IOException("missing packaged mock calibration: dsv4_l20_mock_calibration.json");
             }
             byte[] bytes = stream.readAllBytes();
             JsonNode data = MAPPER.readTree(bytes);

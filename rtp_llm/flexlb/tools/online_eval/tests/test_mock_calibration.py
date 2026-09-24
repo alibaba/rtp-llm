@@ -51,7 +51,7 @@ def assert_snapshot_matches(path, expected):
 class MockCalibrationTest(unittest.TestCase):
     def test_default_and_fault_presets_materialize_named_file_values(self):
         calibration = load_mock_calibration()
-        expected_sha = hashlib.sha256((ROOT / "config/mock_calibrations/dsv4_l20.json").read_bytes()).hexdigest()
+        expected_sha = hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest()
         for preset in ("default", "fault_env"):
             with self.subTest(preset=preset):
                 performance, runtime = load_preset(preset)
@@ -68,7 +68,7 @@ class MockCalibrationTest(unittest.TestCase):
 
     def test_run_files_expose_effective_default_and_fault_calibration(self):
         calibration = load_mock_calibration()
-        expected_sha = hashlib.sha256((ROOT / "config/mock_calibrations/dsv4_l20.json").read_bytes()).hexdigest()
+        expected_sha = hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest()
         for preset in ("default", "fault_env"):
             with self.subTest(preset=preset), tempfile.TemporaryDirectory() as directory:
                 plan = environment({"perf_preset": preset}, "test", "single-nonbatch")
@@ -85,7 +85,7 @@ class MockCalibrationTest(unittest.TestCase):
                 self.assertEqual(estimator["expression"], calibration["prefill_expression"])
                 self.assertEqual(observed_perf["calibration_id"], calibration["id"])
                 self.assertEqual(observed_perf["calibration_sha256"],
-                                 hashlib.sha256((ROOT / "config/mock_calibrations/dsv4_l20.json").read_bytes()).hexdigest())
+                                 hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest())
                 for key, value in calibration["decode"].items():
                     self.assertEqual(observed_perf["decode"][key], value)
                 if preset == "fault_env":
@@ -125,7 +125,7 @@ class MockCalibrationTest(unittest.TestCase):
             for key in ("id", "model", "hardware", "status"):
                 self.assertEqual(performance["calibration_" + key], calibration[key])
             self.assertEqual(performance["calibration_sha256"],
-                             hashlib.sha256((ROOT / "config/mock_calibrations/dsv4_l20.json").read_bytes()).hexdigest())
+                             hashlib.sha256((ROOT / "data/performance/dsv4_l20_mock_calibration.json").read_bytes()).hexdigest())
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "drift.json"
             path.write_text(json.dumps({"expression": expression.replace(expression.split(",", 1)[1].split("+", 1)[0].strip(), "-68.7", 1)}))

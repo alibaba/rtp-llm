@@ -101,7 +101,7 @@ Master 运行形态仍由所选 profile 明确指定。未核验的历史实验�
 
 真实快照的内容变换、记录字段和播放边界以 [流量架构契约](../docs/architecture/traffic.md) 为准。合成画像保留历史格式键 `calibration` 与 `held_out_validated`，目录名不改变旧工件格式或 SHA。
 
-模型测量刻度由 `config/mock_calibrations/dsv4_l20.json` 保存。`default` 与 `fault_env` 是兼容名称，实际加载同一份 `legacy_unverified` DSv4 mock 测试刻度；它们不是中性模型或已验证的线上测量。预设注册表通过相对路径引用刻度，加载时将 decode 数值、模型身份及刻度 SHA 写入运行用性能 JSON；master 默认 prefill 表达式读取同一文件。Java mock jar 将该文件作为资源打包，供无显式 FORMULA 的独立启动使用；LEARNING 在 mock 中使用这份静态近似。采集档案保持自己的记录、哈希与 block 口径，不与合成基线共用身份。
+模型测量刻度由 `data/performance/dsv4_l20_mock_calibration.json` 保存。`default` 与 `fault_env` 是兼容名称，实际加载同一份 `legacy_unverified` DSv4 mock 测试刻度；它们不是中性模型或已验证的线上测量。预设注册表通过相对路径引用刻度，加载时将 decode 数值、模型身份及刻度 SHA 写入运行用性能 JSON；master 默认 prefill 表达式读取同一文件。Java mock jar 将该文件作为资源打包，供无显式 FORMULA 的独立启动使用；LEARNING 在 mock 中使用这份静态近似。采集档案保持自己的记录、哈希与 block 口径，不与合成基线共用身份。
 
 ## 编码代际与复算
 

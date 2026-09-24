@@ -1,7 +1,7 @@
 """Profile data for FLEXLB_CONFIG rendering.
 
 This module owns workload policy defaults and the stress-na130 document.
-The DSv4 test calibration lives in config/mock_calibrations/dsv4_l20.json;
+The DSv4 test calibration lives in data/performance/dsv4_l20_mock_calibration.json;
 flexlb_cfg.py owns schema validation and rendering.
 """
 
@@ -9,7 +9,7 @@ import json
 import math
 from pathlib import Path
 
-_CALIBRATION_PATH = Path(__file__).resolve().parent / "config/mock_calibrations/dsv4_l20.json"
+_CALIBRATION_PATH = Path(__file__).resolve().parent / "data/performance/dsv4_l20_mock_calibration.json"
 
 
 def load_mock_calibration(path=_CALIBRATION_PATH):

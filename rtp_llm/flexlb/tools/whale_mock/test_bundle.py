@@ -35,7 +35,7 @@ class BundleConfigurationTest(unittest.TestCase):
     def test_default_performance_remains_file_based(self):
         command, performance = self.launch_to_process_boundary({})
         self.assertEqual(performance["calibration_id"], "dsv4_l20_legacy_mock")
-        calibration = bundle.ROOT.parent / "online_eval/config/mock_calibrations/dsv4_l20.json"
+        calibration = bundle.ROOT.parent / "online_eval/data/performance/dsv4_l20_mock_calibration.json"
         self.assertEqual(performance["calibration_sha256"],
                          hashlib.sha256(calibration.read_bytes()).hexdigest())
         self.assertEqual(set(performance["decode"]),

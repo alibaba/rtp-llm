@@ -21,7 +21,7 @@ class MockCalibrationConsistencyTest {
     void packagedCalibrationMustMatchMaterializedRun() throws Exception {
         byte[] resource;
         try (var stream = getClass().getClassLoader()
-                .getResourceAsStream("mock_calibrations/dsv4_l20.json")) {
+                .getResourceAsStream("dsv4_l20_mock_calibration.json")) {
             if (stream == null) throw new IllegalStateException("calibration resource missing");
             resource = stream.readAllBytes();
         }

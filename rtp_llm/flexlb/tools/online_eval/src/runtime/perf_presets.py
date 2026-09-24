@@ -26,7 +26,7 @@ def resolve_performance_calibration(performance, source_path):
     if not isinstance(reference, str) or not reference or Path(reference).is_absolute():
         raise ValueError("performance calibration must be a relative file path")
     target = (Path(source_path).resolve().parent / reference).resolve()
-    calibration_root = (ROOT / "config/mock_calibrations").resolve()
+    calibration_root = (ROOT / "data/performance").resolve()
     if target.parent != calibration_root or not target.is_file():
         raise ValueError(f"missing registered mock calibration: {target}")
     from flexlb_profile_data import load_mock_calibration

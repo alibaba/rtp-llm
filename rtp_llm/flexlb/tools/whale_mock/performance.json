@@ -8,5 +8,5 @@
   "decode": {
     "scale": 1
   },
-  "calibration": "../online_eval/config/mock_calibrations/dsv4_l20.json"
+  "calibration": "../online_eval/data/performance/dsv4_l20_mock_calibration.json"
 }
