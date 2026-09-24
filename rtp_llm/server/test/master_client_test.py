@@ -176,6 +176,21 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_pb.cache_key_block_size, 1024)
         self.assertEqual(request_pb.priority, 50)
 
+    async def test_route_only_request_omits_generate_payload(self):
+        client = _CaptureMasterClient()
+        await client.get_backend_role_addrs(
+            block_cache_keys=[],
+            cache_key_block_size=1024,
+            input=_FakeInput(),
+            request_id=99,
+            input_pb=None,
+        )
+        request_pb = client.calls[0]["request_pb"]
+        self.assertEqual(request_pb.generate_input, b"")
+        self.assertEqual(request_pb.seq_len, 5)
+        self.assertEqual(request_pb.request_id, 99)
+        self.assertLess(request_pb.ByteSize(), 16 * 1024 * 1024)
+
     async def test_schedule_payload_priority_from_qos_header(self):
         client = _CaptureMasterClient()
 
