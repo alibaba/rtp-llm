@@ -34,6 +34,10 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
     GroupedFP4Strategy,
     _has_fp8_fp4_grouped_kernel,
 )
+from .grouped_fp8 import (  # noqa: F401  ep_size==1 + SM90 + FP8-expert ckpt
+    GroupedFP8Strategy,
+    _has_grouped_fp8_kernel,
+)
 from .deepep import DeepEPStrategy  # noqa: F401  ep_size>1 fallback
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 
@@ -42,4 +46,5 @@ __all__ = [
     "RoutedExpertsStrategy",
     "select_strategy",
     "_has_fp8_fp4_grouped_kernel",
+    "_has_grouped_fp8_kernel",
 ]

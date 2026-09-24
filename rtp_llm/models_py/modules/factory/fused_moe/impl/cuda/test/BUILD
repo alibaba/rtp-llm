@@ -4,6 +4,13 @@ py_test_deps = [
 ]
 
 py_test (
+    name = "ep_scatter_test",
+    srcs = ["ep_scatter_test.py"],
+    deps = py_test_deps,
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
     name = "fused_moe_test",
     srcs = ["fused_moe_test.py"],
     deps = py_test_deps,

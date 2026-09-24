@@ -59,6 +59,13 @@ py_test (
 )
 
 py_test (
+    name = "deepgemm_wrapper_test",
+    srcs = ["deepgemm_wrapper_test.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test (
     name = "fp8_quant_gemm_microbench",
     srcs = ["fp8_quant_gemm_microbench.py"],
     deps = py_test_deps,
