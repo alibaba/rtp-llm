@@ -160,8 +160,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                    mm_preprocess_config->mm_timeout_ms(),
                                    mm_preprocess_config->max_long_side_pixel() > 0
                                        ? mm_preprocess_config->max_long_side_pixel()
-                                       : -1,
-                                   mm_input->skip_input_inspection());
+                                       : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -210,8 +209,7 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
                                 mm_preprocess_config->mm_timeout_ms(),
                                 mm_preprocess_config->max_long_side_pixel() > 0
                                     ? mm_preprocess_config->max_long_side_pixel()
-                                    : -1,
-                                mm_input->skip_input_inspection());
+                                    : -1);
     }
     return inputs_vec;
 }
@@ -223,7 +221,6 @@ MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalI
         auto now_input = mm_inputs_pb.add_multimodal_inputs();
         now_input->set_multimodal_url(mm_input.url);
         now_input->set_multimodal_type(mm_input.mm_type);
-        now_input->set_skip_input_inspection(mm_input.skip_input_inspection);
         transTensorPB(now_input->mutable_multimodal_tensor(), mm_input.tensor);
         transMMPreprocessConfig(now_input->mutable_mm_preprocess_config(), mm_input.mm_preprocess_config);
     }

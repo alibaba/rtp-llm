@@ -264,7 +264,6 @@ def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateCon
         mm_input_pb = MultimodalInputPB()
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
-        mm_input_pb.skip_input_inspection = mm_input.skip_input_inspection
         if mm_input.tensor.numel() > 0:
             mm_input_pb.multimodal_tensor.CopyFrom(
                 trans_from_tensor(mm_input.tensor)

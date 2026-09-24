@@ -492,7 +492,6 @@ def trans_mm_input(multimodal_inputs):
                     MMUrlType(mm_input.multimodal_type),
                     trans_tensor(mm_input.multimodal_tensor),
                     trans_config(mm_input.mm_preprocess_config),
-                    bool(getattr(mm_input, "skip_input_inspection", False)),
                 )
             )
         return converted
@@ -506,7 +505,6 @@ def trans_mm_input(multimodal_inputs):
                     MMUrlType(mm_input.mm_type),
                     mm_input.tensor,
                     mm_input.mm_preprocess_config,
-                    bool(getattr(mm_input, "skip_input_inspection", False)),
                 )
             )
         return converted

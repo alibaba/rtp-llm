@@ -15,26 +15,6 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
-TEST_F(QueryConverterTest, testMultimodalInspectionPolicyRoundTrip) {
-    MultimodalInputsPB input;
-    auto*              mm_input = input.add_multimodal_inputs();
-    mm_input->set_multimodal_url("image-url");
-    mm_input->set_multimodal_type(1);
-    mm_input->set_skip_input_inspection(true);
-
-    auto converted = QueryConverter::transMMInput(&input);
-    ASSERT_EQ(converted.size(), 1);
-    EXPECT_TRUE(converted[0].skip_input_inspection);
-
-    auto inspected                  = converted[0];
-    inspected.skip_input_inspection = false;
-    EXPECT_NE(converted[0].cache_key(), inspected.cache_key());
-
-    auto round_trip = QueryConverter::transMMInputsPB(converted);
-    ASSERT_EQ(round_trip.multimodal_inputs_size(), 1);
-    EXPECT_TRUE(round_trip.multimodal_inputs(0).skip_input_inspection());
-}
-
 TEST_F(QueryConverterTest, testMultimodalFeatureHashRoundTripAndLegacyFallback) {
     MultimodalOutputPB output;
     QueryConverter::transTensorPB(output.mutable_multimodal_embedding(), torch::ones({3, 4}, torch::kFloat32));

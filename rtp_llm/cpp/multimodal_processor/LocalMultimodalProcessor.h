@@ -19,12 +19,10 @@ private:
             std::vector<std::string>   urls;
             std::vector<int32_t>       types;
             std::vector<torch::Tensor> tensors;
-            std::vector<bool>          skip_input_inspection;
             for (auto& mm_input : mm_inputs) {
                 urls.push_back(mm_input.url);
                 tensors.push_back(mm_input.tensor);
                 types.push_back(mm_input.mm_type);
-                skip_input_inspection.push_back(mm_input.skip_input_inspection);
             }
             try {
                 py::gil_scoped_acquire acquire;
@@ -57,8 +55,7 @@ private:
                     request_id,
                     dashScopeMetadata(server_context, "x-dashscope-uid"),
                     dashScopeMetadata(server_context, "x-dashscope-service"),
-                    "",
-                    skip_input_inspection);
+                    "");
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;

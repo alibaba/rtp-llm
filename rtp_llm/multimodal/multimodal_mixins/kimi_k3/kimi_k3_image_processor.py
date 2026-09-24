@@ -1,14 +1,10 @@
 """Kimi-K3 image processor."""
 
-import asyncio
 import copy
 import json
 import math
-from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 from pathlib import Path
-from threading import Lock
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -16,118 +12,11 @@ from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.py_config_modules import VitConfig
-
-# All renderers in a service process share its startup worker configuration.
-_executor_lock = Lock()
-_executor: ThreadPoolExecutor | None = None
-
 
 def load_kimi_k3_media_config(checkpoint_path: str) -> Dict[str, Any]:
     path = Path(checkpoint_path) / "preprocessor_config.json"
     with path.open(encoding="utf-8") as reader:
         return json.load(reader)["media_proc_cfg"]
-
-
-def _get_kimi_k3_media_executor(max_workers: int) -> ThreadPoolExecutor:
-    global _executor
-    with _executor_lock:
-        if _executor is None:
-            _executor = ThreadPoolExecutor(
-                max_workers=max_workers, thread_name_prefix="kimi-k3-media"
-            )
-        return _executor
-
-
-def shutdown_kimi_k3_media_executor() -> None:
-    """Drain and reset the K3 media pool."""
-    global _executor
-    with _executor_lock:
-        executor = _executor
-        _executor = None
-    if executor is not None:
-        executor.shutdown(wait=True, cancel_futures=True)
-
-
-def _preflight_kimi_k3_image(
-    url: str, config: VitConfig
-) -> tuple[torch.Tensor, tuple[int, int]]:
-    from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-
-    try:
-        data = get_bytes_io_from_url(
-            url,
-            config.download_headers,
-            max_file_size_kb=config.mm_image_max_file_size_kb,
-        )
-    except FtRuntimeException as error:
-        if error.exception_type == ExceptionType.MM_WRONG_FORMAT_ERROR:
-            raise
-        raise FtRuntimeException(
-            ExceptionType.MM_WRONG_FORMAT_ERROR, str(error)
-        ) from error
-    raw = data.getbuffer()
-    try:
-        with Image.open(BytesIO(raw)) as image:
-            size = image.size
-            image.load()
-    except (OSError, Image.DecompressionBombError) as error:
-        raise FtRuntimeException(
-            ExceptionType.MM_WRONG_FORMAT_ERROR, "Image could not be decoded"
-        ) from error
-    return torch.frombuffer(raw, dtype=torch.uint8), size
-
-
-def preflight_kimi_k3_images(
-    urls: Sequence[str], vit_config: VitConfig
-) -> tuple[list[torch.Tensor], list[tuple[int, int]]]:
-    """Load images once, enforcing the per-image byte limit before decoding."""
-    max_workers = vit_config.mm_preprocess_max_workers
-    if not urls:
-        return [], []
-    executor = _get_kimi_k3_media_executor(max_workers)
-    results: list[tuple[torch.Tensor, tuple[int, int]]] = []
-    futures = []
-    try:
-        for offset in range(0, len(urls), max_workers):
-            futures = [
-                executor.submit(_preflight_kimi_k3_image, url, vit_config)
-                for url in urls[offset : offset + max_workers]
-            ]
-            results.extend(future.result() for future in futures)
-    except BaseException:
-        for future in futures:
-            future.cancel()
-        raise
-    return [tensor for tensor, _ in results], [size for _, size in results]
-
-
-async def preflight_kimi_k3_images_async(
-    urls: Sequence[str], vit_config: VitConfig
-) -> tuple[list[torch.Tensor], list[tuple[int, int]]]:
-    """Load images off the event loop with the same limits as sync preflight."""
-    max_workers = vit_config.mm_preprocess_max_workers
-    if not urls:
-        return [], []
-    executor = _get_kimi_k3_media_executor(max_workers)
-    loop = asyncio.get_running_loop()
-    results: list[tuple[torch.Tensor, tuple[int, int]]] = []
-    futures = []
-    try:
-        for offset in range(0, len(urls), max_workers):
-            futures = [
-                loop.run_in_executor(
-                    executor, _preflight_kimi_k3_image, url, vit_config
-                )
-                for url in urls[offset : offset + max_workers]
-            ]
-            results.extend(await asyncio.gather(*futures))
-    except BaseException:
-        for future in futures:
-            future.cancel()
-        raise
-    return [tensor for tensor, _ in results], [size for _, size in results]
 
 
 def _navit_resize_image(

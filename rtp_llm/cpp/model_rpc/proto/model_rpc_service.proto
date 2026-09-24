@@ -127,7 +127,7 @@ message MultimodalInputPB {
     int32 multimodal_type = 2;
     TensorPB multimodal_tensor = 3;
     MMPreprocessConfigPB mm_preprocess_config = 4;
-    bool skip_input_inspection = 5;
+    reserved 5;
 }
 
 message MultimodalInputsPB {
