@@ -15,7 +15,7 @@ from rtp_llm.models_py.model_desc.kimi_linear import (
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.collectives import reduce_scatter
 from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
-from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+from rtp_llm.models_py.modules.kimi_k3.native_gated_norm import KimiK3GatedNorm
 from rtp_llm.utils.model_weight import W
 
 
@@ -43,11 +43,9 @@ class KimiK3KDA(nn.Module):
         self.f_b = linear(weights, W.linear_attn_f_b_w, hardware)
         self.output = linear(weights, W.linear_attn_out_w, hardware)
         self.fa_width = weights[W.linear_attn_f_b_w].shape[0]
-        self.norm = RmsNormGated(
+        self.norm = KimiK3GatedNorm(
             weights[W.linear_attn_norm_w],
             eps=config.layernorm_eps,
-            group_size=self.dim,
-            activation="sigmoid",
         )
         backend = getattr(runtime, "kda_prefill_backend", "rtp")
         if backend in {"flashkda", "vllm_triton"}:
