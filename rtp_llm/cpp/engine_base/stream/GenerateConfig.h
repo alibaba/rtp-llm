@@ -72,31 +72,35 @@ public:
     std::string              adapter_name                         = "";
     std::vector<std::string> adapter_names;
 
-    std::vector<int>              select_tokens_id;
-    std::vector<std::string>      select_tokens_str;
-    int                           calculate_loss           = 0;
-    int                           hidden_states_cut_dim    = 0;
-    bool                          return_logits            = false;
-    bool                          return_prompt_logits     = false;
-    int                           prompt_logits_top_k      = 64;
-    int                           prompt_logits_start      = -1;
-    int                           prompt_logits_end        = -1;
-    bool                          return_target_logprob    = true;
-    bool                          return_cum_log_probs     = false;
-    bool                          return_incremental       = false;
-    bool                          return_hidden_states     = false;
-    bool                          return_all_hidden_states = false;
-    bool                          normalized_hidden_states = false;
-    bool                          return_output_ids        = false;
-    bool                          return_input_ids         = false;
-    bool                          is_streaming             = false;
-    int                           timeout_ms               = -1;
-    bool                          sp_edit                  = false;
-    bool                          force_disable_sp_run     = false;
-    bool                          force_sp_accept          = false;
-    ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
-    bool                          return_softmax_probs     = false;
-    bool                          aux_info                 = true;
+    std::vector<int>         select_tokens_id;
+    std::vector<std::string> select_tokens_str;
+    int                      calculate_loss           = 0;
+    int                      hidden_states_cut_dim    = 0;
+    bool                     return_logits            = false;
+    bool                     return_prompt_logits     = false;
+    int                      prompt_logits_top_k      = 64;
+    int                      prompt_logits_start      = -1;
+    int                      prompt_logits_end        = -1;
+    bool                     return_target_logprob    = true;
+    bool                     return_cum_log_probs     = false;
+    bool                     return_incremental       = false;
+    bool                     return_hidden_states     = false;
+    bool                     return_all_hidden_states = false;
+    bool                     normalized_hidden_states = false;
+    bool                     return_output_ids        = false;
+    bool                     return_input_ids         = false;
+    bool                     is_streaming             = false;
+    int                      timeout_ms               = -1;
+    bool                     sp_edit                  = false;
+    bool                     force_disable_sp_run     = false;
+    bool                     force_sp_accept          = false;
+    ReturnAllProbsMode       return_all_probs         = ReturnAllProbsMode::NONE;
+    bool                     return_softmax_probs     = false;
+    bool                     aux_info                 = true;
+
+    // Opt in to shared prompt states and packed softmax on the wire; false for legacy requests.
+    bool accept_compact_output = false;
+
     std::vector<std::vector<int>> stop_words_list;
     std::vector<std::string>      stop_words_str;
     bool                          print_stop_words = false;
@@ -280,6 +284,7 @@ public:
         JSONIZE(return_incremental);
         JSONIZE(return_hidden_states);
         JSONIZE(return_all_hidden_states);
+        JSONIZE(accept_compact_output);
         JSONIZE(hidden_states_cut_dim);
         JSONIZE(normalized_hidden_states);
         JSONIZE(return_output_ids);

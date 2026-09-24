@@ -591,6 +591,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_all_hidden_states = (
         input_py.generate_config.return_all_hidden_states
     )
+    generate_config_pb.accept_compact_output = (
+        input_py.generate_config.accept_compact_output
+    )
     generate_config_pb.hidden_states_cut_dim = (
         input_py.generate_config.hidden_states_cut_dim
     )
@@ -811,10 +814,11 @@ def trans_output(
         and output_pb.hidden_states.shape[0] > 0
         else None
     )
-    prompt_states_pb = output_pb.all_hidden_states
     all_all_hidden_states = (
-        trans_tensor(prompt_states_pb)
-        if prompt_states_pb.shape and prompt_states_pb.shape[0] > 0
+        trans_tensor(output_pb.all_hidden_states)
+        if output_pb.HasField("all_hidden_states")
+        and len(output_pb.all_hidden_states.shape) > 0
+        and output_pb.all_hidden_states.shape[0] > 0
         else None
     )
     all_loss = (
@@ -862,6 +866,12 @@ def trans_output(
             "start_pos": pl_pb.start_pos,
             "end_pos": pl_pb.end_pos,
         }
+
+    packed_softmax_probs = None
+    if aux_info_flag and output_pb.aux_info:
+        first_probs = output_pb.aux_info[0].softmax_probs
+        if len(first_probs.shape) == 2:
+            packed_softmax_probs = trans_tensor(first_probs)
 
     outputs_py = GenerateOutputs()
     input_token_ids = input_py.token_ids.reshape(1, -1)
@@ -913,7 +923,9 @@ def trans_output(
                 current_aux_info.cum_log_probs = trans_tensor(
                     aux_info_pb.cum_log_probs
                 ).tolist()
-            if aux_info_pb.HasField("softmax_probs"):
+            if packed_softmax_probs is not None:
+                current_aux_info.softmax_probs = packed_softmax_probs[i].tolist()
+            elif aux_info_pb.HasField("softmax_probs"):
                 current_aux_info.softmax_probs = trans_tensor(
                     aux_info_pb.softmax_probs
                 ).tolist()
@@ -932,11 +944,11 @@ def trans_output(
             output_py.hidden_states = all_hidden_states[i]
 
         if all_all_hidden_states is not None:
-            # A singleton output dimension shares prompt states across beams;
-            # retain support for older per-output tensors and rank-2 responses.
+            # Accept both legacy per-output and shared prompt states, including
+            # the rank-2 layout used by earlier backends. Indexing shares storage.
             output_py.all_hidden_states = (
                 all_all_hidden_states
-                if len(all_all_hidden_states.shape) == 2
+                if all_all_hidden_states.dim() == 2
                 else all_all_hidden_states[
                     0 if all_all_hidden_states.shape[0] == 1 else i
                 ]

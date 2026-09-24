@@ -875,11 +875,34 @@ class ModelRpcClientTest(TestCase):
 
 
 class EmbeddingWireCompatibilityTest(unittest.IsolatedAsyncioTestCase):
+    def test_compact_output_acceptance_defaults_to_legacy_and_serializes(self):
+        defaults = GenerateConfig()
+        self.assertFalse(defaults.accept_compact_output)
+        self.assertFalse(GenerateConfigPB().accept_compact_output)
+        self.assertEqual(
+            GenerateConfigPB.DESCRIPTOR.fields_by_name["accept_compact_output"].number,
+            75,
+        )
+        for enabled in (False, True):
+            with self.subTest(accept_compact_output=enabled):
+                request = GenerateInput(
+                    token_ids=torch.tensor([1, 2]),
+                    generate_config=GenerateConfig(
+                        accept_compact_output=enabled,
+                    ),
+                    request_id=1,
+                    mm_inputs=[],
+                )
+                config = trans_input(request).generate_config
+                self.assertEqual(config.accept_compact_output, enabled)
+                self.assertFalse(config.return_all_hidden_states)
+                self.assertFalse(config.return_softmax_probs)
+
     def test_output_field_numbers_preserve_mainline_custom_output(self):
         fields = GenerateOutputsPB().flatten_output.DESCRIPTOR.fields_by_name
         self.assertEqual(fields["all_hidden_states"].number, 8)
         self.assertEqual(fields["custom_output"].number, 10)
-        self.assertEqual(fields["all_softmax_probs"].number, 12)
+        self.assertNotIn("all_softmax_probs", fields)
         self.assertNotIn("shared_all_hidden_states", fields)
 
     async def test_legacy_and_supported_backend_admission(self):
@@ -2511,37 +2534,6 @@ class ClientSpanSettlementTest(TestCase):
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
         self.assertEqual(raised.exception.message, "future error")
 
-    def test_trans_output_reuses_single_all_hidden_states_for_all_outputs(self):
-        input_py = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(return_all_hidden_states=True),
-            request_id=123,
-            mm_inputs=[],
-        )
-        for shape in ([1, 2, 2], [2, 2]):
-            with self.subTest(shape=shape):
-                outputs_pb = GenerateOutputsPB()
-                flatten = outputs_pb.flatten_output
-                flatten.finished.extend([True, True])
-                flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
-                flatten.all_hidden_states.shape.extend(shape)
-                flatten.all_hidden_states.fp32_data = struct.pack(
-                    "<ffff", 1.0, 2.0, 3.0, 4.0
-                )
-
-                outputs = trans_output(input_py, outputs_pb, StreamState())
-
-                self.assertEqual(len(outputs.generate_outputs), 2)
-                for output in outputs.generate_outputs:
-                    self.assertEqual(
-                        [[1.0, 2.0], [3.0, 4.0]],
-                        output.all_hidden_states.tolist(),
-                    )
-                self.assertEqual(
-                    outputs.generate_outputs[0].all_hidden_states.data_ptr(),
-                    outputs.generate_outputs[1].all_hidden_states.data_ptr(),
-                )
-
     def test_trans_output_keeps_legacy_per_output_all_hidden_states(self):
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
@@ -2569,6 +2561,87 @@ class ClientSpanSettlementTest(TestCase):
             [[5.0, 6.0], [7.0, 8.0]],
             outputs.generate_outputs[1].all_hidden_states.tolist(),
         )
+
+    def test_trans_output_shares_prompt_states_without_copying(self):
+        # Read the actual layout, not the request flags: older backends may
+        # return shared states without having understood capability fields.
+        for shape in ([1, 2, 2], [2, 2]):
+            with self.subTest(shape=shape):
+                request = GenerateInput(
+                    token_ids=torch.tensor([1, 2]),
+                    generate_config=GenerateConfig(return_all_hidden_states=True),
+                    request_id=1,
+                    mm_inputs=[],
+                )
+                response = GenerateOutputsPB()
+                flat = response.flatten_output
+                flat.finished.extend([True, True])
+                flat.all_hidden_states.data_type = TensorPB.FP32
+                flat.all_hidden_states.shape.extend(shape)
+                flat.all_hidden_states.fp32_data = struct.pack("<ffff", 1, 2, 3, 4)
+                outputs = trans_output(
+                    request, response, StreamState()
+                ).generate_outputs
+                first, second = [out.all_hidden_states for out in outputs]
+                self.assertEqual(first.tolist(), [[1, 2], [3, 4]])
+                self.assertTrue(torch.equal(first, second))
+                self.assertEqual(first.data_ptr(), second.data_ptr())
+
+    def test_trans_output_accepts_packed_and_legacy_softmax(self):
+        # An opted-in client must also accept legacy/ragged replies from an
+        # older backend or from the new backend's unequal-length fallback.
+        for packed, values in (
+            (True, [[0.25, 0.75], [0.5, 0.5]]),
+            (True, [[0.25, 0.75]]),
+            (False, [[0.25, 0.75], [0.5, 0.5]]),
+            (False, [[0.25], [0.5, 0.5]]),
+        ):
+            with self.subTest(packed=packed, values=values):
+                request = GenerateInput(
+                    token_ids=torch.tensor([1, 2]),
+                    generate_config=GenerateConfig(
+                        aux_info=True,
+                        return_softmax_probs=True,
+                        accept_compact_output=True,
+                    ),
+                    request_id=1,
+                    mm_inputs=[],
+                )
+                response = GenerateOutputsPB()
+                flat = response.flatten_output
+                flat.finished.extend([True] * len(values))
+                for row in values:
+                    aux = flat.aux_info.add()
+                    aux.input_len = 2
+                    aux.output_len = len(row)
+                if packed:
+                    tensor = flat.aux_info[0].softmax_probs
+                    tensor.data_type = TensorPB.FP32
+                    tensor.shape.extend([len(values), len(values[0])])
+                    flat_values = [value for row in values for value in row]
+                    tensor.fp32_data = struct.pack(
+                        f"<{len(flat_values)}f", *flat_values
+                    )
+                else:
+                    for aux, row in zip(flat.aux_info, values):
+                        aux.softmax_probs.data_type = TensorPB.FP32
+                        aux.softmax_probs.shape.append(len(row))
+                        aux.softmax_probs.fp32_data = struct.pack(f"<{len(row)}f", *row)
+                outputs = trans_output(
+                    request, response, StreamState()
+                ).generate_outputs
+                self.assertEqual(
+                    [out.aux_info.softmax_probs for out in outputs], values
+                )
+                self.assertEqual(
+                    [out.aux_info.output_len for out in outputs],
+                    [len(row) for row in values],
+                )
+                request.generate_config.aux_info = False
+                outputs = trans_output(
+                    request, response, StreamState()
+                ).generate_outputs
+                self.assertTrue(all(out.aux_info is None for out in outputs))
 
     def test_trans_input_serializes_input_embeddings(self):
         input_py = GenerateInput(
