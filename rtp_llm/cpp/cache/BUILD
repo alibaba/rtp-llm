@@ -409,6 +409,8 @@ cc_library(
         ":cache_core",
         ":cp_slot_mapper",
         ":prefill_cache_hit_metrics_reporter",
+        ":cache_capacity_negotiator",
+        ":pp_topology_validator",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/utils:time_util",

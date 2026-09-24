@@ -134,7 +134,10 @@ private:
     void
     runDraftStep(const PPExecutionPlan& plan, const GptModelOutputs& model_output, PPExecutionResult& execution_result);
 
-    torch::Tensor proposeDraftTokens(GptModelInputs draft_input, size_t num_draft_tokens);
+    torch::Tensor proposeDraftTokens(GptModelInputs      draft_input,
+                                     size_t              num_draft_tokens,
+                                     const torch::Tensor& dspark_anchors,
+                                     const torch::Tensor& dspark_temperature);
 
     void asyncSendPlan(const PPExecutionPlan& plan, bool empty_plan, PPTickets& tickets);
 
@@ -195,6 +198,12 @@ private:
     std::unique_ptr<SpecLogitsVerifyRunner>          spec_logits_verify_runner_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<ModelBase>                       draft_model_;
+    // DSpARK propose/commit are distinct fixed-width graph contracts, so each gets its own
+    // role-tagged wrapper (mirrors trunk MtpExecutor): draft_model_=PROPOSE, sp_prefill_draft_model_=COMMIT.
+    std::unique_ptr<ModelBase>                    sp_prefill_draft_model_;
+    torch::Tensor                                 dspark_markov_w1_;
+    torch::Tensor                                 dspark_markov_w2_;
+    size_t                                        draft_vocab_size_ = 0;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 
     const ParallelismConfig      parallelism_config_;

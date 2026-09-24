@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -8,6 +10,19 @@
 
 namespace rtp_llm {
 namespace mtp {
+
+bool useMtpDeviceInput() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
+        bool        on  = (env != nullptr && std::string(env) == "1");
+        RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_DEVICE_INPUT=%s -> processor enabled=%d",
+                         env ? env : "(unset)",
+                         static_cast<int>(on));
+        return on;
+    }();
+    return enabled;
+}
+
 namespace {
 torch::Tensor toCudaInt32(const torch::Tensor& tensor, TensorHolder& host_holder) {
     if (!tensor.defined()) {
@@ -177,7 +192,8 @@ void prepareDraftInputForDecode(GptModelInputs&      draft_input,
         draft_input.combo_tokens = toCudaInt32(accepted_token_ids.reshape({total_tokens}), host_holder);
         auto accepted_lengths_gpu = toCudaInt32(accepted_lengths, host_holder);
         draft_input.lm_output_indexes =
-            torch::arange(0, total_tokens, tokens_per_request, accepted_lengths_gpu.options()) + (accepted_lengths_gpu - 1);
+            torch::arange(0, total_tokens, tokens_per_request, accepted_lengths_gpu.options())
+            + (accepted_lengths_gpu - 1);
         draft_input.last_hidden_states = target_hidden_states;
         return;
     }
@@ -192,8 +208,8 @@ void prepareDraftInputForDecode(GptModelInputs&      draft_input,
         total_accepted_tokens += accepted_lengths_per_request[i];
     }
 
-    auto combo_tokens =
-        torch::empty({static_cast<int64_t>(total_accepted_tokens)}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto combo_tokens = torch::empty({static_cast<int64_t>(total_accepted_tokens)},
+                                     torch::TensorOptions(torch::kInt32).pinned_memory(true));
     auto input_lengths =
         torch::empty({static_cast<int64_t>(batch_size)}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     auto lm_output_indexes =
@@ -207,6 +223,12 @@ void prepareDraftInputForDecode(GptModelInputs&      draft_input,
     std::vector<torch::Tensor> accepted_hidden_states;
     accepted_hidden_states.reserve(batch_size);
     for (size_t i = 0; i < batch_size; ++i) {
+        RTP_LLM_CHECK_WITH_INFO(accepted_lengths_per_request[i] > 0
+                                    && static_cast<int64_t>(accepted_lengths_per_request[i]) <= tokens_per_request,
+                                "invalid accept_len[%zu]=%d for draft width %ld",
+                                i,
+                                accepted_lengths_per_request[i],
+                                static_cast<long>(tokens_per_request));
         memcpy(combo_tokens_ptr + token_offset,
                accepted_token_ids_ptr + i * tokens_per_request,
                accepted_lengths_per_request[i] * sizeof(int32_t));
@@ -255,8 +277,8 @@ void advanceDraftInput(GptModelInputs&      draft_input,
         draft_input.combo_position_ids = std::move(next_position_ids);
     }
 
-    if (draft_input.sequence_lengths.is_cuda()) {
-        draft_input.sequence_lengths = (draft_input.sequence_lengths + 1).to(torch::kInt32);
+    if (useMtpDeviceInput() || draft_input.sequence_lengths.is_cuda()) {
+        draft_input.sequence_lengths = (draft_input.sequence_lengths.to(torch::kCUDA) + 1).to(torch::kInt32);
     } else {
         auto sequence_lengths_cpu = draft_input.sequence_lengths.cpu().clone().pin_memory();
         for (int i = 0; i < batch_size; i++) {
@@ -270,24 +292,38 @@ void prepareDSparkProposeInput(GptModelInputs&            draft_input,
                                const torch::Tensor&       anchors,
                                const torch::Tensor&       committed_ends,
                                size_t                     propose_step,
+                               bool                       sample_from_anchor,
                                int32_t                    mask_token_id,
                                DSparkProposeInputBuffers& buffers,
                                TensorHolder&              host_holder) {
     RTP_LLM_CHECK_WITH_INFO(anchors.defined() && anchors.dim() == 1, "dspark propose anchors must be a 1-D tensor");
     RTP_LLM_CHECK_WITH_INFO(committed_ends.defined() && committed_ends.numel() == anchors.numel(),
                             "dspark propose committed ends must contain one value per anchor");
+    RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "dspark draft width must be positive");
+    RTP_LLM_CHECK_WITH_INFO(
+        mask_token_id >= 0, "dspark requires a non-negative noise token id, got %d", mask_token_id);
 
-    const int64_t batch_size     = anchors.numel();
-    const int64_t draft_width    = static_cast<int64_t>(propose_step);
-    const auto    cuda_i32       = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    if (!buffers.combo_tokens.defined() || buffers.combo_tokens.size(0) < batch_size) {
+    const int64_t batch_size  = anchors.numel();
+    const int64_t draft_width = static_cast<int64_t>(propose_step) + (sample_from_anchor ? 0 : 1);
+    const int64_t token_count = batch_size * static_cast<int64_t>(propose_step);
+    const auto    cuda_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (!buffers.combo_tokens.defined() || buffers.combo_tokens.size(0) < batch_size
+        || buffers.combo_tokens.size(1) != draft_width) {
         buffers.combo_tokens = torch::full({batch_size, draft_width}, mask_token_id, cuda_i32);
     }
     if (!buffers.input_lengths.defined() || buffers.input_lengths.size(0) < batch_size) {
         buffers.input_lengths = torch::full({batch_size}, draft_width, cuda_i32);
     }
-    if (!buffers.lm_output_indexes.defined() || buffers.lm_output_indexes.size(0) < batch_size) {
-        buffers.lm_output_indexes = torch::arange(0, batch_size * draft_width, draft_width, cuda_i32);
+    if (!buffers.lm_output_indexes.defined() || buffers.lm_output_indexes.size(0) < token_count) {
+        if (sample_from_anchor) {
+            buffers.lm_output_indexes = torch::arange(token_count, cuda_i32);
+        } else {
+            buffers.lm_output_indexes = torch::arange(batch_size * draft_width, cuda_i32)
+                                            .view({batch_size, draft_width})
+                                            .narrow(1, 1, static_cast<int64_t>(propose_step))
+                                            .contiguous()
+                                            .view({-1});
+        }
     }
 
     auto combo_tokens = buffers.combo_tokens.narrow(0, 0, batch_size);
@@ -299,16 +335,19 @@ void prepareDSparkProposeInput(GptModelInputs&            draft_input,
     draft_input.input_lengths           = buffers.input_lengths.narrow(0, 0, batch_size);
     draft_input.sequence_lengths        = torch::empty({0}, cuda_i32);
     draft_input.sequence_lengths_plus_1 = torch::Tensor();
-    draft_input.lm_output_indexes       = buffers.lm_output_indexes.narrow(0, 0, batch_size);
-    draft_input.is_target_verify        = false;
-    draft_input.dspark_call_phase       = DSparkCallPhase::PROPOSE;
+    draft_input.lm_output_indexes       = buffers.lm_output_indexes.narrow(0, 0, token_count);
+    // The fixed-width proposal block reuses the framework's multi-token graph
+    // geometry; this flag classifies that geometry. The model-semantic phase
+    // comes from the role wrapper (forward_propose), not from this flag.
+    draft_input.is_target_verify        = true;
 }
 
 void prepareDSparkCommitInput(GptModelInputs& draft_input, const torch::Tensor& target_features) {
     RTP_LLM_CHECK_WITH_INFO(target_features.defined(), "dspark commit requires target features");
     draft_input.last_hidden_states = target_features;
-    draft_input.is_target_verify   = false;
-    draft_input.dspark_call_phase  = DSparkCallPhase::COMMIT;
+    // The commit keeps the target verify geometry (gamma+1 rows per request),
+    // so it belongs to the same multi-token graph family as the proposal.
+    draft_input.is_target_verify   = true;
 }
 
 void runRejectionSampling(speculative::SpeculativeSampler&               sampler,

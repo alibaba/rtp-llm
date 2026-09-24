@@ -48,7 +48,7 @@ private:
 };
 
 struct SpeculativeSamplingParams {
-    torch::Tensor do_sample;  // CPU bool [B], with the same !top1() semantics as streams.
+    torch::Tensor do_sample;  // CPU bool [B], stochastic() = do_sample && !top1().
     torch::Tensor force_accept;  // CPU bool [B].
     std::vector<at::Generator> generators;
 };

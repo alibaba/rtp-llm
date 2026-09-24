@@ -1224,6 +1224,7 @@ class CustomChatRenderer:
                     )
                 delta_list: List[OutputDelta] = []
                 for status, output in zip(status_list, outputs.generate_outputs):
+                    was_finished = status.finish_reason is not None
                     delta = await self._update_single_status(
                         status,
                         output,
@@ -1234,8 +1235,14 @@ class CustomChatRenderer:
                     )
                     if delta.extra_outputs is None:
                         delta.extra_outputs = await self._generate_extra_outputs(
-                            output, generate_config
+                            status.output if was_finished else output, generate_config
                         )
+                    if delta.extra_outputs is not None and generate_config.return_output_ids:
+                        if not request.stream:
+                            # logprobs can enable internal streaming for a complete response.
+                            delta.extra_outputs.output_ids = [list(status.output_ids_list)]
+                        elif was_finished:
+                            delta.extra_outputs.output_ids = [[]]
                     delta_list.append(delta)
                 stream_response = await self._generate_stream_response(
                     delta_list, think_status_list

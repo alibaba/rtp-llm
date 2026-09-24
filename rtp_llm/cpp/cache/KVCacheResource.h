@@ -62,7 +62,7 @@ public:
 
     void assign(const BlockIndicesType& new_block_indices);
     void assign(BlockIndicesType&& new_block_indices);
-    void setAt(size_t pos, BlockIdxType val);
+    void setAt(size_t pos, BlockIdxType val, bool needs_zero = false);
 
     void resize(size_t new_size, BlockIdxType value = NULL_BLOCK_IDX);
 

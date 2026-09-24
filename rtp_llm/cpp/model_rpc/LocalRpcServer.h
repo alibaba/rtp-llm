@@ -162,7 +162,7 @@ protected:
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
     py::object                            weight_manager_;
-    std::shared_ptr<BroadcastManager>     tp_broadcaster_;
+    std::shared_ptr<BroadcastManager>     worker_broadcaster_;
     bool                                  torch_allocator_dump_enabled_{false};
     std::string                           torch_allocator_dump_auth_token_;
     double                                torch_allocator_dump_cooldown_seconds_{60.0};

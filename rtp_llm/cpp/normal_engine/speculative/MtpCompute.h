@@ -9,6 +9,9 @@
 namespace rtp_llm {
 namespace mtp {
 
+// Shared probe for the device-input fast path (RTP_LLM_DEVICE_INPUT).
+bool useMtpDeviceInput();
+
 enum class DraftInputLayout {
     COMPACT,
     FIXED_WIDTH,
@@ -45,6 +48,7 @@ void prepareDSparkProposeInput(GptModelInputs&            draft_input,
                                const torch::Tensor&       anchors,
                                const torch::Tensor&       committed_ends,
                                size_t                     propose_step,
+                               bool                       sample_from_anchor,
                                int32_t                    mask_token_id,
                                DSparkProposeInputBuffers& buffers,
                                TensorHolder&              host_holder);

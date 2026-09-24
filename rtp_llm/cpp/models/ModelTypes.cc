@@ -12,6 +12,15 @@
 
 namespace rtp_llm {
 
+GptModelOutputs ModelBase::forwardPP(const GptModelInputs&, const PPIntermediateTensors*, PPIntermediateTensors*) {
+    RTP_LLM_FAIL("PP forward is not implemented by this model");
+}
+
+PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&) {
+    RTP_LLM_FAIL("PP warmup input construction is not implemented by this model");
+}
+
+
 namespace {
 
 struct KvBlockTableShapeHint {
@@ -235,6 +244,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
     inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    // PP shutdown sentinel is not part of trunk's control-flag set; read its dedicated hint.
+    inputs.shutdown                        = shape_hints_ptr[GptModelInputIndex::shutdownSentinel];
     inputs.kv_block_stride_bytes =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kvBlockStrideBytes, "kvBlockStrideBytes"));
     inputs.kv_scale_stride_bytes =

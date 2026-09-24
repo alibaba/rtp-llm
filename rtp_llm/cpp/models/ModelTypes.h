@@ -118,6 +118,11 @@ enum GptModelInputIndex : size_t {
     // tpSyncModelInputs has a bit so non-root ranks choose the same CPU/UDS or
     // CUDA/NCCL lane as rank 0.
     tensorDeviceMap,
+    isTargetVerify,
+    // PREFILL-role flag; synced so non-root lanes of a non-first PP stage
+    // (which get an empty relayed plan) pack cache_keys like the root.
+    pdSeparation,
+    shutdownSentinel,
     // Preserve the root-side KV block-table layout across TP sync. Legacy
     // models use [batch, blocks], while grouped-cache models use
     // [group, batch, blocks].

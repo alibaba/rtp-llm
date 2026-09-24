@@ -67,9 +67,12 @@ public:
 
 public:
     DecodeRpcContext&        rpc_context;
-    std::vector<std::string>  peer_addrs;  // prefill worker addrs
-    GenerateRequestPB         allocate_request;
-    DecodeStatInfo            stat_info;
+    std::vector<std::string>   peer_addrs;  // prefill worker addrs
+    // Prefill-side PP partition reported by the allocate request; empty means
+    // pp_P=1 and the flat peer_addrs routing applies.
+    std::vector<StagePeerGroup> remote_stage_peer_groups;
+    GenerateRequestPB          allocate_request;
+    DecodeStatInfo             stat_info;
     const std::atomic<size_t>* loading_cache_requests = nullptr;
     int32_t                    prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
     // Guards meta_->finishTask() early-failure reporting: at most once per request.

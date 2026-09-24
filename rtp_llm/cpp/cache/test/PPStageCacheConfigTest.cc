@@ -822,9 +822,10 @@ TEST(PPStageCacheConfig, managerWarmupSkipsCapacityCommunicationUnderPp) {
     config.finalizeBlockNums(100, RuntimeConfig{});
 
     KVCacheManager manager(config, true, nullptr, KVCacheConfig{}, pc, RuntimeConfig{});
-    EXPECT_EQ(manager.cacheConfig().block_num, 1u);
+    // Warmup finalizes with the fixed minimal global block count instead of negotiating capacity.
+    EXPECT_EQ(manager.cacheConfig().block_num, 2u);
     for (const auto& group : manager.cacheConfig().topology().groups()) {
-        EXPECT_EQ(group.block_num, 1u);
+        EXPECT_EQ(group.block_num, 2u);
     }
 }
 

@@ -52,7 +52,7 @@ struct PPSamplingPlan {
     torch::Tensor do_sample;             // [total_batch_size]
     torch::Tensor finished_mask;         // [total_batch_size]
 
-    torch::Tensor spec_do_sample;   // [stream_count], !top1()
+    torch::Tensor spec_do_sample;   // [stream_count], stochastic() = do_sample && !top1()
     torch::Tensor force_sp_accept;  // [stream_count]
 };
 

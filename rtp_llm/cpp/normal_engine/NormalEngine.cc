@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
@@ -193,18 +194,18 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_CHECK_WITH_INFO(model_config_.output_vocab_padded_size >= static_cast<int64_t>(output_vocab_ids.size()),
                                 "output_vocab_padded_size must be >= output_vocab_ids.size()");
     }
-    if (propose_params_) {
-        const auto gamma = propose_params_->gen_num_per_circle;
-        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
+    if (sp_config.type != SP_TYPE_NONE) {
+        const auto gamma = static_cast<size_t>(sp_config.gen_num_per_cycle);
+        if (sp_config.type == SP_TYPE_DSPARK) {
             RTP_LLM_CHECK_WITH_INFO(gamma <= static_cast<size_t>(std::numeric_limits<int>::max()) / 3,
-                                    "DSpARK gen_num_per_circle is too large: %zu",
+                                    "DSpARK gen_num_per_cycle is too large: %zu",
                                     gamma);
             // An async DSpark round can expose one extra accepted window before
             // host bookkeeping catches up, then seed the next gamma-wide block.
             reserve_step_ = static_cast<int>(3 * gamma);
         } else {
             RTP_LLM_CHECK_WITH_INFO(gamma < static_cast<size_t>(std::numeric_limits<int>::max()),
-                                    "gen_num_per_circle is too large: %zu",
+                                    "gen_num_per_cycle is too large: %zu",
                                     gamma);
             reserve_step_ = static_cast<int>(gamma + 1);
         }
@@ -272,10 +273,15 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
             propose_params_.get());
         should_loop_ = [pp_executor]() { return !pp_executor->shutdownCompleted(); };
         executor_.reset(pp_executor);
-    } else if (sp_config.type != SP_TYPE_NONE) {
+    } else if (sp_config.type != SP_TYPE_NONE && propose_params_) {
         executor_.reset(new MtpExecutor(
             params, propose_params_, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
+        if (sp_config.type != SP_TYPE_NONE) {
+            RTP_LLM_LOG_WARNING("speculative type %d configured without draft model parameters; "
+                                "falling back to the plain executor",
+                                static_cast<int>(sp_config.type));
+        }
         executor_.reset(new NormalExecutor(
             params,
             resource_context_.cache_manager,
@@ -468,7 +474,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                params.sp_config.type);
     if (!generation_prefill_cuda_graph_requested) {
         rtp_llm::setTraceMemory(true);
-        executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+        if (parallelism_config.pp_size > 1) {
+            executor_.reset(new PPExecutor(params, nullptr, true, mla_ops_type_));
+        } else {
+            executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+        }
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
         const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
         rtp_llm::setTraceMemory(false);
@@ -492,7 +502,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     const auto baseline_reserved  = cuda_graph::graphReservedBytes();
 
     rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+    if (parallelism_config.pp_size > 1) {
+        executor_.reset(new PPExecutor(params, warmup_cache_manager, true, mla_ops_type_));
+    } else {
+        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+    }
     {
         // NormalGenerateStream snapshots ResourceContext at construction. Bind
         // the same temporary manager used by NormalExecutor so fakeInitKVBlock
@@ -644,6 +658,10 @@ void NormalEngine::normalizeSystemPromptCacheConfig() {
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     normalizeSystemPromptCacheConfig();
     const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
+    if (parallelism_config.pp_size > 1) {
+        pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
+    }
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,
@@ -664,7 +682,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       sp_config,
                                                                       pd_sep_config,
                                                                       cache_store_config,
-                                                                      use_device_malloc_block_pool);
+                                                                      use_device_malloc_block_pool,
+                                                                      pp_negotiator);
         resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
@@ -689,7 +708,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       SpeculativeExecutionConfig{},
                                                                       pd_sep_config,
                                                                       cache_store_config,
-                                                                      use_device_malloc_block_pool);
+                                                                      use_device_malloc_block_pool,
+                                                                      pp_negotiator);
         resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
@@ -963,7 +983,11 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 }
 
 bool NormalEngine::isMTPEagle() {
-    return sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_DSPARK;
+    // Without draft parameters no speculative executor is built, so the engine runs the plain
+    // path even when a speculative type is configured.
+    return propose_params_ != nullptr
+           && (sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE
+               || sp_config.type == SP_TYPE_DSPARK);
 }
 
 bool NormalEngine::isEagle() {

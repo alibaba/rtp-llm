@@ -904,6 +904,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         attention_inputs_,
                                                         attention_inputs_by_tag_,
                                                         bert_embedding_inputs});
+        // PP: stage-boundary tensors populated by forwardPP.
+        py_model_inputs.pp_intermediates = inputs.pp_intermediates;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -956,6 +958,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+        // PP: stage-boundary tensors ride along on every post-layers return path.
+        auto attach_pp_intermediates = [&py_model_outputs](GptModelOutputs outputs) {
+            outputs.pp_intermediates = py_model_outputs.pp_intermediates;
+            return outputs;
+        };
         auto attach_mtp_target_hidden_states = [&py_model_outputs](GptModelOutputs outputs) {
             if (py_model_outputs.mtp_target_hidden_states.defined()) {
                 outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states;
@@ -968,7 +975,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
                 return with_generation_prefill_cuda_graph_status(
-                    attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
+                    attach_mtp_target_hidden_states(
+                        attach_pp_intermediates(callForwardPostLayers(hidden_states, inputs, true))));
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
@@ -976,20 +984,24 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(std::move(outputs)));
+            return with_generation_prefill_cuda_graph_status(
+                attach_mtp_target_hidden_states(attach_pp_intermediates(std::move(outputs))));
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
                 return with_generation_prefill_cuda_graph_status(
-                    attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs)));
+                    attach_mtp_target_hidden_states(
+                        attach_pp_intermediates(forwardPostLayersLastHidden(hidden_states, inputs))));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return with_generation_prefill_cuda_graph_status(
-                attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens)));
+                attach_mtp_target_hidden_states(
+                    attach_pp_intermediates(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens))));
         }
         return with_generation_prefill_cuda_graph_status(
-            attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
+            attach_mtp_target_hidden_states(
+                attach_pp_intermediates(callForwardPostLayers(hidden_states, inputs, true))));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

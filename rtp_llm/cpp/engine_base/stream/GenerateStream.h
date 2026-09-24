@@ -61,7 +61,7 @@ struct StreamSpecUpdateInfo {
     // GPU proposal update for the next step. The optional is intentionally
     // tri-state: nullopt keeps the previous mirror, a defined tensor replaces
     // it, and an undefined tensor explicitly clears it so readers use the
-    // current CPU draft_token instead. Per-stream tensor shape is
+    // current CPU draft_tokens instead. Per-stream tensor shape is
     // [stream_batch, token_stride].
     std::optional<torch::Tensor> draft_token_gpu = std::nullopt;
 
@@ -165,7 +165,8 @@ public:
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
     void update(const StreamUpdateInfo& update_info);
-    void specUpdate(const StreamSpecUpdateInfo& update_info);
+    void updateFromPP(const StreamUpdateInfo& update_info);
+    void specUpdate(const StreamSpecUpdateInfo& update_info, bool update_processor = true);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {

@@ -105,6 +105,9 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
+    // PP: boundary tensors from the upstream stage, populated by forwardPP; not part of tpSync packing.
+    std::map<std::string, torch::Tensor> pp_intermediates;
+
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
@@ -132,6 +135,9 @@ struct GptModelOutputs {
     // the readable fallback reason returned through AuxInfo.
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+
+    // PP: boundary tensors emitted on a non-last stage; kept last so existing brace-init sites keep compiling.
+    std::map<std::string, torch::Tensor> pp_intermediates;
 };
 
 struct CopyParams {

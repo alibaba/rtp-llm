@@ -66,8 +66,8 @@ bool StageCacheSnapshot::internallyConsistent() const {
 
 std::string cacheGroupPolicyFingerprint(const CacheGroupPolicy& policy) {
     std::ostringstream oss;
-    oss << "t" << static_cast<int>(policy.group_type) << ":r" << (policy.enable_prefix_reuse ? 1 : 0) << ":e"
-        << static_cast<int>(policy.evict_policy) << ":v" << (policy.reservable ? 1 : 0) << ":x"
+    oss << "t" << static_cast<int>(policy.group_type) << ":r" << (policy.enable_prefix_reuse ? 1 : 0) << ":sw"
+        << policy.sliding_window_size << ":v" << (policy.reservable ? 1 : 0) << ":x"
         << policy.explicit_block_num << ":c" << (policy.charge_to_paged_budget ? 1 : 0) << ":p"
         << static_cast<int>(policy.memory_placement) << ":a" << policy.active_tail_blocks << ":w"
         << (policy.validate_tail_blocks ? 1 : 0) << ":m" << static_cast<int>(policy.cp_mapping) << ":s"

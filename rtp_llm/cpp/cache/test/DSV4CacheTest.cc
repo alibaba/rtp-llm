@@ -825,6 +825,10 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), idx_kv->block_size_bytes());
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(swa_kv_gid), swa_kv->block_size_bytes());
 
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(csa_kv_gid), 4194304u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(hca_kv_gid), 131072u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), 1048576u);
+
     auto full_pool_bpk = DeviceBlockPoolConfigHelper::createConfigForGroup(config, csa_kv_gid);
     auto swa_pool_bpk  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, swa_kv_gid);
     ASSERT_EQ(full_pool_bpk.memory_layouts.size(), 1u);
@@ -879,7 +883,6 @@ TEST(HybridPoolConfigCreatorTest, DecoupledCompressedPhysicalBlockCopyIncludesAl
     ASSERT_EQ(config.kvBlockStrideBytesForGroup(0), 4608u);
 
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config);
-    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
     const auto options  = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
     auto       src      = torch::from_blob(allocator->convertIndexToAddrByTag(0, "hca_kv", 1).kv_addr, {4608}, options);

@@ -1757,7 +1757,7 @@ TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
     parallelism_config.tp_size           = 2;
     parallelism_config.tp_rank           = 0;
     parallelism_config.world_size        = 2;
-    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
+    runtime_config.tp_broadcast_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
     auto manager = std::make_shared<KVCacheManager>(
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
@@ -1785,7 +1785,7 @@ TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {
     parallelism_config.tp_rank           = 1;
     parallelism_config.world_size        = 2;
     parallelism_config.world_rank        = 1;
-    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
+    runtime_config.tp_broadcast_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
     auto manager = std::make_shared<KVCacheManager>(
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
@@ -1802,7 +1802,7 @@ TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) 
     parallelism_config.tp_size       = 2;
     parallelism_config.tp_rank       = 0;
     parallelism_config.world_size    = 2;
-    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+    runtime_config.tp_broadcast_grpc_addrs = {"127.0.0.1:12345"};
 
     auto manager = std::make_shared<KVCacheManager>(
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);

@@ -364,6 +364,8 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    // PP: boundary tensors from the upstream stage; empty under pp_size=1.
+    PPIntermediates pp_intermediates;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -376,6 +378,8 @@ struct PyModelOutputs {
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.
     torch::Tensor mtp_target_hidden_states;
+    // PP: non-last stages return boundary tensors here for transport; empty on the last stage.
+    PPIntermediates pp_intermediates;
 
     PyModelOutputs() = default;
 

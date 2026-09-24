@@ -1538,6 +1538,15 @@ class Qwen3NextModel(GptModelBase):
             else None
         )
 
+    def make_empty_intermediate_tensors(
+        self, hidden_template: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "hidden_states": hidden_template,
+            "residual": torch.zeros_like(hidden_template),
+        }
+
+
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
         if torch.version.hip is None:
@@ -1653,7 +1662,26 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
         ):
             fmha_impl.bind_graph_inputs(inputs)
-        hidden_states = self.word_embedding(inputs)
+        # First stage embeds; later stages resume upstream activations from pp_intermediates, falling back to input_hiddens.
+        if self.embed_tokens is not None:
+            hidden_states = self.word_embedding(inputs)
+        else:
+            upstream_hidden = (
+                inputs.pp_intermediates.get("hidden_states")
+                if inputs.pp_intermediates
+                else None
+            )
+            hidden_states = (
+                upstream_hidden if upstream_hidden is not None else inputs.input_hiddens
+            )
+
+        # Fused add-norm: resume the upstream residual from pp_intermediates, or start from zeros.
+        residual = torch.zeros_like(hidden_states)
+        upstream_residual = (
+            inputs.pp_intermediates.get("residual") if inputs.pp_intermediates else None
+        )
+        if upstream_residual is not None:
+            residual = upstream_residual
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
@@ -1760,12 +1788,12 @@ class Qwen3NextModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
-        residual = torch.zeros_like(hidden_states)
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
         if capture_aux_hidden:
             self.begin_aux_hidden_capture(hidden_states, is_target_verify)
 
-        for i, decoder_layer in enumerate(self.layers):
+        # Cache surfaces are indexed by model-local layer ids (the C++ layout is projected to this stage).
+        for local_idx, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, local_idx
             )
@@ -1784,16 +1812,24 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
-            if i in self._mtp_aux_capture_layer_id_set:
-                self.capture_aux_hidden(i, hidden_states, residual)
+            if local_idx in self._mtp_aux_capture_layer_id_set:
+                self.capture_aux_hidden(local_idx, hidden_states, residual)
         if capture_aux_hidden:
             self.finish_aux_hidden_capture()
 
-        hidden_states, residual = self.norm(hidden_states, residual)
-        if capture_aux_hidden:
-            assert self._mtp_target_hidden_states is not None
-            return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
-        return PyModelOutputs(hidden_states)
+        if self.norm is not None:
+            hidden_states, residual = self.norm(hidden_states, residual)
+            if capture_aux_hidden:
+                assert self._mtp_target_hidden_states is not None
+                return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
+            return PyModelOutputs(hidden_states)
+        # Non-last stage: emit both boundary tensors; dropping residual would corrupt the downstream stream.
+        outputs = PyModelOutputs(hidden_states)
+        outputs.pp_intermediates = {
+            "hidden_states": hidden_states,
+            "residual": residual,
+        }
+        return outputs
 
 
 class Qwen35Model(Qwen3NextModel):

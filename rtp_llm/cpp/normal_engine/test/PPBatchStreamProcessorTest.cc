@@ -11,7 +11,7 @@
 
 #include "gtest/gtest.h"
 #include "torch/all.h"
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 
 #define private public
 #define protected public
@@ -47,18 +47,24 @@ torch::Tensor intTensor(std::vector<int32_t> values) {
     return torch::tensor(std::move(values), torch::kInt32);
 }
 
-class DeferredCacheLoad: public AsyncContext {
-public:
-    void waitDone() override {}
-    bool done() const override {
-        return ready;
+// The load-finalize path downcasts the parked context to LoadAsyncContext, so a
+// hand-rolled AsyncContext is not enough. It stays PENDING (done() == false) until
+// the test completes its transfer.
+std::shared_ptr<LoadAsyncContext> makeDeferredCacheLoad() {
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+    std::vector<TransferDescriptor> descriptors{TransferDescriptor{nullptr,
+                                                                   /*group_set_id=*/0,
+                                                                   /*path_index=*/0,
+                                                                   Tier::HOST,
+                                                                   Tier::DEVICE,
+                                                                   BlockIndicesType{1}}};
+    auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
+    if (!coordinator->registerContext(context)) {
+        throw std::runtime_error("failed to register the deferred cache load context");
     }
-    bool success() const override {
-        return true;
-    }
-
-    bool ready = false;
-};
+    return context;
+}
 
 class RecordingDraftModel: public ModelBase {
 public:
@@ -109,8 +115,11 @@ public:
 
 class RecordingDSparkModel: public ModelBase {
 public:
-    explicit RecordingDSparkModel(int64_t propose_step, int32_t first_token = 100):
-        propose_step_(propose_step), first_token_(first_token) {}
+    // is_propose selects which role-tagged wrapper this stands in for: the PROPOSE wrapper
+    // emits draft logits; the COMMIT wrapper's output is discarded by the executor.
+    explicit RecordingDSparkModel(
+        int64_t propose_step, bool is_propose, int32_t first_token = 100, int64_t vocab = 128):
+        propose_step_(propose_step), is_propose_(is_propose), first_token_(first_token), vocab_(vocab) {}
 
     GptModelOutputs
     forwardPP(const GptModelInputs& input, const PPIntermediateTensors*, PPIntermediateTensors*) override {
@@ -134,18 +143,27 @@ public:
         inputs.push_back(std::move(recorded_input));
 
         GptModelOutputs output;
-        if (input.dspark_call_phase == DSparkCallPhase::PROPOSE) {
+        if (is_propose_) {
+            // Per-row argmax is first_token_ + row; with zero markov bias and greedy
+            // temperature, sampleDSparkDraft collapses to that argmax, so proposals are
+            // deterministic: token[b][s] == first_token_ + b * propose_step_ + s.
             const auto batch_size = input.input_lengths.numel();
-            output.draft_tokens   = torch::arange(first_token_,
-                                                first_token_ + batch_size * propose_step_,
-                                                torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
-                                      .reshape({batch_size, propose_step_});
+            const auto rows       = batch_size * propose_step_;
+            auto       logits     = torch::full({rows, vocab_},
+                                          -1.0f,
+                                          torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            for (int64_t row = 0; row < rows; ++row) {
+                logits[row][first_token_ + row] = 1.0f;
+            }
+            output.logits = logits;
         }
         return output;
     }
 
     int64_t                     propose_step_;
+    bool                        is_propose_;
     int32_t                     first_token_;
+    int64_t                     vocab_;
     std::vector<GptModelInputs> inputs;
 };
 
@@ -240,6 +258,24 @@ protected:
         return result;
     }
 
+    // Configure an executor for deterministic DSpARK draft sampling in tests: zero markov bias
+    // plus greedy temperature collapse sampleDSparkDraft to the argmax of the PROPOSE logits.
+    static void setupDSparkDeterministicSampling(PPExecutor& executor, int64_t gamma, int64_t vocab = 128) {
+        auto opts                     = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        executor.speculative_sampler_ = std::make_unique<speculative::SpeculativeSampler>(torch::Tensor(), gamma);
+        executor.dspark_markov_w1_    = torch::zeros({256, 1}, opts);
+        executor.dspark_markov_w2_    = torch::zeros({vocab, 1}, opts);
+        executor.draft_vocab_size_    = vocab;
+    }
+
+    // C++ tests skip the Python-side derivation that resolves grammar num_workers from this
+    // rank's CPU share, so supply a minimal valid config (mirrors trunk's grammar test setup).
+    static GrammarConfig makeTestGrammarConfig() {
+        GrammarConfig cfg;
+        cfg.num_workers = 1;
+        return cfg;
+    }
+
     static EngineInitParams makeMtpParams(size_t num_draft_tokens) {
         EngineInitParams params;
         params.model_id                                 = 0;
@@ -266,6 +302,12 @@ protected:
             draft->sp_config          = params.sp_config;
             draft->py_model           = py::none();
             draft->py_sp_model        = py::none();
+            if (params.sp_config.type == SP_TYPE_DSPARK) {
+                // Zero markov weights let the executor's DSpARK loading path run deterministically.
+                auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+                draft->gpt_weights.dspark_markov_w1 = torch::zeros({256, 1}, opts);
+                draft->gpt_weights.dspark_markov_w2 = torch::zeros({128, 1}, opts);
+            }
             mtp_params->emplace_back(std::move(draft));
         }
         return std::make_unique<ProposeModelEngineInitParams>(
@@ -359,7 +401,7 @@ TEST_F(PPBatchStreamProcessorTest, ProposeDraftTokensRunsAllForwardsAndPreserves
         initial_input.request_pd_separation = torch::ones({2}, torch::kBool);
         initial_input.cache_keys            = torch::ones({2, 3}, torch::kInt64);
 
-        auto proposed = executor.proposeDraftTokens(initial_input, count);
+        auto proposed = executor.proposeDraftTokens(initial_input, count, torch::Tensor(), torch::Tensor());
         ASSERT_EQ(proposed.sizes().vec(), (std::vector<int64_t>{2, count}));
         EXPECT_TRUE(proposed.device().is_cpu());
         EXPECT_EQ(proposed.scalar_type(), torch::kInt32);
@@ -407,9 +449,13 @@ TEST_F(PPBatchStreamProcessorTest, DSparkDecodeCommitsThenProposesFromAcceptedRo
     auto target_features = target_model->hidden_buffer.clone();
     executor.setModel(std::move(target_model));
 
-    auto  draft_model     = std::make_unique<RecordingDSparkModel>(gamma);
-    auto* recorded_draft  = draft_model.get();
-    executor.draft_model_ = std::move(draft_model);
+    auto  propose_model              = std::make_unique<RecordingDSparkModel>(gamma, /*is_propose=*/true);
+    auto* recorded_propose           = propose_model.get();
+    executor.draft_model_            = std::move(propose_model);
+    auto  commit_model               = std::make_unique<RecordingDSparkModel>(gamma, /*is_propose=*/false);
+    auto* recorded_commit            = commit_model.get();
+    executor.sp_prefill_draft_model_ = std::move(commit_model);
+    setupDSparkDeterministicSampling(executor, gamma);
 
     PPExecutionPlan plan;
     plan.is_decode                         = true;
@@ -428,13 +474,16 @@ TEST_F(PPBatchStreamProcessorTest, DSparkDecodeCommitsThenProposesFromAcceptedRo
     result.new_token_ids = intTensor({20, 21, 22, 23, 30, 31, 32, 33}).reshape({2, 4});
     result.accept_len    = intTensor({2, 4});
     result.request_errors.resize(2);
+    // Greedy draft sampling keeps the DSpARK proposal deterministic (see RecordingDSparkModel).
+    plan.sampling_plan.temperature    = torch::ones({2}, torch::kFloat32);
+    plan.sampling_plan.spec_do_sample = torch::zeros({2}, torch::kBool);
 
     executor.runDraftStep(plan, target_output, result);
 
-    ASSERT_EQ(recorded_draft->inputs.size(), 2u);
-    const auto& commit_input = recorded_draft->inputs[0];
-    EXPECT_EQ(commit_input.dspark_call_phase, DSparkCallPhase::COMMIT);
-    EXPECT_FALSE(commit_input.is_target_verify);
+    ASSERT_EQ(recorded_commit->inputs.size(), 1u);
+    ASSERT_EQ(recorded_propose->inputs.size(), 1u);
+    const auto& commit_input = recorded_commit->inputs[0];
+    EXPECT_TRUE(commit_input.is_target_verify);
     EXPECT_TRUE(torch::equal(commit_input.combo_tokens, plan.model_input.combo_tokens));
     EXPECT_TRUE(torch::equal(commit_input.input_lengths, plan.model_input.input_lengths));
     EXPECT_TRUE(torch::equal(commit_input.prefix_lengths, plan.model_input.prefix_lengths));
@@ -444,9 +493,8 @@ TEST_F(PPBatchStreamProcessorTest, DSparkDecodeCommitsThenProposesFromAcceptedRo
     EXPECT_TRUE(torch::equal(commit_input.request_pd_separation, plan.model_input.request_pd_separation));
     EXPECT_TRUE(torch::equal(commit_input.cache_keys, plan.model_input.cache_keys));
 
-    const auto& propose_input = recorded_draft->inputs[1];
-    EXPECT_EQ(propose_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
-    EXPECT_FALSE(propose_input.is_target_verify);
+    const auto& propose_input = recorded_propose->inputs[0];
+    EXPECT_TRUE(propose_input.is_target_verify);
     EXPECT_FALSE(propose_input.last_hidden_states.defined());
     EXPECT_TRUE(propose_input.sequence_lengths.is_cuda());
     EXPECT_EQ(propose_input.sequence_lengths.numel(), 0);
@@ -454,7 +502,10 @@ TEST_F(PPBatchStreamProcessorTest, DSparkDecodeCommitsThenProposesFromAcceptedRo
               (std::vector<int32_t>{21, mask_id, mask_id, 33, mask_id, mask_id}));
     EXPECT_EQ(tensorToVector<int32_t>(propose_input.input_lengths), (std::vector<int32_t>{gamma, gamma}));
     EXPECT_EQ(tensorToVector<int32_t>(propose_input.prefix_lengths), (std::vector<int32_t>{7, 13}));
-    EXPECT_EQ(tensorToVector<int32_t>(propose_input.lm_output_indexes), (std::vector<int32_t>{0, gamma}));
+    // Every proposal row queries from its own anchor, so the query rows are
+    // arange(batch * gamma) instead of one anchor per request.
+    EXPECT_EQ(tensorToVector<int32_t>(propose_input.lm_output_indexes),
+              (std::vector<int32_t>{0, 1, 2, 3, 4, 5}));
     EXPECT_FALSE(propose_input.request_id.defined());
     EXPECT_FALSE(propose_input.request_pd_separation.defined());
     EXPECT_FALSE(propose_input.cache_keys.defined());
@@ -477,9 +528,13 @@ TEST_F(PPBatchStreamProcessorTest, DSparkFusionPrefillCommitsThenProposesFromSam
         torch::arange(20, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({5, 4});
     executor.setModel(std::move(target_model));
 
-    auto  draft_model     = std::make_unique<RecordingDSparkModel>(gamma);
-    auto* recorded_draft  = draft_model.get();
-    executor.draft_model_ = std::move(draft_model);
+    auto  propose_model              = std::make_unique<RecordingDSparkModel>(gamma, /*is_propose=*/true);
+    auto* recorded_propose           = propose_model.get();
+    executor.draft_model_            = std::move(propose_model);
+    auto  commit_model               = std::make_unique<RecordingDSparkModel>(gamma, /*is_propose=*/false);
+    auto* recorded_commit            = commit_model.get();
+    executor.sp_prefill_draft_model_ = std::move(commit_model);
+    setupDSparkDeterministicSampling(executor, gamma);
 
     PPExecutionPlan plan;
     plan.model_input.combo_tokens          = intTensor({1, 2, 3, 4, 5});
@@ -496,13 +551,15 @@ TEST_F(PPBatchStreamProcessorTest, DSparkFusionPrefillCommitsThenProposesFromSam
     result.new_token_ids = intTensor({40, 50}).reshape({2, 1});
     result.accept_len    = intTensor({1, 1});
     result.request_errors.resize(2);
+    // Greedy draft sampling keeps the DSpARK proposal deterministic (see RecordingDSparkModel).
+    plan.sampling_plan.temperature    = torch::ones({2}, torch::kFloat32);
+    plan.sampling_plan.spec_do_sample = torch::zeros({2}, torch::kBool);
 
     executor.runDraftStep(plan, target_output, result);
 
-    ASSERT_EQ(recorded_draft->inputs.size(), 2u);
-    EXPECT_EQ(recorded_draft->inputs[0].dspark_call_phase, DSparkCallPhase::COMMIT);
-    const auto& propose_input = recorded_draft->inputs[1];
-    EXPECT_EQ(propose_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
+    ASSERT_EQ(recorded_commit->inputs.size(), 1u);
+    ASSERT_EQ(recorded_propose->inputs.size(), 1u);
+    const auto& propose_input = recorded_propose->inputs[0];
     EXPECT_EQ(tensorToVector<int32_t>(propose_input.combo_tokens),
               (std::vector<int32_t>{40, mask_id, mask_id, 50, mask_id, mask_id}));
     EXPECT_EQ(tensorToVector<int32_t>(propose_input.prefix_lengths), (std::vector<int32_t>{6, 10}));
@@ -705,10 +762,15 @@ TEST_F(PPBatchStreamProcessorTest, PrefillPublishesDraftStateForItsRoleAndAlgori
                 executor.setModel(std::move(target_model));
                 RecordingDraftModel*  recorded_mtp    = nullptr;
                 RecordingDSparkModel* recorded_dspark = nullptr;
+                RecordingDSparkModel* recorded_commit = nullptr;
                 if (type == SP_TYPE_DSPARK) {
-                    auto draft            = std::make_unique<RecordingDSparkModel>(count, 10);
-                    recorded_dspark       = draft.get();
-                    executor.draft_model_ = std::move(draft);
+                    auto propose = std::make_unique<RecordingDSparkModel>(count, /*is_propose=*/true, 10);
+                    recorded_dspark                  = propose.get();
+                    executor.draft_model_            = std::move(propose);
+                    auto commit = std::make_unique<RecordingDSparkModel>(count, /*is_propose=*/false, 10);
+                    recorded_commit                  = commit.get();
+                    executor.sp_prefill_draft_model_ = std::move(commit);
+                    setupDSparkDeterministicSampling(executor, count);
                 } else {
                     auto draft            = std::make_unique<RecordingDraftModel>();
                     recorded_mtp          = draft.get();
@@ -725,14 +787,19 @@ TEST_F(PPBatchStreamProcessorTest, PrefillPublishesDraftStateForItsRoleAndAlgori
                 auto result                 = makeInitializedResult(plan.sampling_plan);
                 result.new_token_ids        = intTensor({20}).reshape({1, 1});
                 result.accept_len           = intTensor({1});
+                if (type == SP_TYPE_DSPARK) {
+                    // Greedy draft sampling keeps the DSpARK proposal deterministic.
+                    plan.sampling_plan.spec_do_sample = torch::zeros_like(plan.sampling_plan.spec_do_sample);
+                }
                 executor.runDraftStep(plan, GptModelOutputs{}, result);
 
                 const bool    commit_only = type == SP_TYPE_DSPARK && role == RoleType::PREFILL;
                 const int64_t draft_count = role == RoleType::PREFILL ? (commit_only ? 0 : 1) : count;
                 if (recorded_dspark) {
-                    ASSERT_EQ(recorded_dspark->inputs.size(), commit_only ? 1u : 2u);
-                    const auto& commit = recorded_dspark->inputs[0];
-                    EXPECT_EQ(commit.dspark_call_phase, DSparkCallPhase::COMMIT);
+                    // COMMIT always runs once; PROPOSE runs only when not commit-only.
+                    ASSERT_EQ(recorded_commit->inputs.size(), 1u);
+                    ASSERT_EQ(recorded_dspark->inputs.size(), commit_only ? 0u : 1u);
+                    const auto& commit = recorded_commit->inputs[0];
                     EXPECT_TRUE(torch::equal(commit.combo_tokens, plan.model_input.combo_tokens));
                     EXPECT_TRUE(torch::equal(commit.last_hidden_states, executor.model_->getMtpTargetHiddenStates(2)));
                     EXPECT_TRUE(torch::equal(commit.request_id, plan.model_input.request_id));
@@ -940,7 +1007,7 @@ TEST_F(PPBatchStreamProcessorTest, CompactDraftInputAdvancesAcrossTwoRounds) {
             EXPECT_TRUE(torch::equal(
                 input.last_hidden_states.index_select(0, last_rows.to(input.last_hidden_states.device(), torch::kLong)),
                 expected_last_hidden));
-            auto proposals = executor.proposeDraftTokens(input, count);
+            auto proposals = executor.proposeDraftTokens(input, count, torch::Tensor(), torch::Tensor());
             ASSERT_EQ(recorded->inputs.size(), count);
             EXPECT_EQ(proposals.sizes().vec(), (std::vector<int64_t>{3, count}));
             const auto next_positions = prefixes + lengths;
@@ -1029,7 +1096,7 @@ TEST_F(PPBatchStreamProcessorTest, FirstTailProcessorReplaysPdAnchorOnlyOnce) {
         xgrammar_impl::serializeTokenizerInfo(
             {"a", "b", "c", "<eos>"},
             R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
-        GrammarConfig{});
+        makeTestGrammarConfig());
     ASSERT_NE(backend, nullptr);
     auto previous_backend                    = LogitsProcessorFactory::grammarBackend();
     LogitsProcessorFactory::grammarBackend() = backend;
@@ -1083,7 +1150,7 @@ TEST_F(PPBatchStreamProcessorTest, RegistrationUsesSequenceOffsetAfterExistingMu
         xgrammar_impl::serializeTokenizerInfo(
             {"a", "b", "c", "<eos>"},
             R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
-        GrammarConfig{});
+        makeTestGrammarConfig());
     ASSERT_NE(backend, nullptr);
     auto previous_backend                    = LogitsProcessorFactory::grammarBackend();
     LogitsProcessorFactory::grammarBackend() = backend;
@@ -1175,7 +1242,7 @@ TEST_F(PPBatchStreamProcessorTest, TailReplayFailureClearsProcessorsAndPreserves
         xgrammar_impl::serializeTokenizerInfo(
             {"a", "b", "c", "<eos>"},
             R"({"vocab_size":4,"stop_token_ids":[3],"vocab_type":"RAW","add_prefix_space":false})"),
-        GrammarConfig{});
+        makeTestGrammarConfig());
     ASSERT_NE(backend, nullptr);
     auto previous_backend                    = LogitsProcessorFactory::grammarBackend();
     LogitsProcessorFactory::grammarBackend() = backend;
@@ -1572,13 +1639,16 @@ TEST_F(PPBatchStreamProcessorTest, DecodeAdmissionSizesCandidatesOnlyWhenEnterin
                 }
                 streams.push_back(stream);
             }
-            const auto first                                     = streams[0];
-            const auto waiting                                   = streams[1];
-            const auto wire_tokens                               = waiting->getProposeToken();
-            const auto wire_buffer                               = waiting->getSPOutputBuffer();
-            auto       load                                      = std::make_shared<DeferredCacheLoad>();
-            waiting->stream_cache_resource_->load_cache_context_ = load;
-            waiting->generate_status_->status                    = StreamState::LOADING_CACHE;
+            const auto first                                         = streams[0];
+            const auto waiting                                       = streams[1];
+            const auto wire_tokens                                   = waiting->getProposeToken();
+            const auto wire_buffer                                   = waiting->getSPOutputBuffer();
+            auto       load                                          = makeDeferredCacheLoad();
+            waiting->stream_cache_resource_->allocator_load_context_ = load;
+            // The allocator's readiness path commits the context it installs; this test
+            // installs it directly, so commit here to arm transfer completion.
+            ASSERT_TRUE(load->commit());
+            waiting->generate_status_->status                        = StreamState::LOADING_CACHE;
             scheduler.loading_cache_streams_.push_back(waiting);
             ASSERT_TRUE(scheduler.enqueue(first).ok());
 
@@ -1624,8 +1694,8 @@ TEST_F(PPBatchStreamProcessorTest, DecodeAdmissionSizesCandidatesOnlyWhenEnterin
             const auto real_token_buffer = first->getSPOutputBuffer()->tokens;
 
             /** Cache loading is done, but the batch is still full. */
-            load->ready = true;
-            auto next   = scheduler.schedule();
+            ASSERT_TRUE(load->completeTransfers(1, true));
+            auto next = scheduler.schedule();
             ASSERT_TRUE(next.ok());
             ASSERT_EQ(next->streams, (std::list<GenerateStreamPtr>{first}));
             EXPECT_EQ(waiting->getStatus(), StreamState::WAITING);
@@ -2099,7 +2169,8 @@ TEST_F(PPBatchStreamProcessorTest, MtpPrefillFinishesAtReservedMaxLength) {
     auto            params = makeMtpParams(3);
     PPExecutor      executor(params, nullptr, true);
     ResourceContext resource_context;
-    const int       input_length = params.model_config_.max_seq_len - 4;
+    // maxTokenNum() reserves max(reserve_step, propose_step) tokens below max_seq_len; leave one token of room.
+    const int       input_length = params.model_config_.max_seq_len - 5;
     auto stream = makeStream(resource_context, params.model_config_, 101, std::vector<int32_t>(input_length, 1), 0);
     stream->generateConfig()->max_new_tokens = 32;
     stream->setReserveStep(4);
@@ -2198,13 +2269,18 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
             auto       target       = std::make_unique<RecordingDraftModel>();
             auto*      target_model = target.get();
             tail.setModel(std::move(target));
-            std::vector<GptModelInputs>* draft_inputs = nullptr;
-            RecordingDSparkModel*        dspark_model = nullptr;
+            std::vector<GptModelInputs>* draft_inputs  = nullptr;
+            std::vector<GptModelInputs>* commit_inputs = nullptr;
+            RecordingDSparkModel*        dspark_model  = nullptr;
             if (type == SP_TYPE_DSPARK) {
-                auto draft        = std::make_unique<RecordingDSparkModel>(count, 10);
-                dspark_model      = draft.get();
-                draft_inputs      = &draft->inputs;
-                tail.draft_model_ = std::move(draft);
+                auto propose                 = std::make_unique<RecordingDSparkModel>(count, /*is_propose=*/true, 10);
+                dspark_model                 = propose.get();
+                draft_inputs                 = &propose->inputs;
+                tail.draft_model_            = std::move(propose);
+                auto commit                  = std::make_unique<RecordingDSparkModel>(count, /*is_propose=*/false, 10);
+                commit_inputs                = &commit->inputs;
+                tail.sp_prefill_draft_model_ = std::move(commit);
+                tail.draft_vocab_size_       = 128;
             } else {
                 auto draft        = std::make_unique<RecordingDraftModel>();
                 draft_inputs      = &draft->inputs;
@@ -2313,7 +2389,8 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                     wire->received_tensors.push_back(object);
                 }
                 const auto sends_before = wire->sent_tensors.size();
-                const auto draft_before = draft_inputs->size();
+                const auto draft_before  = draft_inputs->size();
+                const auto commit_before = commit_inputs ? commit_inputs->size() : 0u;
                 if (dspark_model) {
                     dspark_model->first_token_ = 10 + round * 4;
                 }
@@ -2321,19 +2398,20 @@ TEST_F(PPBatchStreamProcessorTest, TailExecutionFeedsNextHeadPlanAcrossRounds) {
                 ASSERT_EQ(wire->sent_tensors.size(), sends_before + 2);
                 const auto result = pp_serialization::deserializeExecutionResult(wire->sent_tensors.back());
                 EXPECT_EQ(tensorToVector<int32_t>(result.accept_len), lengths);
-                ASSERT_EQ(draft_inputs->size(), draft_before + (dspark_model ? 2 : count));
+                ASSERT_EQ(draft_inputs->size(), draft_before + (dspark_model ? 1 : count));
+                if (dspark_model) {
+                    ASSERT_EQ(commit_inputs->size(), commit_before + 1);
+                }
                 EXPECT_EQ(result.propose_token_ids.sizes().vec(), (std::vector<int64_t>{2, count}));
                 if (dspark_model) {
-                    const auto& commit = draft_inputs->at(draft_before);
-                    EXPECT_EQ(commit.dspark_call_phase, DSparkCallPhase::COMMIT);
+                    const auto& commit = commit_inputs->at(commit_before);
                     EXPECT_TRUE(torch::equal(commit.combo_tokens, plan.model_input.combo_tokens));
                     EXPECT_TRUE(torch::equal(commit.input_lengths, plan.model_input.input_lengths));
                     EXPECT_TRUE(torch::equal(commit.prefix_lengths, plan.model_input.prefix_lengths));
                     EXPECT_TRUE(
                         torch::equal(commit.last_hidden_states,
                                      target_model->getMtpTargetHiddenStates(plan.model_input.combo_tokens.numel())));
-                    const auto& propose = draft_inputs->at(draft_before + 1);
-                    EXPECT_EQ(propose.dspark_call_phase, DSparkCallPhase::PROPOSE);
+                    const auto& propose = draft_inputs->at(draft_before);
                     const auto expected_prefix =
                         plan.model_input.prefix_lengths.cpu()
                         + (round == 0 ? plan.model_input.input_lengths.cpu() : intTensor(lengths));

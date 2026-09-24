@@ -87,9 +87,9 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     return output;
 }
 
-SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
-                                                     SamplerOutput&                      draft_sampler_output,
-                                                     SamplerOutput&                      target_sampler_output) {
+SpeculativeSamplerOutput SpeculativeSampler::forward(const SpeculativeSamplingParams& params,
+                                                    SamplerOutput&                   draft_sampler_output,
+                                                    SamplerOutput&                   target_sampler_output) {
     // TensorHolder release point (SpeculativeSampler): advances host tensors
     // staged for rejection sampling H2D in the previous forward.
     buffer_holder_.release();
@@ -124,13 +124,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&         sample_ou
         target_token_ids_d_t = target_token_ids_d_t.to(target_device, true);
     }
 
-    torch::Tensor do_sample =
-        torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
-    int stream_idx = 0;
-    for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = stream->generateConfig()->stochastic();
-        stream_idx++;
-    }
+    const auto& do_sample = params.do_sample;
     buffer_holder_.hold_host(do_sample);
     auto do_sample_d = do_sample.to(target_device, true);
 

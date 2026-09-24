@@ -501,6 +501,11 @@ struct RuntimeConfig {
 
     std::string              model_name = "";
     std::vector<std::string> worker_grpc_addrs;
+    // TP-scoped grpc addresses of the current PP stage's tp workers, used by the
+    // block_tree_cache multi-rank block transfer. worker_grpc_addrs spans all PP
+    // stages (PD cache-store loadCache needs every prefill rank), so the TP-scoped
+    // broadcast must not reuse it under PP.
+    std::vector<std::string> tp_broadcast_grpc_addrs;
     std::vector<std::string> worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig

@@ -37,6 +37,12 @@ bool HybridTypeKVCacheAllocator::doInit() {
     const int group_nums = config_.groupNums();
     kv_cache_groups_.reserve(group_nums);
 
+    // Shared physical blocks can contain FP32 SSM bytes when reassigned to attention.
+    const bool zero_full_blocks = !config_.use_independent_block_pools
+        && std::any_of(config_.topology().groups().begin(), config_.topology().groups().end(),
+                       [](const GroupBase& group) {
+                           return group.spec && group.spec->type == KVCacheSpecType::LinearAttention;
+                       });
     for (int group_id = 0; group_id < group_nums; ++group_id) {
         const auto& cache_group = config_.topology().groupById(static_cast<size_t>(group_id));
         const auto& spec        = cache_group.spec;
@@ -50,7 +56,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
             group = std::make_shared<LinearKVCacheGroup>(cache_group, block_pool_, group_id, config_.linear_step);
             linear_group_ids_.push_back(group_id);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, group_id);
+            group = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, group_id, zero_full_blocks);
             full_group_ids_.push_back(group_id);
         }
 

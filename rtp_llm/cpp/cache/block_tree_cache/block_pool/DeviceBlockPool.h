@@ -57,6 +57,10 @@ public:
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
 
+    // Zero the KV payload of freshly allocated physical blocks before the first model
+    // write; needed when a shared pool reassigns FP32 SSM blocks to BF16 full-attention.
+    void zeroBlocks(const torch::Tensor& block_ids);
+
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
     int64_t getMrCostTimeMs() const {

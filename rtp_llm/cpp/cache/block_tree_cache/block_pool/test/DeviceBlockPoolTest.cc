@@ -395,6 +395,54 @@ TEST(DeviceBlockPoolTest, ExposesAllocatorFacingLayerTensorsAndBuffers) {
     EXPECT_TRUE(infos[0].is_cuda);
 }
 
+TEST(DeviceBlockPoolTest, ZeroBlocksClearsSelectedPhysicalBlocksAndPreservesLiveCache) {
+    // BF16 full-attention pool over a shared physical block: reproduces the case where a
+    // block freed by an FP32 SSM group is reassigned to attention and its stale finite
+    // FP32 bytes read as BF16 NaNs in the unwritten tail.
+    rtp_llm::CacheConfig cache_config = rtp_llm::test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/4, /*block_num=*/10, /*tokens_per_block=*/1, rtp_llm::TYPE_BF16,
+        /*local_head_num_kv=*/1, /*size_per_head=*/64);
+    auto config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
+    config->pool_name                 = "device_bf16";
+    config->use_device_malloc_backing = true;
+
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    // Rebuild the {layer, block, stride} byte view over the KV pool via the public base
+    // address; the pool keeps cache_aligned_buffer_ private.
+    const auto& layout = config->memory_layouts.front();
+    auto        bytes  = torch::from_blob(pool.getBaseAddress(),
+                                         {static_cast<int64_t>(config->total_size_bytes)},
+                                         torch::TensorOptions(torch::kUInt8).device(torch::kCUDA))
+                          .narrow(0, layout.kv_cache_offset_bytes, layout.kv_block_pool_size_bytes)
+                          .view({static_cast<int64_t>(layout.layer_num),
+                                 static_cast<int64_t>(layout.block_num),
+                                 static_cast<int64_t>(layout.kv_block_stride_bytes)});
+
+    // 0xbc827f88 is a finite FP32 whose low 16 bits (0x7f88) are a BF16 NaN.
+    bytes.view(torch::kInt32).fill_(static_cast<int32_t>(0xbc827f88u));
+    ASSERT_TRUE(torch::isfinite(bytes.view(torch::kFloat32)).all().item<bool>());
+    ASSERT_TRUE(torch::isnan(bytes.view(torch::kBFloat16)).any().item<bool>());
+
+    auto before = bytes.clone();
+    auto ids    = torch::tensor({int64_t{2}, int64_t{7}}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+    pool.zeroBlocks(ids);
+
+    for (int64_t block = 0; block < static_cast<int64_t>(layout.block_num); ++block) {
+        if (block == 2 || block == 7) {
+            EXPECT_TRUE((bytes.select(1, block) == 0).all().item<bool>());
+        } else {
+            EXPECT_TRUE(torch::equal(bytes.select(1, block), before.select(1, block)));
+        }
+    }
+
+    // A later call with no new allocations must preserve the freshly written KV.
+    bytes.select(1, 2).fill_(42);
+    pool.zeroBlocks(torch::Tensor());
+    EXPECT_TRUE((bytes.select(1, 2) == 42).all().item<bool>());
+}
+
 TEST(DeviceBlockPoolTest, RegUserMrWithoutCacheStoreIsNoOp) {
     auto            config = makeConfig();
     DeviceBlockPool pool(config);

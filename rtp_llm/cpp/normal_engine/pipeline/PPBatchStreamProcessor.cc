@@ -114,7 +114,7 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
         sampling_plan.random_seeds.push_back(config.random_seed);
         sampling_plan.num_return_sequences.push_back(config.num_return_sequences);
         if (sp_enabled_) {
-            sampling_plan.spec_do_sample.data_ptr<bool>()[stream_idx]  = !config.top1();
+            sampling_plan.spec_do_sample.data_ptr<bool>()[stream_idx]  = config.stochastic();
             sampling_plan.force_sp_accept.data_ptr<bool>()[stream_idx] = stream->forceSpAccept();
         }
 

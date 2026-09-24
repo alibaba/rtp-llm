@@ -335,13 +335,19 @@ def _create_process_groups(
                     f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                 )
                 # symm_mem init is per-member; only for groups this rank joins.
-                _get_symm_mem().init_symm_mem_communicator(tp_group)
+                _get_symm_mem().init_symm_mem_communicator(
+                    tp_group,
+                    disable_custom_all_reduce=disable_custom_all_reduce,
+                )
 
             # All ranks must wait for group creation to complete
             torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
-        _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+        _get_symm_mem().init_symm_mem_communicator(
+            torch.distributed.group.WORLD,
+            disable_custom_all_reduce=disable_custom_all_reduce,
+        )
 
     if pp_size > 1:
         # A distinct STAGE communicator is only needed when a stage spans more
@@ -360,20 +366,36 @@ def _create_process_groups(
                     logging.info(
                         f"[rank: {world_rank}] Stored STAGE group with key: {group_key} with ranks: {stage_ranks}"
                     )
-
-                _get_symm_mem().init_symm_mem_communicator(
-                    tp_group,
-                    disable_custom_all_reduce=disable_custom_all_reduce,
-                )
-
-                # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
-    elif tp_size > 1 and world_size == tp_size:
-        # Single TP group: WORLD is the TP group, init symm_mem for it
-        _get_symm_mem().init_symm_mem_communicator(
-            torch.distributed.group.WORLD,
-            disable_custom_all_reduce=disable_custom_all_reduce,
-        )
+
+        # PP groups: ranks of the same (dp_rank, tp_rank) lane across stages.
+        for pp_ranks in layout.groups(Group.PP):
+            first = layout.coord_of(pp_ranks[0])
+            logging.info(
+                f"[rank: {world_rank}] Creating PP group for dp_rank {first.dp}, "
+                f"tp_rank {first.tp} with ranks: {pp_ranks}"
+            )
+            pp_group = torch.distributed.new_group(
+                ranks=pp_ranks,
+                backend=backend,
+                timeout=timedelta(days=36500),
+            )
+            # Gloo twin of the lane group for CPU-object transport.
+            pp_gloo_group = torch.distributed.new_group(
+                ranks=pp_ranks,
+                backend="gloo",
+                timeout=timedelta(days=36500),
+            )
+            if world_rank in pp_ranks:
+                group_key = Group.PP.name + str(first.dp * tp_size + first.tp)
+                _group_map[group_key] = pp_group
+                _group_map[group_key + "_gloo"] = pp_gloo_group
+                logging.info(
+                    f"[rank: {world_rank}] Stored PP group with key: {group_key} {pp_group} with ranks: {pp_ranks}"
+                )
+            torch.distributed.barrier()
+    else:
+        _group_map[Group.STAGE] = torch.distributed.group.WORLD
 
 
 def _register_process_groups_to_cpp():
@@ -446,6 +468,17 @@ def _register_process_groups_to_cpp():
         if pg_world is not None:
             mode_to_group[_CPP_PARALLEL_MODE_TP] = pg_world
 
+    # pp>1 with dp=1: no distinct STAGE group was created above; alias STAGE to
+    # its TP group when one exists (tp>1), else leave it unregistered.
+    if (
+        _parallelism_config is not None
+        and _parallelism_config.pp_size > 1
+        and _CPP_PARALLEL_MODE_STAGE not in mode_to_group
+    ):
+        pg_tp = mode_to_group.get(_CPP_PARALLEL_MODE_TP)
+        if pg_tp is not None:
+            mode_to_group[_CPP_PARALLEL_MODE_STAGE] = pg_tp
+
     # If world_size == dp_size, WORLD is also the only DP group.
     if (
         _parallelism_config is not None
@@ -453,7 +486,7 @@ def _register_process_groups_to_cpp():
         and _parallelism_config.world_size == _parallelism_config.dp_size
         and _CPP_PARALLEL_MODE_DP not in registered_modes
     ):
-        pg_world = _group_map.get(Group.DP_AND_TP)
+        pg_world = _group_map.get(Group.WORLD)
         if pg_world is not None:
             mode_to_group[_CPP_PARALLEL_MODE_DP] = pg_world
 

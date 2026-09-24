@@ -24,6 +24,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
+#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -201,16 +204,17 @@ void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_r
 
 }  // namespace
 
-KVCacheManager::KVCacheManager(const CacheConfig&                 config,
-                               bool                               warmup,
-                               const kmonitor::MetricsReporterPtr metrics_reporter,
-                               const KVCacheConfig&               kv_cache_config,
-                               const ParallelismConfig&           parallelism_config,
-                               const RuntimeConfig&               runtime_config,
-                               const SpeculativeExecutionConfig&  sp_config,
-                               const PDSepConfig&                 pd_sep_config,
-                               const CacheStoreConfig& /*cache_store_config*/,
-                               bool use_device_malloc_block_pool):
+KVCacheManager::KVCacheManager(const CacheConfig&                              config,
+                               bool                                            warmup,
+                               const kmonitor::MetricsReporterPtr              metrics_reporter,
+                               const KVCacheConfig&                            kv_cache_config,
+                               const ParallelismConfig&                        parallelism_config,
+                               const RuntimeConfig&                            runtime_config,
+                               const SpeculativeExecutionConfig&               sp_config,
+                               const PDSepConfig&                              pd_sep_config,
+                               const CacheStoreConfig&                         /*cache_store_config*/,
+                               bool                                            use_device_malloc_block_pool,
+                               const std::shared_ptr<CacheCapacityNegotiator>& capacity_negotiator):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -220,6 +224,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     use_device_malloc_block_pool_(use_device_malloc_block_pool),
     warmup_(warmup),
+    capacity_negotiator_(capacity_negotiator),
     allocation_wait_state_(std::make_shared<KVCacheAllocationWaitState>()) {
     if (warmup) {
         config_.finalizeBlockNums(/*global_block_num=*/2, runtime_config_);
@@ -317,7 +322,7 @@ bool KVCacheManager::init() {
         pool->setCapacityChangeCallback(capacity_changed);
     }
     const bool requires_broadcast_manager = parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
-                                            && !runtime_config_.worker_grpc_addrs.empty();
+                                            && !runtime_config_.tp_broadcast_grpc_addrs.empty();
     std::shared_ptr<BroadcastManager> broadcast_manager;
     if (requires_broadcast_manager) {
         broadcast_manager = createMultiRankBlockTransferManager();
@@ -361,14 +366,14 @@ bool KVCacheManager::init() {
 
 std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferManager() const {
     const size_t expected_worker_count = static_cast<size_t>(parallelism_config_.tp_size);
-    if (runtime_config_.worker_grpc_addrs.size() != expected_worker_count) {
-        RTP_LLM_LOG_ERROR("KVCacheManager: worker grpc address count mismatch, expected=%zu, actual=%zu",
+    if (runtime_config_.tp_broadcast_grpc_addrs.size() != expected_worker_count) {
+        RTP_LLM_LOG_ERROR("KVCacheManager: tp broadcast grpc address count mismatch, expected=%zu, actual=%zu",
                           expected_worker_count,
-                          runtime_config_.worker_grpc_addrs.size());
+                          runtime_config_.tp_broadcast_grpc_addrs.size());
         return nullptr;
     }
 
-    auto broadcast_manager = std::make_shared<BroadcastManager>(runtime_config_.worker_grpc_addrs);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(runtime_config_.tp_broadcast_grpc_addrs);
     if (!broadcast_manager->init()) {
         RTP_LLM_LOG_ERROR("KVCacheManager: failed to initialize BlockTreeCache BroadcastManager");
         return nullptr;
@@ -529,7 +534,7 @@ void KVCacheManager::zeroBlocks(const torch::Tensor& block_ids) {
     if (!block_ids.defined() || block_ids.numel() == 0) {
         return;
     }
-    auto pool = allocator_->getBlockPool();
+    auto pool = allocator_->getDeviceBlockPool();
     RTP_LLM_CHECK_WITH_INFO(pool && !config_.use_independent_block_pools,
                             "block initialization requires the shared physical pool");
     pool->zeroBlocks(block_ids);

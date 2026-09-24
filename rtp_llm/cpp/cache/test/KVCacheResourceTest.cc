@@ -307,5 +307,16 @@ TEST(BlockIdsInitializationTest, PreservesRestoredPrefixAndConsumesOnce) {
     EXPECT_TRUE(ids.takeBlocksToZero().empty());
 }
 
+TEST(BlockIdsInitializationTest, SetAtCarriesFreshAllocationMarker) {
+    BlockIds ids(8);
+    ids.assign({1, 2});
+    // Backfill path: setAt installs a freshly allocated block that still needs zeroing.
+    ids.setAt(0, 5, /*needs_zero=*/true);
+    // Overwrite with an already-initialized block: the marker must drop.
+    ids.setAt(1, 6);
+    EXPECT_EQ(ids.takeBlocksToZero(), (BlockIndicesType{5}));
+    EXPECT_TRUE(ids.takeBlocksToZero().empty());
+}
+
 }  // namespace test
 }  // namespace rtp_llm

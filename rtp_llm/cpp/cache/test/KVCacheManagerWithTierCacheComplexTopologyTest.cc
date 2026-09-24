@@ -499,7 +499,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     ASSERT_TRUE(scheduler->enqueue(prefill_stream).ok());
     auto first_schedule = scheduler->schedule();
     ASSERT_TRUE(first_schedule.ok());
-    EXPECT_TRUE(first_schedule.value().empty());
+    EXPECT_TRUE(first_schedule.value().streams.empty());
     EXPECT_EQ(prefill_stream->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(prefill_stream->reuseLength(), block_size);
     EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
@@ -513,14 +513,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     engine->release();
     auto       second_schedule   = scheduler->schedule();
     const auto schedule_deadline = std::chrono::steady_clock::now() + kTransferWaitTimeout;
-    while (second_schedule.ok() && second_schedule.value().empty()
+    while (second_schedule.ok() && second_schedule.value().streams.empty()
            && std::chrono::steady_clock::now() < schedule_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         second_schedule = scheduler->schedule();
     }
     ASSERT_TRUE(second_schedule.ok());
-    ASSERT_EQ(second_schedule.value().size(), 1u);
-    EXPECT_EQ(second_schedule.value().front(), prefill_stream);
+    ASSERT_EQ(second_schedule.value().streams.size(), 1u);
+    EXPECT_EQ(second_schedule.value().streams.front(), prefill_stream);
     EXPECT_EQ(prefill_stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(prefill_stream->hasError());
     EXPECT_EQ(prefill_stream->reuseLength(), block_size);

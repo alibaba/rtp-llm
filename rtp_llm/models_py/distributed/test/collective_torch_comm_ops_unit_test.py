@@ -28,7 +28,7 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         with patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}), patch.object(
             collective,
             "_group_map",
-            {collective.Group.DP_AND_TP: process_group},
+            {collective.Group.WORLD: process_group},
         ), patch.object(collective, "_parallelism_config", config):
             collective._register_process_groups_to_cpp()
 
@@ -45,7 +45,7 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         result = allreduce(
             tensor,
             0,
-            collective._CPP_PARALLEL_MODE_DP_AND_TP,
+            collective._CPP_PARALLEL_MODE_WORLD,
             None,
         )
 
@@ -59,7 +59,7 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
         result = allreduce(
             tensor,
             0,
-            collective._CPP_PARALLEL_MODE_DP_AND_TP,
+            collective._CPP_PARALLEL_MODE_WORLD,
             dest,
         )
 
@@ -73,7 +73,7 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
 
         allgather(
             [recv],
-            collective._CPP_PARALLEL_MODE_DP_AND_TP,
+            collective._CPP_PARALLEL_MODE_WORLD,
             [send],
             False,
         )

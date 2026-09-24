@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import resolve_ssm_state_dtype
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Dense

@@ -224,7 +224,6 @@ void writeModelInput(ByteWriter& w, const GptModelInputs& in) {
     w.flag(in.is_fake_stream);
     w.flag(in.is_target_verify);
     w.flag(in.shutdown);
-    w.val<int32_t>(static_cast<int32_t>(in.dspark_call_phase));
 }
 
 void readModelInput(ByteReader& r, GptModelInputs& in) {
@@ -268,7 +267,6 @@ void readModelInput(ByteReader& r, GptModelInputs& in) {
     in.is_fake_stream            = r.flag();
     in.is_target_verify          = r.flag();
     in.shutdown                  = r.flag();
-    in.dspark_call_phase         = static_cast<DSparkCallPhase>(r.val<int32_t>());
 }
 
 void writeSamplingPlan(ByteWriter& w, const PPSamplingPlan& s) {

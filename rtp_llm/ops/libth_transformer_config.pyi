@@ -1305,6 +1305,7 @@ class ParallelismConfig:
     ffn_tp_size: int
     local_rank: int
     local_world_size: int
+    pp_rank: int
     pp_size: int
     prefill_cp_config: ...
     role_type: RoleType
@@ -1642,6 +1643,7 @@ class RuntimeConfig:
     model_warm_up: bool
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
+    tp_broadcast_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

@@ -1,13 +1,18 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <utility>
+
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
 namespace rtp_llm {
@@ -141,6 +146,123 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(remote->FindFieldByName("block_ids")->number(), 4);
     EXPECT_EQ(remote->FindFieldByName("uris")->number(), 5);
     EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
+}
+
+TEST(ModelRpcProtoTest, GenerateRequestCarriesPpTopologyFields) {
+    const auto* request = GenerateRequestPB::descriptor();
+    ASSERT_NE(request, nullptr);
+    EXPECT_EQ(request->FindFieldByName("peer_addrs")->number(), 7);
+    ASSERT_NE(request->FindFieldByName("stage_peer_groups"), nullptr);
+    EXPECT_EQ(request->FindFieldByName("stage_peer_groups")->number(), 12);
+
+    const auto* group = StagePeerGroupPB::descriptor();
+    ASSERT_NE(group, nullptr);
+    EXPECT_EQ(group->FindFieldByName("layer_begin")->number(), 1);
+    EXPECT_EQ(group->FindFieldByName("layer_count")->number(), 2);
+    EXPECT_EQ(group->FindFieldByName("peer_addrs")->number(), 3);
+}
+
+TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string                 request_key = "request";
+    const std::vector<std::string>    peer_addrs  = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    const std::vector<CacheKeyType>   cache_keys  = {101};
+    const GroupBlockIds               block_ids_by_group;
+    const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0", "prefill-1"}, false},
+                                                {{2, 2}, {"prefill-2", "prefill-3"}, true}};
+    const auto                        load_context =
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
+
+    const auto request = server.buildBroadcastLoadRequest(load_context);
+
+    // PP routing ignores the flat peer list and ships the stage groups instead.
+    EXPECT_EQ(request.peer_addrs_size(), 0);
+    ASSERT_EQ(request.stage_peer_groups_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(0).layer_begin(), 0);
+    EXPECT_EQ(request.stage_peer_groups(0).layer_count(), 2);
+    ASSERT_EQ(request.stage_peer_groups(0).peer_addrs_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(0).peer_addrs(1), "prefill-1");
+    EXPECT_EQ(request.stage_peer_groups(1).layer_begin(), 2);
+    EXPECT_EQ(request.stage_peer_groups(1).peer_addrs(0), "prefill-2");
+    EXPECT_FALSE(request.stage_peer_groups(0).is_last_stage());
+    EXPECT_TRUE(request.stage_peer_groups(1).is_last_stage());
+}
+
+TEST(DecodeRpcServerTest, PpMlaLoadRequestCarriesStagePeerGroups) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1"};
+    server.maga_init_params_.parallelism_config.tp_size = 1;
+
+    const std::string                 request_key = "request";
+    const std::vector<std::string>    peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType>   cache_keys  = {101};
+    const GroupBlockIds               block_ids_by_group;
+    const std::vector<StagePeerGroup> groups = {{{0, 2}, {"prefill-0"}}, {{2, 2}, {"prefill-1"}}};
+    const auto                        load_context =
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1, /*reuse=*/0, groups);
+
+    const auto request = server.buildBroadcastLoadRequest(load_context);
+
+    EXPECT_EQ(request.peer_addrs_size(), 0);
+    ASSERT_EQ(request.stage_peer_groups_size(), 2);
+    EXPECT_EQ(request.stage_peer_groups(1).peer_addrs(0), "prefill-1");
+}
+
+TEST(DecodeRpcServerTest, FlatLoadRequestCarriesRawPrefillPeers) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
+
+    // Flat ships the raw peer list; per-lane peer selection happens in loadCache.
+    const auto request = server.buildBroadcastLoadRequest(load_context);
+    ASSERT_EQ(request.peer_addrs_size(), 2);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
+    EXPECT_EQ(request.stage_peer_groups_size(), 0);
+}
+
+TEST(DecodeRpcServerTest, FlatLoadRequestCarriesSingleRawPrefillPeer) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
+
+    // A single prefill peer is shipped raw; the worker derives the source slice.
+    const auto request = server.buildBroadcastLoadRequest(load_context);
+    ASSERT_EQ(request.peer_addrs_size(), 1);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.stage_peer_groups_size(), 0);
+}
+
+TEST(DecodeRpcServerTest, MlaFlatLoadRequestCarriesRawPrefillPeers) {
+    DecodeRpcServer server;
+    server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    server.maga_init_params_.parallelism_config.tp_size = 2;
+
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    const GroupBlockIds             block_ids_by_group;
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
+
+    const auto request = server.buildBroadcastLoadRequest(load_context);
+    ASSERT_EQ(request.peer_addrs_size(), 2);
+    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
+    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
 }
 
 TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {
@@ -669,7 +791,7 @@ TEST_F(DecodeRpcBootstrapTest, PpMtpAndEaglePreserveUnpaddedHandoff) {
                 EXPECT_FALSE(buffer->hidden_states.defined());
                 EXPECT_FALSE(buffer->all_probs.defined());
                 EXPECT_EQ(stream->getProposeToken(), expected_tokens);
-                EXPECT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, -1);
+                EXPECT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, -1);
                 EXPECT_TRUE(torch::equal(stream->getContextPositionIds(), torch::tensor({2, 12}, torch::kInt32)));
             }
         }
@@ -766,7 +888,7 @@ TEST_F(DecodeRpcBootstrapTest, NonPipelineHandoffRestoresRemoteDraftState) {
                     EXPECT_TRUE(torch::equal(buffer->all_probs.cpu(), QueryConverter::transTensor(request.propose_probs())));
                     const auto& state = stream->getMtpAsyncDeviceState();
                     const bool async_enabled = stream_flag == "1" || mtp_flag == "1";
-                    EXPECT_EQ(state.next_real_seq_len, async_enabled ? 4 : -1);
+                    EXPECT_EQ(state.next_seq_len_upper_bound, async_enabled ? 4 : -1);
                     EXPECT_EQ(state.next_seq_len_gpu.defined(), async_enabled);
                 }
             }
@@ -804,7 +926,7 @@ TEST_F(DecodeRpcBootstrapTest, PpDSparkPreservesEmptyHandoff) {
             EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
             EXPECT_TRUE(stream->getProposeToken().empty());
             EXPECT_FALSE(stream->contain_propose_token_);
-            EXPECT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, -1);
+            EXPECT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, -1);
             EXPECT_FALSE(stream->getMtpAsyncDeviceState().propose_tokens_gpu.defined());
             EXPECT_TRUE(torch::equal(stream->getContextPositionIds(), torch::tensor({2, 12}, torch::kInt32)));
         }
@@ -839,7 +961,7 @@ TEST_F(DecodeRpcBootstrapTest, NonPipelineDSparkKeepsItsProposalContract) {
         ASSERT_TRUE(runHandoff(stream, makeRequest(false)).ok());
         EXPECT_EQ(engine_->enqueue_count, 1);
         EXPECT_EQ(processor_->update_calls, 1);
-        EXPECT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, -1);
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, -1);
         EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
         EXPECT_TRUE(stream->getProposeToken().empty());
     }
@@ -854,7 +976,7 @@ TEST_F(DecodeRpcBootstrapTest, AsyncFlagsNeverPublishUnsupportedPpState) {
         auto stream = makeStream();
         ASSERT_TRUE(runHandoff(stream, makeRequest()).ok());
         EXPECT_EQ(stream->getMtpAsyncDeviceState().epoch, 0);
-        EXPECT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, -1);
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, -1);
         EXPECT_FALSE(stream->getMtpAsyncDeviceState().propose_tokens_gpu.defined());
         EXPECT_FALSE(stream->getMtpAsyncDeviceState().last_hidden_states_gpu.defined());
     }

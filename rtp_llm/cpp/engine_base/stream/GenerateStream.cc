@@ -75,6 +75,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
+    auto& cum_log_probs_         = sampling_state_.cum_log_probs;
+    auto& logits_processor_list_ = sampling_state_.logits_processors;
+    auto& softmax_probs_         = sampling_state_.softmax_probs;
+    auto& generator_             = sampling_state_.generator;
     stream_async_reserve_ = useStreamAsyncReserveTokens();
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
@@ -871,6 +875,19 @@ StreamState GenerateStream::moveToNext() {
     return state;
 }
 
+void GenerateStream::setPPInflight() {
+    pp_inflight_.store(true, std::memory_order_release);
+}
+
+void GenerateStream::clearPPInflight() {
+    pp_inflight_.store(false, std::memory_order_release);
+}
+
+bool GenerateStream::isPPInflight() const {
+    return pp_inflight_.load(std::memory_order_acquire);
+}
+
+
 bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     if (getStatus() != StreamState::RUNNING || !hasPendingAsyncBookkeeping()) {
         return false;
@@ -1130,15 +1147,14 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info, bool up
     int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
-    if (update_info.draft_token >= 0) {
-        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
-                                "speculative token buffer must contain target and draft slots");
-        spec_tokens[1] = update_info.draft_token;
-        propose_token_ = {target_last_token, update_info.draft_token};
+    if (draft_count > 0) {
+        sp_output_buffer_->tokens.flatten().narrow(0, 1, draft_count).copy_(update_info.draft_tokens);
+        propose_token_.assign(spec_tokens, spec_tokens + draft_count + 1);
     } else {
-        // The legacy CPU side channel has no proposal. This covers both
-        // commit-only steps and GPU-only fast paths, so GPU proposal lifetime
-        // is controlled independently by draft_token_gpu below.
+        // Commit-only speculative steps (DSpARK prefill/decode tail) publish
+        // only accepted target tokens. Their next proposal is produced at the
+        // following decode round head and must not become persistent stream
+        // or PD side-channel state.
         propose_token_.clear();
     }
 

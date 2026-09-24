@@ -27,22 +27,26 @@ namespace rtp_llm {
 class RtpLLMCacheReuseMetricsCollector;
 class CPSlotMapper;
 class CacheStore;
+class CacheCapacityNegotiator;
+class KVCacheConnectorCoordinator;
+class KVCacheConnectorReadWriteContext;
 class BroadcastManager;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 
 class KVCacheManager {
 public:
-    KVCacheManager(const CacheConfig&                 config,
-                   bool                               warmup                       = false,
-                   const kmonitor::MetricsReporterPtr metrics_reporter             = nullptr,
-                   const KVCacheConfig&               kv_cache_config              = KVCacheConfig{},
-                   const ParallelismConfig&           parallelism_config           = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config               = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&  sp_config                    = SpeculativeExecutionConfig{},
-                   const PDSepConfig&                 pd_sep_config                = PDSepConfig{},
-                   const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
-                   bool                               use_device_malloc_block_pool = false);
+    KVCacheManager(const CacheConfig&                              config,
+                   bool                                            warmup             = false,
+                   const kmonitor::MetricsReporterPtr              metrics_reporter   = nullptr,
+                   const KVCacheConfig&                            kv_cache_config    = KVCacheConfig{},
+                   const ParallelismConfig&                        parallelism_config = ParallelismConfig{},
+                   const RuntimeConfig&                            runtime_config     = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&               sp_config          = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                              pd_sep_config      = PDSepConfig{},
+                   const CacheStoreConfig&                         cache_store_config = CacheStoreConfig{},
+                   bool                                            use_device_malloc_block_pool = false,
+                   const std::shared_ptr<CacheCapacityNegotiator>& capacity_negotiator        = nullptr);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -51,9 +55,11 @@ public:
         return allocator_ != nullptr;
     }
 
-    // TP0 owns request block allocation; other ranks only receive the block IDs.
+    // The first-stage TP0 owns request block allocation; other ranks only receive the block IDs.
+    // Under PP the block numbers are malloc'd by the first stage and shipped to peers, so a
+    // non-first stage's tp_rank==0 must not pin blocks it never allocated in its own pool.
     bool isAllocatorOwner() const {
-        return parallelism_config_.tp_rank == 0;
+        return parallelism_config_.pp_rank == 0 && parallelism_config_.tp_rank == 0;
     }
 
     const CacheConfig& cacheConfig() const;
@@ -196,6 +202,9 @@ private:
     KVCacheEventPublisherPtr           cache_event_publisher_;
     void                               initCacheEventPublisher();
     void                               stopCacheEventPublisher();
+    // Cross-stage capacity agreement hook, required under pp_size>1; consulted
+    // in allocateAndSync after the intra-stage TP/DP alignment.
+    const std::shared_ptr<CacheCapacityNegotiator> capacity_negotiator_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;

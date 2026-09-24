@@ -89,12 +89,7 @@ private:
     LoadCacheResult        loadCache(const LoadKVCacheContext& load_context);
     LoadCacheResult        loadCacheForAllRank(DecodeGenerateContext& decode_context);
     LoadCacheResult        loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
-    BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
-                                                      int                             index,
-                                                      const std::vector<std::string>& peer_ips) const;
-    BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
-                                                            int                             index,
-                                                            const std::vector<std::string>& peer_ips) const;
+    BroadcastLoadRequestPB buildBroadcastLoadRequest(const LoadKVCacheContext& load_context) const;
     static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
     static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string

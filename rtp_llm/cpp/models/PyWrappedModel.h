@@ -81,15 +81,21 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
-    GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
-    void            releaseBuffers() override;
-    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool            hasMtpTargetHiddenBuffer() const override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    std::string     waitCacheStorePublication() override;
+    /* Transport adapter: unpacks upstream intermediates into PyModelInputs.pp_intermediates,
+       delegates to forward() (the only compute path), and packs the model-emitted ones. */
+    GptModelOutputs       forwardPP(const GptModelInputs&        inputs,
+                                    const PPIntermediateTensors* input_tensors,
+                                    PPIntermediateTensors*       output_tensors) override;
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs) override;
+    GptModelOutputs       forwardMicroBatched(const GptModelInputs& inputs);
+    void                  releaseBuffers() override;
+    torch::Tensor         getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor         getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                  hasMtpTargetHiddenBuffer() const override;
+    void                  prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                  prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                  updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string           waitCacheStorePublication() override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -215,7 +221,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                is_prefill_cuda_graph_mode,
                                                                                params.parallelism_config.role_type,
                                                                                params.sp_config.type)),
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph),
+    // PP: CUDA graph stays off under pipeline parallelism; trunk's allow_cuda_graph
+    // already encodes the DSpARK role/prefill-graph gating.
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && pp_size_ == 1 && allow_cuda_graph),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :

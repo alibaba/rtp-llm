@@ -98,7 +98,7 @@ bool FullKVCacheGroup::malloc(BlockIds&                  block_ids,
 
     size_t allocated_index = 0;
     for (const size_t position : positions_to_backfill) {
-        block_ids.setAt(position, (*result)[allocated_index++]);
+        block_ids.setAt(position, (*result)[allocated_index++], zero_new_blocks_);
     }
     if (backfilled_positions != nullptr) {
         *backfilled_positions = positions_to_backfill;
@@ -110,7 +110,7 @@ bool FullKVCacheGroup::malloc(BlockIds&                  block_ids,
         new_blocks.push_back((*result)[allocated_index++]);
     }
     if (!new_blocks.empty()) {
-        block_ids.add(new_blocks);
+        block_ids.add(new_blocks, zero_new_blocks_);
     }
     RTP_LLM_CHECK_WITH_INFO(allocated_index == result->size(),
                             "full kv allocation accounting mismatch, used=%zu allocated=%zu",

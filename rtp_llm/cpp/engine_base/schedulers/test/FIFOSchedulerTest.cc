@@ -445,14 +445,14 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status1 = scheduler.schedule();
     ASSERT_TRUE(streams_status1.ok());
-    ASSERT_EQ(streams_status1.value().size(), 1);
+    ASSERT_EQ(streams_status1.value().streams.size(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_FALSE(stream->hasError());
 
     stream->setSeqLength(9);
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 1);
+    ASSERT_EQ(streams_status2.value().streams.size(), 1);
     ASSERT_FALSE(stream->hasError());
 }
 

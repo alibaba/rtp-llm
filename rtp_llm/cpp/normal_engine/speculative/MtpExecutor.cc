@@ -150,29 +150,6 @@ bool hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
     return true;
 }
 
-std::optional<ErrorInfo> validateMtpCompatibility(const std::vector<BaseLogitsProcessorPtr>& processors) {
-    for (size_t i = 0; i < processors.size(); ++i) {
-        const auto capability = processors[i]->mtpCapability();
-        if (capability.mode == MtpProcessorMode::UNSUPPORTED) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                             "MTP decode is incompatible with logits processor: processor_index=" + std::to_string(i)
-                                 + ", mode=unsupported, reason=" + std::string(capability.reason));
-        }
-    }
-    return std::nullopt;
-}
-
-void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
-#if USING_CUDA
-    if (tensor.defined() && tensor.is_cuda()) {
-        c10::cuda::CUDACachingAllocator::recordStream(tensor.storage().data_ptr(),
-                                                      at::cuda::getCurrentCUDAStream(tensor.device().index()));
-    }
-#else
-    (void)tensor;
-#endif
-}
-
 torch::Tensor toCudaWithHostHold(const torch::Tensor& tensor, TensorHolder& holder) {
     if (!tensor.defined() || tensor.is_cuda()) {
         return tensor;
@@ -199,64 +176,16 @@ torch::Tensor toCudaInt32WithHostHold(const torch::Tensor& tensor, TensorHolder&
     return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
-void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& verify_result,
-                                 const SamplerOutput&                        target_sampler_output,
-                                 speculative::SpeculativeSamplerOutput&      output,
-                                 int64_t                                     batch_size,
-                                 int64_t                                     propose_step) {
-    output.processor_errors = verify_result.processor_errors;
-    torch::Tensor cap_src   = verify_result.spec_cap_gpu;
-    if (!cap_src.defined() && verify_result.spec_cap_cpu.defined()) {
-        // Non-CUDA builds get no device mirror from the runner; upload the CPU
-        // cap so accept-len capping still applies (main parity).
-        cap_src = verify_result.spec_cap_cpu.to(output.accept_len.device());
-    }
-    if (!cap_src.defined()) {
-        return;
-    }
-    RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && output.accept_len.is_cuda(),
-                            "spec logits cap requires CUDA accept_len");
-
-    if (verify_result.ready_event) {
-        verify_result.ready_event->block(cuda_graph::graphGetCurrentStream());
-    }
-    recordSpecTensorUseOnCurrentStream(cap_src);
-    auto cap_gpu      = cap_src.to(output.accept_len.options());
-    auto cap_plus_one = cap_gpu + 1;
-    output.accept_len = torch::minimum(output.accept_len, cap_plus_one);
-
-    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.defined() && output.accept_tokens.is_cuda(),
-                            "spec logits cap requires CUDA accept_tokens");
-    RTP_LLM_CHECK_WITH_INFO(target_sampler_output.token_ids.defined(),
-                            "spec logits cap requires target sampler token_ids");
-    auto target_token_ids = target_sampler_output.token_ids;
-    if (!target_token_ids.is_cuda()) {
-        target_token_ids = target_token_ids.to(output.accept_tokens.device(), /*non_blocking=*/true);
-    }
-    const int64_t token_stride  = target_token_ids.size(1);
-    auto          target_tokens = target_token_ids.reshape({batch_size, propose_step + 1, token_stride})
-                             .select(2, token_stride - 1)
-                             .to(output.accept_tokens.options());
-    auto cap_index   = cap_src.to(torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong));
-    auto replacement = target_tokens.gather(1, cap_index.unsqueeze(1));
-
-    auto cols = torch::arange(propose_step + 1,
-                              torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong))
-                    .unsqueeze(0)
-                    .expand({batch_size, propose_step + 1});
-    auto replace_mask = (cap_gpu < propose_step).unsqueeze(1) & (output.accept_len > cap_gpu).unsqueeze(1)
-                        & (cols == cap_index.unsqueeze(1));
-    output.accept_tokens =
-        torch::where(replace_mask, replacement.expand({batch_size, propose_step + 1}), output.accept_tokens);
-
-    output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
-    output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
-    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
-    // The spec artifact is read by logits masking before sampling and by cap
-    // application here. Recording after cap keeps future artifact pools from
-    // reusing mask/cap storage before the sampler stream has consumed both.
-    if (verify_result.consumed_event) {
-        verify_result.consumed_event->record(cuda_graph::graphGetCurrentStream());
+speculative::SpeculativeSamplingParams gatherSpeculativeSamplingParams(const std::list<GenerateStreamPtr>& streams) {
+    speculative::SpeculativeSamplingParams params;
+    params.do_sample = torch::empty({(int64_t)streams.size()},
+                                    torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    params.force_accept = torch::empty({(int64_t)streams.size()}, torch::kBool);
+    for (const auto& stream : streams) {
+        const auto row = params.generators.size();
+        params.do_sample.data_ptr<bool>()[row]    = stream->generateConfig()->stochastic();
+        params.force_accept.data_ptr<bool>()[row] = stream->forceSpAccept();
+        params.generators.push_back(stream->getGenerator());
     }
 
     return params;
@@ -1048,6 +977,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     metrics_collector.not_skip = true;
 
+    // Freshly allocated blocks must be zeroed after the TP sync delivers their IDs
+    // and before the first model write; the field is then cleared so the later
+    // syncs in this step do not re-broadcast it.
+    cache_manager_->zeroBlocks(model_input.kv_cache_blocks_to_zero);
+    model_input.kv_cache_blocks_to_zero = torch::Tensor();
+
     // Any return or exception after DSpark PD work becomes possible must drain
     // local publication state. The normal path performs the TP-wide check below
     // and disarms this fallback; unwinding deliberately avoids collectives.
@@ -1497,6 +1432,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (proposal_input.skip_run) {
                 return absl::OkStatus();
             }
+            cache_manager_->zeroBlocks(proposal_input.kv_cache_blocks_to_zero);
+            // proposal_input shallow-copies model_input, so both handles name the same
+            // tensor: clear the pair to keep the step at exactly one zeroing.
+            proposal_input.kv_cache_blocks_to_zero = torch::Tensor();
+            model_input.kv_cache_blocks_to_zero    = torch::Tensor();
             ensureModelInputsOnCuda(proposal_input, "decode.dspark_proposal_after_tp_sync");
         }
         batch_size = proposal_input.input_lengths.size(0);
@@ -1538,6 +1478,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (model_input.skip_run) {
                 return absl::OkStatus();
             }
+            cache_manager_->zeroBlocks(model_input.kv_cache_blocks_to_zero);
+            model_input.kv_cache_blocks_to_zero = torch::Tensor();
             ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
         }
         batch_size = model_input.input_lengths.size(0);
@@ -1720,6 +1662,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             batch_stream_processor_->updateDecodePostDSparkCommitInput(
                 model_input, model_output.all_hidden_states, batch_size);
         } else {
+            // Batch cross-check lives here: only the executor sees both the scheduled batch_size and the sampler rows.
+            RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_len.numel() == static_cast<int64_t>(batch_size),
+                                    "accept_len batch mismatch: %ld != %zu",
+                                    speculative_sampler_output.accept_len.numel(),
+                                    batch_size);
             batch_stream_processor_->updateDecodePostDraftModelInput(
                 model_input, model_output, speculative_sampler_output, hidden_states_d_t, buffer_holder_);
         }

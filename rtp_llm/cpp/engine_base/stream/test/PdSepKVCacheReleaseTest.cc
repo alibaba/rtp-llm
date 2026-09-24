@@ -883,8 +883,6 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                                      decode_resource->groupBlocks(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
                                                      &server_context,
                                                      /*prefill_cp_size=*/cp_size);
     const auto                          result = server.loadCache(load_context);
@@ -1037,8 +1035,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      decode_resource->groupBlocks(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
                                                      &server_context);
     const auto                          result = server.loadCache(load_context);
     ASSERT_TRUE(result.ok()) << result.error_info.ToString();
@@ -1181,8 +1177,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                      decode_resource->groupBlocks(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
                                                      &server_context);
     const auto                          result = server.loadCache(load_context);
     ASSERT_TRUE(result.ok()) << result.error_info.ToString();
@@ -1329,8 +1323,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      decode_resource->groupBlocks(),
                                                      reuse_num,
                                                      /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
                                                      &server_context);
     const auto                          result = server.loadCache(load_context);
     ASSERT_TRUE(result.ok()) << result.error_info.ToString();

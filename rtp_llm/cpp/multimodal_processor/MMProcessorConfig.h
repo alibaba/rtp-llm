@@ -36,16 +36,21 @@ inline const char* vitSeparationName(VitSeparation separation) {
 }
 
 // Keep this ownership rule aligned with LanguageCppEngine in rpc_engine.py.
-inline bool ownsMultimodalIngress(RoleType role_type, int64_t tp_rank) {
-    return tp_rank == 0 && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL);
+// is_pp_stage_root mirrors the Python gate of the same name: under pipeline
+// parallelism only the leading stage admits requests and builds the processor,
+// so a later stage's tp_rank 0 owns no ingress and must not be required to.
+inline bool ownsMultimodalIngress(RoleType role_type, int64_t tp_rank, bool is_pp_stage_root) {
+    return tp_rank == 0 && is_pp_stage_root
+           && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL);
 }
 
 inline MMProcessorKind resolveMMProcessorKind(bool          is_multimodal,
                                               VitSeparation vit_separation,
                                               bool          has_local_engine,
                                               RoleType      role_type,
-                                              int64_t       tp_rank) {
-    if (!is_multimodal || !ownsMultimodalIngress(role_type, tp_rank)) {
+                                              int64_t       tp_rank,
+                                              bool          is_pp_stage_root) {
+    if (!is_multimodal || !ownsMultimodalIngress(role_type, tp_rank, is_pp_stage_root)) {
         return MMProcessorKind::NONE;
     }
     if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
@@ -57,14 +62,16 @@ inline MMProcessorKind resolveMMProcessorKind(bool          is_multimodal,
     return MMProcessorKind::INVALID;
 }
 
-inline std::string mmProcessorConfigError(VitSeparation vit_separation,
-                                          bool          has_local_engine,
-                                          RoleType      role_type,
-                                          int64_t       tp_rank,
+inline std::string mmProcessorConfigError(VitSeparation      vit_separation,
+                                          bool               has_local_engine,
+                                          RoleType           role_type,
+                                          int64_t            tp_rank,
+                                          bool               is_pp_stage_root,
                                           const std::string& model_type) {
     return "invalid multimodal processor config: vit_separation=" + std::string(vitSeparationName(vit_separation))
            + ", has_local_engine=" + (has_local_engine ? "true" : "false") + ", role_type="
-           + roleTypeToString(role_type) + ", tp_rank=" + std::to_string(tp_rank) + ", model_type=" + model_type
+           + roleTypeToString(role_type) + ", tp_rank=" + std::to_string(tp_rank) + ", is_pp_stage_root="
+           + (is_pp_stage_root ? "true" : "false") + ", model_type=" + model_type
            + " (most likely cause: LanguageCppEngine did not create mm_process_engine for this"
              " process -- see rtp_llm/async_decoder_engine/rpc_engine.py)";
 }
@@ -83,10 +90,12 @@ inline MMProcessorDecision resolveAndLogMMProcessorKind(bool               is_mu
                                                         bool               has_local_engine,
                                                         RoleType           role_type,
                                                         int64_t            tp_rank,
+                                                        bool               is_pp_stage_root,
                                                         const std::string& model_type,
                                                         const std::string& entry) {
     MMProcessorDecision decision;
-    decision.kind = resolveMMProcessorKind(is_multimodal, vit_separation, has_local_engine, role_type, tp_rank);
+    decision.kind =
+        resolveMMProcessorKind(is_multimodal, vit_separation, has_local_engine, role_type, tp_rank, is_pp_stage_root);
 
     const std::string described = "entry=" + entry + ", vit_separation=" + vitSeparationName(vit_separation)
                                   + ", role_type=" + roleTypeToString(role_type)
@@ -99,7 +108,8 @@ inline MMProcessorDecision resolveAndLogMMProcessorKind(bool               is_mu
         RTP_LLM_LOG_WARNING("this process does not own multimodal ingress: %s", described.c_str());
     }
     if (decision.kind == MMProcessorKind::INVALID) {
-        decision.error = mmProcessorConfigError(vit_separation, has_local_engine, role_type, tp_rank, model_type);
+        decision.error =
+            mmProcessorConfigError(vit_separation, has_local_engine, role_type, tp_rank, is_pp_stage_root, model_type);
     }
     return decision;
 }

@@ -3,8 +3,8 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
-#include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 
 namespace rtp_llm {
 
@@ -177,9 +177,6 @@ protected:
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
-    torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
-    torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
-    torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
     int64_t dsparkQueryWidth() const {
         return propose_step_ + static_cast<int64_t>(!dspark_sample_from_anchor_);
     }
@@ -190,7 +187,7 @@ protected:
     int32_t dspark_mask_token_id_         = -1;
     bool    dspark_sample_from_anchor_     = true;
 
-    // DSpARK proposal constants are grow-only device buffers. Keeping them on
+    // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
     // introduced on the scheduling thread.
     mtp::DSparkProposeInputBuffers dspark_propose_input_buffers_;

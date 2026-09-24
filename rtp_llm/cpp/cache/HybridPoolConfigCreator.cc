@@ -236,15 +236,11 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         const auto& spec = config.specForGroup(gid);
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
         const auto   layer_count      = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
-        const size_t kernel_kv_stride = spec->block_size_bytes();
-        const auto   kernel_scale     = spec->scale_block_size_bytes();
-        // MHA/MLA specs already describe one physical block. Compressed
-        // OpaqueKV specs describe one kernel block and must be repeated to
-        // fill the physical block.
-        const size_t group_bpk =
-            spec->type == KVCacheSpecType::OpaqueKV ? config.kernelBlocksPerKvBlockForGroup(gid) : 1;
-        const size_t kv_stride           = kernel_kv_stride * group_bpk;
-        const size_t scale_stride        = kernel_scale * group_bpk;
+        // CompressedKVCacheSpec::block_size_bytes() already assembles the physical
+        // block (kernel stride * kernel_blocks_per_kv_block), so the stride needs no
+        // further per-group bpk multiplication; MHA/MLA specs are physical too.
+        const size_t kv_stride           = spec->block_size_bytes();
+        const size_t scale_stride        = spec->scale_block_size_bytes();
         group_kv_block_stride_bytes[gid] = kv_stride;
         group_kv_scale_stride_bytes[gid] = scale_stride;
         const auto type                  = config.typeForGroup(gid);

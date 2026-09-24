@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 import torch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.pp_layout import derive_pp_rank
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
     LoadConfig,
@@ -274,6 +275,7 @@ def update_worker_addrs(
         return
     worker_addrs = []
     worker_grpc_addrs = []
+    tp_broadcast_grpc_addrs = []
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
         if (
@@ -287,12 +289,24 @@ def update_worker_addrs(
                 f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
             )
             worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
+            if (
+                derive_pp_rank(
+                    member.world_rank,
+                    parallelism_config.dp_size,
+                    parallelism_config.tp_size,
+                )
+                == parallelism_config.pp_rank
+            ):
+                tp_broadcast_grpc_addrs.append(
+                    f"{member.ip}:{member.rpc_server_port}"
+                )
             logging.info(
                 f"append member for pd sep "
                 f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
                 f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
             )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs
+    runtime_config.tp_broadcast_grpc_addrs = tp_broadcast_grpc_addrs
     runtime_config.worker_addrs = worker_addrs
 
 

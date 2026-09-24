@@ -378,8 +378,18 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                                      params.py_sp_model,
                                                      false,
                                                      false,
-                                                     is_dspark_,
-                                                     is_dspark_ ? DSparkCallPhase::COMMIT : DSparkCallPhase::NONE);
+                                                     is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
+                                                     /*allow_cuda_graph=*/false);
+                if (is_dspark_) {
+                    // DSpARK commit is a distinct fixed-width graph contract; give it its own role wrapper.
+                    sp_prefill_draft_model_ = std::make_unique<PyWrappedModel>(draft_init_params,
+                                                                               params.py_sp_model,
+                                                                               false,
+                                                                               false,
+                                                                               DSparkModelRole::COMMIT,
+                                                                               /*allow_cuda_graph=*/false);
+                    draft_vocab_size_ = draft_params->model_config_.vocab_size;
+                }
             } else if (test_model_factory) {
                 draft_model_ = test_model_factory(draft_init_params);
             } else {
@@ -393,6 +403,11 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
             const auto& d2t_map       = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
             if (!is_dspark_) {
                 fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>(d2t_map);
+            } else {
+                dspark_markov_w1_ = draft_weights.dspark_markov_w1;
+                dspark_markov_w2_ = draft_weights.dspark_markov_w2;
+                RTP_LLM_CHECK_WITH_INFO(dspark_markov_w1_.defined() && dspark_markov_w2_.defined(),
+                                        "PP DSpARK requires markov_w1 and markov_w2 weights");
             }
             speculative_sampler_       = std::make_unique<speculative::SpeculativeSampler>(d2t_map, propose_step_);
             spec_logits_verify_runner_ = std::make_unique<SpecLogitsVerifyRunner>();
@@ -743,8 +758,6 @@ void PPExecutor::runDSparkCommit(const GptModelInputs& target_input, const GptMo
 
     auto commit_input               = target_input;
     commit_input.last_hidden_states = torch::Tensor();
-    commit_input.is_target_verify   = false;
-    commit_input.dspark_call_phase  = DSparkCallPhase::COMMIT;
     tpSyncModelInputs(commit_input, parallelism_config_);
     /** Sync shared geometry before binding rank-local target features. */
     mtp::prepareDSparkCommitInput(commit_input, target_features);
@@ -756,16 +769,18 @@ void PPExecutor::runDSparkCommit(const GptModelInputs& target_input, const GptMo
     if (model_inputs_logger_) {
         model_inputs_logger_->log(commit_input, ModelInputsModelRole::DRAFT, draft_model_->model_id_);
     }
-    (void)draft_model_->forward(commit_input);
+    (void)sp_prefill_draft_model_->forward(commit_input);
 }
 
-torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs draft_input, size_t num_draft_tokens) {
+torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs      draft_input,
+                                              size_t              num_draft_tokens,
+                                              const torch::Tensor& dspark_anchors,
+                                              const torch::Tensor& dspark_temperature) {
     RTP_LLM_PROFILE_SCOPE("executor.pp.propose_draft_tokens");
     RTP_LLM_CHECK_WITH_INFO(draft_model_ != nullptr, "PP draft model is not initialized");
 
     if (is_dspark_) {
         tpSyncModelInputs(draft_input, parallelism_config_);
-        draft_input.dspark_call_phase = DSparkCallPhase::PROPOSE;
         if (cache_manager_) {
             const auto& draft_cache_config    = cache_manager_->getMTPModuleCacheConfig(0);
             draft_input.kv_block_stride_bytes = draft_cache_config.kv_block_stride_bytes;
@@ -778,14 +793,23 @@ torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs draft_input, size_t 
         torch::Tensor proposed_tokens;
         if (isStageRoot()) {
             const auto batch_size = draft_input.input_lengths.numel();
+            // The PROPOSE-role wrapper emits logits; trunk's Markov-bias draft sampling runs in
+            // C++. Its sampled token ids feed PP's unchanged point-mass verify path.
+            auto draft_sampler_output = speculative_sampler_->sampleDSparkDraft(draft_output.logits,
+                                                                                dspark_anchors,
+                                                                                dspark_temperature,
+                                                                                dspark_markov_w1_,
+                                                                                dspark_markov_w2_,
+                                                                                draft_vocab_size_);
             RTP_LLM_CHECK_WITH_INFO(
-                draft_output.draft_tokens.defined() && draft_output.draft_tokens.scalar_type() == torch::kInt32
-                    && draft_output.draft_tokens.dim() == 2 && draft_output.draft_tokens.size(0) == batch_size
-                    && draft_output.draft_tokens.size(1) == static_cast<int64_t>(num_draft_tokens),
+                draft_sampler_output.token_ids.defined()
+                    && draft_sampler_output.token_ids.scalar_type() == torch::kInt32
+                    && draft_sampler_output.token_ids.dim() == 2 && draft_sampler_output.token_ids.size(0) == batch_size
+                    && draft_sampler_output.token_ids.size(1) == static_cast<int64_t>(num_draft_tokens),
                 "PP DSpARK proposal must be int32 [%ld, %zu]",
                 batch_size,
                 num_draft_tokens);
-            proposed_tokens = draft_output.draft_tokens.to(torch::kCPU).contiguous();
+            proposed_tokens = draft_sampler_output.token_ids.to(torch::kCPU).contiguous();
         }
         cudaSyncAndCheck();
         return proposed_tokens;
@@ -904,6 +928,8 @@ void PPExecutor::runDraftStep(const PPExecutionPlan& plan,
         }
     }
     auto draft_input = plan.model_input;
+    torch::Tensor dspark_anchors;
+    torch::Tensor dspark_temperature;
     if (isStageRoot()) {
         /** Replace failed rows with draft placeholders; request_errors prevents their commit. */
         auto& accepted_tokens  = execution_result.new_token_ids;
@@ -954,13 +980,35 @@ void PPExecutor::runDraftStep(const PPExecutionPlan& plan,
                 anchors        = accepted_tokens.reshape({batch_size}).contiguous();
                 committed_ends = prefix_lengths + input_lengths;
             }
+            // Host-gathered anchors (already clipped and error-zeroed) cross to CUDA once;
+            // the propose-input builder and the draft sampler share this single device copy.
+            dspark_anchors = anchors.to(torch::kCUDA);
+            // PP proposes every slot of the gamma-wide block with the anchor in slot 0.
             mtp::prepareDSparkProposeInput(draft_input,
-                                           anchors,
+                                           dspark_anchors,
                                            committed_ends,
                                            propose_step_,
+                                           /*sample_from_anchor=*/true,
                                            dspark_mask_token_id_,
                                            dspark_propose_input_buffers_,
                                            buffer_holder_);
+            {
+                // Mirror trunk MtpExecutor::sampleDSparkDraft temperature gating: greedy rows
+                // collapse the draft q to argmax; stochastic rows use the request temperature.
+                const auto& sp         = plan.sampling_plan;
+                const auto  row_count  = sp.temperature.numel();
+                auto        t_cpu      = sp.temperature.to(torch::kCPU).to(torch::kFloat32).contiguous();
+                auto        d_cpu      = sp.spec_do_sample.to(torch::kCPU).to(torch::kBool).contiguous();
+                auto        eff        = torch::empty({row_count}, torch::TensorOptions().dtype(torch::kFloat32));
+                constexpr float kMinDraftTemperature = 1.0e-6f;
+                const float* tp = t_cpu.data_ptr<float>();
+                const bool*  dp = d_cpu.data_ptr<bool>();
+                float*       ep = eff.data_ptr<float>();
+                for (int64_t i = 0; i < row_count; ++i) {
+                    ep[i] = dp[i] ? std::max(tp[i], kMinDraftTemperature) : kMinDraftTemperature;
+                }
+                dspark_temperature = eff.to(torch::kCUDA);
+            }
             /** Only COMMIT publishes persistent draft KV state. */
             draft_input.request_id            = torch::Tensor();
             draft_input.request_pd_separation = torch::Tensor();
@@ -974,7 +1022,8 @@ void PPExecutor::runDraftStep(const PPExecutionPlan& plan,
     }
     /** MTP/EAGLE PD prefill hands off d1 after one draft forward; D pads the remaining candidate slots. */
     const size_t draft_count           = !is_dspark_ && role_type_ == RoleType::PREFILL ? 1 : propose_step_;
-    execution_result.propose_token_ids = proposeDraftTokens(std::move(draft_input), draft_count);
+    execution_result.propose_token_ids =
+        proposeDraftTokens(std::move(draft_input), draft_count, dspark_anchors, dspark_temperature);
 }
 
 absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {

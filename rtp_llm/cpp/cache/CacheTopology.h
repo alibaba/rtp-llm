@@ -33,6 +33,9 @@ struct GroupBase {
     size_t   kv_block_stride_bytes     = 0;
     size_t   kv_scale_stride_bytes     = 0;
 
+    // Column in the PP canonical group table (identical on every stage); unset keeps identity mapping.
+    size_t canonical_idx = kCanonicalIdxUnset;
+
     // Optional cache-key token coverage; physical allocation strides stay unchanged.
     size_t cache_key_token_stride = 0;
     size_t cacheKeyTokenStride() const {

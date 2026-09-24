@@ -8,8 +8,12 @@ namespace rtp_llm {
 
 class FullKVCacheGroup: public KVCacheGroup {
 public:
-    FullKVCacheGroup(GroupBase cache_group, DeviceBlockPoolPtr block_pool, int group_id):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id) {}
+    FullKVCacheGroup(GroupBase          cache_group,
+                     DeviceBlockPoolPtr block_pool,
+                     int                group_id,
+                     bool               zero_new_blocks = false):
+        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id),
+        zero_new_blocks_(zero_new_blocks) {}
 
     // Transition-only overload.
     FullKVCacheGroup(const LayerIdsType&          layer_ids,

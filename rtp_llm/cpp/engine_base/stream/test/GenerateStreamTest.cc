@@ -195,7 +195,7 @@ TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissin
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = -1,
+        .draft_tokens        = torch::Tensor(),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = std::nullopt,
@@ -220,7 +220,7 @@ TEST_F(GenerateStreamTest, mtpUpdateRefreshesGpuProposalWithMultipleDrafts) {
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = -1,
+        .draft_tokens        = torch::Tensor(),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = new_gpu_proposal,
@@ -247,7 +247,7 @@ TEST_F(GenerateStreamTest, mtpCpuProposalClearsStaleGpuMirror) {
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = 11,
+        .draft_tokens        = torch::tensor({11}, torch::kInt32),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = torch::Tensor(),

@@ -128,10 +128,10 @@ void BlockIds::assign(BlockIndicesType&& new_block_indices) {
     syncKernelBlocks();
 }
 
-void BlockIds::setAt(size_t pos, BlockIdxType val) {
+void BlockIds::setAt(size_t pos, BlockIdxType val, bool needs_zero) {
     RTP_LLM_CHECK(pos < block_indices.size());
     block_indices[pos] = val;
-    needs_zero_[pos] = 0;
+    needs_zero_[pos] = needs_zero ? 1 : 0;
     updateKernelSlotAt(pos, val);
 }
 
