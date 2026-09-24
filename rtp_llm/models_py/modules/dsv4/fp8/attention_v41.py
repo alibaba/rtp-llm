@@ -880,6 +880,11 @@ class AttentionV41FP8(AttentionFP8):
         # layers. Build through the mature SWA planner with this layer's RoPE.
         ratio = self.compress_ratio
         self.compress_ratio = 0
+        # Only compressed bounded consumers bypass prefix concat. Pure SWA
+        # still reads combined_indices even if bounded replay was requested.
+        kwargs["swa_write_only"] = (
+            bool(getattr(self, "swa_bounded_replay", False)) and ratio != 0
+        )
         reuse_common = kwargs.get("reuse_common_meta")
         try:
             cache = self._shared_attention.setdefault("prefill_meta_common", {})

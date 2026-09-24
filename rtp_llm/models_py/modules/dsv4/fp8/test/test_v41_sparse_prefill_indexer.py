@@ -436,6 +436,269 @@ class SparsePrefillCUDA(unittest.TestCase):
         cls.sparse = sparse_module()
         cls.device = torch.device("cuda")
 
+    def test_compact_ced_dispatch_dense_publication_and_sparse_consumers(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_batched_prefill_select as batched,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_deepselect as selector
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_grouped_prefill_score as grouped,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as topk
+        from rtp_llm.models_py.modules.dsv4.fp8 import attention_v41 as attention
+
+        torch.manual_seed(5801)
+        for batch in (1, 2, 32, 64):
+            for ratio in (1, 2):
+                with self.subTest(batch=batch, ratio=ratio):
+                    lengths = [7, 31, 128, 257] * 16
+                    counts = [2 * ((min(n, 128) + 7) // 8) for n in lengths[:batch]]
+                    widths = [1025 + 256 * (i % 4) for i in range(batch)]
+                    rows = sum(counts)
+                    q, sf = dense_indexer.quantize_indexer_q(
+                        torch.randn(
+                            rows, 32, 128, device=self.device, dtype=torch.bfloat16
+                        )
+                    )
+                    weights = torch.randn(rows, 32, device=self.device).contiguous()
+                    keys = []
+                    # Independent backing slabs must not be silently concatenated.
+                    split = batch if batch <= 2 else 19
+                    for first in range(0, batch, split):
+                        sizes = widths[first : first + split]
+                        padded = [(n + 255) // 256 * 256 for n in sizes]
+                        kp, ks = dense_indexer.quantize_indexer_q(
+                            torch.randn(
+                                sum(padded),
+                                128,
+                                device=self.device,
+                                dtype=torch.bfloat16,
+                            )
+                        )
+                        keys.extend(
+                            (None, dense_indexer.PrefillIndexerKeys(p[:n], s[:n]))
+                            for p, s, n in zip(
+                                kp.split(padded), ks.split(padded), sizes
+                            )
+                        )
+                    slices, start, positions, request_ids = [], 0, [], []
+                    for i, (n, width) in enumerate(zip(counts, widths)):
+                        slices.append(slice(start, start + n))
+                        start += n
+                        # Absolute positions near each request's causal tail.
+                        positions.extend(range(width * ratio - n, width * ratio))
+                        request_ids.extend([i] * n)
+                    positions = torch.tensor(
+                        positions, device=self.device, dtype=torch.int64
+                    )
+                    request_ids = torch.tensor(
+                        request_ids, device=self.device, dtype=torch.int32
+                    )
+                    full_fresh = torch.tensor(
+                        lengths[:batch], device=self.device, dtype=torch.int32
+                    )
+                    prefix = (
+                        torch.tensor(widths, device=self.device) * ratio - full_fresh
+                    )
+                    shared = {
+                        "ced_indexer_projection": object(),
+                        "candidates": torch.full(
+                            (rows, 128), -1, device=self.device, dtype=torch.int32
+                        ),
+                        "prefill_sparse_candidates": True,
+                    }
+                    owner = SimpleNamespace(
+                        _shared_attention=shared,
+                        layer_id=20,
+                        compress_ratio=ratio,
+                        index_topk=512,
+                        _cp_ctx=SimpleNamespace(
+                            prefix_lengths=prefix, input_lengths_global=full_fresh
+                        ),
+                    )
+                    output = torch.full(
+                        (rows, 512), -777, device=self.device, dtype=torch.int32
+                    )
+
+                    def dispatch():
+                        return batched.try_select_batched(
+                            owner,
+                            q,
+                            sf,
+                            weights,
+                            keys,
+                            slices,
+                            positions,
+                            output,
+                            candidate_source=20,
+                            publish_candidates=owner.layer_id == 20,
+                            candidate_size=8,
+                            candidate_blocks=128,
+                            req_ids=request_ids,
+                        )
+
+                    with patch.object(
+                        grouped, "try_grouped_scores", wraps=grouped.try_grouped_scores
+                    ) as grouped_call:
+                        self.assertEqual(dispatch(), batch > 1)
+                        self.assertEqual(grouped_call.call_count, int(batch > 1))
+                    if batch == 1:
+                        self.assertTrue((output == -777).all())
+                        continue
+                    reference_candidates = torch.full_like(shared["candidates"], -1)
+                    # Dense grouped logits and publication are compared with the
+                    # original per-request FP32 score boundary, never BF16-cast.
+                    for i, span in enumerate(slices):
+                        visible = (
+                            ((positions[span] + 1) // ratio).clamp(0, widths[i]).int()
+                        )
+                        zeros = torch.zeros_like(visible)
+                        logits = dense_indexer.score_indexer_chunk(
+                            q[span],
+                            sf[span],
+                            keys[i][1].quant,
+                            keys[i][1].scale,
+                            weights[span],
+                            visible,
+                            bounds=(zeros, visible),
+                        )
+                        expected = topk.try_select_tokens(
+                            logits, visible, 512, bounds=(zeros, visible)
+                        )
+                        self.assertIsNotNone(expected)
+                        self._assert_selected_score_contract(
+                            output[span], expected, logits, visible
+                        )
+                        reference = {
+                            "candidates": reference_candidates[span],
+                            "prefill_sparse_candidates": True,
+                        }
+                        attention._apply_prefill_candidates(
+                            reference,
+                            logits,
+                            visible,
+                            slice(0, span.stop - span.start),
+                            8,
+                            128,
+                            True,
+                        )
+                        torch.testing.assert_close(
+                            shared["candidates"][span].sort(1).values,
+                            reference_candidates[span].sort(1).values,
+                            rtol=0,
+                            atol=0,
+                        )
+
+                    expected = torch.empty_like(output)
+                    reference_logits, reference_ends = [], []
+                    for i, span in enumerate(slices):
+                        visible = (positions[span] + 1) // ratio
+                        plan = self.sparse.prepare_plan(
+                            shared["candidates"][span], visible, widths[i]
+                        )
+                        logits = self.sparse.score(
+                            q[span], sf[span], keys[i][1], weights[span], plan
+                        )
+                        selected = selector.try_select_sparse_tokens(logits, plan.end)
+                        self.sparse.remap(
+                            selected, plan, logits=logits, out=expected[span]
+                        )
+                        reference_logits.append(logits)
+                        reference_ends.append(plan.end)
+                    reference_logits = torch.cat(reference_logits)
+                    reference_ends = torch.cat(reference_ends)
+                    groups = self.sparse._batch_groups(
+                        [k for _, k in keys], slices, rows
+                    )
+                    self.assertLess(len(groups), batch)
+                    original_score = self.sparse.score
+
+                    for layer in (24, 28, 32, 36):
+                        owner.layer_id = layer
+                        seen = []
+
+                        def check_score(*args):
+                            value = original_score(*args)
+                            seen.append((value, args[-1]))
+                            return value
+
+                        with patch.object(
+                            self.sparse, "score", side_effect=check_score
+                        ) as scorer, patch.object(
+                            self.sparse, "prepare_plan", wraps=self.sparse.prepare_plan
+                        ) as prepare, patch.object(
+                            selector,
+                            "try_select_sparse_tokens",
+                            wraps=selector.try_select_sparse_tokens,
+                        ) as select:
+                            self.assertTrue(dispatch())
+                            self.assertEqual(scorer.call_count, len(groups))
+                            self.assertEqual(select.call_count, len(groups))
+                            self.assertEqual(
+                                prepare.call_count, len(groups) if layer == 24 else 0
+                            )
+                        combined = torch.cat([value for value, _ in seen])
+                        ends = torch.cat([plan.end for _, plan in seen])
+                        valid = (
+                            torch.arange(combined.shape[1], device=self.device)[None]
+                            < ends[:, None]
+                        )
+                        torch.testing.assert_close(ends, reference_ends, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            combined[valid], reference_logits[valid], rtol=0, atol=0
+                        )
+                        # BF16 ties may return different members: score values,
+                        # uniqueness and legal request-local membership must agree.
+                        for i, span in enumerate(slices):
+                            dense = torch.full(
+                                (span.stop - span.start, widths[i]),
+                                -torch.inf,
+                                device=self.device,
+                                dtype=torch.bfloat16,
+                            )
+                            plan = self.sparse.prepare_plan(
+                                shared["candidates"][span],
+                                (positions[span] + 1) // ratio,
+                                widths[i],
+                            )
+                            indices = (
+                                plan.sparse_indices.long()[:, :, None] * 8
+                                + torch.arange(8, device=self.device)
+                            ).flatten(1)
+                            mask = (
+                                torch.arange(indices.shape[1], device=self.device)[None]
+                                < plan.end[:, None]
+                            )
+                            rr = torch.arange(len(indices), device=self.device)[
+                                :, None
+                            ].expand_as(indices)
+                            dense[rr[mask], indices[mask]] = reference_logits[span][
+                                mask
+                            ]
+                            self._assert_selected_score_contract(
+                                output[span],
+                                expected[span],
+                                dense,
+                                ((positions[span] + 1) // ratio).int(),
+                            )
+
+    def _assert_selected_score_contract(self, actual, expected, logits, ends):
+        self.assertTrue(
+            ((actual == -1) | ((actual >= 0) & (actual < ends[:, None]))).all()
+        )
+        for row in actual:
+            valid = row[row >= 0]
+            self.assertEqual(valid.unique().numel(), valid.numel())
+        values = logits.gather(1, actual.clamp_min(0).long()).masked_fill(
+            actual < 0, -torch.inf
+        )
+        reference = logits.gather(1, expected.clamp_min(0).long()).masked_fill(
+            expected < 0, -torch.inf
+        )
+        torch.testing.assert_close(
+            values.sort(1).values, reference.sort(1).values, rtol=0, atol=0
+        )
+
     def assert_plans_equal(self, actual, expected):
         self.assertIsNotNone(actual)
         self.assertIsNotNone(expected)

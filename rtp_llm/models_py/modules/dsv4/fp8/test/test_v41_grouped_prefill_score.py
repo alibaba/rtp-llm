@@ -36,6 +36,207 @@ def key_views(widths, slab_counts, device="cpu"):
     return [Keys(**vars(key)) for key in result]
 
 
+class GroupedCEDDispatchCPU(unittest.TestCase):
+    def test_compact_consumers_reuse_full_key_counts_and_invalidate_replaced_cp(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_batched_prefill_select as batched,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_sparse_prefill_indexer as sparse,
+        )
+
+        for batch in (1, 2, 32, 64):
+            with self.subTest(batch=batch):
+                lengths = torch.tensor([129 + 17 * i for i in range(batch)])
+                prefixes = torch.tensor([512 * (i + 1) for i in range(batch)])
+                local_rows = [2 * ((min(int(n), 128) + 7) // 8) for n in lengths]
+                slices, start = [], 0
+                for count in local_rows:
+                    slices.append(slice(start, start + count))
+                    start += count
+                positions = torch.cat(
+                    [
+                        torch.arange(int(p + n) - count, int(p + n))
+                        for p, n, count in zip(prefixes, lengths, local_rows)
+                    ]
+                )
+                ids = torch.repeat_interleave(
+                    torch.arange(batch), torch.tensor(local_rows)
+                )
+                projection = unittest.mock.Mock(
+                    side_effect=AssertionError("reprojected compact weights")
+                )
+                shared = {
+                    "ced_indexer_projection": projection,
+                    "candidates": torch.zeros(start, 64, dtype=torch.int32),
+                }
+                owner = SimpleNamespace(
+                    _shared_attention=shared,
+                    layer_id=24,
+                    compress_ratio=2,
+                    index_topk=512,
+                    _cp_ctx=SimpleNamespace(
+                        prefix_lengths=prefixes, input_lengths_global=lengths
+                    ),
+                )
+                q, sf, weights, output = (
+                    SimpleNamespace(is_cuda=True),
+                    object(),
+                    object(),
+                    object(),
+                )
+                calls = []
+
+                def sparse_call(*args, **kwargs):
+                    self.assertIs(args[0], q)
+                    self.assertIs(args[1], sf)
+                    self.assertIs(args[2], weights)
+                    self.assertIs(args[5], positions)
+                    self.assertIs(args[7], shared["candidates"])
+                    self.assertIs(kwargs["req_ids"], ids)
+                    torch.testing.assert_close(
+                        kwargs["key_counts"],
+                        (
+                            (
+                                owner._cp_ctx.prefix_lengths
+                                + owner._cp_ctx.input_lengths_global
+                            )
+                            // 2
+                        ).int(),
+                    )
+                    calls.append(kwargs["key_counts"])
+                    return True
+
+                def dispatch():
+                    return batched.try_select_batched(
+                        owner,
+                        q,
+                        sf,
+                        weights,
+                        [None] * batch,
+                        slices,
+                        positions,
+                        output,
+                        candidate_source=20,
+                        publish_candidates=False,
+                        candidate_size=8,
+                        candidate_blocks=64,
+                        req_ids=ids,
+                    )
+
+                with patch.object(
+                    sparse, "try_batched_sparse", side_effect=sparse_call
+                ):
+                    for layer in (24, 28, 32, 36):
+                        owner.layer_id = layer
+                        self.assertEqual(dispatch(), batch > 1)
+                    if batch > 1:
+                        self.assertTrue(all(value is calls[0] for value in calls))
+                        shared["prefill_sparse_plans"] = object()
+                        owner._cp_ctx.prefix_lengths = prefixes + 512
+                        self.assertTrue(dispatch())
+                        self.assertIsNot(calls[0], calls[-1])
+                        self.assertNotIn("prefill_sparse_plans", shared)
+                        previous = calls[-1]
+                        owner._cp_ctx.input_lengths_global = lengths + 7
+                        self.assertTrue(dispatch())
+                        self.assertIsNot(previous, calls[-1])
+                projection.assert_not_called()
+
+    def test_compact_l20_dispatches_grouped_publication_without_reprojection(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_batched_prefill_select as batched,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as topk
+
+        for batch in (2, 32, 64):
+            with self.subTest(batch=batch):
+                counts = [
+                    2 * ((min(n, 128) + 7) // 8)
+                    for n in ([7, 31, 128, 257] * 16)[:batch]
+                ]
+                rows = sum(counts)
+                projection = unittest.mock.Mock(
+                    side_effect=AssertionError("unexpected projection")
+                )
+                shared = {
+                    "ced_indexer_projection": projection,
+                    "candidates": torch.full((rows, 64), -1, dtype=torch.int32),
+                }
+                owner = SimpleNamespace(
+                    _shared_attention=shared,
+                    layer_id=20,
+                    compress_ratio=2,
+                    index_topk=512,
+                    _cp_ctx=SimpleNamespace(
+                        prefix_lengths=torch.full((batch,), 4096),
+                        input_lengths_global=torch.arange(batch) + 128,
+                    ),
+                )
+                weights, positions, ids = object(), object(), object()
+                output = torch.full((rows, 512), -777, dtype=torch.int32)
+                logits, visible = torch.empty(rows, 512), torch.full(
+                    (rows,), 512, dtype=torch.int32
+                )
+                bounds = (torch.zeros_like(visible), visible)
+
+                def groups(*, mask_tail):
+                    self.assertFalse(mask_tail)
+                    yield slice(0, rows), logits, visible, bounds
+
+                def publish(shared_arg, score, ends, span, bound, target, block, count):
+                    self.assertIs(shared_arg, shared)
+                    self.assertIs(score, logits)
+                    target.copy_(torch.arange(512, dtype=torch.int32))
+                    shared["candidates"][span].copy_(
+                        torch.arange(64, dtype=torch.int32)
+                    )
+                    return True, target
+
+                with patch.object(
+                    grouped,
+                    "try_grouped_scores",
+                    return_value=SimpleNamespace(groups=groups),
+                ) as score, patch.object(
+                    batched, "_try_publish_with_tokens", side_effect=publish
+                ) as published, patch.object(
+                    topk,
+                    "try_select_tokens",
+                    side_effect=AssertionError("unexpected per-request fallback"),
+                ):
+                    self.assertTrue(
+                        batched.try_select_batched(
+                            owner,
+                            SimpleNamespace(is_cuda=True),
+                            None,
+                            weights,
+                            [None] * batch,
+                            [slice(0, rows)],
+                            positions,
+                            output,
+                            candidate_source=20,
+                            publish_candidates=True,
+                            candidate_size=8,
+                            candidate_blocks=64,
+                            req_ids=ids,
+                        )
+                    )
+                    score.assert_called_once()
+                    self.assertIs(score.call_args.args[2], weights)
+                    self.assertIs(score.call_args.kwargs["req_ids"], ids)
+                    published.assert_called_once()
+                    self.assertTrue(
+                        torch.equal(output, torch.arange(512).int().expand(rows, -1))
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            shared["candidates"],
+                            torch.arange(64).int().expand(rows, -1),
+                        )
+                    )
+                projection.assert_not_called()
+
+
 class GroupedScoreEnvironmentTest(unittest.TestCase):
     def _load(self, value):
         name = grouped.__name__ + "_environment_test"

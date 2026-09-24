@@ -3927,6 +3927,9 @@ class AttentionFP8(nn.Module):
         max_seqlen_q: int = 0,
         reuse_common_meta: Optional["PrefillMeta"] = None,
         reuse_freqs_meta: Optional["PrefillMeta"] = None,
+        reuse_swa_write_meta: Optional["SwaPrefillMeta"] = None,
+        host_swa_table: Optional[torch.Tensor] = None,
+        swa_write_only: bool = False,
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -4039,6 +4042,9 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     topk_length_kv_full=topk_length_kv_full,
+                    reuse_write_meta=reuse_swa_write_meta,
+                    host_swa_table=host_swa_table,
+                    write_only=swa_write_only,
                 )
             row_seqlens_full = torch.full(
                 (1,), seqlen_full, device=device, dtype=torch.long
@@ -4826,6 +4832,9 @@ class AttentionFP8(nn.Module):
         position_ids: torch.Tensor,
         req_id_per_token: torch.Tensor,
         topk_length_kv_full: Optional[torch.Tensor] = None,
+        reuse_write_meta: Optional[SwaPrefillMeta] = None,
+        host_swa_table: Optional[torch.Tensor] = None,
+        write_only: bool = False,
     ) -> SwaPrefillMeta:
         """Varlen path: B>=1, per-request tensor plumbing.
 
@@ -4850,7 +4859,7 @@ class AttentionFP8(nn.Module):
         req_id_per_token = _flat_1d(req_id_per_token)
 
         win = self.window_size
-        is_swa_only = self.compress_ratio == 0
+        is_swa_only = self.compress_ratio == 0 and not write_only
         num_tokens = seqlen  # T_total — flat token axis
 
         # Cache-independent fallback metadata. SWA-only always consumes this.
@@ -4941,21 +4950,40 @@ class AttentionFP8(nn.Module):
             write_combined_seq_lens = combined_seq_lens
             write_num_tokens = num_tokens
         bt_swa = bt[:write_B].to(device=device, dtype=torch.int32).contiguous()
-        slot_mapping = _swa_ops.compute_swa_slot_mapping(
-            block_table=bt_swa,
-            query_start_loc=write_query_start_loc,
-            seq_lens=write_combined_seq_lens,
-            num_tokens=write_num_tokens,
-            pool_entries_per_block=eb,
-            tokens_per_block_for_block_table=swa_tokens_per_block,
-            ring_entries=eb,
-        )
-        slot_compaction = self._build_swa_cp_byte_compaction(
-            slot_mapping,
-            full_entries_per_block=eb,
-            validation_site="swa.quantize_and_insert_cp_byte.slot_mapping",
-            negative_mode="skip_minus_one",
-        )
+        if reuse_write_meta is not None and reuse_write_meta.slot_mapping is not None:
+            slot_mapping = reuse_write_meta.slot_mapping
+            slot_compaction = reuse_write_meta.slot_compaction
+        else:
+            planned = None
+            if host_swa_table is not None and win == 128 and self._swa_cp_byte_sliced():
+                from ._v41_swa_metadata import try_host_slot_metadata
+
+                planned = try_host_slot_metadata(
+                    bt_swa,
+                    host_swa_table[:write_B],
+                    cp_ctx,
+                    entries=eb,
+                    span=swa_tokens_per_block,
+                    num_blocks=int(self._pool_raw_u8(SWA_KV).shape[0]),
+                )
+            if planned is not None:
+                slot_mapping, slot_compaction = planned
+            else:
+                slot_mapping = _swa_ops.compute_swa_slot_mapping(
+                    block_table=bt_swa,
+                    query_start_loc=write_query_start_loc,
+                    seq_lens=write_combined_seq_lens,
+                    num_tokens=write_num_tokens,
+                    pool_entries_per_block=eb,
+                    tokens_per_block_for_block_table=swa_tokens_per_block,
+                    ring_entries=eb,
+                )
+                slot_compaction = self._build_swa_cp_byte_compaction(
+                    slot_mapping,
+                    full_entries_per_block=eb,
+                    validation_site="swa.quantize_and_insert_cp_byte.slot_mapping",
+                    negative_mode="skip_minus_one",
+                )
 
         # CSA/HCA: Group-1 only. Their attention meta lives on workspace_meta.
         if not is_swa_only:
@@ -5000,7 +5028,19 @@ class AttentionFP8(nn.Module):
         # Single .item() sync per forward — ``combined_gather_lens`` already
         # encodes ``input_lengths[b] + min(prefix_lengths[b], win-1)`` per
         # request; its max is exactly ``combined_gather_len_max``.
-        combined_gather_len_max = int(combined_gather_lens.max().item())
+        host_prefixes = getattr(cp_ctx, "prefix_lengths_host", None)
+        host_lengths = getattr(cp_ctx, "input_lengths_global_host", None)
+        if (
+            hasattr(self, "swa_bounded_replay")
+            and cp_on_write
+            and host_prefixes is not None
+            and host_lengths is not None
+        ):
+            combined_gather_len_max = max(
+                n + min(p, win - 1) for p, n in zip(host_prefixes, host_lengths)
+            )
+        else:
+            combined_gather_len_max = int(combined_gather_lens.max().item())
         M = max(combined_gather_len_max, 1)
 
         # cache_* + combined_* only populated on continuation (via_concat).
@@ -5023,21 +5063,53 @@ class AttentionFP8(nn.Module):
                 .to(device=device, dtype=torch.int32)[:write_B]
                 .contiguous()
             )
-            cache_slot_mapping = _build_suffix_pool_slot_mapping(
-                block_table=bt_swa,
-                seq_lens=cache_seq_lens,
-                gather_lens=cache_gather_lens,
-                entries_per_block=eb,
-                tokens_per_block_for_block_table=swa_tokens_per_block,
-                ring_entries=eb,
-            )
-            cache_compaction = self._build_swa_cp_byte_compaction(
-                cache_slot_mapping,
-                full_entries_per_block=eb,
-                validation_site="swa.gather_cp_byte.slot_indices",
-                negative_mode="skip_any",
-                gather_lens=cache_gather_lens,
-            )
+            cache_slot_mapping = None
+            planned = None
+            if host_swa_table is not None and win == 128 and self._swa_cp_byte_sliced():
+                from ._v41_swa_metadata import try_host_slot_metadata
+
+                planned = try_host_slot_metadata(
+                    bt_swa,
+                    host_swa_table[:write_B],
+                    cp_ctx,
+                    entries=eb,
+                    span=swa_tokens_per_block,
+                    num_blocks=int(self._pool_raw_u8(SWA_KV).shape[0]),
+                    read=True,
+                )
+            if planned is not None:
+                cache_slot_mapping, cache_compaction = planned
+            elif hasattr(self, "swa_bounded_replay") and host_prefixes is not None:
+                from ._v41_swa_metadata import try_suffix_slots
+
+                cache_slot_mapping = try_suffix_slots(
+                    bt_swa,
+                    cache_seq_lens,
+                    cache_gather_lens,
+                    max_gather=max(
+                        (min(p, win - 1) for p in host_prefixes[:write_B]), default=0
+                    ),
+                    entries=eb,
+                    span=swa_tokens_per_block,
+                    ring=eb,
+                )
+            if cache_slot_mapping is None:
+                cache_slot_mapping = _build_suffix_pool_slot_mapping(
+                    block_table=bt_swa,
+                    seq_lens=cache_seq_lens,
+                    gather_lens=cache_gather_lens,
+                    entries_per_block=eb,
+                    tokens_per_block_for_block_table=swa_tokens_per_block,
+                    ring_entries=eb,
+                )
+            if planned is None:
+                cache_compaction = self._build_swa_cp_byte_compaction(
+                    cache_slot_mapping,
+                    full_entries_per_block=eb,
+                    validation_site="swa.gather_cp_byte.slot_indices",
+                    negative_mode="skip_any",
+                    gather_lens=cache_gather_lens,
+                )
             if cp_on_write:
                 # CP path: build per-Q-token attention meta with explicit
                 # rank-local CP positions. B>1 needs request offsets in the
@@ -5049,7 +5121,11 @@ class AttentionFP8(nn.Module):
                 combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices_cp(
                     topk_indices=topk_indices_empty,
                     global_positions=_flat_1d(cp_ctx.global_positions),
-                    sp_int=int(prefix_lengths[0].item()),
+                    sp_int=(
+                        host_prefixes[0]
+                        if host_prefixes
+                        else int(prefix_lengths[0].item())
+                    ),
                     window_size=win,
                     compress_ratio=1,
                     topk=0,

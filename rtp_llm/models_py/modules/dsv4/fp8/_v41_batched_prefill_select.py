@@ -74,13 +74,14 @@ def try_select_batched(
     shared = attn._shared_attention
     cp = getattr(attn, "_cp_ctx", None)
     if (
-        shared.get("ced_indexer_projection") is not None
-        or cp is None
+        cp is None
         or req_ids is None
         or cp.prefix_lengths is None
         or cp.input_lengths_global is None
     ):
         return False
+    # CED has already projected weights in original-owner geometry. Its compact
+    # query positions/IDs change, while these write-side KV lengths stay full.
     cache = shared.setdefault("prefill_score_bounds", {})
     counts_key = ("batch_key_counts", attn.compress_ratio)
     entry = cache.get(counts_key)

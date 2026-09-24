@@ -353,6 +353,7 @@ def forward_layers(
     # its fixed maximum Q and compressor CP capacities for allocator reuse.
     first_attn = getattr(next(iter(v4.layers), None), "attn", None)
     shared_prefill = getattr(first_attn, "_shared_attention", None)
+    prefill_write_by_region = None
     if shared_prefill is not None:
         release_v41_prefill_shared(shared_prefill)
 
@@ -530,7 +531,7 @@ def forward_layers(
             # embedding could fragment its cached address range.  It remains a
             # per-forward local so the MTP draft can reuse the block immediately.
             assert ws is not None
-            build_and_propagate_prefill_meta_fp8(
+            prefill_write_by_region = build_and_propagate_prefill_meta_fp8(
                 v4,
                 h,
                 sp_int_for_meta,
@@ -545,6 +546,7 @@ def forward_layers(
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
                 workspace=ws,
+                host_block_ids=getattr(attn_inputs, "kv_cache_block_id_host", None),
             )
 
     layer_forward_range = _profiler.make_layer_forward_range()
@@ -612,7 +614,13 @@ def forward_layers(
                             req_id_per_token=cp_ctx.req_id_per_token,
                             max_seqlen_q=max(cp_ctx.chunk_lengths_per_req),
                             workspace=ws,
+                            first_layer=21,
+                            reuse_write_by_region=prefill_write_by_region,
+                            host_block_ids=getattr(
+                                attn_inputs, "kv_cache_block_id_host", None
+                            ),
                         )
+                        prefill_write_by_region = None
                 with layer_forward_range(layer_idx):
                     with (
                         ced_tail.candidate_publication(shared_prefill)
@@ -678,6 +686,7 @@ def forward_layers(
                             )
                         _rt.record(f"layer{layer_idx:02d}_last", layer_last)
     finally:
+        prefill_write_by_region = None
         # Always drop the per-layer ``common.workspace`` references, even if a
         # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
         # the exact case this per-forward workspace exists to relieve). The

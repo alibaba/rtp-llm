@@ -14,7 +14,7 @@ asserted to be ``AttentionFP8``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional
 
 import torch
 
@@ -29,6 +29,14 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 def _flat_optional(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return None if t is None else t.reshape(-1).contiguous()
+
+
+class _SwaWriteSource(NamedTuple):
+    cp_ctx: Any
+    slot_mapping: Any
+    slot_compaction: Any
+    kv_cache: Any
+    block_table: Any
 
 
 def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> None:
@@ -104,7 +112,10 @@ def build_and_propagate_prefill_meta_fp8(
     req_id_per_token: Optional[torch.Tensor] = None,
     max_seqlen_q: int = 0,
     workspace: "PrefillWorkspace",
-) -> None:
+    first_layer: int = 0,
+    reuse_write_by_region: Optional[Dict] = None,
+    host_block_ids: Optional[torch.Tensor] = None,
+) -> Dict:
     """Build the layer-invariant prefill meta once per ``compress_ratio``
     bucket and broadcast each bucket's meta to its layers'
     ``AttentionFP8._prefill_meta_shared``.
@@ -118,9 +129,8 @@ def build_and_propagate_prefill_meta_fp8(
     ``_pool_entries_per_block`` / FP8-pool-bound checks resolve without
     threading the framework handles through every signature.
 
-    All three ratios must be prepared even if the request only exercises
-    one of them, because every layer's ``forward`` reads its own
-    ``_prefill_meta_shared`` and we propagate that here.
+    Only remaining layers are rebuilt after CED changes the query domain.
+    Returned write metadata is owned by this forward and is never a global cache.
     """
     sp_per_req = _flat_optional(sp_per_req)
     cu_seqlens = _flat_optional(cu_seqlens)
@@ -136,7 +146,7 @@ def build_and_propagate_prefill_meta_fp8(
         )
 
     representatives: Dict[tuple, Any] = {}
-    for layer in v4.layers:
+    for layer in v4.layers[first_layer:]:
         attn = getattr(layer, "attn", None)
         if attn is not None:
             representatives.setdefault(bucket(attn), attn)
@@ -150,6 +160,7 @@ def build_and_propagate_prefill_meta_fp8(
     meta_by_ratio: Dict[tuple, "PrefillMeta"] = {}
     reusable_common: Dict[int, "PrefillMeta"] = {}
     reusable_freqs_by_rope_kind: Dict[bool, "PrefillMeta"] = {}
+    write_by_region: Dict = {}
     # V4.1 buckets (ratios 0/2/1) build through ``AttentionV41FP8``'s SWA
     # planner override, which caches the built meta per (rope kind, input
     # identity) in the shared per-forward state. Drop that cache HERE, at the
@@ -169,6 +180,51 @@ def build_and_propagate_prefill_meta_fp8(
                 from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 
                 with bind_attn_cache(attn, kv_cache, block_tables_by_type):
+                    reuse_write = None
+                    previous = (reuse_write_by_region or {}).get(swa_region)
+                    cp = getattr(attn, "_cp_ctx", None)
+                    table = (block_tables_by_type or {}).get(swa_region)
+                    if previous is not None and hasattr(attn, "swa_bounded_replay"):
+                        old_cp = previous.cp_ctx
+                        if (
+                            cp is not None
+                            and old_cp is not None
+                            and kv_cache is not None
+                            and previous.kv_cache is kv_cache
+                            and table is not None
+                            and previous.block_table is table
+                            and cp.cp_size == old_cp.cp_size
+                            and cp.cp_rank == old_cp.cp_rank
+                            and cp.kv_cache_sharded == old_cp.kv_cache_sharded
+                            and cp.seq_len_full == old_cp.seq_len_full
+                            and cp.input_lengths_global is old_cp.input_lengths_global
+                            and cp.cu_seqlens_global is old_cp.cu_seqlens_global
+                            and cp.prefix_lengths is old_cp.prefix_lengths
+                            and cp.input_lengths_global_host
+                            == old_cp.input_lengths_global_host
+                            and cp.prefix_lengths_host == old_cp.prefix_lengths_host
+                        ):
+                            reuse_write = previous
+                    write_kwargs = (
+                        {"reuse_swa_write_meta": reuse_write}
+                        if reuse_write is not None
+                        else {}
+                    )
+                    regions = tuple(
+                        int(region)
+                        for region in getattr(kv_cache, "group_region_names", ())
+                    )
+                    if (
+                        hasattr(attn, "swa_bounded_replay")
+                        and isinstance(host_block_ids, torch.Tensor)
+                        and host_block_ids.device.type == "cpu"
+                        and host_block_ids.ndim == 3
+                        and host_block_ids.shape[0] == len(regions)
+                        and swa_region in regions
+                    ):
+                        write_kwargs["host_swa_table"] = host_block_ids[
+                            regions.index(swa_region)
+                        ]
                     with record_function_range(f"dsv4.fp8.prefill_meta.ratio_{r}"):
                         meta_by_ratio[key] = attn._build_shared_prefill_meta(
                             x_first_layer,
@@ -185,14 +241,27 @@ def build_and_propagate_prefill_meta_fp8(
                             reuse_freqs_meta=reusable_freqs_by_rope_kind.get(
                                 compressed_rope
                             ),
+                            **write_kwargs,
                         )._replace(workspace=workspace)
+                if hasattr(attn, "swa_bounded_replay") and cp is not None:
+                    swa = meta_by_ratio[key].swa_meta
+                    write_by_region.setdefault(
+                        swa_region,
+                        _SwaWriteSource(
+                            cp,
+                            swa.slot_mapping,
+                            swa.slot_compaction,
+                            kv_cache,
+                            table,
+                        ),
+                    )
                 reusable_common.setdefault(swa_region, meta_by_ratio[key])
                 reusable_freqs_by_rope_kind.setdefault(
                     compressed_rope, meta_by_ratio[key]
                 )
 
         with record_function_range("dsv4.fp8.prefill_meta.propagate"):
-            for layer in v4.layers:
+            for layer in v4.layers[first_layer:]:
                 attn = getattr(layer, "attn", None)
                 if attn is None:
                     continue
@@ -201,6 +270,7 @@ def build_and_propagate_prefill_meta_fp8(
                 # is-None set.
                 attn._ensure_freqs_cis_bound()
                 attn._set_prefill_meta_shared(meta_by_ratio.get(bucket(attn)))
+        return write_by_region
     except BaseException:
         clear_prefill_meta_shared_fp8(v4)
         raise
