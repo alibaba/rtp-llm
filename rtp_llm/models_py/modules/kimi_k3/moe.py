@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
-from rtp_llm.models_py.modules import RMSNorm
+from .norm import KimiK3LatentRMSNorm
 from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -64,7 +64,7 @@ class KimiK3LatentMoE(nn.Module):
         self.down = linear(weights, K3W.MOE_ROUTED_DOWN, hardware)
         self.up = linear(weights, K3W.MOE_ROUTED_UP, hardware)
         self.norm = (
-            RMSNorm(weights[K3W.MOE_ROUTED_NORM], config.layernorm_eps)
+            KimiK3LatentRMSNorm(weights[K3W.MOE_ROUTED_NORM], config.layernorm_eps)
             if runtime.latent_moe_use_norm
             else None
         )

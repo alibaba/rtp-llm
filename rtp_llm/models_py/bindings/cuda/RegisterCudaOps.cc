@@ -6,6 +6,10 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_attn_res.h"
 #endif
 
+#ifdef RTP_K3_NATIVE_RMS_NORM
+#include "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_rms_norm.h"
+#endif
+
 #ifdef RTP_K3_NATIVE_ROUTING
 #include "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_topk.h"
 #endif
@@ -21,6 +25,10 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+#ifdef RTP_K3_NATIVE_RMS_NORM
+    rtp_ops_m.def("kimi_k3_rms_norm", &kimi_k3_rms_norm,
+                 py::arg("input"), py::arg("weight"), py::arg("epsilon"));
+#endif
 #ifdef RTP_K3_NATIVE_ROUTING
     rtp_ops_m.def("kimi_k3_grouped_topk", &kimi_k3_grouped_topk,
                  "Native K3 fused sigmoid, grouped top-k and routing normalization",
