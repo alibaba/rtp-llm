@@ -1293,6 +1293,7 @@ class FlexlbServiceImplTest {
         BalanceContext capturedCtx = ctxCaptor.getValue();
         Request capturedRequest = capturedCtx.getRequest();
         assertEquals(1024L, capturedRequest.getCacheKeyBlockSize());
+        assertEquals(1024L, capturedRequest.getBlockSize());
         assertEquals(2, capturedRequest.getBlockCacheKeys().size());
         assertEquals(100L, capturedRequest.getBlockCacheKeys().get(0));
         assertEquals(200L, capturedRequest.getBlockCacheKeys().get(1));
