@@ -38,8 +38,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.net.ConnectException;
-import java.net.UnknownHostException;
+import java.io.IOException;
 import java.nio.channels.UnresolvedAddressException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -214,7 +213,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 responseObserver, ScheduleOrigin.FORWARD_FAILED, completionClaimed);
     }
 
-    /** Retry locally only when forwarding could not have admitted the request. */
+    /**
+     * Route locally when the Master is unreachable or explicitly declines ownership.
+     */
     boolean shouldScheduleLocally(BalanceContext context, FlexlbGrpcForwarder.MasterForwardResult result) {
         if (result == null || !requestActive(context)) {
             return false;
@@ -229,16 +230,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (!result.masterFound()) {
             return true;
         }
-        if (result.error() != null && Status.fromThrowable(result.error()).getCode() == Status.Code.UNAVAILABLE) {
-            for (Throwable cause = result.error(); cause != null; cause = cause.getCause()) {
-                if (cause instanceof ConnectException
-                        || cause instanceof UnknownHostException
-                        || cause instanceof UnresolvedAddressException) {
-                    return true;
+        if (result.error() != null) {
+            Status.Code code = Status.fromThrowable(result.error()).getCode();
+            if (code == Status.Code.UNAVAILABLE || code == Status.Code.UNKNOWN) {
+                for (Throwable cause = result.error(); cause != null; cause = cause.getCause()) {
+                    if (cause instanceof IOException || cause instanceof UnresolvedAddressException) {
+                        return true;
+                    }
                 }
             }
         }
-        // Disconnects and RPC timeouts may occur after admission; do not replay them.
         return false;
     }
 

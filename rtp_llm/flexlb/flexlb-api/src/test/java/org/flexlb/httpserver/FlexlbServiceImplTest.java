@@ -962,13 +962,40 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void connectionResetAndRemoteUnavailableCannotMasqueradeAsConnectFailure() {
+    void disconnectedMasterPermitsLocalRoutingWithinCallerBudget() {
+        BalanceContext context = mock(BalanceContext.class);
+        for (var status : java.util.List.of(Status.UNAVAILABLE, Status.UNKNOWN)) {
+            for (var cause : java.util.List.of(
+                    new java.net.SocketException("Connection reset by peer"),
+                    new java.nio.channels.ClosedChannelException(),
+                    new java.io.EOFException("Connection closed"),
+                    new java.net.NoRouteToHostException("No route to host"))) {
+                var failure = FlexlbGrpcForwarder.MasterForwardResult.failed(
+                        status.withCause(new RuntimeException(cause)).asRuntimeException(), "old:7001");
+                when(context.requestExpired(anyLong())).thenReturn(false);
+                assertTrue(service.shouldScheduleLocally(context, failure));
+                when(context.requestExpired(anyLong())).thenReturn(true);
+                assertFalse(service.shouldScheduleLocally(context, failure));
+                when(context.requestExpired(anyLong())).thenReturn(false);
+                try (var inbound = Context.current().withCancellation()) {
+                    inbound.cancel(null);
+                    inbound.run(() -> assertFalse(service.shouldScheduleLocally(context, failure)));
+                }
+            }
+        }
+        for (var status : java.util.List.of(Status.DEADLINE_EXCEEDED, Status.CANCELLED, Status.INTERNAL)) {
+            assertFalse(service.shouldScheduleLocally(context, FlexlbGrpcForwarder.MasterForwardResult.failed(
+                    status.withCause(new java.net.SocketException("Connection reset")).asRuntimeException(),
+                    "old:7001")));
+        }
+    }
+
+    @Test
+    void unclassifiedRpcFailuresDoNotPermitLocalRouting() {
         BalanceContext context = mock(BalanceContext.class);
         for (var error : java.util.List.of(
-                Status.UNAVAILABLE.withCause(new java.net.SocketException("Connection reset")).asRuntimeException(),
                 Status.UNAVAILABLE.withDescription("Connection refused").asRuntimeException(),
                 Status.UNAVAILABLE.withDescription("Unable to resolve host master.invalid").asRuntimeException(),
-                Status.UNAVAILABLE.withCause(new java.net.NoRouteToHostException("No route to host")).asRuntimeException(),
                 Status.DEADLINE_EXCEEDED.asRuntimeException())) {
             assertFalse(service.shouldScheduleLocally(context,
                     FlexlbGrpcForwarder.MasterForwardResult.failed(error, "old:7001")));
