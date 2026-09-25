@@ -530,9 +530,7 @@ def multi_rank_start(
 
     # Wait for all ranks to report startup status
     try:
-        _wait_for_ranks_startup(
-            processes, rank_pipe_readers, local_world_size, manager
-        )
+        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size, manager)
 
         # Report success via external pipe
         _send_pipe_status(
@@ -639,6 +637,7 @@ def start_backend_server(
     pipe_writer=None,
 ):
     _install_hot_hook_runtime("backend_manager")
+    set_global_controller(global_controller)
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)

@@ -800,6 +800,9 @@ message WakeUpRequestPB {
     bool prepare_only = 1;        // restore/register resources; keep admission closed
     bool commit_only = 2;         // restart engine after all ranks prepared
     string cancel_quiesce_token = 3; // rollback only this uncommitted drain; never restore sleeping resources
+    bool resume_metrics_only = 4; // coordinator: every rank has successfully reached RUNNING
+    string expected_incarnation = 5;
+    int64 expected_sleep_epoch = 6;
 }
 
 message SleepStatusResponsePB {
