@@ -8,6 +8,8 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.epoll.EpollEventLoopGroup;
+import io.netty.channel.nio.NioEventLoopGroup;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;
@@ -28,6 +30,8 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
@@ -55,6 +59,50 @@ class FlexlbGrpcForwarderAsyncTest {
 
     private static final String MASTER_HTTP_ADDRESS = "10.0.0.2:7001";
     private static final String MASTER_CHANNEL_KEY = "10.0.0.2:7003";
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void forwardsScheduleUsingNioTransport() throws Exception {
+        assertScheduleWithTransport(new NioEventLoopGroup(1));
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void forwardsScheduleUsingEpollTransport() throws Exception {
+        assertScheduleWithTransport(new EpollEventLoopGroup(1));
+    }
+
+    private static void assertScheduleWithTransport(EventLoopGroup eventLoopGroup) throws Exception {
+        AtomicReference<FlexlbScheduleProtocol.FlexlbScheduleRequestPB> received = new AtomicReference<>();
+        try (RpcFixture fixture = RpcFixture.start((request, observer) -> {
+            received.set(request);
+            observer.onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                    .setSuccess(true).setCode(200).build());
+            observer.onCompleted();
+        })) {
+            LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+            when(consistency.getMasterHostIpPort()).thenReturn(
+                    "127.0.0.1:" + (fixture.server.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
+            when(consistency.getLocalHostIp()).thenReturn("127.0.0.2");
+            ConfigService config = mock(ConfigService.class);
+            when(config.loadBalanceConfig()).thenReturn(new org.flexlb.config.FlexlbConfig());
+            FlexlbGrpcForwarder forwarder = new FlexlbGrpcForwarder(
+                    consistency, config, mock(EngineHealthReporter.class), eventLoopGroup, Runnable::run);
+            try {
+                var response = await(forwarder.forwardScheduleToMaster(request("transport-schedule"))).response();
+                assertNotNull(response);
+                assertTrue(response.getSuccess());
+                assertEquals(200, response.getCode());
+                assertEquals("transport-schedule", received.get().getRequestId());
+                assertEquals(1, received.get().getForwardHop());
+            } finally {
+                forwarder.shutdown();
+            }
+        } finally {
+            eventLoopGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
+        }
+    }
 
     @Test
     @Timeout(value = 20, unit = TimeUnit.SECONDS)
