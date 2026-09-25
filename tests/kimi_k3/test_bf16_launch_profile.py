@@ -54,6 +54,7 @@ def test_fixed_full_profile(tmp_path, role):
     assert options["--enable_cuda_graph"] == str(int(role == "DECODE"))
     assert options["--concurrency_limit"] == "16"
     assert int(options["--max_seq_len"]) > 2 * 65536
+    assert options["--reserver_runtime_mem_mb"] == "14336"
 
 
 def test_reject_four_layer_as_formal_profile(tmp_path):

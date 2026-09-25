@@ -36,6 +36,9 @@ def launch_config(args):
     for port in (args.start_port, args.peer_port):
         if port < 1024 or port + 8 * 9 > 65535:
             raise ValueError("Invalid eight-rank service port range")
+    reserve_runtime_mem_mb = getattr(args, "reserve_runtime_mem_mb", 14336)
+    if reserve_runtime_mem_mb <= 0:
+        raise ValueError("Runtime memory reserve must be positive")
     socket.inet_aton(args.peer_ip)
     environment = {
         "MODEL_TYPE": "kimi_k3",
@@ -99,6 +102,7 @@ def launch_config(args):
         "load_cache_timeout_ms": 7200000,
         "load_method": "fastsafetensors",
         "warm_up": 0,
+        "reserver_runtime_mem_mb": reserve_runtime_mem_mb,
     }
     if args.role == "DECODE":
         options["decode_capture_config"] = "1,2,3,4,7,8,9,16"
@@ -233,6 +237,8 @@ def main():
     parser.add_argument("--server", required=True)
     parser.add_argument("--guard", required=True, help="weight_loader_guard.py")
     parser.add_argument("--rdma-hcas", help="Explicit comma-separated Barex HCA allowlist")
+    parser.add_argument("--reserve-runtime-mem-mb", type=int, default=14336,
+                        help="Per-rank runtime reserve; validated PD427 used 14336 MiB")
     parser.add_argument(
         "--run-dir", required=True, help="New directory on a local data disk"
     )
