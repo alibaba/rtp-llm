@@ -6,8 +6,10 @@ spring:
   main:
     web-application-type: reactive
   codec:
-    max-in-memory-size: 5MB
+    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:10MB}
 logging:
+  group:
+    flexlb: org.flexlb,flexlbLogger,syncLogger,syncConsistencyLogger
   level:
     root: info
     io.grpc: info

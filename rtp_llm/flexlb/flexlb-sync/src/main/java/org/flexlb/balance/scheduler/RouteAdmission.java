@@ -26,20 +26,20 @@ import java.util.function.BooleanSupplier;
 public final class RouteAdmission implements AutoCloseable {
     private enum Ownership { PROVISIONAL, COMMITTED, CLOSED }
 
-    private final long requestId;
+    private final String requestId;
     private final Response response;
     private final Selection selection;
     private DecodeBinding decodeBinding;
     private WorkerEndpoint blockedEndpoint;
     private Ownership ownership = Ownership.PROVISIONAL;
 
-    private RouteAdmission(long requestId, Response response, Selection selection,
+    private RouteAdmission(String requestId, Response response, Selection selection,
                            DecodeBinding decodeRequest) {
         this.requestId = requestId;
         this.response = Objects.requireNonNull(response, "response");
         this.selection = Objects.requireNonNull(selection, "selection");
         this.decodeBinding = Objects.requireNonNull(decodeRequest, "decodeRequest");
-        if (decodeRequest.requestId() != requestId) {
+        if (!Objects.equals(decodeRequest.requestId(), requestId)) {
             throw new IllegalArgumentException("Decode admission belongs to another request");
         }
     }
@@ -49,7 +49,7 @@ public final class RouteAdmission implements AutoCloseable {
             List<SelectedRole> selectedRoles,
             Response response,
             DecodeBinding decodeRequest) {
-        long requestId = context.getRequestId();
+        String requestId = context.getRequestId();
 
         PrefillEndpoint prefillEndpoint = null;
         WorkerEndpoint.GenerationPin prefillPin = null;
@@ -64,7 +64,7 @@ public final class RouteAdmission implements AutoCloseable {
         try {
             for (SelectedRole selected : selectedRoles) {
                 ServerStatus status = selected.serverStatus();
-                if (status.getRequestId() != requestId) {
+                if (!Objects.equals(status.getRequestId(), requestId)) {
                     throw new IllegalStateException(
                             "selected role belongs to another request");
                 }
@@ -191,6 +191,12 @@ public final class RouteAdmission implements AutoCloseable {
     private long decodePlacementVersion() { return selection.decodePlacementVersion(); }
     public DecodeBinding decodeBinding() { return decodeBinding; }
 
+    /** Attach client-executed Decode cancellation instructions before publication. */
+    public void setDecodePreemptRequestIds(List<String> requestIds) {
+        requireProvisional();
+        decodeStatus().setPreemptRequestIds(List.copyOf(requestIds));
+    }
+
     boolean reserveDecode() {
         requireProvisional();
         if (decodeEndpoint() == null || decodeBinding.reservation() != null) { return true; }
@@ -221,7 +227,8 @@ public final class RouteAdmission implements AutoCloseable {
 
     public boolean adoptDecodeReservation(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
         requireProvisional();
-        if (endpoint == null || endpoint != decodeEndpoint() || reservation == null || reservation.requestId() != requestId
+        if (endpoint == null || endpoint != decodeEndpoint() || reservation == null
+                || !Objects.equals(reservation.requestId(), requestId)
                 || decodeBinding.reservation() != null) {
             if (endpoint != null && reservation != null) { endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK); }
             return false;
@@ -242,7 +249,7 @@ public final class RouteAdmission implements AutoCloseable {
 
     public ScheduledRequest createScheduledRequest(BalanceContext context, CompletableFuture<Response> future, long enqueuedAtMs) {
         requireProvisional();
-        if (context.getRequestId() != requestId) {
+        if (!Objects.equals(context.getRequestId(), requestId)) {
             throw new IllegalArgumentException("admission cannot build another request");
         }
         return new ScheduledRequest(context, future, response,

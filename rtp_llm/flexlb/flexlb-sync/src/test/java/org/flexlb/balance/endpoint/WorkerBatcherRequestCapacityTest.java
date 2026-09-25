@@ -115,7 +115,7 @@ class WorkerBatcherRequestCapacityTest {
             DeliveryStrategy live = EndpointTestSupport.liveRouteStrategy(fixture.runtime);
             doAnswer(invocation -> {
                 List<ScheduledRequest> candidates = invocation.getArgument(0);
-                if (candidates.getFirst().requestId() == 1L) {
+                if (candidates.getFirst().requestId().equals("1")) {
                     DeliveryStrategy.Transaction transaction = live.prepare(candidates,
                             invocation.getArgument(1), invocation.getArgument(2));
                     assertEquals(1, transaction.items().size());
@@ -173,7 +173,7 @@ class WorkerBatcherRequestCapacityTest {
             assertEquals(4, admitted.size(), "each writer attempts once; publication must not oversubscribe");
             assertEquals(4L, fixture.endpoint.observedRequestCount());
             ScheduledRequest first = admitted.getFirst();
-            assertFalse(fixture.endpoint.removeQueued(item(config, fixture.endpoint, first.requestId()), "stale identity"));
+            assertFalse(fixture.endpoint.removeQueued(item(config, fixture.endpoint, Long.parseLong(first.requestId())), "stale identity"));
             assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 70L)));
             assertTrue(fixture.endpoint.removeQueued(first, "cancel exact queued request"));
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 71L)));

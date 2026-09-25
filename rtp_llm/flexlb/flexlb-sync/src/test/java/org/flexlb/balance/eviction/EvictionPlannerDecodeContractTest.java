@@ -49,7 +49,7 @@ class EvictionPlannerDecodeContractTest {
 
                 @Override
                 public CompletableFuture<CancelAck> cancel(
-                        CancelTarget target, long a, long b) {
+                        CancelTarget target, String requestId, long timeoutMs) {
                     return CompletableFuture.completedFuture(CancelAck.ACCEPTED);
                 }
             };
@@ -57,6 +57,7 @@ class EvictionPlannerDecodeContractTest {
     private static PreemptionConfig engineOwned() {
         PreemptionConfig p = new PreemptionConfig();
         p.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
+        p.setEngineCancellation(new org.flexlb.config.EngineCancellationConfig());
         return p;
     }
 
@@ -86,7 +87,7 @@ class EvictionPlannerDecodeContractTest {
                 priority, hardKvTokens, hardKvTokens, List.of(ep), engineOwned(), SUPPORTING_CHANNEL, failures);
     }
 
-    private static List<Long> victimIds(DecodeEvictionProposal p) {
+    private static List<String> victimIds(DecodeEvictionProposal p) {
         return p.victims().stream().map(DecodeRequestView::requestId).toList();
     }
 
@@ -118,7 +119,7 @@ class EvictionPlannerDecodeContractTest {
             Map<String, String> f = new HashMap<>();
             DecodeEvictionProposal p = plan(70, 0L,
                     endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 30, 128L))), f);
-            assertEquals(List.of(1L), victimIds(p));
+            assertEquals(List.of("1"), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_SLOT, p.evictionCase());
             // cost = H_SLOT * f(30) * g(ACCEPTED) = 4 * 1 * 16 = 64
             assertEquals(64L, p.totalCost());
@@ -157,7 +158,7 @@ class EvictionPlannerDecodeContractTest {
             DecodeEvictionProposal p = plan(70, 300L,
                     endpoint(100L, 1000L, 0, 0L,
                             List.of(accepted(1L, 30, 2048L), accepted(2L, 30, 512L))), f);
-            assertEquals(List.of(1L), victimIds(p));
+            assertEquals(List.of("1"), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_KV, p.evictionCase());
             // cost = H_KV * f(30) * g(ACCEPTED) * lengthWasteCost(2048)
             //      = 8 * 1 * 16 * round(sqrt(ceil(2048/1024))) = 8*16*round(sqrt(2))

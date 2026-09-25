@@ -121,7 +121,7 @@ public final class RequestSlot {
     private final GlobalQueueCoordinator globalQueue;
     /** Used while active to capture PV evidence; released with the terminal record. */
     private BalanceContext context;
-    private final long requestId;
+    private final String requestId;
     private final long createdAtMs;
     private final RequestFuture future;
     private RequestState.Phase state = RequestState.Phase.QUEUED;
@@ -219,7 +219,7 @@ public final class RequestSlot {
 
     // ── 请求身份与状态：只读查询、生命周期条件和状态提交 ──
 
-    long requestId() {
+    String requestId() {
         return requestId;
     }
 

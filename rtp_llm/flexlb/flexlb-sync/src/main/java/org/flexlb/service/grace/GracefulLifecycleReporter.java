@@ -34,7 +34,9 @@ public class GracefulLifecycleReporter {
     }
 
     public void reportProcessOk() {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "process_ok"), 1);
+        monitor.report(GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(TYPE_TAG, "process_ok", DURATION_MS_TAG, "0"),
+                System.currentTimeMillis());
     }
 
     public void reportZkNodeOnline(long durationMs) {

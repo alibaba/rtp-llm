@@ -33,13 +33,13 @@ enum CancelReasonPB {
 }
 
 message RequestLifecyclePB {
-    int64 request_id = 1;
+    string request_id = 1;
     RequestStatePB state = 2;
     int64 batch_id = 3;
 }
 
 message FlexlbScheduleRequestPB {
-    int64 request_id = 1;
+    string request_id = 1;
     // Wire-compatible with the historical GenerateInputPB message field:
     // message and bytes are both length-delimited on the wire.
     bytes generate_input = 2;
@@ -64,6 +64,9 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
+    // Raw prompt token IDs used by the Master to derive block_cache_keys when
+    // the client does not provide precomputed keys.
+    repeated int32 input_ids = 16;
 }
 
 message FlexlbServerStatusPB {
@@ -72,6 +75,11 @@ message FlexlbServerStatusPB {
     int32 http_port = 3;
     int32 grpc_port = 4;
     reserved 5;
+    // Present only for a multi-engine frontend; zero is a valid selected index.
+    optional int32 engine_index = 6;
+    // Requests on this Decode engine that must finish cancellation and resource
+    // release before the incoming request executes. Empty means no preemption.
+    repeated string preempt_request_ids = 7;
 }
 
 // Why an incoming request was rejected by the admission decision.  This is
@@ -97,7 +105,7 @@ message FlexlbScheduleResponsePB {
 }
 
 message FlexlbCancelRequestPB {
-    int64 request_id = 1;
+    string request_id = 1;
     int64 batch_id = 2;
     CancelReasonPB reason = 3;
     // Single-hop guard only. Every receiver checks local lifecycle ownership;
@@ -111,7 +119,7 @@ message FlexlbCancelResponsePB {
 }
 
 message GetRequestStateRequestPB {
-    int64 request_id = 1;
+    string request_id = 1;
     int64 batch_id = 2;
     // Same single-hop guard as Schedule. Clients leave this at zero and a
     // FlexLB follower sets it to one before forwarding.

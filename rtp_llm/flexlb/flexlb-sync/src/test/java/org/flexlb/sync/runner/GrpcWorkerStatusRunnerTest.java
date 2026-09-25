@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -45,7 +45,7 @@ class GrpcWorkerStatusRunnerTest {
                 role, null, "127.0.0.1", 8080, 8081, "test-site");
         WorkerDirectory directory = directory(registry, status);
         WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(
-                registry, role, status.getIpPort(), status);
+                registry, role, status.getLogicalIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(
@@ -57,32 +57,76 @@ class GrpcWorkerStatusRunnerTest {
             WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
             assertNotNull(lease);
             new GrpcWorkerStatusRunner(
-                    "test-model", status.getIpPort(), "test-site", role, null,
+                    "test-model", status.getLogicalIpPort(), "test-site", role, null,
                     status, lease, directory, mock(EngineHealthReporter.class),
                     grpc, 5_000L, cache, Runnable::run).run();
             if (failure < 3) {
-                assertSame(status, directory.statusSnapshot(role).get(status.getIpPort()));
-                assertSame(endpoint, registry.get(role, status.getIpPort()));
+                assertSame(status, directory.statusSnapshot(role).get(status.getLogicalIpPort()));
+                assertSame(endpoint, registry.get(role, status.getLogicalIpPort()));
                 verifyNoInteractions(cache);
             }
         }
 
-        assertNull(registry.get(role, status.getIpPort()));
+        assertNull(registry.get(role, status.getLogicalIpPort()));
         assertTrue(directory.statusSnapshot(role).isEmpty());
         assertNull(status.tryBeginStatusPoll(), "retired generation cannot poll again");
         if (needsCacheKeys) {
-            verify(cache).removeEngineBlockCache(status.getIpPort());
+            verify(cache).removeEngineBlockCache(status.getLogicalIpPort());
         } else {
             verifyNoInteractions(cache);
         }
     }
 
     @Test
+    void reportsEachObservedStepOnceAcrossPolls() {
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
+        String ipPort = status.getLogicalIpPort();
+        WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        WorkerDirectory directory = directory(registry, status);
+        when(registry.publishPreparedEndpoint(anyString(), any(), any())).thenAnswer(invocation -> {
+            status.publishPreparedStatus(invocation.getArgument(2));
+            return new EndpointRegistry.EndpointPublication(endpoint, () -> { });
+        });
+        when(registry.get(RoleType.DECODE, ipPort, status)).thenReturn(endpoint);
+        when(endpoint.applyPreparedStatus(any(), any())).thenAnswer(invocation -> {
+            status.publishPreparedStatus(invocation.getArgument(1));
+            return (Runnable) () -> { };
+        });
+        when(endpoint.observeStatusHeartbeat(any(), any())).thenReturn(() -> { });
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+        long[] versions = {1, 2, 2, 3, 4};
+        long[] steps = {0, 42, 42, 42, 43};
+        for (int i = 0; i < versions.length; i++) {
+            var response = EngineRpcService.WorkerStatusPB.newBuilder()
+                    .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .setStatusVersion(versions[i]).setAlive(true);
+            if (steps[i] > 0) {
+                response.setLastStepMetrics(EngineRpcService.WorkerStepMetricsPB.newBuilder()
+                        .setStepId(steps[i]).setTotalScheduledTokens(64).setTokenBudget(32000)
+                        .setBudgetFillRatio(0.002));
+            }
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.completedFuture(response.build()));
+            new GrpcWorkerStatusRunner("test-model", ipPort, "test-site", RoleType.DECODE, null,
+                    status, status.tryBeginStatusPoll(), directory, reporter, grpc, 5000L,
+                    mock(CacheAwareService.class), Runnable::run).run();
+        }
+        var observed = ArgumentCaptor.forClass(WorkerStatus.StepMetrics.class);
+        verify(reporter, org.mockito.Mockito.times(2)).reportWorkerStepMetrics(
+                org.mockito.Mockito.eq("test-model"), org.mockito.Mockito.eq(status), observed.capture());
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(42L, 43L),
+                observed.getAllValues().stream().map(WorkerStatus.StepMetrics::stepId).toList());
+    }
+
+    @Test
     void newGenerationProjectionRunsOutsideWorkerStatusLock() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus status = RunnerTestSupport.discovered(
                 RoleType.DECODE, null, "127.0.0.1",
                 8080, 8081, "test-site");
+        String ipPort = status.getLogicalIpPort();
         WorkerStatus.PollLease pollLease = status.tryBeginStatusPoll();
         assertNotNull(pollLease);
 
@@ -133,10 +177,10 @@ class GrpcWorkerStatusRunnerTest {
 
     @Test
     void sameVersionResponseProjectsExactEndpointActivity() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus status = RunnerTestSupport.alive(
                 RoleType.DECODE, null, "127.0.0.1",
                 8080, 8081, "test-site");
+        String ipPort = status.getLogicalIpPort();
         WorkerStatus.PollLease pollLease = status.tryBeginStatusPoll();
         assertNotNull(pollLease);
 
@@ -180,7 +224,7 @@ class GrpcWorkerStatusRunnerTest {
         verify(endpoint).observeStatusHeartbeat(
                 org.mockito.Mockito.eq(status), observation.capture());
         assertTrue(observation.getValue().runningTasks().values().stream()
-                .anyMatch(active -> active.requestId() == 123L));
+                .anyMatch(active -> active.requestId().equals("123")));
         assertTrue(projected.get());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
         assertNotNull(nextPoll, "the asynchronous owner must close the exact poll lease");
@@ -191,7 +235,7 @@ class GrpcWorkerStatusRunnerTest {
             EndpointRegistry registry, WorkerStatus status) {
         WorkerDirectory directory = new WorkerDirectory(registry);
         directory.currentOrDiscover(
-                status.getRole(), status.getIpPort(), () -> status);
+                status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
 }

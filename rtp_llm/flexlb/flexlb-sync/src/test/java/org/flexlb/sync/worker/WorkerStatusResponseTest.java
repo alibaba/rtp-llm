@@ -1,5 +1,6 @@
 package org.flexlb.sync.worker;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.StatusObservation;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -19,7 +20,7 @@ class WorkerStatusResponseTest {
     @Test
     void testConfigLoader() throws Exception {
         String TEST_JSON = "{\"role\":\"PREFILL\",\"available_concurrency\":1637,\"running_task_info\":{},\"finished_task_info\":{},\"step_latency_ms\":36.636,\"iterate_count\":1,\"dp_size\":1,\"tp_size\":1,\"alive\":true,\"version\":1,\"status_version\":1752025357566,\"cache_status\":{\"available_kv_cache\":82944,\"total_kv_cache\":82944,\"block_size\":256,\"version\":-1},\"waiting_query_len\":0,\"running_query_len\":0,\"max_seq_len\":131072,\"max_batch_tokens_size\":262144}";
-        WorkerStatusResponse workerStatusResponse = JsonUtils.toObject(TEST_JSON, new com.fasterxml.jackson.core.type.TypeReference<WorkerStatusResponse>() {
+        WorkerStatusResponse workerStatusResponse = JsonUtils.toObject(TEST_JSON, new TypeReference<WorkerStatusResponse>() {
         });
         Assertions.assertEquals(RoleType.PREFILL, workerStatusResponse.getRole());
         Assertions.assertTrue(workerStatusResponse.isAlive());

@@ -86,7 +86,7 @@ class MockEngineCancelChannelTest {
         int n = 4;
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[n];
         for (int i = 0; i < n; i++) {
-            inputs[i] = inputWithDecode(i + 1, 10, decodeServices.get(0).getGrpcPort());
+            inputs[i] = inputWithDecode(String.valueOf(i + 1), 10, decodeServices.get(0).getGrpcPort());
         }
         EngineRpcService.EnqueueBatchResponsePB response =
                 enqueue(prefill, batch(9000, slot(0, inputs)));
@@ -125,7 +125,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueue(prefill, batch(9050, slot(0,
-                inputWithDecode(51, 10, decode.getGrpcPort()))));
+                inputWithDecode("51", 10, decode.getGrpcPort()))));
         awaitInflight(decode, 1, 1_000);
         awaitNoInflight(prefill, 1_000);
         assertEquals(0, prefill.getInflightCount(),
@@ -164,7 +164,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueue(prefill, batch(9100, slot(0,
-                inputWithDecode(11, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("11", 10, decodeServices.get(0).getGrpcPort()))));
         awaitAllInflightZero(5_000);
 
         CancelAck outcome = channel
@@ -188,7 +188,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueue(prefill, batch(9200, slot(0,
-                inputWithDecode(21, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("21", 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck first = channel
@@ -259,7 +259,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueue(prefill, batch(9300, slot(0,
-                inputWithDecode(31, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("31", 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck outcome = channel

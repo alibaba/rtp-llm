@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** Immutable public view of one canonical request generation. */
 public record RequestState(
-        long requestId,
+        String requestId,
         Phase state,
         DeliveryClaimKind deliveryClaimKind,
         long batchId,
@@ -26,6 +26,18 @@ public record RequestState(
             throw new IllegalArgumentException(
                     "only batch enqueue delivery may carry a batchId");
         }
+    }
+
+    public RequestState(
+            long requestId,
+            Phase state,
+            DeliveryClaimKind deliveryClaimKind,
+            long batchId,
+            long createdAtMs,
+            long updatedAtMs,
+            String detail) {
+        this(Long.toString(requestId), state, deliveryClaimKind,
+                batchId, createdAtMs, updatedAtMs, detail);
     }
 
     /** An expected batch ID of zero accepts any batch, including route delivery. */

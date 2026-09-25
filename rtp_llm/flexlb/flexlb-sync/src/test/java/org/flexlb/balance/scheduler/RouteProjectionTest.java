@@ -157,7 +157,7 @@ class RouteProjectionTest {
                         new WorkSnapshot.RequestWork(
                                 3L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
                 List.of(new WorkSnapshot.BatchWork(
-                        7L, List.of(4L, 5L),
+                        7L, List.of("4", "5"),
                         WorkSnapshot.Phase.ENGINE_RUNNING, 40L)),
                 0L);
 
@@ -343,7 +343,7 @@ class RouteProjectionTest {
                 List.of(),
                 List.of(new WorkSnapshot.BatchWork(
                         7L,
-                        List.of(1L),
+                        List.of("1"),
                         WorkSnapshot.Phase.ENGINE_RUNNING,
                         OptionalLong.empty())),
                 0L);

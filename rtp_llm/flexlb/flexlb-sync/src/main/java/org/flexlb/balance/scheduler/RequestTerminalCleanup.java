@@ -1,10 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint;
-
-import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.balance.delivery.DeliveryResult;
-
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.util.Logger;
 
 /** Executes an already-owned terminal action, then commits its terminal record and publishes. */
@@ -150,6 +148,5 @@ final class RequestTerminalCleanup {
                     "request slot cleanup failed", failure);
         }
     }
-
 
 }

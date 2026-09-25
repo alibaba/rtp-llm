@@ -29,7 +29,7 @@ class RequestTest {
                 }
                 """, Request.class);
 
-        assertEquals(12345L, request.getRequestId());
+        assertEquals("12345", request.getRequestId());
         assertEquals(8192L, request.getSeqLen());
         assertEquals(1024L, request.getCacheKeyBlockSize());
         assertEquals(3, request.getBlockCacheKeys().size());
@@ -42,7 +42,7 @@ class RequestTest {
     @Test
     void should_not_include_api_key_in_to_string() {
         Request request = new Request();
-        request.setRequestId(12345L);
+        request.setRequestId("12345");
         request.setApiKey("secret-api-key");
 
         assertFalse(request.toString().contains("secret-api-key"));

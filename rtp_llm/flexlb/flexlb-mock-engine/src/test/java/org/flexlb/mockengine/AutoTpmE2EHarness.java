@@ -17,7 +17,9 @@ import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
@@ -35,8 +37,9 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -416,13 +419,13 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         config.priorityOrdering().setPreemption(preemption);
     }
 
-    private ServerStatus prefillServer(int index, long requestId) {
+    private ServerStatus prefillServer(int index, String requestId) {
         int grpcPort = prefillEngines.get(index).getGrpcPort();
         return server(
                 RoleType.PREFILL, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
     }
 
-    private ServerStatus decodeServer(int index, long requestId) {
+    private ServerStatus decodeServer(int index, String requestId) {
         int grpcPort = decodeEngines.get(index).getGrpcPort();
         return server(
                 RoleType.DECODE, "127.0.0.1", httpPort(grpcPort), grpcPort,
@@ -453,8 +456,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private DefaultRouter productionRouter() {
         WorkerDirectory workers = new WorkerDirectory(endpointRegistry);
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);
         when(modelMeta.requiredRoles()).thenReturn(
@@ -469,7 +472,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     private static ServerStatus server(
-            RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+            RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
@@ -484,11 +487,15 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     // ==================== request construction ====================
 
-    BalanceContext context(long requestId, int priority) {
+    BalanceContext context(String requestId, int priority) {
         return context(requestId, priority, 128, 8);
     }
 
-    BalanceContext context(long requestId, int priority, long seqLen, int maxNewTokens) {
+    BalanceContext context(long requestId, int priority) {
+        return context(Long.toString(requestId), priority);
+    }
+
+    BalanceContext context(String requestId, int priority, long seqLen, int maxNewTokens) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -508,9 +515,13 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return ctx;
     }
 
-    static byte[] generateInputBytes(long requestId, int inputTokens, int maxNewTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    BalanceContext context(
+            long requestId, int priority, long seqLen, int maxNewTokens) {
+        return context(Long.toString(requestId), priority, seqLen, maxNewTokens);
+    }
+
+    static byte[] generateInputBytes(String requestId, int inputTokens, int maxNewTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(maxNewTokens)
                         .build());
@@ -559,7 +570,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
         TaskInfo info = new TaskInfo();
-        info.setRequestId(task.getRequestId());
+        info.setRequestId(RequestId.parse(task));
         info.setInputLength(task.getInputLength());
         info.setBatchId(task.getBatchId());
         info.setErrorCode(task.getErrorInfo().getErrorCode());
@@ -665,7 +676,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
         @Override
         public CompletableFuture<CancelAck> cancel(
-                CancelTarget target, long requestId, long timeoutMs) {
+                CancelTarget target, String requestId, long timeoutMs) {
             return CompletableFuture.completedFuture(
                     CancelAck.UNSUPPORTED);
         }

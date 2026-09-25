@@ -5,8 +5,8 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 
 /** Projects one incoming route against immutable, coherently captured inputs. */
 public final class RouteProjection {
@@ -68,7 +68,7 @@ public final class RouteProjection {
 
         default long itemDurationMs(long seqLen, long hitCache) {
             return itemDurationMs(new GroupPlanner.Item(
-                    0L, 0, 0L, 0L, Long.MAX_VALUE,
+                    "", 0, 0L, 0L, Long.MAX_VALUE,
                     seqLen, hitCache));
         }
 
@@ -84,7 +84,7 @@ public final class RouteProjection {
         default long singletonBatchDurationMs(
                 long seqLen, long hitCache) {
             return batchDurationMs(List.of(new GroupPlanner.Item(
-                    0L, 0, 0L, 0L, Long.MAX_VALUE,
+                    "", 0, 0L, 0L, Long.MAX_VALUE,
                     seqLen, hitCache)));
         }
 
@@ -120,7 +120,7 @@ public final class RouteProjection {
 
     /** Virtual request evaluated against one frozen endpoint snapshot. */
     public record Probe(
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -139,6 +139,13 @@ public final class RouteProjection {
                 throw new IllegalArgumentException(
                         "routingCacheMatchTokens must be non-negative");
             }
+        }
+
+        public Probe(long requestId, int priority, long enqueuedAtMs,
+                     long expiresAtMs, long seqLen, long hitCache,
+                     long routingCacheMatchTokens) {
+            this(Long.toString(requestId), priority, enqueuedAtMs,
+                    expiresAtMs, seqLen, hitCache, routingCacheMatchTokens);
         }
     }
 
@@ -309,7 +316,7 @@ public final class RouteProjection {
      */
     public static CandidateView projectView(
             Inputs inputs,
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -339,7 +346,7 @@ public final class RouteProjection {
 
         public CandidateView projectView(
                 Inputs inputs,
-                long requestId,
+                String requestId,
                 int priority,
                 long enqueuedAtMs,
                 long expiresAtMs,

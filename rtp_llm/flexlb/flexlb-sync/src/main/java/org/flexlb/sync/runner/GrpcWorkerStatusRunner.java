@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -10,7 +10,6 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,7 +36,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final String ip;
-    private final int grpcPort;
+    private final int workerStatusPort;
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
@@ -45,7 +44,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final CacheAwareService cacheAwareService;
     private final Executor callbackExecutor;
 
-    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site,
+    public GrpcWorkerStatusRunner(String modelName, String ipPort,
+                                  int workerStatusPort, String site,
                                   RoleType roleType, String ignoredGroup,
                                   WorkerStatus workerStatus,
                                   WorkerStatus.PollLease pollLease,
@@ -56,9 +56,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   CacheAwareService cacheAwareService,
                                   Executor callbackExecutor) {
         this.ipPort = ipPort;
-        String[] split = ipPort.split(":");
-        this.ip = split[0];
-        this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+        this.ip = workerStatus.getIp();
+        this.workerStatusPort = workerStatusPort;
         this.modelName = modelName;
         this.workerStatus = workerStatus;
         this.pollLease = Objects.requireNonNull(pollLease, "pollLease");
@@ -75,6 +74,26 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.callbackExecutor = callbackExecutor;
     }
 
+    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site,
+                                  RoleType roleType, String ignoredGroup,
+                                  WorkerStatus workerStatus,
+                                  WorkerStatus.PollLease pollLease,
+                                  WorkerDirectory workerDirectory,
+                                  EngineHealthReporter engineHealthReporter,
+                                  EngineGrpcService engineGrpcService,
+                                  long syncRequestTimeoutMs,
+                                  CacheAwareService cacheAwareService,
+                                  Executor callbackExecutor) {
+        this(modelName, ipPort, defaultWorkerStatusPort(workerStatus), site, roleType,
+                ignoredGroup, workerStatus, pollLease, workerDirectory,
+                engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                cacheAwareService, callbackExecutor);
+    }
+
+    private static int defaultWorkerStatusPort(WorkerStatus workerStatus) {
+        return workerStatus.getGrpcPort();
+    }
+
     @Override
     public void run() {
         boolean asyncInitiated = false;
@@ -86,7 +105,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     .latestFinishedTaskVersion();
 
             engineGrpcService.getWorkerStatusAsync(
-                            ip, grpcPort, latestFinishedTaskVersion,
+                            ip, workerStatusPort, latestFinishedTaskVersion,
                             syncRequestTimeoutMs, roleType)
                     .thenApply(response -> EngineStatusConverter
                             .convertToStatusObservation(workerStatus, response))
@@ -128,14 +147,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 ? failure.getCause() : failure;
     }
 
-    private void handleStatusResponse(
-            WorkerStatus.StatusObservation observation,
-            long startTime) {
+    private void handleStatusResponse(WorkerStatus.StatusObservation observation, long startTime) {
         try {
             if (observation == null) {
                 logger.debug("query engine worker status via gRPC, response body is null");
                 engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
+                        modelName, BalanceStatusEnum.RESPONSE_NULL,
+                        workerStatus.getMetricIpPort(), roleType);
                 return;
             }
             if (!workerDirectory.isCurrentStatus(
@@ -144,6 +162,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
             WorkerEndpoint ep;
+            WorkerStatus.StepMetrics previousStep;
             WorkerStatus.StatusObservation committedObservation;
             Runnable statusProjection = NO_STATUS_PROJECTION;
             Runnable activityProjection = NO_STATUS_PROJECTION;
@@ -183,6 +202,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                     + observation.role());
                 }
                 committedObservation = observation;
+                previousStep = workerStatus.committedEngineObservation().lastStepMetrics();
 
                 WorkerStatus.AppliedStatusCursor cursor =
                         workerStatus.appliedStatusCursor();
@@ -272,15 +292,18 @@ public class GrpcWorkerStatusRunner implements Runnable {
             reportSuccessfulStatus(
                     committedObservation,
                     startTime,
-                    ep);
+                    ep,
+                    previousStep);
 
+            reportCacheFeedback(committedObservation);
             logWorkerStatusUpdate(startTime, workerStatus);
 
         } catch (Throwable e) {
             logger.error("Worker status response handling failed after callback for {}",
                     ipPort, e);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
+                    modelName, BalanceStatusEnum.UNKNOWN_ERROR,
+                    workerStatus.getMetricIpPort(), roleType);
         }
     }
 
@@ -356,19 +379,48 @@ public class GrpcWorkerStatusRunner implements Runnable {
         return new IllegalStateException("Worker status reconciliation failed", failure);
     }
 
+    private void reportCacheFeedback(WorkerStatus.StatusObservation observation) {
+        try {
+            for (var result : cacheAwareService.observeCacheHitFeedback(workerStatus, observation)) {
+                result.whenComplete((comparison, error) -> {
+                    if (error != null || comparison == null) {
+                        logger.warn("Cache comparison failed at {}", ipPort, error);
+                        return;
+                    }
+                    try {
+                        LoggerFactory.getLogger("pvLogger").info(org.flexlb.util.JsonUtils.toStringOrEmpty(comparison));
+                        engineHealthReporter.reportCacheHitComparisonMetrics(modelName, comparison);
+                    } catch (RuntimeException failure) {
+                        logger.warn("Cache comparison telemetry failed at {}", ipPort, failure);
+                    }
+                });
+            }
+        } catch (RuntimeException failure) {
+            logger.warn("Cache feedback observation failed at {}", ipPort, failure);
+        }
+    }
+
     private void reportSuccessfulStatus(
             WorkerStatus.StatusObservation observation,
             long startTime,
-            WorkerEndpoint endpoint) {
+            WorkerEndpoint endpoint,
+            WorkerStatus.StepMetrics previousStep) {
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    modelName, observation.role().name(), startTime);
+                    modelName, workerStatus.getMetricIpPort(),
+                    observation.role().name(), startTime);
             engineHealthReporter.reportStatusCheckerSuccess(
                     modelName,
                     workerStatus,
                     endpoint,
                     observation.runningTasks().size(),
                     observation.finishedTasks().size());
+            WorkerStatus.StepMetrics step = observation.engine().lastStepMetrics();
+            if (step != null
+                    && (previousStep == null || step.stepId() != previousStep.stepId())) {
+                engineHealthReporter.reportWorkerStepMetrics(
+                        modelName, workerStatus, step);
+            }
         } catch (Throwable telemetryFailure) {
             logger.warn("Worker status telemetry failed after commit for {}: {}",
                     ipPort, telemetryFailure.getMessage());
@@ -412,10 +464,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
+                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT,
+                    workerStatus.getMetricIpPort(), roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, roleType);
+                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                    workerStatus.getMetricIpPort(), roleType);
         }
     }
 

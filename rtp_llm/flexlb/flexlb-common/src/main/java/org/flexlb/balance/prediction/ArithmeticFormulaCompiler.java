@@ -15,8 +15,42 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.flexlb.balance.prediction.ArithmeticFormula.Executable;
-import static org.flexlb.balance.prediction.ArithmeticFormulaAst.*;
-import static org.objectweb.asm.Opcodes.*;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.AggregateFuncNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.BinaryNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.ConstantNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.FunctionNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.UnaryNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.VariableNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.evaluate;
+import static org.objectweb.asm.Opcodes.ACC_FINAL;
+import static org.objectweb.asm.Opcodes.ACC_PUBLIC;
+import static org.objectweb.asm.Opcodes.ACC_SUPER;
+import static org.objectweb.asm.Opcodes.ALOAD;
+import static org.objectweb.asm.Opcodes.ASTORE;
+import static org.objectweb.asm.Opcodes.CHECKCAST;
+import static org.objectweb.asm.Opcodes.DADD;
+import static org.objectweb.asm.Opcodes.DALOAD;
+import static org.objectweb.asm.Opcodes.DASTORE;
+import static org.objectweb.asm.Opcodes.DCONST_0;
+import static org.objectweb.asm.Opcodes.DDIV;
+import static org.objectweb.asm.Opcodes.DLOAD;
+import static org.objectweb.asm.Opcodes.DMUL;
+import static org.objectweb.asm.Opcodes.DNEG;
+import static org.objectweb.asm.Opcodes.DRETURN;
+import static org.objectweb.asm.Opcodes.DSTORE;
+import static org.objectweb.asm.Opcodes.DSUB;
+import static org.objectweb.asm.Opcodes.DUP2;
+import static org.objectweb.asm.Opcodes.GOTO;
+import static org.objectweb.asm.Opcodes.IFEQ;
+import static org.objectweb.asm.Opcodes.IFNE;
+import static org.objectweb.asm.Opcodes.IFNULL;
+import static org.objectweb.asm.Opcodes.INVOKEINTERFACE;
+import static org.objectweb.asm.Opcodes.INVOKESPECIAL;
+import static org.objectweb.asm.Opcodes.INVOKESTATIC;
+import static org.objectweb.asm.Opcodes.IRETURN;
+import static org.objectweb.asm.Opcodes.RETURN;
+import static org.objectweb.asm.Opcodes.V17;
 
 /** JVM backend: fused aggregates and scoped common subexpressions, without reassociation. */
 final class ArithmeticFormulaCompiler {

@@ -106,7 +106,7 @@ class StatusFaultInjectionTest {
         enqueue(prefill, batch(1002, slot(0, input(2, 10))));
         EngineRpcService.WorkerStatusPB second = awaitFinished(prefill, 1, 1, 5_000);
         assertEquals(1, second.getFinishedTaskListCount());
-        assertEquals(2, second.getFinishedTaskList(0).getRequestId());
+        assertEquals(2L, second.getFinishedTaskList(0).getRequestId());
         assertEquals(2, second.getLatestFinishedVersion());
 
         // Suppress: the SAME query now hides the completion, but the cursor
@@ -138,7 +138,7 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB laggingConsumer = workerStatus(prefill, 1);
         assertEquals(1, laggingConsumer.getFinishedTaskListCount(),
                 "an un-advanced cursor still sees the suppressed completion");
-        assertEquals(2, laggingConsumer.getFinishedTaskList(0).getRequestId());
+        assertEquals(2L, laggingConsumer.getFinishedTaskList(0).getRequestId());
         assertEquals(2, laggingConsumer.getLatestFinishedVersion());
     }
 
@@ -185,13 +185,13 @@ class StatusFaultInjectionTest {
         // Running snapshot: rid 7007 swallowed, rid 7008 reported.
         EngineRpcService.WorkerStatusPB running = workerStatus(prefill, 0);
         assertEquals(1, running.getRunningTaskInfoCount());
-        assertEquals(7008, running.getRunningTaskInfo(0).getRequestId());
+        assertEquals(7008L, running.getRunningTaskInfo(0).getRequestId());
         assertEquals(2, running.getRunningQueryLen(), "runningQueryLen stays REAL");
 
         // Finished list: rid 7007 swallowed too (double swallow).
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 1, 5_000);
         assertEquals(1, done.getFinishedTaskListCount());
-        assertEquals(7008, done.getFinishedTaskList(0).getRequestId());
+        assertEquals(7008L, done.getFinishedTaskList(0).getRequestId());
         assertEquals(2, done.getLatestFinishedVersion(),
                 "latestFinishedVersion counts BOTH completions (7007 is only hidden)");
     }
@@ -249,7 +249,7 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB first = workerStatus(prefill, 0);
         assertEquals(1, first.getRunningTaskInfoCount());
         EngineRpcService.TaskInfoPB fake = first.getRunningTaskInfo(0);
-        assertEquals(9001, fake.getRequestId());
+        assertEquals(9001L, fake.getRequestId());
         assertEquals(42, fake.getBatchId());
         assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING, fake.getPhase());
         assertEquals(0, first.getRunningQueryLen(),
@@ -259,8 +259,8 @@ class StatusFaultInjectionTest {
         inject(basePort, "status_fake_task", "\"rid\":9002,\"phase\":\"KV_ALLOCATED\"");
         EngineRpcService.WorkerStatusPB second = workerStatus(prefill, 0);
         assertEquals(2, second.getRunningTaskInfoCount());
-        assertEquals(9001, second.getRunningTaskInfo(0).getRequestId());
-        assertEquals(9002, second.getRunningTaskInfo(1).getRequestId());
+        assertEquals(9001L, second.getRunningTaskInfo(0).getRequestId());
+        assertEquals(9002L, second.getRunningTaskInfo(1).getRequestId());
         assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED,
                 second.getRunningTaskInfo(1).getPhase());
         assertTrue(second.getRunningTaskInfo(1).getIsWaiting(),
@@ -283,7 +283,7 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB first = workerStatus(prefill, 0);
         assertEquals(1, first.getFinishedTaskListCount());
         EngineRpcService.TaskInfoPB fake = first.getFinishedTaskList(0);
-        assertEquals(8801, fake.getRequestId());
+        assertEquals(8801L, fake.getRequestId());
         assertEquals(7, fake.getBatchId());
         assertTrue(fake.hasErrorInfo(), "errorCode 5 must surface as error_info");
         assertEquals(5, fake.getErrorInfo().getErrorCode());
@@ -300,7 +300,7 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB both = workerStatus(prefill, 999);
         assertEquals(2, both.getFinishedTaskListCount());
         assertFalse(both.getFinishedTaskList(1).hasErrorInfo());
-        assertEquals(8802, both.getFinishedTaskList(1).getRequestId());
+        assertEquals(8802L, both.getFinishedTaskList(1).getRequestId());
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -319,8 +319,8 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 2, 5_000);
         assertEquals(2, done.getFinishedTaskListCount(),
                 "duplicate_finished must enqueue the completion twice");
-        assertEquals(31, done.getFinishedTaskList(0).getRequestId());
-        assertEquals(31, done.getFinishedTaskList(1).getRequestId());
+        assertEquals(31L, done.getFinishedTaskList(0).getRequestId());
+        assertEquals(31L, done.getFinishedTaskList(1).getRequestId());
         assertEquals(1, done.getLatestFinishedVersion(),
                 "both copies share ONE version");
 
@@ -388,16 +388,18 @@ class StatusFaultInjectionTest {
         assertEquals(1, prefill.getCompletedCount(),
                 "the request DID complete internally");
 
-        // The report keeps it RUNNING forever and never publishes finished.
+        long cursor = 0L;
+        // The first report publishes the real terminal; later reports retain
+        // only the stale RUNNING entry after the caller advances its cursor.
         for (int i = 0; i < 3; i++) {
-            EngineRpcService.WorkerStatusPB status = workerStatus(prefill, 0);
+            EngineRpcService.WorkerStatusPB status = workerStatus(prefill, cursor);
             assertEquals(1, status.getRunningTaskInfoCount(),
                     "zombie must stay in runningTaskInfo (poll " + i + ")");
-            assertEquals(51, status.getRunningTaskInfo(0).getRequestId());
-            assertEquals(0, status.getFinishedTaskListCount(),
-                    "zombie must never appear in finishedTaskList (poll " + i + ")");
-            assertEquals(0, status.getLatestFinishedVersion(),
-                    "no completion version is ever published (poll " + i + ")");
+            assertEquals(51L, status.getRunningTaskInfo(0).getRequestId());
+            assertEquals(i == 0 ? 1 : 0, status.getFinishedTaskListCount(),
+                    "the completion must be published exactly once to this cursor");
+            assertTrue(status.getLatestFinishedVersion() > 0L);
+            cursor = status.getLatestFinishedVersion();
             Thread.sleep(50);
         }
 
@@ -420,15 +422,16 @@ class StatusFaultInjectionTest {
 
         // One decode step (1ms) finishes internally.
         Thread.sleep(150);
+        long cursor = 0L;
         for (int i = 0; i < 3; i++) {
-            EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
+            EngineRpcService.WorkerStatusPB status = workerStatus(decode, cursor);
             assertEquals(1, status.getRunningTaskInfoCount(),
                     "decode zombie must stay in runningTaskInfo (poll " + i + ")");
-            assertEquals(61, status.getRunningTaskInfo(0).getRequestId());
-            assertEquals(0, status.getFinishedTaskListCount(),
-                    "decode zombie must never appear in finishedTaskList (poll " + i + ")");
-            assertEquals(0, status.getLatestFinishedVersion(),
-                    "no decode completion version is published (poll " + i + ")");
+            assertEquals(61L, status.getRunningTaskInfo(0).getRequestId());
+            assertEquals(i == 0 ? 1 : 0, status.getFinishedTaskListCount(),
+                    "the decode completion must be published exactly once to this cursor");
+            assertTrue(status.getLatestFinishedVersion() > 0L);
+            cursor = status.getLatestFinishedVersion();
             Thread.sleep(50);
         }
         assertEquals(0, decode.getInflightCount(),
@@ -670,9 +673,9 @@ class StatusFaultInjectionTest {
         StreamCollector failedStream = new StreamCollector();
         StreamCollector survivorStream = new StreamCollector();
         prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                .setRequestId(401).build(), failedStream.observer());
+                .setRequestId(401L).build(), failedStream.observer());
         prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                .setRequestId(402).build(), survivorStream.observer());
+                .setRequestId(402L).build(), survivorStream.observer());
 
         EngineRpcService.EnqueueBatchResponsePB ack =
                 enqueue(prefill, batch(7401, slot(0, input(401, 10), input(402, 10))));

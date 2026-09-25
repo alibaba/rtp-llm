@@ -1,5 +1,6 @@
-package org.flexlb.cache.monitor;
+package org.flexlb.cache.telemetry;
 
+import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
@@ -75,10 +76,10 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_report_engine_local_metrics_without_engine_ip_port() {
-        reporter.reportEngineLocalMetrics("10.0.0.1", "PREFILL", 2);
+    void should_report_engine_local_metrics_with_logical_worker_address() {
+        reporter.reportEngineLocalMetrics("10.0.0.1:8080@0", "PREFILL", 2);
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1", "role", "PREFILL");
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080@0", "role", "PREFILL");
         verify(monitor).report(CACHE_ENGINE_LOCAL_COUNT, tags, 2);
         verify(monitor).report(CACHE_ENGINE_LOCAL_BYTES, tags, 272L);
     }
@@ -103,8 +104,8 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_theory_cache_hit_metrics() {
-        CacheHitTheoryStats stats = new CacheHitTheoryStats(() -> 0L);
-        CacheHitTheoryStats.Snapshot snapshot = stats.record(2L, 4L, 0L);
+        CacheHitTheoryStats stats = new CacheHitTheoryStats();
+        CacheHitTheoryStats.Snapshot snapshot = stats.record(2L, 4L);
 
         reporter.reportTheoryCacheHitMetrics(snapshot);
 

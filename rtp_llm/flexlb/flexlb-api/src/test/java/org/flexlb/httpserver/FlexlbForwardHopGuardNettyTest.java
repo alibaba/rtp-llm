@@ -15,6 +15,8 @@ import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
@@ -30,8 +32,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -45,6 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -227,11 +228,11 @@ class FlexlbForwardHopGuardNettyTest {
         long requestId = 73_001L;
         try (Node originalMaster = Node.start("10.0.0.1");
              Client client = Client.connect(originalMaster.grpcPort())) {
-            when(originalMaster.routeService.getRequestState(requestId, 0L))
+            when(originalMaster.routeService.getRequestState(Long.toString(requestId), 0L))
                     .thenReturn(requestState(
                             requestId, RequestState.Phase.ACKNOWLEDGED));
             when(originalMaster.routeService.cancelRequest(
-                    requestId, 0L, CancelReason.CLIENT_CANCELLED))
+                    Long.toString(requestId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(
                             requestId, RequestState.Phase.CANCELLED));
 
@@ -239,7 +240,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.GetRequestStateResponsePB state =
                     client.stub.getRequestState(
                             FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                    .setRequestId(requestId)
+                                    .setRequestId(Long.toString(requestId))
                                     .build());
             assertTrue(state.getFound());
             assertEquals(
@@ -251,7 +252,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
                     client.stub.cancel(
                             FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(requestId)
+                                    .setRequestId(Long.toString(requestId))
                                     .setReason(FlexlbScheduleProtocol.CancelReasonPB
                                             .CANCEL_REASON_CLIENT_CANCELLED)
                                     .build());
@@ -261,7 +262,7 @@ class FlexlbForwardHopGuardNettyTest {
                     FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED,
                     response.getLifecycle().getState());
             verify(originalMaster.routeService).cancelRequest(
-                    requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                    Long.toString(requestId), 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(2, originalMaster.inboundCalls.get());
             originalMaster.awaitExecutorIdle();
         }
@@ -278,18 +279,18 @@ class FlexlbForwardHopGuardNettyTest {
             follower.masterAddress.set(currentMaster.httpAddress());
             currentMaster.isMaster.set(true);
             when(follower.routeService.cancelRequest(
-                    unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED))
+                    Long.toString(unrelatedLocalId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(
                             unrelatedLocalId, RequestState.Phase.CANCELLED));
             when(currentMaster.routeService.cancelRequest(
-                    requestedId, 0L, CancelReason.CLIENT_CANCELLED))
+                    Long.toString(requestedId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(
                             requestedId, RequestState.Phase.CANCELLED));
 
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
                     client.stub.cancel(
                             FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(requestedId)
+                                    .setRequestId(Long.toString(requestedId))
                                     .setReason(FlexlbScheduleProtocol.CancelReasonPB
                                             .CANCEL_REASON_CLIENT_CANCELLED)
                                     .setForwardHop(1)
@@ -298,11 +299,11 @@ class FlexlbForwardHopGuardNettyTest {
             assertFalse(response.getFound());
             assertFalse(response.hasLifecycle());
             verify(follower.routeService).cancelRequest(
-                    requestedId, 0L, CancelReason.CLIENT_CANCELLED);
+                    Long.toString(requestedId), 0L, CancelReason.CLIENT_CANCELLED);
             verify(follower.routeService, never()).cancelRequest(
-                    unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED);
+                    Long.toString(unrelatedLocalId), 0L, CancelReason.CLIENT_CANCELLED);
             verify(currentMaster.routeService, never()).cancelRequest(
-                    anyLong(), anyLong(), any(CancelReason.class));
+                    anyString(), anyLong(), any(CancelReason.class));
             assertEquals(1, follower.inboundCalls.get());
             assertEquals(0, currentMaster.inboundCalls.get());
             follower.awaitExecutorIdle();
@@ -312,8 +313,9 @@ class FlexlbForwardHopGuardNettyTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(Long.toString(requestId))
                 .setSeqLen(1024)
+                .addInputIds(1)
                 .build();
     }
 

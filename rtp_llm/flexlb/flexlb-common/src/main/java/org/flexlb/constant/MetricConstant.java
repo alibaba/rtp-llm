@@ -41,6 +41,14 @@ public class MetricConstant {
      */
     public static final String ENGINE_STATUS_CHECK_FAIL = "app.engine.health.check.fail";
 
+    /** Cumulative engine-status check failure count for the process lifetime. */
+    public static final String ENGINE_STATUS_CHECK_FAIL_TOTAL =
+            "app.engine.health.check.fail.total";
+
+    /** Failed WorkerStatus gRPC check latency in microseconds. */
+    public static final String ENGINE_STATUS_CHECK_FAIL_RT =
+            "app.engine.health.check.fail.rt";
+
     /**
      * Master load balancing service total QPS
      */
@@ -159,6 +167,14 @@ public class MetricConstant {
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
 
+    /** Local tasks known to FlexLB for a worker. */
+    public static final String ENGINE_LOCAL_TASK_MAP_SIZE =
+            "app.engine.health.check.local.task.map.size";
+
+    /** Tasks dispatched by FlexLB but not yet confirmed by the worker. */
+    public static final String ENGINE_IN_TRANSIT_TASK_SIZE =
+            "app.engine.health.check.in.transit.task.size";
+
     /**
      * FlexLB scheduler inflight size — the scheduler's own inflight request count.
      * <p>Reported by BatchSchedulerReporter using role=PREFILL + engineIp="scheduler" tags.
@@ -185,6 +201,9 @@ public class MetricConstant {
      * Engine running task info size
      */
     public static final String ENGINE_RUNNING_TASK_INFO_SIZE = "app.engine.health.check.running.task.info.size";
+
+    public static final String ENGINE_WAITING_TASK_INFO_SIZE =
+            "app.engine.health.check.waiting.task.info.size";
 
     /**
      * Prefill master node monitoring
@@ -218,6 +237,64 @@ public class MetricConstant {
      */
     public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
+    public static final String ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS =
+            "app.engine.worker.status.observed.decision.to.waiting.ms";
+    public static final String ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_WAITING_TO_RUNNING_MS =
+            "app.engine.worker.status.observed.waiting.to.running.ms";
+    public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS =
+            "app.engine.worker.status.engine.waiting.to.running.ms";
+    public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS =
+            "app.engine.worker.status.engine.received.to.waiting.ms";
+    public static final String ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS =
+            "app.engine.worker.status.input.queue.wait.ms";
+    public static final String ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS =
+            "app.engine.worker.status.scheduler.to.running.ms";
+    public static final String ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS =
+            "app.engine.worker.status.scheduler.wait.ms";
+    public static final String ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS =
+            "app.engine.worker.status.remote.kv.wait.ms";
+    public static final String ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS =
+            "app.engine.worker.status.running.to.first.token.ms";
+    public static final String ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS =
+            "app.engine.worker.status.hbm.local.match.tokens";
+    public static final String ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS =
+            "app.engine.worker.status.remote.kv.added.match.tokens";
+    public static final String ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT =
+            "app.engine.worker.status.prefill.step.count";
+    public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN =
+            "app.engine.worker.status.prefill.nonfinal.chunk.tokens.min";
+    public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX =
+            "app.engine.worker.status.prefill.nonfinal.chunk.tokens.max";
+
+    public static final String ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS =
+            "app.engine.worker.step.total.scheduled.tokens";
+    public static final String ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT =
+            "app.engine.worker.step.prefill.request.count";
+    public static final String ENGINE_WORKER_STEP_PREFILL_TOKENS =
+            "app.engine.worker.step.prefill.tokens";
+    public static final String ENGINE_WORKER_STEP_TOKEN_BUDGET =
+            "app.engine.worker.step.token.budget";
+    public static final String ENGINE_WORKER_STEP_BUDGET_FILL_RATIO =
+            "app.engine.worker.step.budget.fill.ratio";
+
+    /* ------------------------ Routing Observability -------------------------- */
+
+    /** Failed KVCM query attempts after the configured retry budget is exhausted. */
+    public static final String KVCM_QUERY_FAILURE_QPS =
+            "app.cache.kvcm.query.failure.qps";
+
+    /** KVCM retry attempts issued after an initial query failure. */
+    public static final String KVCM_QUERY_RETRY_QPS =
+            "app.cache.kvcm.query.retry.qps";
+
+    /** Optimizer trace queries that could not be dispatched or returned an error. */
+    public static final String OPTIMIZER_TRACE_QUERY_FAILED_QPS =
+            "app.optimizer.trace.query.failed.qps";
+
+    /** Optimizer trace queries intentionally skipped because prerequisites were unavailable. */
+    public static final String OPTIMIZER_TRACE_QUERY_SKIPPED_QPS =
+            "app.optimizer.trace.query.skipped.qps";
+
     /* ------------------------ Cache Health Monitoring -------------------------- */
 
     /**
@@ -249,6 +326,43 @@ public class MetricConstant {
      * Cache hit percentage
      */
     public static final String CACHE_HIT_RATIO = "app.cache.hit.ratio";
+
+    public static final String CACHE_HIT_COMPARISON_PREDICTED_TOKENS =
+            "app.cache.hit.comparison.predicted.tokens";
+    public static final String CACHE_HIT_COMPARISON_ACTUAL_TOKENS =
+            "app.cache.hit.comparison.actual.tokens";
+    public static final String CACHE_HIT_COMPARISON_DELTA_TOKENS =
+            "app.cache.hit.comparison.delta.tokens";
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS =
+            "app.cache.hit.comparison.local.standby.predicted.tokens";
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS =
+            "app.cache.hit.comparison.local.standby.delta.tokens";
+    public static final String CACHE_HIT_COMPARISON_PREDICTED_RATIO =
+            "app.cache.hit.comparison.predicted.ratio";
+    public static final String CACHE_HIT_COMPARISON_ACTUAL_RATIO =
+            "app.cache.hit.comparison.actual.ratio";
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO =
+            "app.cache.hit.comparison.local.standby.predicted.ratio";
+    public static final String CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS =
+            "app.cache.kvcm.selected.local.match.tokens";
+    public static final String CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS =
+            "app.cache.kvcm.selected.global.match.tokens";
+    public static final String CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS =
+            "app.cache.hit.comparison.kvcm.local.delta.tokens";
+    public static final String CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS =
+            "app.cache.hit.comparison.kvcm.global.match.delta.tokens";
+    public static final String CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS =
+            "app.cache.local.standby.capacity.rejected.qps";
+    public static final String CACHE_LOCAL_STANDBY_MAPPING_COUNT =
+            "app.cache.local.standby.mapping.count";
+    public static final String CACHE_LOCAL_STANDBY_BLOCK_SIZE =
+            "app.cache.local.standby.block.size";
+    public static final String CACHE_MATCH_ACTIVE_SOURCE =
+            "app.cache.match.active.source";
+    public static final String CACHE_MATCH_SOURCE_CHANGE_QPS =
+            "app.cache.match.source.change.qps";
+    public static final String CACHE_MATCH_STANDBY_FALLBACK_QPS =
+            "app.cache.match.standby.fallback.qps";
 
     /**
      * Recent cache-key hit token count for requests in the current metric bucket.
@@ -373,6 +487,28 @@ public class MetricConstant {
      */
     public static final String CACHE_ENGINE_VIEWS_MAP_SIZE = "app.cache.engine.views.map.size";
 
+    /* ------------------------ Block Hash Monitoring -------------------------- */
+
+    /**
+     * Time spent waiting in the block hash executor queue, in microseconds.
+     */
+    public static final String BLOCK_HASH_QUEUE_WAIT_TIME_US = "app.block.hash.queue.wait.time.us";
+
+    /**
+     * Time spent calculating block hashes, in microseconds.
+     */
+    public static final String BLOCK_HASH_EXECUTION_TIME_US = "app.block.hash.execution.time.us";
+
+    /**
+     * Block hash request result, tagged by status.
+     */
+    public static final String BLOCK_HASH_RESULT = "app.block.hash.result";
+
+    /**
+     * Dedicated block hash thread pool status.
+     */
+    public static final String BLOCK_HASH_THREAD_POOL_INFO = "app.block.hash.thread.pool.info";
+
     /* ------------------------ gRPC Connection Pool Monitoring -------------------------- */
 
     /**
@@ -466,6 +602,24 @@ public class MetricConstant {
      */
     public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
 
+    /** Number of input token IDs observed at the request boundary. */
+    public static final String REQUEST_INPUT_IDS_COUNT = "app.request.input.ids.count";
+
+    /** Protobuf message size excluding gRPC framing and compression. */
+    public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
+
+    /** Request payload size from Content-Length when available. */
+    public static final String REQUEST_BODY_BYTES = "app.request.body.bytes";
+
+    public static final String LOCAL_STANDBY_HASH_QUEUE_WAIT_TIME_US =
+            "app.local.standby.hash.queue.wait.time.us";
+    public static final String LOCAL_STANDBY_HASH_EXECUTION_TIME_US =
+            "app.local.standby.hash.execution.time.us";
+    public static final String LOCAL_STANDBY_HASH_RESULT =
+            "app.local.standby.hash.result";
+    public static final String LOCAL_STANDBY_HASH_THREAD_POOL_INFO =
+            "app.local.standby.hash.thread.pool.info";
+
     /**
      * Graceful online/offline lifecycle events
      */
@@ -556,12 +710,18 @@ public class MetricConstant {
     public static final String AUTO_TPM_EVICTION_PLAN_COUNT = "auto_tpm.eviction_plan.count";
 
     /**
-     * Auto-TPM eviction plan commit count (QPS), tags: priority, case, result
+     * Auto-TPM eviction plan commit count (QPS), tags: priority, case, result.
+     * Under {@code engineCancellation.mode=RETURN} a commit means the
+     * instruction-bearing route was prepared, before it crosses its delivery
+     * boundary and before the victims' releases are proven, so the count is an
+     * upper bound on completed Engine-owned preemptions.
      */
     public static final String AUTO_TPM_EVICTION_COMMIT_COUNT = "auto_tpm.eviction_commit.count";
 
     /**
-     * Auto-TPM evicted victim count (QPS), tags: victim_priority, incoming_priority, stage, case
+     * Auto-TPM evicted victim count (QPS), tags: victim_priority, incoming_priority, stage, case.
+     * Subject to the same RETURN-mode upper bound as
+     * {@link #AUTO_TPM_EVICTION_COMMIT_COUNT}.
      */
     public static final String AUTO_TPM_VICTIM_COUNT = "auto_tpm.victim.count";
 
@@ -600,7 +760,7 @@ public class MetricConstant {
 
     /**
      * Auto-TPM priority preemption count (QPS), tags: stage
-     * (prefill_queued / decode_reserved).
+     * (prefill_queued / decode_reserved / decode_running / decode_cancel).
      */
     public static final String AUTO_TPM_PRIORITY_PREEMPT_COUNT = "auto_tpm.priority_preempt.count";
 

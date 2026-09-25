@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package kv_cache_manager.proto.meta;
+
+option java_package = "org.flexlb.kvcm.grpc";
+option java_multiple_files = true;
+option java_outer_classname = "KvcmMetaServiceProto";
+
+// Wire-compatible subset of
+// KVCacheManager/github-opensource/kv_cache_manager/protocol/protobuf/meta_service.proto.
+// FlexLB vendors only the RPCs required for leader discovery and cache matching.
+enum ErrorCode {
+  UNSPECIFIED = 0;
+  OK = 1;
+  UNSUPPORTED = 2;
+  INTERNAL_ERROR = 3;
+  SERVICE_NOT_READY = 4;
+  INVALID_ARGUMENT = 5;
+  DUPLICATE_ENTITY = 6;
+  REACH_MAX_ENTITY_CAPACITY = 7;
+  INSTANCE_NOT_EXIST = 8;
+  SERVER_NOT_LEADER = 9;
+  NODE_NOT_REGISTERED = 10;
+  IO_ERROR = 20;
+  UNKNOWN_ERROR = 100;
+  ERROR_MAX = 65535;
+}
+
+message Status {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+message CommonResponseHeader {
+  Status status = 1;
+  string request_id = 2;
+  string tracer_result = 3;
+}
+
+message MetaNodeEndpoint {
+  string node_id = 1;
+  string host = 2;
+  int32 meta_rpc_port = 3;
+  int32 meta_http_port = 4;
+  string custom_info = 5;
+}
+
+message GetClusterInfoRequest {
+  string trace_id = 1;
+  string instance_id = 2;
+}
+
+message GetClusterInfoResponse {
+  CommonResponseHeader header = 1;
+  string self_node_id = 2;
+  string leader_node_id = 3;
+  MetaNodeEndpoint leader_endpoint = 4;
+}
+
+enum QueryType {
+  QT_UNSPECIFIED = 0;
+  QT_BATCH_GET = 1;
+  QT_PREFIX_MATCH = 2;
+  QT_REVERSE_ROLL_SW_MATCH = 3;
+  QT_PREFIX_MATCH_WITH_MAMBA = 4;
+}
+
+message GetHostCacheStateRequest {
+  string trace_id = 1;
+  string instance_id = 2;
+  QueryType query_type = 3;
+  repeated int64 block_cache_keys = 4;  // Ordered prompt block cache keys.
+  repeated string medium = 5;           // Empty means all storage media.
+  // Deprecated: superseded by global_kvs_host_count and enable_p2p. The number is
+  // kept so that vendored field numbering stays aligned with the upstream protocol.
+  int32 p2p_host_count = 6;
+  // Number of logical engines with the longest local match to compute remote hits for.
+  // Zero computes local matches only.
+  int32 global_kvs_host_count = 7;
+  bool enable_p2p = 8;
+}
+
+message HostCacheMatch {
+  // Logical worker identity emitted by the KVCM subscriber: ip:port@engineIndex.
+  // A legacy physical ip:port key is accepted only for an unambiguous N=1 worker.
+  string host_ip_port = 1;
+  int64 local = 2;                    // Local continuous prefix matches.
+  // Deprecated: superseded by global. The numbers are kept so that vendored field
+  // numbering stays aligned with the upstream protocol.
+  int64 p2p_1_fetch = 3;              // Local-miss blocks fetched from one remote peer.
+  int64 p2p_1_total_match = 4;        // Continuous prefix matches after that P2P fetch.
+  // Continuous prefix matches from local, P2P and remote pool sources combined,
+  // including local.
+  int64 global = 5;
+}
+
+message GetHostCacheStateResponse {
+  CommonResponseHeader header = 1;
+  repeated HostCacheMatch hosts = 2;
+}
+
+service MetaService {
+  rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
+  rpc GetHostCacheState(GetHostCacheStateRequest) returns (GetHostCacheStateResponse);
+}

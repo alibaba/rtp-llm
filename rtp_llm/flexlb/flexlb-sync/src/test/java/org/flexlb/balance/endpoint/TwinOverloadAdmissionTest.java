@@ -177,8 +177,9 @@ class TwinOverloadAdmissionTest {
         EndpointTestSupport.TestRequestRuntime runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
-                config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                () -> config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         endpoints.add(endpoint);
         endpoint.startGeneration();
         return endpoint;
@@ -215,7 +216,7 @@ class TwinOverloadAdmissionTest {
 
     private static ScheduledRequest item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
         Request request = new Request();
-        request.setRequestId(id);
+        request.setRequestId(Long.toString(id));
         request.setSeqLen(128L);
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
@@ -232,7 +233,7 @@ class TwinOverloadAdmissionTest {
         Map<String, TaskInfo> result = new LinkedHashMap<>();
         for (long id = firstId; id < firstId + count; id++) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(id);
+            task.setRequestId(Long.toString(id));
             task.setBatchId(batchId);
             task.setPhase(phase);
             task.setInputLength(128L);

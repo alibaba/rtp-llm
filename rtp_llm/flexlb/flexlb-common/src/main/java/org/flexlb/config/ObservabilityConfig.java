@@ -2,12 +2,21 @@ package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.Setter;
+import org.flexlb.enums.LogLevel;
 
 @Getter
 @Setter
 public final class ObservabilityConfig {
 
     private CacheHitConfig cacheHit = new CacheHitConfig();
+    private LoggingConfig logging = new LoggingConfig();
+
+    @Getter
+    @Setter
+    public static final class LoggingConfig {
+        private LogLevel level = LogLevel.INFO;
+        private boolean stdoutEnabled;
+    }
 
     @Getter
     @Setter

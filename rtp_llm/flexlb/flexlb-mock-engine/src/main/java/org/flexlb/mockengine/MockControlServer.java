@@ -740,7 +740,19 @@ final class MockControlServer {
                 return;
             }
             JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+            JavaMockEngineCluster.FastRpcService service;
+            try {
+                service = resolveService(body);
+            } catch (ApiException unresolved) {
+                DynamicEngineManager.RemovedEngine detached = detachedRemoval(body);
+                if (detached == null) {
+                    throw unresolved;
+                }
+                // A concurrent caller already drove this engine's teardown; join
+                // that outcome instead of reporting a missing engine.
+                sendJson(exchange, 200, removalResponse(detached));
+                return;
+            }
             String mode = body.path("mode").asText("graceful");
             if (!"graceful".equalsIgnoreCase(mode) && !"abrupt".equalsIgnoreCase(mode)) {
                 sendJson(exchange, 400, Map.of("error",
@@ -754,17 +766,7 @@ final class MockControlServer {
                 return;
             }
             DynamicEngineManager.RemovedEngine removed = engineManager.removeEngine(service, mode, drainTimeoutMs);
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", removed.engineName());
-            response.put("port", removed.grpcPort());
-            response.put("action", "removed");
-            response.put("running_at_removal", removed.runningAtRemoval());
-            response.put("waiting_at_removal", removed.waitingAtRemoval());
-            response.put("mode", removed.mode());
-            response.put("drained", removed.drained());
-            response.put("drain_ms", removed.drainMs());
-            sendJson(exchange, 200, response);
+            sendJson(exchange, 200, removalResponse(removed));
         } catch (DynamicEngineManager.EngineOperationException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
         } catch (ApiException e) {
@@ -776,6 +778,35 @@ final class MockControlServer {
                 // Response already committed; nothing more to do.
             }
         }
+    }
+
+    /** One body for the caller that drove a teardown and for one that joined it. */
+    private static Map<String, Object> removalResponse(
+            DynamicEngineManager.RemovedEngine removed) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "ok");
+        response.put("engine", removed.engineName());
+        response.put("port", removed.grpcPort());
+        response.put("action", "removed");
+        response.put("running_at_removal", removed.runningAtRemoval());
+        response.put("waiting_at_removal", removed.waitingAtRemoval());
+        response.put("mode", removed.mode());
+        response.put("drained", removed.drained());
+        response.put("drain_ms", removed.drainMs());
+        return response;
+    }
+
+    /** Dual-addressed lookup of an outcome this control plane already detached. */
+    private DynamicEngineManager.RemovedEngine detachedRemoval(JsonNode body) {
+        if (engineManager == null) {
+            return null;
+        }
+        if (body.has("port")) {
+            return engineManager.detachedRemovalByPort(body.path("port").asInt());
+        }
+        JsonNode engineNode = body.path("engine");
+        return engineNode.isTextual()
+                ? engineManager.detachedRemovalByEngine(engineNode.asText()) : null;
     }
 
     private void handleMetrics(HttpExchange exchange) throws IOException {

@@ -21,12 +21,12 @@ final class RouteProjectionTestSupport {
 
     static final Comparator<GroupPlanner.Item> FIFO =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
     static final Comparator<GroupPlanner.Item> PRIORITY =
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .reversed()
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
 
     static final RouteProjection.DeliveryProjection ROUTE =
             new RouteDeliveryStrategy(
@@ -117,7 +117,7 @@ final class RouteProjectionTestSupport {
             long serviceTokens,
             long expiresAtMs) {
         return new GroupPlanner.Item(
-                requestId,
+                Long.toString(requestId),
                 priority,
                 enqueueSequence,
                 NOW_MS - 1L,
@@ -143,7 +143,7 @@ final class RouteProjectionTestSupport {
             long sequenceLength,
             long hitCache) {
         return new RouteProjection.Probe(
-                requestId,
+                Long.toString(requestId),
                 priority,
                 enqueuedAtMs,
                 expiresAtMs,

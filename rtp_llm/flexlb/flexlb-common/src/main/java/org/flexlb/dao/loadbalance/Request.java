@@ -1,6 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
@@ -22,6 +23,24 @@ public class Request {
     @JsonProperty("block_cache_keys")
     private List<Long> blockCacheKeys;
 
+    @JsonIgnore
+    @ToString.Exclude
+    private List<Long> localStandbyBlockCacheKeys;
+
+    @JsonIgnore
+    @ToString.Exclude
+    private List<Long> localStandbyCacheableBlockCacheKeys;
+
+    @JsonIgnore
+    private long localStandbyBlockSize;
+
+    @ToString.Exclude
+    @JsonProperty(value = "input_ids", access = JsonProperty.Access.WRITE_ONLY)
+    private TokenIds inputIds;
+
+    @JsonProperty("block_size")
+    private long blockSize;
+
     @JsonProperty("seq_len")
     private long seqLen;
 
@@ -29,7 +48,15 @@ public class Request {
     private long cacheKeyBlockSize;
 
     @JsonProperty("request_id")
-    private long requestId;
+    private String requestId;
+
+    public void setRequestId(String requestId) {
+        this.requestId = requestId;
+    }
+
+    public void setRequestId(long requestId) {
+        this.requestId = Long.toString(requestId);
+    }
 
     /** Upstream generation timeout retained for transport compatibility. */
     @JsonProperty("generate_timeout")
@@ -44,7 +71,7 @@ public class Request {
     private String apiKey;
 
     @JsonProperty("max_new_tokens")
-    private int maxNewTokens = 1;
+    private int maxNewTokens = 0;
 
     @JsonProperty("num_beams")
     private int numBeams = 1;
@@ -63,5 +90,19 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
+
+    @JsonIgnore
+    public void setInputIds(TokenIds inputIds) {
+        this.inputIds = inputIds;
+    }
+
+    @JsonProperty(value = "input_ids", access = JsonProperty.Access.WRITE_ONLY)
+    public void setInputIds(int[] inputIds) {
+        this.inputIds = inputIds == null ? null : TokenIds.wrap(inputIds);
+    }
+
+    public void clearInputIds() {
+        this.inputIds = null;
+    }
 
 }

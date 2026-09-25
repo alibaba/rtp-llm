@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 @Component
 public class EndpointRegistry {
@@ -734,10 +734,9 @@ public class EndpointRegistry {
         }
     }
 
-    private WorkerEndpoint createEndpoint(
-            WorkerStatus status,
-            RoleType role,
-            WorkerStatus.EngineObservation engineStatus) {
+    private WorkerEndpoint createEndpoint(WorkerStatus status,
+                                          RoleType role,
+                                          WorkerStatus.EngineObservation engineStatus) {
         if (role == RoleType.FRONTEND) {
             throw new IllegalArgumentException("Unsupported role: " + role);
         }
@@ -753,7 +752,7 @@ public class EndpointRegistry {
         return switch (role) {
             case PREFILL, PDFUSION -> new PrefillEndpoint(
                     status,
-                    configService.loadBalanceConfig(),
+                    configService::loadBalanceConfig,
                     deliveryStrategy,
                     endpointEvents,
                     reporter,
@@ -767,10 +766,10 @@ public class EndpointRegistry {
 
     private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
         try {
-            reporter.prepareEndpointMetrics(roleType.name(), status.getIp());
+            reporter.prepareEndpointMetrics(roleType.name(), status.getMetricIpPort());
         } catch (RuntimeException telemetryFailure) {
             Logger.warn("Endpoint metric preparation failed: role={}, engine={}",
-                    roleType, status.getIp(), telemetryFailure);
+                    roleType, status.getMetricIpPort(), telemetryFailure);
         }
     }
 
@@ -979,7 +978,7 @@ public class EndpointRegistry {
      *                                  must not acquire request locks or use a historical snapshot
      */
     public void evictExpiredOrphans(long ttlMs,
-                                    LongPredicate retainForSchedulerCleanup) {
+                                    Predicate<String> retainForSchedulerCleanup) {
         endpoints(RoleType.PREFILL).forEach((endpoint, worker) -> {
             PrefillEndpoint ep = (PrefillEndpoint) worker;
             logEndpointEviction(RoleType.PREFILL, endpoint,

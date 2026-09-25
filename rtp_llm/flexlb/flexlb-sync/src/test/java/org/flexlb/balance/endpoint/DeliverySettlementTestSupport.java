@@ -11,13 +11,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Real endpoint accounting used by delivery callback ordering tests. */
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
     public final PrefillState prefill = new PrefillState(lock,
-            PrefillActiveIndex.ordered(4, Comparator.comparingLong(ScheduledRequest::requestId)),
+                PrefillActiveIndex.ordered(4, Comparator.comparing(ScheduledRequest::requestId)),
             System::currentTimeMillis, () -> { });
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
@@ -60,7 +63,7 @@ public final class DeliverySettlementTestSupport {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of(Long.toString(item.requestId()), finished));
+        response.setFinishedTaskInfo(Map.of(item.requestId(), finished));
         var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
                 .freezeStatusResponse(response);
         var result = prefill.reconcileWorkerStatus(observation, ignored -> 100L, () -> { }, () -> { });

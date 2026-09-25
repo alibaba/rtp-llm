@@ -166,6 +166,10 @@ public final class FlexlbTrace {
         setAttribute(span, REQUEST_ID, Long.toString(requestId));
     }
 
+    public static void setRequestAttributes(Span span, String requestId) {
+        setAttribute(span, REQUEST_ID, requestId);
+    }
+
     public static <T> void setAttribute(Span span, AttributeKey<T> key, T value) {
         try {
             if (enabled && span != null && value != null) {

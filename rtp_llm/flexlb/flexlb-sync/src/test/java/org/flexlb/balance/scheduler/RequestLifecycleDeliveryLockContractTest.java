@@ -534,6 +534,10 @@ class RequestLifecycleDeliveryLockContractTest {
     }
 
     private void assertQueuedWithoutClaim(long requestId) {
+        assertQueuedWithoutClaim(Long.toString(requestId));
+    }
+
+    private void assertQueuedWithoutClaim(String requestId) {
         RequestState snapshot = lifecycle.getRequestState(
                 requestId, 0L);
         assertEquals(RequestState.Phase.QUEUED, snapshot.state());

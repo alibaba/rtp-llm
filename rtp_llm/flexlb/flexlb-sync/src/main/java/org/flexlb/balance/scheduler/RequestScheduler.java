@@ -128,7 +128,7 @@ public final class RequestScheduler {
     }
 
     public RequestState cancelRequest(
-            long requestId,
+            String requestId,
             long expectedBatchId,
             CancelReason reason) {
         return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
@@ -150,11 +150,15 @@ public final class RequestScheduler {
         return (int) queued;
     }
 
+    public int getBlockedRequestCount() {
+        return globalQueue == null ? 0 : globalQueue.blockedSize();
+    }
+
     public List<RequestState> snapshotActiveRequests() {
         return requestRegistry.snapshotActiveRequests();
     }
 
-    public RequestState getRequestState(long requestId, long expectedBatchId) {
+    public RequestState getRequestState(String requestId, long expectedBatchId) {
         return requestRegistry.getRequestState(requestId, expectedBatchId);
     }
 
