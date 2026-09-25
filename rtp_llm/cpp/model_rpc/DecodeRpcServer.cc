@@ -1,3 +1,4 @@
+#include <c10/util/ScopeExit.h>
 #include <algorithm>
 #include <mutex>
 #include <memory>
@@ -1128,7 +1129,10 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     if (!admission.detail.admitted) {
         return AdmissionGate::toGrpcStatus(admission.detail);
     }
-    auto admission_lease = std::move(admission.lease);
+    auto admission_done = c10::make_scope_exit([&]() {
+        if (admission.complete)
+            admission.complete();
+    });
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     GroupBlockIds             block_ids_by_group;
@@ -1195,7 +1199,10 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     if (!admission.detail.admitted) {
         return AdmissionGate::toGrpcStatus(admission.detail);
     }
-    auto               admission_lease = std::move(admission.lease);
+    auto               admission_done = c10::make_scope_exit([&]() {
+        if (admission.complete)
+            admission.complete();
+    });
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     DecodeRpcContext   rpc_context{grpc_stream};

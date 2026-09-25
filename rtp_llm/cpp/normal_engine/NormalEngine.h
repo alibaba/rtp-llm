@@ -27,7 +27,9 @@ namespace rtp_llm {
 
 class NormalEngine: public EngineBase {
 public:
-    NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
+    NormalEngine(const EngineInitParams&                       params,
+                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                 bool                                          defer_loop_start = false);
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;
@@ -38,14 +40,18 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
-    void                              pause() override;
-    void                              restart() override;
-    absl::Status                      pauseAndWaitQuiesced(int64_t timeout_ms) override;
+    absl::Status                      start() override;
+    absl::Status quiesce(int64_t timeout_ms, std::optional<uint64_t> target_round = std::nullopt) override;
+    absl::Status resume() override;
+    absl::Status terminate() override;
+    bool         executionQuiesceSupported() const override;
+    void         requestTermination() override;
+    void         pause() override;
+    void         restart() override;
     // Keep multi-rank peers polling during drain; the control plane freezes them later.
-    void armCollectiveSleepQuiesce() override;
-    bool         requiresCoordinatedSleepQuiesce() const override;
-    uint64_t     freezeSleepRounds() override;
-    absl::Status pauseAtSleepRound(uint64_t round, int64_t timeout_ms) override;
+    void     armCollectiveSleepQuiesce() override;
+    bool     requiresCoordinatedSleepQuiesce() const override;
+    uint64_t freezeSleepRounds() override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -74,11 +80,13 @@ private:
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
-    absl::Status                    releasePendingTpCollectiveForPause(uint64_t pause_epoch);
     bool                            collectiveSleepQuiesceEnabled() const;
     bool                            acquireSleepRound();
     void                            enterPausedState();
-    void                            markPauseQuiesced(uint64_t pause_epoch);
+    void                            requestPause(bool require_drain);
+    absl::Status                    drainExecution();
+    absl::Status                    resumeExecution(bool require_quiesced);
+    absl::Status                    terminateExecution(bool require_quiesced);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -89,17 +97,26 @@ private:
 private:
     autil::ThreadPtr  loop_thread_;
     std::atomic<bool> running_{false};
-    std::mutex        process_mutex_;
+    // Serialize first start, resume and the single join owner. The loop never
+    // takes this mutex; completion/ready notifications use pause_mutex_.
+    std::mutex              execution_mutex_;
+    bool                    terminated_{false};
+    bool                    loop_ready_{false};
+    absl::Status            loop_start_status_;
+    absl::Status            loop_exit_status_;
+    std::atomic<bool>       execution_quiesced_{false};
     SleepRoundFence         sleep_round_fence_;
     std::mutex              pause_mutex_;
     std::condition_variable pause_cv_;
     // Monotonic quiesce acknowledgement: the highest pause epoch a quiesce has
-    // completed for. pauseAndWaitQuiesced() waits for this to reach the epoch it
+    // completed for. quiesce() waits for this to reach the epoch it
     // captured. Monotonic-and-epoch-stamped so a fresh pause() (which only bumps
     // pause_epoch_) can never race-erase a quiesce already recorded for that epoch.
     uint64_t                                      quiesced_pause_epoch_{0};
+    bool                                          pause_quiescing_{false};
+    bool                                          safe_pause_requested_{false};
+    absl::Status                                  pause_failure_;
     std::atomic<uint64_t>                         pause_epoch_{0};
-    std::atomic<uint64_t>                         processed_pause_epoch_{0};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

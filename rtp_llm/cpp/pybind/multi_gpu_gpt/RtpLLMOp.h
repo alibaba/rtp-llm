@@ -12,6 +12,8 @@ namespace th = torch;
 
 namespace rtp_llm {
 
+class CpuQuiesceCoordinator;
+
 class RtpLLMOp: public th::jit::CustomClassHolder {
 public:
     RtpLLMOp();
@@ -22,7 +24,8 @@ public:
               py::object vit_config,
               py::object mm_process_engine,
               py::object propose_model,
-              py::object token_processor);
+              py::object token_processor,
+              py::object cpu_lifecycle_group);
     void stop();
     void
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
@@ -45,6 +48,7 @@ private:
                                                                 py::object                                    token_processor);
 
 private:
+    std::shared_ptr<CpuQuiesceCoordinator> quiesce_coordinator_;
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
     std::shared_ptr<HttpApiServer>  http_server_;
     std::unique_ptr<grpc::Server>   grpc_server_;

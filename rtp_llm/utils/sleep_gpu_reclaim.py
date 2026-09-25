@@ -56,11 +56,10 @@ def _cuda_graph_baked() -> bool:
 
 
 def _optional_release_allowed(graph_baked: bool) -> bool:
-    """Explicit opt-in release, never allowed for graph-baked pointers.
+    """Default-on with sleep, but never allowed for graph-baked pointers.
 
-    ``RTP_LLM_SLEEP_FREE_RUNTIME_CACHES`` intentionally defaults to ``0``.
-    Operators can opt into reclaim on a no-graph role, while a graph role always
-    wins the safety check.
+    Explicit ``RTP_LLM_SLEEP_FREE_RUNTIME_CACHES=0`` disables optional reclaim.
+    A graph role always wins the safety check, even with an explicit 1.
     """
     try:
         from rtp_llm.models_py.utils.cuda_graph_state import (
@@ -82,7 +81,7 @@ def _clear_module_device_caches() -> list[str]:
 
     Returns a list of human-readable notes for logging. MegaMoE symmetric-memory
     destruction is non-collective, but recreation requires a collective rendezvous
-    and is therefore opt-in.
+    and therefore retains the graph/lifecycle safety interlocks below.
     """
     notes: list[str] = []
     graph_baked = _cuda_graph_baked()
@@ -142,7 +141,7 @@ def _clear_module_device_caches() -> list[str]:
         # lazily on the first post-wake forward, run in lockstep). The symm buffer's
         # cross-rank state (CUDA multicast binding + peer P2P imports, keyed to the
         # physical VMM handle) cannot be VMM-paused at a fixed VA, which is why the
-        # release is opt-in rather than automatic.
+        # release remains independently disableable even when sleep is enabled.
         #
         # Hard safety interlock: when the forward is captured into a CUDA graph both
         # buffers MUST stay resident across sleep/wake -- freeing a baked buffer
@@ -180,7 +179,7 @@ def _clear_module_device_caches() -> list[str]:
         else:
             notes.append(
                 f"mega buffers kept ~{output_gib:.3f} GiB output + ~{symm_gib:.3f} GiB "
-                "symm (RTP_LLM_SLEEP_FREE_RUNTIME_CACHES not set)"
+                "symm (runtime-cache release disabled)"
             )
     except RuntimeCacheReleaseError:
         raise

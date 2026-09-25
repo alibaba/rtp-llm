@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <vector>
 
 #include <torch/torch.h>
@@ -30,6 +31,67 @@ protected:
 
 // ==================== BlockPool::resetMetadata ====================
 
+TEST_F(KVCacheMetadataResetTest, ResetMetadataRejectsLiveRequestRefsWithoutMutation) {
+    auto pool   = makePool();
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto free_before = pool->freeBlocksNum();
+    EXPECT_THROW(pool->resetMetadata(), std::runtime_error);
+    EXPECT_EQ(pool->requestRefBlocksNum(), 1u);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    if (pool->requestRefBlocksNum() != 0) {
+        pool->requestFree(blocks);
+    }
+}
+
+TEST_F(KVCacheMetadataResetTest, ResetMetadataRejectsLiveConnectorRefsWithoutMutation) {
+    auto pool   = makePool();
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    pool->connectorReference(blocks);
+    pool->requestFree(blocks);
+    const auto free_before = pool->freeBlocksNum();
+    EXPECT_THROW(pool->resetMetadata(), std::runtime_error);
+    EXPECT_EQ(pool->connectorRefBlocksNum(), 1u);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    if (pool->connectorRefBlocksNum() != 0) {
+        pool->connectorFree(blocks);
+    }
+}
+
+TEST_F(KVCacheMetadataResetTest, ResetMetadataAllowsRetainedCacheRefs) {
+    auto pool   = makePool();
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    pool->blockCacheReference(blocks);
+    pool->requestFree(blocks);
+    ASSERT_EQ(pool->requestRefBlocksNum(), 0u);
+    ASSERT_EQ(pool->connectorRefBlocksNum(), 0u);
+    ASSERT_EQ(pool->blockCacheRefBlocksNum(), 1u);
+    EXPECT_NO_THROW(pool->resetMetadata());
+    EXPECT_EQ(pool->blockCacheRefBlocksNum(), 0u);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
+TEST_F(KVCacheMetadataResetTest, ReleaseHostBufferRejectsLiveReferencesWithoutMutation) {
+    auto pool = std::make_shared<BlockPool>(createTestConfig(), AllocationType::HOST);
+    ASSERT_TRUE(pool->init());
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto base_before = pool->getBaseAddress();
+    EXPECT_THROW(pool->releaseHostBuffer(), std::runtime_error);
+    EXPECT_EQ(pool->getBaseAddress(), base_before);
+    pool->connectorReference(blocks);
+    pool->requestFree(blocks);
+    EXPECT_THROW(pool->releaseHostBuffer(), std::runtime_error);
+    EXPECT_EQ(pool->getBaseAddress(), base_before);
+    pool->connectorFree(blocks);
+    EXPECT_NO_THROW(pool->releaseHostBuffer());
+    EXPECT_EQ(pool->getBaseAddress(), nullptr);
+    EXPECT_NO_THROW(pool->reallocateHostBuffer());
+    EXPECT_NE(pool->getBaseAddress(), nullptr);
+}
+
 TEST_F(KVCacheMetadataResetTest, ResetMetadataRestoresFreshPoolState) {
     auto pool       = makePool();
     auto fresh_pool = makePool();  // reference: never-touched pool with the same config
@@ -50,6 +112,12 @@ TEST_F(KVCacheMetadataResetTest, ResetMetadataRestoresFreshPoolState) {
     ASSERT_GT(pool->blockCacheRefBlocksNum(), 0u);
     ASSERT_GT(pool->connectorRefBlocksNum(), 0u);
     ASSERT_LT(pool->availableBlocksNum(), total);
+
+    // Destructive lifecycle operations require active owners to finish first.
+    // Retained cache references are intentionally left for the discard reset.
+    pool->requestFree(blocks);
+    pool->requestFree(blocks[2]);
+    pool->connectorFree(blocks[1]);
 
     void* base_before  = pool->getBaseAddress();
     auto  cache_before = pool->blockCache();
@@ -85,8 +153,10 @@ TEST_F(KVCacheMetadataResetTest, ResetMetadataPoolIsFullyAllocatableAgain) {
     auto pool = makePool();
 
     const size_t total = pool->totalBlocksNum();
-    ASSERT_FALSE(pool->malloc(static_cast<int>(total)).empty());
+    auto         held_blocks = pool->malloc(static_cast<int>(total));
+    ASSERT_FALSE(held_blocks.empty());
     ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    pool->requestFree(held_blocks);
 
     pool->resetMetadata();
 

@@ -78,7 +78,8 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params):
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                           bool                                          defer_loop_start):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -146,7 +147,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    (void)startLoop();
+    sleepController().bindAdmission(getScheduler().admission());
+    if (!defer_loop_start) {
+        THROW_IF_STATUS_ERROR(start());
+    }
 }
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
@@ -483,6 +487,17 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+    return start();
+}
+
+absl::Status NormalEngine::start() {
+    std::lock_guard<std::mutex> execution_lock(execution_mutex_);
+    if (terminationRequested() || terminated_) {
+        return absl::FailedPreconditionError("cannot start a terminating/terminated engine");
+    }
+    if (loop_thread_) {
+        return absl::OkStatus();  // First-start is idempotent; it never resumes a paused loop.
+    }
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
@@ -491,44 +506,127 @@ absl::Status NormalEngine::startLoop() {
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
-    return absl::OkStatus();
+    if (!loop_thread_) {
+        running_ = false;
+        return absl::InternalError("failed to create normal engine loop");
+    }
+    // Returning a created thread is not enough: its device/thread context must
+    // be initialized before the control plane can advertise execution readiness.
+    std::unique_lock<std::mutex> pause_lock(pause_mutex_);
+    pause_cv_.wait(pause_lock, [this] { return loop_ready_; });
+    const auto status = loop_start_status_;
+    pause_lock.unlock();
+    if (!status.ok()) {
+        loop_thread_->join();
+        loop_thread_.reset();
+        terminated_ = true;
+        EngineBase::requestTermination();
+    }
+    return status;
 }
 
 absl::Status NormalEngine::stop() {
-    RTP_LLM_LOG_INFO("stop normal engine");
+    // Compatibility/final destruction path. This does not claim that unrelated
+    // ranks have quiesced. Coordinated callers use quiesce() then terminate().
+    return terminateExecution(false);
+}
+
+void NormalEngine::requestTermination() {
+    std::lock_guard<std::mutex> lock(execution_mutex_);
+    EngineBase::requestTermination();
+}
+
+absl::Status NormalEngine::terminate() {
+    return terminateExecution(true);
+}
+
+absl::Status NormalEngine::terminateExecution(bool require_quiesced) {
+    std::lock_guard<std::mutex> execution_lock(execution_mutex_);
+    EngineBase::requestTermination();
+    if (terminated_) {
+        return loop_exit_status_;
+    }
+    if (require_quiesced && loop_thread_ && !execution_quiesced_.load(std::memory_order_acquire)) {
+        return absl::FailedPreconditionError("execution must quiesce before termination");
+    }
+    RTP_LLM_LOG_INFO("terminate normal engine, safe_quiesce_required=%d", require_quiesced);
     running_ = false;
     sleep_round_fence_.stop();
-    restart();
-    RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    loop_thread_->join();
-    return absl::OkStatus();
+    {
+        std::lock_guard<std::mutex> pause_lock(pause_mutex_);
+        pause_.store(false, std::memory_order_release);
+    }
+    pause_cv_.notify_all();
+    // Never return before joining just because scheduler cleanup failed.
+    const auto scheduler_status = scheduler_ ? scheduler_->stop() : absl::OkStatus();
+    if (loop_thread_) {
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
+    terminated_ = true;
+    if (loop_exit_status_.ok()) {
+        loop_exit_status_ = scheduler_status;
+    }
+    return loop_exit_status_;
 }
 
 void NormalEngine::pause() {
+    requestPause(false);
+}
+
+void NormalEngine::requestPause(bool require_drain) {
     {
         // Bump the epoch under pause_mutex_ so it is published together with pause_=true.
         // A quiesce reader (enterPausedState) that observes pause_=true then loads the epoch
         // under the same lock is guaranteed to see the bumped value, so it can never
-        // acknowledge a stale epoch and strand pauseAndWaitQuiesced() until timeout.
+        // acknowledge a stale epoch and strand quiesce() until timeout.
         // Bumping the epoch is also the sole "reset" of the quiesce ack: quiesced_pause_epoch_
         // stays below this new epoch until a real quiesce records it, with no separate reset
         // step that a concurrent acknowledgement could clobber.
         std::lock_guard<std::mutex> lock(pause_mutex_);
-        bool                        expected = false;
-        if (pause_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        if (!pause_.load(std::memory_order_acquire) || (require_drain && !safe_pause_requested_)) {
+            safe_pause_requested_ = require_drain;
+            pause_.store(true, std::memory_order_release);
             auto epoch = pause_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
             RTP_LLM_LOG_INFO("normal engine pause requested, epoch=%lu", epoch);
         }
     }
+    pause_cv_.notify_all();
     if (scheduler_) {
         scheduler_->wake();
     }
 }
 
 void NormalEngine::restart() {
-    if (running_.load(std::memory_order_acquire) && collectiveSleepQuiesceEnabled() && !sleep_round_fence_.resume()) {
-        throw std::runtime_error("cannot restart: sleep device drain is still running or failed");
+    // Legacy callers may cancel an uncommitted drain before a quiesce ACK.
+    // They still cannot interrupt an in-progress/failed device drain.
+    auto status = resumeExecution(false);
+    if (!status.ok()) {
+        throw std::runtime_error(status.ToString());
     }
+}
+
+absl::Status NormalEngine::resume() {
+    return resumeExecution(true);
+}
+
+absl::Status NormalEngine::resumeExecution(bool require_quiesced) {
+    std::lock_guard<std::mutex> execution_lock(execution_mutex_);
+    if (terminationRequested() || terminated_ || !running_.load(std::memory_order_acquire)) {
+        return absl::FailedPreconditionError("cannot resume an unstarted/terminating/terminated engine");
+    }
+    std::lock_guard<std::mutex> pause_lock(pause_mutex_);
+    if (pause_quiescing_ || !pause_failure_.ok()) {
+        return absl::FailedPreconditionError("cannot resume: execution drain is in progress or failed");
+    }
+    if (require_quiesced && !execution_quiesced_.load(std::memory_order_acquire)) {
+        return absl::FailedPreconditionError("cannot resume before execution quiesces");
+    }
+    if (collectiveSleepQuiesceEnabled() && !sleep_round_fence_.resume()) {
+        return absl::FailedPreconditionError("cannot resume: collective execution drain is in progress or failed");
+    }
+    execution_quiesced_.store(false, std::memory_order_release);
+    safe_pause_requested_ = false;
     if (scheduler_) {
         scheduler_->setForcePoll(false);
     }
@@ -536,23 +634,9 @@ void NormalEngine::restart() {
     // between a waiter's predicate check and its wait: holding the lock forces
     // the waiter to either observe pause_=false before parking or receive the
     // notify while parked. A bare store+notify here could be lost.
-    {
-        std::lock_guard<std::mutex> lock(pause_mutex_);
-        pause_.store(false, std::memory_order_release);
-    }
+    pause_.store(false, std::memory_order_release);
     pause_cv_.notify_all();
-}
-
-void NormalEngine::markPauseQuiesced(uint64_t pause_epoch) {
-    {
-        std::lock_guard<std::mutex> lock(pause_mutex_);
-        // Monotonic: only ever advance. A stale/late caller for an older epoch cannot
-        // pull the ack backwards and strand a waiter that captured a newer epoch.
-        if (pause_epoch > quiesced_pause_epoch_) {
-            quiesced_pause_epoch_ = pause_epoch;
-        }
-    }
-    pause_cv_.notify_all();
+    return absl::OkStatus();
 }
 
 void NormalEngine::enterPausedState() {
@@ -569,8 +653,21 @@ void NormalEngine::enterPausedState() {
             break;
         }
         const uint64_t epoch = pause_epoch_.load(std::memory_order_acquire);
-        if (epoch > quiesced_pause_epoch_) {
-            quiesced_pause_epoch_ = epoch;
+        if (safe_pause_requested_ && epoch > quiesced_pause_epoch_ && pause_failure_.ok()) {
+            pause_quiescing_ = true;
+            // Do not hold the control mutex while waiting on CPU workers/GPU.
+            // A timeout may report failure, but cannot cancel their execution.
+            lock.unlock();
+            const auto status = drainExecution();
+            lock.lock();
+            pause_quiescing_ = false;
+            if (!status.ok()) {
+                pause_failure_ = status;
+            } else if (running_.load(std::memory_order_acquire) && pause_.load(std::memory_order_acquire)
+                       && pause_epoch_.load(std::memory_order_acquire) == epoch) {
+                execution_quiesced_.store(true, std::memory_order_release);
+                quiesced_pause_epoch_ = epoch;
+            }
             pause_cv_.notify_all();
         }
         pause_cv_.wait(lock, [this, epoch] {
@@ -581,12 +678,29 @@ void NormalEngine::enterPausedState() {
 }
 
 bool NormalEngine::collectiveSleepQuiesceEnabled() const {
-    // Static launch-time gate. Only local ticket accounting runs during serving;
-    // runtimeSupported() may be installed later and must not reset ticket history.
-    // TP-only also needs a common boundary: a rank-local pause may arrive after
-    // its peer has already entered the next TP broadcast. Startup capability
-    // validation excludes topologies without matching full executor rounds.
-    return sleep_controller_.enabled() && parallelism_config.world_size > 1;
+    // Count from first start even when sleep is OFF: graceful termination needs
+    // the same full-round history. This is a topology capability, not a VMM gate.
+    return parallelism_config.world_size > 1 && executionQuiesceSupported();
+}
+
+bool NormalEngine::executionQuiesceSupported() const {
+    if (ffn_disaggregate_config.enable_ffn_disaggregate || !kv_cache_config.multi_task_prompt_tokens.empty()
+        || parallelism_config.tp_size < 1 || parallelism_config.dp_size < 1
+        || parallelism_config.world_size != parallelism_config.tp_size * parallelism_config.dp_size
+        || (parallelism_config.ep_size != 1 && parallelism_config.ep_size != parallelism_config.world_size)) {
+        return false;
+    }
+    // Independent dense DP replicas do not share full-forward rounds. Never
+    // create a world-wide max-round barrier merely because world_size > 1.
+    const bool has_moe_layer =
+        model_config_.expert_num > 0
+        && ((model_config_.moe_style == 1 && model_config_.num_layers > 0)
+            || (model_config_.moe_style == 2
+                && std::any_of(model_config_.moe_layer_index.begin(),
+                               model_config_.moe_layer_index.end(),
+                               [this](int64_t layer) { return layer >= 0 && layer < model_config_.num_layers; })));
+    return parallelism_config.dp_size <= 1
+           || (parallelism_config.ep_size == parallelism_config.world_size && has_moe_layer);
 }
 
 bool NormalEngine::requiresCoordinatedSleepQuiesce() const {
@@ -597,19 +711,36 @@ uint64_t NormalEngine::freezeSleepRounds() {
     return collectiveSleepQuiesceEnabled() ? sleep_round_fence_.freeze() : 0;
 }
 
-absl::Status NormalEngine::pauseAtSleepRound(uint64_t round, int64_t timeout_ms) {
-    if (!collectiveSleepQuiesceEnabled()) {
-        return pauseAndWaitQuiesced(timeout_ms);
+absl::Status NormalEngine::drainExecution() {
+    absl::Status status;
+    try {
+        if (executor_) {
+            executor_->drainAsyncRunners();
+        }
+    } catch (const std::exception& e) {
+        status = absl::InternalError(e.what());
+    } catch (...) {
+        status = absl::InternalError("unknown async runner failure");
     }
-    if (!running_.load(std::memory_order_acquire) || !sleep_round_fence_.setTarget(round)) {
-        return absl::FailedPreconditionError("sleep round target rejected or engine stopped");
+    // Even after a CPU exception, retire already submitted GPU work before
+    // publishing failure. No success ACK may hide either kind of failure.
+    try {
+        cudaSyncAndCheck();
+    } catch (const std::exception& e) {
+        if (status.ok()) {
+            status = absl::InternalError(e.what());
+        }
+    } catch (...) {
+        if (status.ok()) {
+            status = absl::InternalError("unknown device synchronization failure");
+        }
     }
-    const auto timeout = std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 60000);
-    if (!sleep_round_fence_.wait(timeout)) {
-        return absl::DeadlineExceededError("sleep round quiesce incomplete or failed; GPU resources remain backed");
+    // Only the loop writes this status, and the stop owner reads it after join.
+    // A runner may consume its exception: a later cleanup must not erase it.
+    if (!status.ok() && loop_exit_status_.ok()) {
+        loop_exit_status_ = status;
     }
-    RTP_LLM_LOG_INFO("normal engine sleep round quiesced, round=%lu", round);
-    return absl::OkStatus();
+    return status;
 }
 
 bool NormalEngine::acquireSleepRound() {
@@ -624,86 +755,58 @@ bool NormalEngine::acquireSleepRound() {
         // The coordinator froze EVERY peer before granting this common target.
         // All kernels belonging to an admitted round have been submitted before
         // this point; catch-up peers remain able to complete their matching work.
-        std::string error;
-        try {
-            if (executor_) {
-                executor_->drainAsyncRunners();
-            }
-#if USING_CUDA
-            if (auto result = cudaDeviceSynchronize(); result != cudaSuccess) {
-                error = cudaGetErrorString(result);
-            }
-#endif
-        } catch (const std::exception& e) {
-            error = e.what();
-        } catch (...) {
-            error = "unknown async runner failure";
+        const auto status = drainExecution();
+        if (!status.ok()) {
+            RTP_LLM_LOG_ERROR("execution round device drain failed: %s", status.ToString().c_str());
         }
-        if (!error.empty()) {
-            RTP_LLM_LOG_ERROR("sleep round device drain failed: %s", error.c_str());
-        }
-        sleep_round_fence_.finishQuiesce(permit.generation, error);
+        execution_quiesced_.store(status.ok(), std::memory_order_release);
+        sleep_round_fence_.finishQuiesce(permit.generation, status.ok() ? "" : status.ToString());
         // Stay parked until wake/cancel/stop; never submit target + 1.
     }
 }
 
-absl::Status NormalEngine::releasePendingTpCollectiveForPause(uint64_t pause_epoch) {
-    if (parallelism_config.tp_size <= 1 || parallelism_config.tp_rank != 0) {
-        return absl::OkStatus();
+absl::Status NormalEngine::quiesce(int64_t timeout_ms, std::optional<uint64_t> target_round) {
+    if (!executionQuiesceSupported()) {
+        return absl::UnimplementedError("safe execution quiesce is unavailable for this engine topology");
     }
-    if (processed_pause_epoch_.load(std::memory_order_acquire) >= pause_epoch) {
-        return absl::OkStatus();
+    if (!running_.load(std::memory_order_acquire)) {
+        return absl::FailedPreconditionError("execution is not running");
     }
-
-    std::lock_guard<std::mutex> lock(process_mutex_);
-    if (processed_pause_epoch_.load(std::memory_order_acquire) >= pause_epoch) {
-        return absl::OkStatus();
-    }
-
-    RTP_LLM_LOG_INFO("normal engine pause: run one empty TP sync step, epoch=%lu", pause_epoch);
-    auto status = executor_->processForPause();
-    if (!status.ok()) {
-        return status;
-    }
-    processed_pause_epoch_.store(pause_epoch, std::memory_order_release);
-    // Rank0 may be blocked in scheduler_->schedule() while worker ranks are
-    // waiting in tpSyncModelInputs. The RPC thread's empty sync step releases
-    // those workers, and rank0 itself is not touching GPU while scheduler-blocked.
-    markPauseQuiesced(pause_epoch);
-    return absl::OkStatus();
-}
-
-absl::Status NormalEngine::pauseAndWaitQuiesced(int64_t timeout_ms) {
     if (collectiveSleepQuiesceEnabled()) {
-        return absl::FailedPreconditionError("multi-rank pause requires the all-rank sleep round-fence protocol");
+        if (!target_round) {
+            return absl::FailedPreconditionError("multi-rank quiesce requires all-rank freeze and a common target");
+        }
+        if (!sleep_round_fence_.setTarget(*target_round)) {
+            return absl::FailedPreconditionError("execution round target rejected or engine stopped");
+        }
+        const auto timeout = std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 60000);
+        if (!sleep_round_fence_.wait(timeout)) {
+            return absl::DeadlineExceededError("execution round quiesce incomplete or failed; resources remain backed");
+        }
+        RTP_LLM_LOG_INFO("normal engine execution quiesced, round=%lu", *target_round);
+        return absl::OkStatus();
     }
     constexpr int64_t kDefaultPauseQuiesceTimeoutMs = 60000;
     const int64_t     effective_timeout_ms          = timeout_ms > 0 ? timeout_ms : kDefaultPauseQuiesceTimeoutMs;
 
-    pause();
-    const auto pause_epoch = pause_epoch_.load(std::memory_order_acquire);
-    if (!running_.load(std::memory_order_acquire)) {
-        return absl::OkStatus();
-    }
-
-    if (!collectiveSleepQuiesceEnabled()) {
-        auto status = releasePendingTpCollectiveForPause(pause_epoch);
-        if (!status.ok()) {
-            return status;
-        }
-    }
-
+    requestPause(true);
+    const auto                   pause_epoch = pause_epoch_.load(std::memory_order_acquire);
     std::unique_lock<std::mutex> lock(pause_mutex_);
-    if (quiesced_pause_epoch_ >= pause_epoch || !pause_.load(std::memory_order_acquire)) {
-        return absl::OkStatus();
-    }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(effective_timeout_ms);
     if (!pause_cv_.wait_until(lock, deadline, [this, pause_epoch] {
-            return quiesced_pause_epoch_ >= pause_epoch || !pause_.load(std::memory_order_acquire) || !running_.load();
+            return quiesced_pause_epoch_ >= pause_epoch || !pause_.load(std::memory_order_acquire)
+                   || !pause_failure_.ok() || !running_.load();
         })) {
         return absl::Status(absl::StatusCode::kDeadlineExceeded,
                             "normal engine pause quiesce timeout after " + std::to_string(effective_timeout_ms)
                                 + " ms");
+    }
+    if (!pause_failure_.ok()) {
+        return pause_failure_;
+    }
+    if (!running_.load(std::memory_order_acquire) || !pause_.load(std::memory_order_acquire)
+        || pause_epoch_.load(std::memory_order_acquire) != pause_epoch) {
+        return absl::FailedPreconditionError("quiesce was interrupted before its completion acknowledgement");
     }
     return absl::OkStatus();
 }
@@ -721,13 +824,36 @@ void NormalEngine::armCollectiveSleepQuiesce() {
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
-    cudaPreRun(getDeviceId());
+    absl::Status startup_status;
+    try {
+        cudaPreRun(getDeviceId());
+    } catch (const std::exception& e) {
+        startup_status = absl::InternalError(e.what());
+    } catch (...) {
+        startup_status = absl::InternalError("engine loop context initialization failed");
+    }
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        loop_start_status_ = startup_status;
+        loop_ready_        = true;
+    }
+    pause_cv_.notify_all();
+    if (!startup_status.ok()) {
+        running_ = false;
+        return;
+    }
     while (running_) {
         auto status = step();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
+    }
+    // Compatibility stop may not have used quiesce. Retire CPU workers before
+    // the final GPU drain while the executor's thread/device context still lives.
+    // A sleeping engine already quiesced: do not touch unbacked resources again.
+    if (!execution_quiesced_.load(std::memory_order_acquire)) {
+        (void)drainExecution();
     }
 }
 
@@ -771,7 +897,7 @@ absl::Status NormalEngine::step() {
     try {
         RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
         const bool collective_sleep_quiesce = collectiveSleepQuiesceEnabled();
-        if (pause_.load(std::memory_order_acquire) && !collective_sleep_quiesce
+        if (pause_.load(std::memory_order_acquire)
             && (parallelism_config.tp_size <= 1 || parallelism_config.tp_rank == 0)) {
             enterPausedState();
         }
@@ -817,9 +943,14 @@ absl::Status NormalEngine::step() {
             }
         }
 
-        if (pause_.load(std::memory_order_acquire) && !collective_sleep_quiesce && parallelism_config.tp_rank == 0) {
+        if (pause_.load(std::memory_order_acquire) && parallelism_config.tp_rank == 0) {
             enterPausedState();
-            return absl::OkStatus();
+            // A legacy pause may arrive after the round ticket was admitted.
+            // Resume must finish that same round, not abandon it and skew the
+            // next coordinated boundary relative to TP peers in process().
+            if (!running_.load(std::memory_order_acquire)) {
+                return absl::OkStatus();
+            }
         }
 
         RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -841,7 +972,7 @@ absl::Status NormalEngine::step() {
 
         if (!status.ok() && collective_sleep_quiesce) {
             sleep_round_fence_.fail(status.ToString());
-        } else if (status.ok() && !collective_sleep_quiesce && pause_.load(std::memory_order_acquire)) {
+        } else if (status.ok() && pause_.load(std::memory_order_acquire)) {
             enterPausedState();
         }
 

@@ -10,10 +10,7 @@
 
 namespace rtp_llm {
 
-// Structured admission result. When denied, all fields are populated so RPC
-// callers can serialize ErrorDetailsPB and HTTP callers can build a JSON body
-// with the same schema:
-//   {error_code, error_code_str, message, instance_id, sleep_epoch, state}
+// Structured admission result serialized as ErrorDetailsPB on RPC rejection.
 struct AdmissionCheckResult {
     bool        admitted   = true;
     int64_t     error_code = 0;  // ErrorCode::ENGINE_UNAVAILABLE (8600) when denied
@@ -25,39 +22,40 @@ struct AdmissionCheckResult {
 };
 
 struct AdmissionAcquireResult {
-    AdmissionCheckResult detail;
-    AdmissionLease       lease;
+    AdmissionCheckResult  detail;
+    std::function<void()> complete;
 };
 
-// Unified admission gate. Inference entries use acquire() and retain its lease;
+// Protocol adapter for scheduler-owned admission. Inference entries notify
+// complete() from their final cleanup; no lease leaves the scheduler.
 // health/status paths may use check() or checkDetail(). Any state other than
 // RUNNING is rejected with a retryable ENGINE_UNAVAILABLE carrying
 // instance_id / sleep_epoch / state.
 class AdmissionGate {
 public:
-    // controller is not owned and must outlive the gate (it lives in
-    // EngineBase, which is never destructed).
+    // Optional sleep status view is not owned and must outlive this adapter.
     explicit AdmissionGate(SleepLifecycleController* controller, std::string instance_id = ""):
-        controller_(controller), instance_id_(std::move(instance_id)) {}
-
-    // Linearizable admission check. A successful result carries a move-only
-    // lease that must remain alive for the full inference request.
+        admission_(controller ? controller->admission() : nullptr),
+        controller_(controller),
+        instance_id_(std::move(instance_id)) {}
+    // Linearizable admission. A successful result contains an idempotent
+    // completion notification for the final cleanup owner.
     AdmissionAcquireResult acquire() const;
     // Only for internal KV continuations of admitted work, never new roots.
     AdmissionAcquireResult acquireCacheTransfer() const;
 
-    // RUNNING (or no controller wired) -> OK. Otherwise UNAVAILABLE with the
+    // Open scheduler admission -> OK. Otherwise UNAVAILABLE with the
     // error body serialized into grpc error_details as ErrorDetailsPB.
     grpc::Status check() const;
 
-    // Structured variant for the HTTP layer (and tests).
+    // Structured variant for RPC error handling.
     AdmissionCheckResult checkDetail() const;
 
-    // JSON body for HTTP responses, same schema as the gRPC error details.
-    static std::string  toJson(const AdmissionCheckResult& result);
     static grpc::Status toGrpcStatus(const AdmissionCheckResult& result);
 
 private:
+    AdmissionAcquireResult              acquireImpl(bool continuation) const;
+    std::shared_ptr<SchedulerAdmission> admission_;
     SleepLifecycleController* controller_;  // not owned
     std::string               instance_id_;
 };

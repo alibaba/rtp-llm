@@ -16,6 +16,25 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "cpu_quiesce_coordinator_test",
+    srcs = ["CpuQuiesceCoordinatorTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base:cpu_quiesce_coordinator",
+        "//rtp_llm/cpp/engine_base/sleep",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_python//:python_lib",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    # Unlike production (one rank per process), this fixture creates concurrent
+    # ranks in one process. PyTorch 2.11 FlightRecorder inserts new PG IDs into
+    # its global all_pg_status_ map before locking; disable only that unrelated
+    # tracer for this test, not for the service or the control protocol.
+    env = {"TORCH_FR_BUFFER_SIZE": "0"},
+    timeout = "short",
+)
+
+cc_test(
     name = "torch_profiler_test",
     srcs = ["TorchProfilerTest.cc"],
     copts = copts(),

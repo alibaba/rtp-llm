@@ -61,6 +61,27 @@ some communication memory remain; sleep does not promise zero GPU usage.
 
 ## HTTP API
 
+### Backend execution coordination
+
+Quiesce protocol 2 keeps execution-round IDs inside the backend. The frontend
+waits for all drain ACKs, then all freeze ACKs, then all quiesce ACKs before any
+resource release. Frozen backends use one native CPU/Gloo MAX all-reduce to
+agree on the stopping round, catch up locally, and retire asynchronous/GPU
+work. The same engine primitive is used by graceful shutdown. No collective
+is added to the normal forward loop, and this path never acquires the Python GIL.
+
+The dedicated CPU control group is created before model execution starts and
+is independent of model NCCL suspend/rebuild. Multi-rank language-model
+backends require Gloo support and TCP connectivity between ranks. The operation
+token is checked by every participant in the same reduction. Mixed protocol-1
+and protocol-2 deployments are rejected before sleep drain; upgrade the complete
+instance together. A control-group timeout/disconnect leaves GPU resources
+backed and fails the operation. A failed Gloo transport is not reused: restart
+the instance before attempting another distributed sleep. Ordinary drain
+timeouts do not enter this collective and retain their existing retry behavior.
+
+### Requests
+
 Call the frontend HTTP port, not a backend gRPC port. These examples assume that
 your frontend listens on `127.0.0.1:8080` and was started with level 2:
 
@@ -108,8 +129,12 @@ Status-query failures return 500. If a response has `recovery_required=true`, or
 ranks disagree after an interrupted operation, keep traffic removed and restart
 the complete instance/communication group. Do not clear a stranded instance
 lease or force individual ranks back to service. After a successfully verified
-drain rollback, a later sleep may be retried. Allow enough HTTP timeout for
-checkpoint reload; `timeout_ms` bounds drain, not the entire sleep/wake operation.
+drain rollback, a later sleep may be retried. Allow enough HTTP timeout for host
+backup and checkpoint reload; `timeout_ms` bounds drain, not the entire
+sleep/wake operation. Sleep commit RPCs allow at least 600 seconds for resource
+release, preserving a longer existing deadline when the drain budget plus
+30 seconds exceeds that floor. Wake RPCs allow 600 seconds. These are transport
+deadlines, not a guarantee of completion within the requested drain budget.
 
 ## Distributed control addresses
 

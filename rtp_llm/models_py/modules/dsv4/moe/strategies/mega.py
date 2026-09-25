@@ -263,7 +263,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         # creation kwargs so the buffer (and the small bf16 output staging buffer)
         # can be dropped at engine sleep and lazily re-created on the first
         # forward after wake -- see _ensure_mega_buffers / release_mega_symm_buffers
-        # (sleep release is opt-in via RTP_LLM_SLEEP_FREE_RUNTIME_CACHES=1).
+        # (sleep release defaults on; RTP_LLM_SLEEP_FREE_RUNTIME_CACHES=0 opts out).
         self._mega_buf_kwargs = dict(
             num_experts=cfg.n_routed_experts,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
@@ -849,9 +849,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         rank = dist.get_rank(group)
         world_size = dist.get_world_size(group)
         device = self._mega_l1_w.device
-        _log_pre_kernel_barrier(
-            "enter", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
 
         if device.type == "cuda":
             with torch.cuda.device(device):
@@ -866,6 +864,4 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         else:
             dist.barrier(group=group)
 
-        _log_pre_kernel_barrier(
-            "leave", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)

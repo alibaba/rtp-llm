@@ -809,10 +809,8 @@ class CollectiveReleaseSwitchTest(WeightMemorySaverTestBase):
     """``release_collective_memory()`` -- whether sleep also releases the NCCL
     communicator's GPU memory (ncclCommSuspend/Resume).
 
-    Deliberately independent of the sleep level and of the sleep-mode switch: it
-    carries costs the level does not (equal pinned host memory, seconds on each of
-    sleep/wake, NCCL >= 2.29.7), so it is read on its own. Defaults to off; an
-    explicit env/runtime value of true is required to opt in.
+    Unset follows sleep activation at either level. Explicit env/runtime values
+    still override that default to control pinned-host memory and latency costs.
 
     The CLI arg has no C++ RuntimeConfig field, so the env var (mirrored by
     server_args.setup_args) and the explicit override installed by
@@ -861,12 +859,23 @@ class CollectiveReleaseSwitchTest(WeightMemorySaverTestBase):
         wms.configure_from_runtime(True, sleep_mode_level=2)
         self.assertFalse(wms.release_collective_memory())
 
-    def test_independent_of_sleep_level(self) -> None:
-        # The level selects what happens to the weights; this switch selects whether
-        # the communicator buffers go too. Level 2 must not imply the release.
-        wms.configure_from_runtime(True, sleep_mode_level=2)
-        self.assertEqual(wms.sleep_mode_level(), 2)
-        self.assertFalse(wms.release_collective_memory())
+    def test_enabled_sleep_defaults_to_collective_release_at_either_level(self) -> None:
+        for level in (1, 2):
+            wms.configure_from_runtime(True, sleep_mode_level=level)
+            self.assertEqual(wms.sleep_mode_level(), level)
+            self.assertTrue(wms.release_collective_memory())
+
+    def test_level_only_environment_enables_weights_and_collective_release(
+        self,
+    ) -> None:
+        for level in ("1", "2"):
+            with (
+                self.subTest(level=level),
+                mock.patch.dict(os.environ, {wms.ENV_LEVEL: level}, clear=True),
+            ):
+                self.assertTrue(wms.is_enabled())
+                self.assertEqual(wms.sleep_mode_level(), int(level))
+                self.assertTrue(wms.release_collective_memory())
 
     def test_reset_for_testing_clears_override(self) -> None:
         wms.configure_from_runtime(True, release_collective_memory=True)

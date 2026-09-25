@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <memory>
 #include <tuple>
+#include <stdexcept>
 #include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
@@ -11,6 +12,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
+#include "rtp_llm/cpp/engine_base/CpuQuiesceCoordinator.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
@@ -139,10 +141,19 @@ void RtpLLMOp::init(py::object model,
                     py::object vit_config,
                     py::object mm_process_engine,
                     py::object propose_model,
-                    py::object token_processor) {
+                    py::object token_processor,
+                    py::object cpu_lifecycle_group) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
+    if (!cpu_lifecycle_group.is_none()) {
+        auto group = cpu_lifecycle_group.cast<c10::intrusive_ptr<c10d::Backend>>();
+        if (group->getRank() != params.parallelism_config.world_rank
+            || group->getSize() != params.parallelism_config.world_size) {
+            throw std::invalid_argument("CPU lifecycle group does not cover this DP/TP world");
+        }
+        quiesce_coordinator_ = std::make_shared<CpuQuiesceCoordinator>(std::move(group));
+    }
 
     if (!propose_model.is_none()) {
         if (!propose_model.attr("model").is_none()) {
@@ -336,6 +347,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
+        model_rpc_service_->getEngine()->setQuiesceCoordinator(quiesce_coordinator_);
 
         // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
@@ -451,7 +463,8 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("vit_config"),
              py::arg("mm_process_engine"),
              py::arg("propose_model"),
-             py::arg("token_processor"))
+             py::arg("token_processor"),
+             py::arg("cpu_lifecycle_group") = py::none())
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),

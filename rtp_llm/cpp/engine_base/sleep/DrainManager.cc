@@ -44,11 +44,6 @@ void DrainManager::registerCounter(const std::string& name, CounterFn fn, Counte
                      kind == CounterKind::REQUEST ? "REQUEST" : "CACHE_TRANSFER");
 }
 
-void DrainManager::unregisterCounter(const std::string& name) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    counters_.erase(name);
-}
-
 void DrainManager::setCancelCallback(CancelFn fn) {
     std::lock_guard<std::mutex> lock(mutex_);
     cancel_callback_ = std::move(fn);
@@ -125,16 +120,11 @@ bool DrainManager::waitDrained(int64_t timeout_ms) {
     }
 }
 
-bool DrainManager::drain(const SleepOptions& opt) {
-    const bool abort = opt.mode == "abort";
-    RTP_LLM_LOG_INFO("drain manager: start drain, mode=%s abort=%d timeout_ms=%ld",
-                     opt.mode.c_str(),
-                     static_cast<int>(abort),
-                     opt.timeout_ms);
-    if (abort) {
+bool DrainManager::drain(int64_t timeout_ms, bool cancel) {
+    if (cancel) {
         forceCancel();
     }
-    return waitDrained(opt.timeout_ms);
+    return waitDrained(timeout_ms);
 }
 
 void DrainManager::forceCancel() {
@@ -147,7 +137,7 @@ void DrainManager::forceCancel() {
         RTP_LLM_LOG_WARNING("drain manager: abort drain requested but no cancel callback injected");
         return;
     }
-    RTP_LLM_LOG_INFO("drain manager: invoking abort callback (streaming requests are exempted by provider)");
+    RTP_LLM_LOG_INFO("drain manager: invoking configured cancellation callback");
     // The cancel callback is injected engine code; a throw here would escape drain() into the sleep
     // hook. Swallow it (log) so abort-mode drain degrades to a plain wait-drain (bounded by
     // waitDrained's timeout) instead of wedging or crashing the sleep path.
@@ -177,12 +167,6 @@ int64_t DrainManager::activeRequestCount() const {
 
 int64_t DrainManager::activeCacheTransferCount() const {
     return sumByKind(CounterKind::CACHE_TRANSFER);
-}
-
-void DrainManager::installHooks(SleepHooks& hooks) {
-    hooks.drain                    = [this](const SleepOptions& opt) { return drain(opt); };
-    hooks.activeRequestCount       = [this]() { return activeRequestCount(); };
-    hooks.activeCacheTransferCount = [this]() { return activeCacheTransferCount(); };
 }
 
 void DrainManager::notifyDrainProgress() {

@@ -405,6 +405,23 @@ size_t PrefixTreeMemoryBlockCache::size() const {
     return count;
 }
 
+bool PrefixTreeMemoryBlockCache::hasInFlightReferences() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    for (const auto& [_, node] : nodes_) {
+        for (const auto& kind : node.kinds) {
+            if (kind.in_flight_ref != 0) {
+                return true;
+            }
+        }
+        for (const auto& retired : node.retired_items) {
+            if (!retired.empty()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 std::vector<PrefixTreeMemoryBlockCache::CacheItem> PrefixTreeMemoryBlockCache::clear() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     std::vector<CacheItem>              removed;

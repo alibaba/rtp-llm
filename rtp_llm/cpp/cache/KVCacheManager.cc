@@ -697,9 +697,42 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
 
 // Sleep/wake_up
 
+bool KVCacheManager::memoryUsersDrained(const char* operation) const {
+    if (!allocator_) {
+        RTP_LLM_LOG_ERROR("%s rejected: KV allocator not initialized", operation);
+        return false;
+    }
+    // Inspect every pool before resuming physical memory, clearing any cache,
+    // or resetting any pool. Retained prefix-cache refs are not active users.
+    for (const auto& pool : allocator_->getBlockPools()) {
+        if (!pool) {
+            RTP_LLM_LOG_ERROR("%s rejected: null KV block pool", operation);
+            return false;
+        }
+        const auto requests  = pool->requestRefBlocksNum();
+        const auto transfers = pool->connectorRefBlocksNum();
+        if (requests != 0 || transfers != 0) {
+            RTP_LLM_LOG_ERROR("%s rejected: pool=%s request_ref_blocks=%zu connector_ref_blocks=%zu",
+                              operation,
+                              pool->poolName().c_str(),
+                              requests,
+                              transfers);
+            return false;
+        }
+    }
+    if (coordinator_ && coordinator_->inflightTransferCount() != 0) {
+        RTP_LLM_LOG_ERROR("%s rejected: cache connector transfers have not drained", operation);
+        return false;
+    }
+    return true;
+}
+
 bool KVCacheManager::releaseKVCacheMemoryBacking() {
     if (!kv_memory_controller_) {
         RTP_LLM_LOG_ERROR("releaseKVCacheMemoryBacking failed: kv memory controller not initialized");
+        return false;
+    }
+    if (!memoryUsersDrained("releaseKVCacheMemoryBacking")) {
         return false;
     }
     // Caller guarantees the engine is drained: no in-flight requests, schedulers stopped,
@@ -710,6 +743,9 @@ bool KVCacheManager::releaseKVCacheMemoryBacking() {
 bool KVCacheManager::restoreKVCacheMemoryBackingAndResetMetadata() {
     if (!kv_memory_controller_) {
         RTP_LLM_LOG_ERROR("restoreKVCacheMemoryBackingAndResetMetadata failed: kv memory controller not initialized");
+        return false;
+    }
+    if (!memoryUsersDrained("restoreKVCacheMemoryBackingAndResetMetadata")) {
         return false;
     }
     if (!kv_memory_controller_->resumePhysicalMemory()) {
@@ -738,12 +774,18 @@ bool KVCacheManager::releaseMemoryCacheBacking() {
     if (!coordinator_) {
         return true;  // no connector coordinator -> memory cache not enabled
     }
+    if (!memoryUsersDrained("releaseMemoryCacheBacking")) {
+        return false;
+    }
     return coordinator_->releaseMemoryCacheBacking();
 }
 
 bool KVCacheManager::restoreMemoryCacheBacking() {
     if (!coordinator_) {
         return true;
+    }
+    if (!memoryUsersDrained("restoreMemoryCacheBacking")) {
+        return false;
     }
     return coordinator_->restoreMemoryCacheBacking();
 }

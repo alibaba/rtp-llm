@@ -172,6 +172,17 @@ class BackendManager(object):
         # delta vs after_nccl = symm buffer + weights (torch) + KV (torch) +
         # JIT cubins + plugin/cuBLAS workspaces bound during warmup.
         log_gpu_mem("before_engine_create")
+        if model_config.task_type == TaskType.LANGUAGE_MODEL:
+            from rtp_llm.models_py.distributed.lifecycle_group import (
+                init_lifecycle_group,
+            )
+
+            init_lifecycle_group(
+                self._distributed_server.store,
+                engine_config.parallelism_config.world_rank,
+                engine_config.parallelism_config.world_size,
+                self.py_env_configs.distribute_config.dist_comm_timeout or 300,
+            )
         # Finally create engine using the new API
         self.engine = ModelFactory.from_model_configs(
             model_config=model_config,

@@ -70,6 +70,7 @@ public:
     // Does NOT touch block_cache_ (callers clear it separately via BlockCache::clear()) and
     // does NOT recreate the underlying buffer (VA must stay stable).
     // Caller must guarantee no in-flight users of the pool (engine drained).
+    // Throws without mutation if request/connector refs remain; retained block-cache refs are allowed.
     void resetMetadata();
 
     // Sleep/wake_up: host memory-cache tier discard / reallocate.
@@ -82,6 +83,7 @@ public:
     // resets all block metadata to a fresh pool on wake.
     // Caller must guarantee the pool is drained/quiesced (no in-flight copies) and must
     // clear any external cache-key->block LRU that indexes into the freed buffer.
+    // Live request/connector refs are rejected with std::runtime_error before buffer mutation.
     void releaseHostBuffer();
     void reallocateHostBuffer();
 
