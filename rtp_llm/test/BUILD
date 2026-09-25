@@ -17,6 +17,13 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_cutlass_import_test",
+    srcs = ["kimi_k3_cutlass_import_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",

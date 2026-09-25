@@ -1,3 +1,4 @@
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -24,6 +25,14 @@ def setup_cutlass_import_path() -> None:
             value = str(path)
             if value not in sys.path:
                 sys.path.insert(0, value)
+        # FlashInfer may prepend its vendored CuTeDSL path later. Import the
+        # selected package now so that later path changes cannot replace it.
+        selected = importlib.import_module("cutlass")
+        actual = Path(selected.__file__).resolve().parent
+        if actual != expected:
+            raise RuntimeError(
+                f"K3 CUTLASS resolved to {actual}; expected {expected}"
+            )
         return
 
     try:
