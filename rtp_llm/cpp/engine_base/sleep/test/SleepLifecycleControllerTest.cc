@@ -11,11 +11,249 @@
 
 namespace rtp_llm {
 
+TEST(SleepLifecycleMetricsTest, CommitPausesAndExplicitWakeResumeRestoresReporting) {
+    SleepLifecycleController controller(true);
+    std::vector<bool>        changes;
+    SleepHooks               hooks;
+    hooks.setMetricsReportingEnabled = [&](bool enabled) {
+        changes.push_back(enabled);
+        return true;
+    };
+    controller.setHooks(hooks);
+    SleepOptions prepare;
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller.sleep(prepare).ok);
+    EXPECT_TRUE(changes.empty());
+    SleepOptions commit;
+    commit.commit_only = true;
+    ASSERT_TRUE(controller.sleep(commit).ok);
+    EXPECT_EQ(changes, std::vector<bool>({false}));
+    ASSERT_TRUE(controller.sleep(commit).ok);
+    EXPECT_EQ(changes.size(), 1);
+    WakeUpOptions wake_prepare;
+    wake_prepare.prepare_only = true;
+    ASSERT_TRUE(controller.wakeUp(wake_prepare).ok);
+    EXPECT_EQ(changes.size(), 1);
+    WakeUpOptions wake_commit;
+    wake_commit.commit_only = true;
+    ASSERT_TRUE(controller.wakeUp(wake_commit).ok);
+    EXPECT_EQ(changes, std::vector<bool>({false}));
+    WakeUpOptions resume;
+    resume.resume_metrics_only  = true;
+    resume.expected_incarnation = controller.status().worker_incarnation;
+    resume.expected_sleep_epoch = controller.sleepEpoch();
+    ASSERT_TRUE(controller.wakeUp(resume).ok);
+    EXPECT_EQ(changes, std::vector<bool>({false, true}));
+    ASSERT_TRUE(controller.wakeUp().ok);
+    EXPECT_EQ(changes.size(), 2);
+}
+
+TEST(SleepLifecycleMetricsTest, RejectsStaleOrPrematureResume) {
+    SleepLifecycleController controller(true);
+    std::vector<bool>        changes;
+    SleepHooks               hooks;
+    hooks.setMetricsReportingEnabled = [&](bool enabled) {
+        changes.push_back(enabled);
+        return true;
+    };
+    controller.setHooks(hooks);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    WakeUpOptions resume;
+    resume.resume_metrics_only  = true;
+    resume.expected_incarnation = controller.status().worker_incarnation;
+    resume.expected_sleep_epoch = controller.sleepEpoch();
+    EXPECT_FALSE(controller.wakeUp(resume).ok);
+    WakeUpOptions prepare, commit;
+    prepare.prepare_only = true;
+    commit.commit_only   = true;
+    ASSERT_TRUE(controller.wakeUp(prepare).ok);
+    ASSERT_TRUE(controller.wakeUp(commit).ok);
+    auto wrong                 = resume;
+    wrong.expected_incarnation = "replaced-worker";
+    EXPECT_FALSE(controller.wakeUp(wrong).ok);
+    wrong             = resume;
+    wrong.commit_only = true;
+    EXPECT_FALSE(controller.wakeUp(wrong).ok);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    ASSERT_TRUE(controller.wakeUp(prepare).ok);
+    ASSERT_TRUE(controller.wakeUp(commit).ok);
+    EXPECT_FALSE(controller.wakeUp(resume).ok);
+    EXPECT_EQ(changes, std::vector<bool>({false, false}));
+    resume.expected_sleep_epoch = controller.sleepEpoch();
+    EXPECT_TRUE(controller.wakeUp(resume).ok);
+}
+
+TEST(SleepLifecycleMetricsTest, MetricsResumeFailureKeepsEngineRunningAndCanBeRetried) {
+    for (bool throws : {false, true}) {
+        SleepLifecycleController controller(true);
+        bool                     fail     = true;
+        int                      restarts = 0;
+        SleepHooks               hooks;
+        hooks.restartEngine = [&] {
+            ++restarts;
+            return true;
+        };
+        hooks.setMetricsReportingEnabled = [&](bool enabled) {
+            if (enabled && fail && throws) {
+                throw std::runtime_error("monitor unavailable");
+            }
+            return !enabled || !fail;
+        };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+        EXPECT_FALSE(controller.wakeUp().ok);
+        EXPECT_EQ(controller.state(), SleepState::RUNNING);
+        EXPECT_EQ(controller.status().kv_memory_state, "ACTIVE");
+        fail = false;
+        EXPECT_TRUE(controller.wakeUp().ok);
+        EXPECT_EQ(restarts, 1);
+    }
+}
+
+TEST(SleepLifecycleMetricsTest, PartialPauseFailureRollsBackBeforeResourceReleaseAndCanRetry) {
+    for (bool throws : {false, true}) {
+        SleepLifecycleController controller(true);
+        bool                          cpp_enabled = true, python_enabled = true, fail_pause = true;
+        std::vector<std::string>      releases;
+        SleepHooks                    hooks;
+        hooks.setMetricsReportingEnabled = [&](bool enabled) {
+            cpp_enabled = enabled;
+            if (!enabled && fail_pause) {
+                if (throws) {
+                    throw std::runtime_error("Python reporting failed after C++ pause");
+                }
+                return false;
+            }
+            python_enabled = enabled;
+            return true;
+        };
+        hooks.synchronizeAndDeregisterMr = [&](const SleepOptions&) {
+            EXPECT_FALSE(cpp_enabled);
+            EXPECT_FALSE(python_enabled);
+            releases.push_back("mr");
+            return true;
+        };
+        hooks.releaseKvMemoryBacking = [&](const SleepOptions&) {
+            releases.push_back("kv");
+            return true;
+        };
+        hooks.releaseRestorableGpuMemory = [&](const SleepOptions&) {
+            releases.push_back("weights");
+            return true;
+        };
+        controller.setHooks(hooks);
+        SleepOptions prepare, commit;
+        prepare.prepare_only = true;
+        commit.commit_only   = true;
+        ASSERT_TRUE(controller.sleep(prepare).ok);
+        const auto epoch = controller.sleepEpoch();
+        EXPECT_FALSE(controller.sleep(commit).ok);
+        EXPECT_EQ(controller.state(), SleepState::DRAINING);
+        EXPECT_EQ(controller.status().kv_memory_state, "ACTIVE");
+        EXPECT_TRUE(controller.status().device_kv_cache_valid);
+        EXPECT_TRUE(releases.empty());
+        EXPECT_TRUE(cpp_enabled);
+        EXPECT_TRUE(python_enabled);
+        EXPECT_FALSE(controller.admit());
+
+        fail_pause = false;
+        ASSERT_TRUE(controller.sleep(commit).ok);
+        EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+        EXPECT_EQ(controller.sleepEpoch(), epoch);
+        EXPECT_EQ(releases, std::vector<std::string>({"mr", "kv", "weights"}));
+        ASSERT_TRUE(controller.wakeUp().ok);
+        EXPECT_TRUE(cpp_enabled);
+        EXPECT_TRUE(python_enabled);
+    }
+}
+
+TEST(SleepLifecycleMetricsTest, FailedPauseCompensationRemainsRetryableThroughDrainCancellation) {
+    for (bool throws : {false, true}) {
+        SleepLifecycleController controller(true);
+        bool                          cpp_enabled = true, python_enabled = true, fail_resume = true;
+        int                           restarts = 0;
+        SleepHooks                    hooks;
+        hooks.setMetricsReportingEnabled = [&](bool enabled) {
+            if (!enabled) {
+                cpp_enabled = false;
+                throw std::runtime_error("partial pause");
+            }
+            if (fail_resume) {
+                if (throws) {
+                    throw std::runtime_error("compensation unavailable");
+                }
+                return false;
+            }
+            cpp_enabled = python_enabled = true;
+            return true;
+        };
+        hooks.cancelQuiesceAndRestartEngine = [&] {
+            ++restarts;
+            return true;
+        };
+        hooks.releaseKvMemoryBacking = [](const SleepOptions&) {
+            ADD_FAILURE() << "metrics failure must precede GPU release";
+            return true;
+        };
+        controller.setHooks(hooks);
+        EXPECT_FALSE(controller.sleep(SleepOptions{}).ok);
+        EXPECT_EQ(controller.state(), SleepState::DRAINING);
+        EXPECT_FALSE(cpp_enabled);
+        EXPECT_TRUE(python_enabled);
+        EXPECT_FALSE(controller.wakeUp().ok);
+        EXPECT_EQ(controller.state(), SleepState::RUNNING);
+        EXPECT_EQ(controller.status().kv_memory_state, "ACTIVE");
+        WakeUpOptions cancel;
+        cancel.cancel_quiesce_token = "late-cancel";
+        EXPECT_FALSE(controller.wakeUp(cancel).ok);
+        fail_resume = false;
+        EXPECT_TRUE(controller.wakeUp(cancel).ok);
+        EXPECT_TRUE(cpp_enabled);
+        EXPECT_TRUE(python_enabled);
+        EXPECT_EQ(restarts, 1);
+    }
+}
+
+TEST(SleepLifecycleMetricsTest, FailedReleaseRestoresReportingAndFailedWakeDoesNotReconnect) {
+    for (bool fail_sleep : {false, true}) {
+        SleepLifecycleController controller(true);
+        std::vector<bool>        changes;
+        SleepHooks               hooks;
+        hooks.releaseRestorableGpuMemory = [&](const SleepOptions&) { return !fail_sleep; };
+        hooks.warmupAndHealthCheck       = [] { return false; };
+        hooks.setMetricsReportingEnabled = [&](bool enabled) {
+            changes.push_back(enabled);
+            return true;
+        };
+        controller.setHooks(hooks);
+        if (fail_sleep) {
+            EXPECT_FALSE(controller.sleep(SleepOptions{}).ok);
+            EXPECT_EQ(changes, std::vector<bool>({false, true}));
+        } else {
+            ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+            EXPECT_FALSE(controller.wakeUp().ok);
+            EXPECT_EQ(changes, std::vector<bool>({false}));
+        }
+    }
+}
+
+TEST(SleepLifecycleMetricsTest, DisabledModeNeverSwitchesReporting) {
+    SleepLifecycleController controller(false);
+    SleepHooks               hooks;
+    hooks.setMetricsReportingEnabled = [](bool) {
+        ADD_FAILURE() << "disabled sleep must not change reporting";
+        return true;
+    };
+    controller.setHooks(hooks);
+    EXPECT_FALSE(controller.sleep(SleepOptions{}).ok);
+    EXPECT_FALSE(controller.wakeUp().ok);
+}
+
 TEST(SleepLifecycleControllerConcurrencyTest, ConcurrentAdmissionCannotEscapeClosedGate) {
     SleepLifecycleController controller(true);
-    std::atomic<bool> stop{false};
-    std::atomic<int> accepted{0};
-    SleepHooks hooks;
+    std::atomic<bool>        stop{false};
+    std::atomic<int>         accepted{0};
+    SleepHooks               hooks;
     hooks.drain = [&](const SleepOptions&) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (controller.activeAdmissionCount() != 0) {

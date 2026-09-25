@@ -36,6 +36,7 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/metrics/MetricsReporting.h"
 
 using namespace std;
 
@@ -229,7 +230,7 @@ void LocalRpcServer::installSleepHooks() {
         return status.ok();
     };
     drain_manager_->installHooks(hooks);  // drain + activeRequestCount + activeCacheTransferCount
-    auto       vmm_backend = vmm_backend_;
+    auto vmm_backend       = vmm_backend_;
     hooks.armEngineQuiesce = [engine](const SleepOptions&) {
         // Keep empty peers polling until every rank has drained. Freeze and
         // the common stopping target arrive later over the control plane.
@@ -521,6 +522,18 @@ void LocalRpcServer::installSleepHooks() {
         return true;
     };
 
+    hooks.setMetricsReportingEnabled = [local_rank](bool enabled) {
+        // Pause/resume this rank's C++ client and publish its local Python state.
+        // Coordinated resume is called only after every backend rank is RUNNING.
+        if (!setKmonitorReportingEnabled(enabled)) {
+            return false;
+        }
+        py::gil_scoped_acquire acquire;
+        py::module_::import("rtp_llm.aios.kmonitor.python_client.kmonitor.reporting")
+            .attr("set_backend_reporting")(enabled, local_rank);
+        return true;
+    };
+
     // Keep the existing bool hook ABI, but enrich failures with the last
     // NCCL adapter event. This is read-only and does not touch CUDA/NCCL; it
     // makes GetSleepStatus/gRPC FAILED_PRECONDITION actionable without adding
@@ -598,8 +611,8 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 
 grpc::Status
 LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
-    const auto  error_msg       = safeGrpcErrorMessage(error_info.ToString());
-    const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
+    const auto error_msg       = safeGrpcErrorMessage(error_info.ToString());
+    const auto request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
                         ErrorCodeToString(error_info.code()).c_str(),
@@ -678,8 +691,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
-    auto input                    = QueryConverter::transQuery(request);
-    generate_context.request_info = input->request_info;
+    auto input                         = QueryConverter::transQuery(request);
+    generate_context.request_info      = input->request_info;
     if (applyTimelineGate(generate_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,
@@ -1226,18 +1239,18 @@ LocalRpcServer::SleepServing(grpc::ServerContext* context, const SleepRequestPB*
                             "non-empty sleep tags are unsupported; partial sleep is not implemented");
     }
     SleepOptions options;
-    options.level        = request->level();
-    options.mode         = request->mode().empty() ? "wait" : request->mode();
-    options.timeout_ms   = request->timeout_ms();
-    options.reason       = request->reason();
-    options.tags         = std::vector<std::string>(request->tags().begin(), request->tags().end());
-    options.prepare_only = request->prepare_only();
-    options.commit_only  = request->commit_only();
+    options.level                = request->level();
+    options.mode                 = request->mode().empty() ? "wait" : request->mode();
+    options.timeout_ms           = request->timeout_ms();
+    options.reason               = request->reason();
+    options.tags                 = std::vector<std::string>(request->tags().begin(), request->tags().end());
+    options.prepare_only         = request->prepare_only();
+    options.commit_only          = request->commit_only();
     options.drain_only           = request->drain_only();
     options.quiesce_token        = request->quiesce_token();
     options.expected_incarnation = request->expected_incarnation();
     options.expected_sleep_epoch = request->expected_sleep_epoch();
-    const auto result    = engine_->sleepController().sleep(options);
+    const auto result            = engine_->sleepController().sleep(options);
     return sleep_rpc::resultToGrpcStatus(result);
 }
 
@@ -1268,9 +1281,12 @@ LocalRpcServer::WakeUpServing(grpc::ServerContext* context, const WakeUpRequestP
                      request->commit_only());
     WakeUpOptions options;
     options.cancel_quiesce_token = request->cancel_quiesce_token();
-    options.prepare_only = request->prepare_only();
-    options.commit_only  = request->commit_only();
-    const auto result    = engine_->sleepController().wakeUp(options);
+    options.resume_metrics_only  = request->resume_metrics_only();
+    options.expected_incarnation = request->expected_incarnation();
+    options.expected_sleep_epoch = request->expected_sleep_epoch();
+    options.prepare_only         = request->prepare_only();
+    options.commit_only          = request->commit_only();
+    const auto result            = engine_->sleepController().wakeUp(options);
     return sleep_rpc::resultToGrpcStatus(result);
 }
 

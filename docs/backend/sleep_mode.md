@@ -6,6 +6,23 @@ prefill/decode deployments, coordinate both roles before restoring traffic.
 The lifecycle endpoints are administrative APIs: restrict access to trusted
 control-plane callers; do not expose them to inference clients.
 
+After successful sleep, RTP-LLM disconnects its kmonitor clients and stops all
+metric publication, including sleep metrics. Wake preparation keeps reporting
+paused; reporting resumes with fresh statistics windows after every backend
+rank has reached RUNNING. A metrics-reconnect failure can be retried with
+`wake_up`; it does not invalidate restored GPU resources or put the engine in ERROR.
+Samples collected during sleep are discarded, not replayed or reported as zero.
+Sleep commit pauses reporting before deregistering MR or releasing GPU resources.
+If that switch fails, the controller compensates both reporting clients and
+remains in DRAINING with resources intact; the coordinator can retry commit or
+cancel with `wake_up`. Failed compensation remains pending and is retried by
+`wake_up`, rather than turning a monitoring failure into a terminal GPU error.
+The control plane owns liveness checks, resource-release verification and wake
+requests; the lifecycle RPC endpoints remain available. Treat missing sleeping
+instances as offline in monitoring queries rather than filling their samples
+with zero. Metrics from external host collectors or FlexLB are controlled by
+those components, not by the RTP-LLM client's connection.
+
 ## Startup configuration
 
 | CLI argument | Environment variable | Default |
@@ -29,6 +46,13 @@ EPLB and redundant experts for level 2; runtime LoRA mutations and weight
 updates are rejected as well. Embedding engines do not support either level.
 Both levels discard KV/prefix-cache contents. The level is fixed at startup,
 not switchable per request.
+
+With the tested `torch_memory_saver` runtime, level 1 allocates its pinned-host
+backup lazily on the first sleep and retains it after wake for reuse. Later
+sleeps still copy the GPU contents but avoid allocating that backup again.
+Budget host memory for the backup even while the instance is awake after its
+first sleep. Measure first-sleep latency separately from subsequent cycles;
+large concurrent backups can have substantially different latency.
 
 NCCL release is an independent opt-in. It needs a compatible NCCL suspend/resume
 runtime and uses pinned-host backups. Verify success on **all ranks**, since an

@@ -419,6 +419,20 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         return SleepResult::failedPrecondition("sleep commit requires closed and drained KV admission");
     }
 
+    // Monitoring is a reversible prerequisite, not a GPU resource failure.
+    // The hook updates C++ and Python clients and may fail after only one side
+    // changed. Remember that compensation is needed BEFORE invoking it.
+    if (hooks_.setMetricsReportingEnabled) {
+        metrics_reporting_paused_ = true;
+        if (!timing.run("pause_metrics", hooks_.setMetricsReportingEnabled, false)) {
+            const auto rollback = resumeMetricsReporting();
+            setLastError(rollback.ok ? "pause metrics reporting failed, staying in DRAINING" :
+                                      "pause metrics reporting and compensation failed, staying in DRAINING; "
+                                      "retry sleep or wake_up");
+            return SleepResult::failedPrecondition(lastError());
+        }
+    }
+
     if (!transitionLocked(SleepState::DRAINING, SleepState::SUSPENDING)) {
         return SleepResult::failedPrecondition(lastError());
     }
@@ -459,6 +473,11 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
             kv_memory_state_.store(KvMemoryState::FAILED, std::memory_order_release);
         }
         transitionLocked(SleepState::SUSPENDING, SleepState::ERROR);
+        // Keep reporting a genuine resource failure when possible. A failed
+        // compensation must not replace the original GPU failure diagnostic.
+        if (!resumeMetricsReporting().ok) {
+            RTP_LLM_LOG_ERROR("failed to restore metrics reporting after sleep resource failure");
+        }
         return SleepResult::failedPrecondition(lastError());
     }
 
@@ -477,8 +496,7 @@ SleepResult SleepLifecycleController::quiesce(const SleepQuiesceOptions& opt, ui
     if (opt.timeout_ms < 0 || opt.token.empty()) {
         return SleepResult::invalidArgument("quiesce requires a token and non-negative timeout");
     }
-    if (state() != SleepState::DRAINING || !drain_prepared_
-        || opt.token != quiesce_token_) {
+    if (state() != SleepState::DRAINING || !drain_prepared_ || opt.token != quiesce_token_) {
         return SleepResult::failedPrecondition("quiesce requires the matching prepared drain");
     }
     try {
@@ -532,6 +550,24 @@ SleepResult SleepLifecycleController::quiesce(const SleepQuiesceOptions& opt, ui
     return SleepResult::failedPrecondition(lastError());
 }
 
+SleepResult SleepLifecycleController::resumeMetricsReporting() {
+    if (!metrics_reporting_paused_ || !hooks_.setMetricsReportingEnabled) {
+        return SleepResult::success();
+    }
+    const auto failure = "engine is " + sleepStateToString(state()) + "; retry wake_up to resume metrics";
+    try {
+        if (hooks_.setMetricsReportingEnabled(true)) {
+            metrics_reporting_paused_ = false;
+            return SleepResult::success();
+        }
+    } catch (const std::exception& e) {
+        return SleepResult::failedPrecondition(failure + ": " + e.what());
+    } catch (...) {
+        return SleepResult::failedPrecondition(failure + ": unknown exception");
+    }
+    return SleepResult::failedPrecondition(failure);
+}
+
 SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     std::lock_guard<std::mutex> lock(transition_mutex_);
 
@@ -543,6 +579,16 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     }
 
     const SleepState current = state();
+    if (opt.resume_metrics_only) {
+        if (opt.prepare_only || opt.commit_only || !opt.cancel_quiesce_token.empty()) {
+            return SleepResult::invalidArgument("resume_metrics_only cannot be combined with another wake phase");
+        }
+        if (current != SleepState::RUNNING || opt.expected_incarnation != worker_incarnation_
+            || opt.expected_sleep_epoch != sleep_epoch_.load()) {
+            return SleepResult::failedPrecondition("stale metrics resume or engine is not RUNNING");
+        }
+        return resumeMetricsReporting();
+    }
     // Idempotency: already running.
     if (current == SleepState::RUNNING) {
         if (!opt.cancel_quiesce_token.empty() && opt.cancel_quiesce_token != last_cancelled_quiesce_token_) {
@@ -551,7 +597,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             sleep_epoch_.fetch_add(1, std::memory_order_acq_rel);
             last_cancelled_quiesce_token_ = opt.cancel_quiesce_token;
         }
-        return SleepResult::success();
+        return opt.prepare_only || opt.commit_only ? SleepResult::success() : resumeMetricsReporting();
     }
     if (!opt.cancel_quiesce_token.empty()
         && (current != SleepState::DRAINING || opt.cancel_quiesce_token != quiesce_token_)) {
@@ -586,7 +632,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             return SleepResult::failedPrecondition(lastError());
         }
         timing.end();
-        return SleepResult::success();
+        return resumeMetricsReporting();
     }
     if (opt.commit_only && current != SleepState::WAKING_UP && current != SleepState::RUNNING) {
         return SleepResult::failedPrecondition("wake_up commit rejected in state " + sleepStateToString(current));
@@ -682,7 +728,9 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         return SleepResult::failedPrecondition(lastError());
     }
     timing.end();
-    return SleepResult::success();
+    // Coordinated wake keeps reporting paused until the coordinator confirms
+    // every rank is RUNNING. A monitoring error must not invalidate restored GPU resources.
+    return opt.commit_only ? SleepResult::success() : resumeMetricsReporting();
 }
 
 SleepStatus SleepLifecycleController::status() const {
@@ -759,19 +807,19 @@ ControllerAdmissionResult SleepLifecycleController::acquireAdmissionImpl(bool ca
                && (word >> kAdmissionStateShift) == static_cast<uint64_t>(SleepState::DRAINING))) {
         // Unreachable in practice, but never let count overflow reopen the gate.
         if ((word & kAdmissionCountMask) == kAdmissionCountMask) {
-            result.state = SleepState::ERROR;
+            result.state       = SleepState::ERROR;
             result.sleep_epoch = sleepEpoch();
             return result;
         }
-        if (admission_state_.compare_exchange_weak(word, word + 1, std::memory_order_acq_rel,
-                                                 std::memory_order_acquire)) {
+        if (admission_state_.compare_exchange_weak(
+                word, word + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
             result.state    = static_cast<SleepState>(word >> kAdmissionStateShift);
             result.accepted = true;
-            result.lease = AdmissionLease(this);
+            result.lease    = AdmissionLease(this);
             return result;
         }
     }
-    result.state = static_cast<SleepState>(word >> kAdmissionStateShift);
+    result.state       = static_cast<SleepState>(word >> kAdmissionStateShift);
     result.sleep_epoch = sleepEpoch();
     return result;
 }

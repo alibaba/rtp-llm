@@ -9,6 +9,7 @@ UNSUPPORTED_LIFECYCLE_CONTROL_FIELDS = (
     "expected_incarnation",
     "expected_sleep_epoch",
     "cancel_quiesce_token",
+    "resume_metrics_only",
     "freeze_only",
     "target_round",
 )

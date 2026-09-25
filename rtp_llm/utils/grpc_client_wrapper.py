@@ -11,6 +11,9 @@ from google.protobuf.json_format import MessageToDict
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
+from rtp_llm.aios.kmonitor.python_client.kmonitor.reporting import (
+    set_instance_reporting,
+)
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.frontend.sleep_validation import (
     dedupe_addresses,
@@ -506,12 +509,51 @@ class GrpcClientWrapper:
                 if state == transitional_state
             ]
             if not pending:
+                if final_state == "RUNNING":
+                    return await self._resume_metrics_after_wake(last_statuses)
+                await asyncio.to_thread(set_instance_reporting, False)
                 return {"status": "ok"}
         return recovery_required(
             operation,
             f"did not converge after {self.COMMIT_MAX_ATTEMPTS} commit attempts",
             last_statuses,
         )
+
+    async def _resume_metrics_after_wake(
+        self, statuses: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        # Called under the existing lifecycle lease after all ranks reached
+        # RUNNING. Per-rank epoch/incarnation fences late notification retries.
+        pending = {status["address"]: status for status in statuses}
+        failures = []
+        for _ in range(self.COMMIT_MAX_ATTEMPTS):
+            results = await asyncio.gather(
+                *(
+                    self._call_control_rpc(
+                        address,
+                        "WakeUpServing",
+                        pb2.WakeUpRequestPB(
+                            resume_metrics_only=True,
+                            expected_incarnation=status.get("worker_incarnation", ""),
+                            expected_sleep_epoch=_as_int(status.get("sleep_epoch", 0)),
+                        ),
+                        timeout_s=10,
+                    )
+                    for address, status in pending.items()
+                )
+            )
+            failures = [result for result in results if "error" in result]
+            if not failures:
+                await asyncio.to_thread(set_instance_reporting, True)
+                return {"status": "ok"}
+            pending = {
+                result["address"]: pending[result["address"]] for result in failures
+            }
+        return {
+            "error": "all ranks are RUNNING; metrics resume failed, retry wake_up",
+            "grpc_status": "UNAVAILABLE",
+            "details": error_details(failures),
+        }
 
     def _aggregate_sleep_status(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         return aggregate(results, self._control_address_coverage_error())
@@ -638,6 +680,12 @@ class GrpcClientWrapper:
                     "supported_levels": status.get("supported_levels", []),
                 }
             if status.get("state") == "SLEEPING":
+                # A standalone frontend may have restarted after the backends
+                # slept. Keep the lease until its local sender fence finishes,
+                # even if the caller cancels this idempotent request.
+                await self._drive_to_terminal(
+                    asyncio.to_thread(set_instance_reporting, False)
+                )
                 return {"status": "ok"}
             if status.get("state") != "RUNNING":
                 return {

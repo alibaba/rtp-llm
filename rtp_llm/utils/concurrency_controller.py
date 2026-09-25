@@ -69,6 +69,11 @@ def init_controller(concurrency_config, dp_size=1):
 def set_global_controller(_global_controller: ConcurrencyController):
     global global_controller
     global_controller = _global_controller
+    reporting_state = getattr(_global_controller, "metrics_reporting_state", None)
+    if reporting_state is not None:
+        from rtp_llm.aios.kmonitor.python_client.kmonitor.reporting import configure
+
+        configure(reporting_state)
 
 
 def get_global_controller() -> Optional[ConcurrencyController]:

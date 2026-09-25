@@ -108,9 +108,12 @@ struct SleepQuiesceOptions {
 
 // Options passed in via WakeUpServing RPC.
 struct WakeUpOptions {
-    bool prepare_only = false;  // restore/register resources, keep admission closed
-    bool commit_only  = false;  // restart engine and reopen admission after every rank prepared
+    bool        prepare_only = false;  // restore/register resources, keep admission closed
+    bool        commit_only  = false;  // restart engine and reopen admission after every rank prepared
     std::string cancel_quiesce_token;
+    bool        resume_metrics_only = false;
+    std::string expected_incarnation;
+    int64_t     expected_sleep_epoch = 0;
 };
 
 // Snapshot returned by status() / GetSleepStatus RPC (proto SleepStatusResponsePB).
@@ -210,6 +213,12 @@ struct SleepHooks {
     // Warmup + health self-check before going back online.
     std::function<bool()> warmupAndHealthCheck;
 
+    // Idempotent reporting switch. May partially apply before returning false
+    // or throwing; the controller compensates failed pause before GPU release
+    // and keeps failed compensation/resume retryable. Do not destroy metric
+    // registrations: the sleeping process still owns live reporter objects.
+    std::function<bool(bool enabled)> setMetricsReportingEnabled;
+
     // Live counters surfaced through status().
     std::function<int64_t()> activeRequestCount;
     std::function<int64_t()> activeCacheTransferCount;
@@ -303,12 +312,15 @@ private:
     // Atomically move state_ from expected_from to to if the transition is legal.
     // Caller must hold transition_mutex_. Returns false (and sets last_error) on
     // illegal transition.
-    bool transitionLocked(SleepState expected_from, SleepState to);
+    bool        transitionLocked(SleepState expected_from, SleepState to);
+    SleepResult resumeMetricsReporting();  // caller holds transition_mutex_
+    // Also true after a partial hook failure, until compensation succeeds.
+    bool        metrics_reporting_paused_ = false;
 
-    void releaseAdmission();
+    void                      releaseAdmission();
     ControllerAdmissionResult acquireAdmissionImpl(bool cache_transfer);
     SleepResult               closeCacheTransferAdmissionAndDrain(const SleepOptions& opt);
-    void setLastError(const std::string& msg);
+    void                      setLastError(const std::string& msg);
     // Read last_error_ under status_mutex_ only. Error paths use this instead of
     // status().last_error so they do not fire the activeRequestCount /
     // activeCacheTransferCount engine hooks as a side effect (those reach into
@@ -316,15 +328,15 @@ private:
     std::string lastError() const;
     std::string disabledReason() const;
 
-    static constexpr uint64_t kAdmissionStateShift = 61;
+    static constexpr uint64_t kAdmissionStateShift     = 61;
     static constexpr uint64_t kCacheTransferClosedMask = uint64_t{1} << 60;
     static constexpr uint64_t kAdmissionCountMask      = kCacheTransferClosedMask - 1;
     // State, continuation gate and count share a CAS word: closing the gate
     // cannot miss a concurrent lease. RUNNING is zero with both gates open.
     std::atomic<uint64_t> admission_state_{0};
-    std::atomic<int64_t>    sleep_epoch_{0};
-    std::atomic<bool>       enabled_{false};
-    std::atomic<bool>       runtime_supported_{true};
+    std::atomic<int64_t>  sleep_epoch_{0};
+    std::atomic<bool>     enabled_{false};
+    std::atomic<bool>     runtime_supported_{true};
     // Startup-fixed sleep level for this process (1 = host backup, 2 = discard
     // weights). Normalized in setConfiguredLevel(); torch_memory_saver binds the
     // weights backup mode at load time, so it never changes per request.
@@ -334,7 +346,7 @@ private:
     // Lock ordering: transition_mutex_ -> hooks_mutex_ ->
     // status_mutex_.
     // Never acquire in reverse.
-    std::mutex         transition_mutex_;  // serializes sleep/wake_up + idempotency
+    std::mutex transition_mutex_;  // serializes sleep/wake_up + idempotency
 
     std::atomic<KvMemoryState> kv_memory_state_{KvMemoryState::ACTIVE};
     std::atomic<bool>          device_kv_cache_valid_{true};
