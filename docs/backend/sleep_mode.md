@@ -108,8 +108,12 @@ Status-query failures return 500. If a response has `recovery_required=true`, or
 ranks disagree after an interrupted operation, keep traffic removed and restart
 the complete instance/communication group. Do not clear a stranded instance
 lease or force individual ranks back to service. After a successfully verified
-drain rollback, a later sleep may be retried. Allow enough HTTP timeout for
-checkpoint reload; `timeout_ms` bounds drain, not the entire sleep/wake operation.
+drain rollback, a later sleep may be retried. Allow enough HTTP timeout for host
+backup and checkpoint reload; `timeout_ms` bounds drain, not the entire
+sleep/wake operation. Sleep commit RPCs allow at least 600 seconds for resource
+release, preserving a longer existing deadline when the drain budget plus
+30 seconds exceeds that floor. Wake RPCs allow 600 seconds. These are transport
+deadlines, not a guarantee of completion within the requested drain budget.
 
 ## Distributed control addresses
 

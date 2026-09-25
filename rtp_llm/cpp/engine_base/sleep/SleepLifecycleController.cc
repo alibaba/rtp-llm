@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <utility>
@@ -81,30 +82,12 @@ SleepLifecycleController::SleepLifecycleController(bool enabled):
                + std::to_string(sequence.fetch_add(1));
     }()) {}
 
-AdmissionLease::~AdmissionLease() {
-    release();
-}
-
-AdmissionLease::AdmissionLease(AdmissionLease&& other) noexcept: controller_(other.controller_) {
-    other.controller_ = nullptr;
-}
-
-AdmissionLease& AdmissionLease::operator=(AdmissionLease&& other) noexcept {
-    if (this != &other) {
-        release();
-        controller_       = other.controller_;
-        other.controller_ = nullptr;
+void SleepLifecycleController::bindAdmission(std::shared_ptr<SchedulerAdmission> admission) {
+    std::lock_guard<std::mutex> lock(transition_mutex_);
+    if (!admission || admission_ || state() != SleepState::RUNNING) {
+        throw std::logic_error("sleep admission must be bound once before serving");
     }
-    return *this;
-}
-
-void AdmissionLease::release() {
-    if (controller_ == nullptr) {
-        return;
-    }
-    auto* controller = controller_;
-    controller_      = nullptr;
-    controller->releaseAdmission();
+    admission_ = std::move(admission);
 }
 
 std::string sleepStateToString(SleepState state) {
@@ -182,18 +165,24 @@ bool SleepLifecycleController::transitionLocked(SleepState expected_from, SleepS
         return false;
     }
     if (expected_from == SleepState::RUNNING && to == SleepState::DRAINING) {
+        wake_prepared_.store(false, std::memory_order_release);
         sleep_epoch_.fetch_add(1, std::memory_order_acq_rel);
     }
-    auto word = admission_state_.load(std::memory_order_acquire);
-    // Control transitions are serialized. Only admission/release may change
-    // the count while this CAS retries; preserve every pre-drain lease.
-    while (!admission_state_.compare_exchange_weak(
-        word,
-        (word & kAdmissionCountMask)
-            | ((to == SleepState::RUNNING || to == SleepState::DRAINING) ? 0 : kCacheTransferClosedMask)
-            | (static_cast<uint64_t>(to) << kAdmissionStateShift),
-        std::memory_order_acq_rel,
-        std::memory_order_acquire)) {}
+    if (!admission_) {
+        setLastError("scheduler admission is not initialized");
+        return false;
+    }
+    if (to == SleepState::RUNNING) {
+        if (!admission_->reopen()) {
+            setLastError("engine termination prevents reopening admission");
+            return false;
+        }
+    } else if (to == SleepState::DRAINING) {
+        admission_->closeRoots();
+    } else {
+        admission_->sealContinuations();
+    }
+    state_.store(to, std::memory_order_release);
     RTP_LLM_LOG_INFO("sleep state transition: %s -> %s (epoch=%ld)",
                      sleepStateToString(expected_from).c_str(),
                      sleepStateToString(to).c_str(),
@@ -396,11 +385,16 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         if (!closed.ok) {
             return closed;
         }
+        const auto quiesce_started = std::chrono::steady_clock::now();
         if (hooks_.quiesceEngine) {
             if (!timing.run("quiesce_engine", hooks_.quiesceEngine, opt)) {
                 setLastError("quiesceEngine failed, staying in DRAINING");
                 return SleepResult::failedPrecondition(lastError());
             }
+        }
+        const auto drained = drainAfterQuiesce(opt, quiesce_started);
+        if (!drained.ok) {
+            return drained;
         }
         engine_quiesced_.store(true, std::memory_order_release);
     }
@@ -415,7 +409,7 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         return SleepResult::failedPrecondition(lastError());
     }
 
-    if (!(admission_state_.load(std::memory_order_acquire) & kCacheTransferClosedMask) || activeAdmissionCount() != 0) {
+    if (!admission_ || !admission_->continuationsSealed() || activeAdmissionCount() != 0) {
         return SleepResult::failedPrecondition("sleep commit requires closed and drained KV admission");
     }
 
@@ -528,7 +522,8 @@ SleepResult SleepLifecycleController::quiesce(const SleepQuiesceOptions& opt, ui
         if (engine_quiesced_.load(std::memory_order_acquire)) {
             return SleepResult::success();
         }
-        bool ok = true;
+        const auto quiesce_started = std::chrono::steady_clock::now();
+        bool       ok              = true;
         if (hooks_.quiesceEngineAtRound) {
             ok = hooks_.quiesceEngineAtRound(opt.target_round, opt.timeout_ms);
         } else if (hooks_.quiesceEngine) {
@@ -539,6 +534,12 @@ SleepResult SleepLifecycleController::quiesce(const SleepQuiesceOptions& opt, ui
         if (!ok) {
             setLastError("round-fenced engine quiesce failed, staying in DRAINING");
             return SleepResult::failedPrecondition(lastError());
+        }
+        SleepOptions drain_options;
+        drain_options.timeout_ms = opt.timeout_ms;
+        const auto drained       = drainAfterQuiesce(drain_options, quiesce_started);
+        if (!drained.ok) {
+            return drained;
         }
         engine_quiesced_.store(true, std::memory_order_release);
         return SleepResult::success();
@@ -576,6 +577,13 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     }
     if (opt.prepare_only && opt.commit_only) {
         return SleepResult::invalidArgument("wake_up rejected: prepare_only and commit_only cannot both be true");
+    }
+    if (!opt.expected_incarnation.empty()
+        && (opt.expected_incarnation != worker_incarnation_ || opt.expected_sleep_epoch != sleep_epoch_.load())) {
+        return SleepResult::failedPrecondition("stale wake request: worker incarnation or sleep epoch changed");
+    }
+    if (admission_ && admission_->terminating()) {
+        return SleepResult::failedPrecondition("wake rejected after engine termination intent");
     }
 
     const SleepState current = state();
@@ -638,10 +646,15 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         return SleepResult::failedPrecondition("wake_up commit rejected in state " + sleepStateToString(current));
     }
     if (opt.prepare_only && current == SleepState::WAKING_UP) {
-        return SleepResult::success();
+        return wake_prepared_.load(std::memory_order_acquire) ?
+                   SleepResult::success() :
+                   SleepResult::failedPrecondition("wake preparation has not completed");
     }
     if (current != SleepState::SLEEPING && current != SleepState::WAKING_UP) {
         return SleepResult::failedPrecondition("wake_up rejected in state " + sleepStateToString(current));
+    }
+    if (opt.commit_only && !wake_prepared_.load(std::memory_order_acquire)) {
+        return SleepResult::failedPrecondition("wake commit requires completed resource preparation");
     }
 
     setLastError("");
@@ -662,26 +675,36 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     // (weights load, then KV is sized from what remains). The two hooks are
     // independent: the reload only copies into the weight tensors and cuda_graph
     // resume only remaps graph-private pages; neither touches KV content.
-    if (!opt.commit_only && ok && hooks_.restoreRestorableGpuMemory) {
+    const bool prepare_resources = !opt.commit_only && !wake_prepared_.load(std::memory_order_acquire);
+    if (prepare_resources && ok && hooks_.restoreRestorableGpuMemory) {
         ok = timing.run("restore_restorable_gpu_memory", hooks_.restoreRestorableGpuMemory);
         if (!ok) {
             setLastError(hookFailureMessage(hooks_, "restoreRestorableGpuMemory", "restoreRestorableGpuMemory failed"));
         }
     }
-    if (!opt.commit_only && ok && hooks_.restoreKvMemoryBackingAndResetMetadata) {
+    if (prepare_resources && ok && hooks_.restoreKvMemoryBackingAndResetMetadata) {
         kv_memory_state_.store(KvMemoryState::WAKING_UP, std::memory_order_release);
         ok = timing.run("restore_kv_memory_backing", hooks_.restoreKvMemoryBackingAndResetMetadata);
         if (!ok) {
             setLastError("restoreKvMemoryBackingAndResetMetadata failed");
         }
     }
-    if (!opt.commit_only && ok) {
+    if (prepare_resources && ok) {
         kv_memory_state_.store(KvMemoryState::ACTIVE, std::memory_order_release);
     }
-    if (!opt.commit_only && ok && hooks_.registerMr) {
+    if (prepare_resources && ok && hooks_.registerMr) {
         ok = timing.run("register_mr", hooks_.registerMr);
         if (!ok) {
             setLastError("registerMr failed");
+        }
+    }
+    // This hook does not run a model forward. It synchronizes/checks restored
+    // resources while every engine loop is still parked. Running it after a
+    // peer resumes can deadlock a device-wide sync on its next TP collective.
+    if (prepare_resources && ok && hooks_.warmupAndHealthCheck) {
+        ok = timing.run("warmup_and_health_check", hooks_.warmupAndHealthCheck);
+        if (!ok) {
+            setLastError("warmupAndHealthCheck failed");
         }
     }
 
@@ -697,6 +720,9 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         return SleepResult::failedPrecondition(lastError());
     }
 
+    if (!opt.commit_only) {
+        wake_prepared_.store(true, std::memory_order_release);
+    }
     if (opt.prepare_only) {
         timing.end("prepare_end");
         return SleepResult::success();
@@ -706,12 +732,6 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         ok = timing.run("restart_engine", hooks_.restartEngine);
         if (!ok) {
             setLastError("restartEngine failed");
-        }
-    }
-    if (ok && hooks_.warmupAndHealthCheck) {
-        ok = timing.run("warmup_and_health_check", hooks_.warmupAndHealthCheck);
-        if (!ok) {
-            setLastError("warmupAndHealthCheck failed");
         }
     }
 
@@ -746,6 +766,7 @@ SleepStatus SleepLifecycleController::status() const {
     s.disabled_reason       = s.effective ? "" : disabledReason();
     s.state                 = state();
     s.sleep_epoch           = sleep_epoch_.load(std::memory_order_acquire);
+    s.wake_prepared                = s.state == SleepState::WAKING_UP && wake_prepared_.load(std::memory_order_acquire);
     s.kv_memory_state       = kvMemoryStateToString(kv_memory_state_.load(std::memory_order_acquire));
     s.device_kv_cache_valid = device_kv_cache_valid_.load(std::memory_order_acquire);
     // Copy the live-counter hooks under hooks_mutex_, then invoke the copies with
@@ -784,50 +805,54 @@ SleepStatus SleepLifecycleController::status() const {
 }
 
 bool SleepLifecycleController::admit() const {
-    return state() == SleepState::RUNNING;
+    return admission_ && admission_->rootsOpen() && state() == SleepState::RUNNING;
 }
 
-ControllerAdmissionResult SleepLifecycleController::acquireAdmission() {
-    return acquireAdmissionImpl(false);
-}
-
-ControllerAdmissionResult SleepLifecycleController::acquireCacheTransferAdmission() {
-    return acquireAdmissionImpl(true);
-}
-
-ControllerAdmissionResult SleepLifecycleController::acquireAdmissionImpl(bool cache_transfer) {
-    ControllerAdmissionResult result;
-    if (!enabled()) {
-        result.accepted = true;
-        return result;  // OFF requests have no tracking or lease release work.
+SleepResult SleepLifecycleController::drainAfterQuiesce(const SleepOptions&                   opt,
+                                                        std::chrono::steady_clock::time_point quiesce_started) {
+    // A FINISHED stream can leave the scheduler before its last async runner
+    // releases KV references. That release may enqueue connector writes after
+    // the pre-freeze drain. Execution quiesce stops those producers; join their
+    // cleanup before publishing the all-rank prepared ACK or touching MR/KV.
+    // Keep this business resource barrier out of Engine's execution-only API.
+    constexpr int64_t kDefaultQuiesceTimeoutMs = 60000;  // same as Engine::quiesce(0)
+    const int64_t     timeout_ms               = opt.timeout_ms > 0 ? opt.timeout_ms : kDefaultQuiesceTimeoutMs;
+    const auto        deadline                 = quiesce_started + std::chrono::milliseconds(timeout_ms);
+    const auto        now                      = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+        setLastError("post-quiesce drain deadline exceeded; admission remains closed, state=DRAINING");
+        return SleepResult::failedPrecondition(lastError());
     }
-    auto word = admission_state_.load(std::memory_order_acquire);
-    while ((word >> kAdmissionStateShift) == static_cast<uint64_t>(SleepState::RUNNING)
-           || (cache_transfer && !(word & kCacheTransferClosedMask)
-               && (word >> kAdmissionStateShift) == static_cast<uint64_t>(SleepState::DRAINING))) {
-        // Unreachable in practice, but never let count overflow reopen the gate.
-        if ((word & kAdmissionCountMask) == kAdmissionCountMask) {
-            result.state       = SleepState::ERROR;
-            result.sleep_epoch = sleepEpoch();
-            return result;
-        }
-        if (admission_state_.compare_exchange_weak(
-                word, word + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
-            result.state    = static_cast<SleepState>(word >> kAdmissionStateShift);
-            result.accepted = true;
-            result.lease    = AdmissionLease(this);
-            return result;
-        }
+    // Preserve a positive sub-millisecond remainder without passing zero to a
+    // hook that might interpret it as its default timeout. The absolute check
+    // below still rejects a result that arrives after the original deadline.
+    const auto remaining_ms =
+        std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+
+    auto drain_options       = opt;
+    drain_options.mode       = "wait";  // abort cancellation already ran before quiesce
+    drain_options.timeout_ms = remaining_ms;
+    SleepTiming timing("sleep", quiesce_started, sleepEpoch());
+    if (hooks_.drain && !timing.run("post_quiesce_drain", hooks_.drain, drain_options)) {
+        setLastError("post-quiesce cleanup drain failed; admission remains closed, state=DRAINING");
+        return SleepResult::failedPrecondition(lastError());
     }
-    result.state       = static_cast<SleepState>(word >> kAdmissionStateShift);
-    result.sleep_epoch = sleepEpoch();
-    return result;
+    // A provider may return success only after consuming its deadline. Do not
+    // convert that late reply into a prepared ACK or reset its timeout to 60s.
+    if (std::chrono::steady_clock::now() >= deadline) {
+        setLastError("post-quiesce drain deadline exceeded; admission remains closed, state=DRAINING");
+        return SleepResult::failedPrecondition(lastError());
+    }
+    return SleepResult::success();
 }
 
 SleepResult SleepLifecycleController::closeCacheTransferAdmissionAndDrain(const SleepOptions& opt) {
-    admission_state_.fetch_or(kCacheTransferClosedMask, std::memory_order_acq_rel);
+    if (!admission_) {
+        return SleepResult::failedPrecondition("scheduler admission is not initialized");
+    }
+    admission_->sealContinuations();
     try {
-        // Close first, THEN re-drain. A pre-close CAS winner remains counted;
+        // Close first, THEN re-drain. Work admitted before closing remains counted;
         // a post-close arrival cannot invalidate the freeze acknowledgement.
         // The first drain already issued cancellation for mode=abort. This
         // second barrier only joins late cleanup; do not cancel twice.
@@ -850,13 +875,8 @@ SleepResult SleepLifecycleController::closeCacheTransferAdmissionAndDrain(const 
     return SleepResult::failedPrecondition(lastError());
 }
 
-void SleepLifecycleController::releaseAdmission() {
-    // Only a move-only lease created by successful acquire may release.
-    admission_state_.fetch_sub(1, std::memory_order_acq_rel);
-}
-
 int64_t SleepLifecycleController::activeAdmissionCount() const {
-    return static_cast<int64_t>(admission_state_.load(std::memory_order_acquire) & kAdmissionCountMask);
+    return admission_ ? static_cast<int64_t>(admission_->activeCount()) : 0;
 }
 
 int64_t SleepLifecycleController::sleepEpoch() const {
@@ -864,7 +884,7 @@ int64_t SleepLifecycleController::sleepEpoch() const {
 }
 
 SleepState SleepLifecycleController::state() const {
-    return static_cast<SleepState>(admission_state_.load(std::memory_order_acquire) >> kAdmissionStateShift);
+    return state_.load(std::memory_order_acquire);
 }
 
 }  // namespace rtp_llm

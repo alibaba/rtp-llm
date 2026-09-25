@@ -3774,6 +3774,92 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_IncompletePoolTracksCompletePool
     EXPECT_EQ(incomplete, (complete + 1) * static_cast<size_t>(linear_step - 1) - 1);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, SleepBackingRejectsLiveHostRequestRefsBeforeClearingCache) {
+    const auto block_bytes = memoryCacheBlockBytes();
+    putItemsToCache({4001}, block_bytes);
+    auto pool = requireExistingBlockPool(block_bytes);
+    ASSERT_NE(pool, nullptr);
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto base_before = pool->getBaseAddress();
+    const bool released    = connector_->releaseMemoryCacheBacking();
+    EXPECT_FALSE(released);
+    EXPECT_EQ(pool->getBaseAddress(), base_before);
+    EXPECT_EQ(connector_->cacheKeys().size(), 1u);
+    pool->requestFree(blocks);
+    if (released) {
+        ASSERT_TRUE(connector_->restoreMemoryCacheBacking());
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, SleepBackingRejectsLiveHostConnectorRefsBeforeClearingCache) {
+    const auto block_bytes = memoryCacheBlockBytes();
+    putItemsToCache({4002}, block_bytes);
+    auto pool = requireExistingBlockPool(block_bytes);
+    ASSERT_NE(pool, nullptr);
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    pool->connectorReference(blocks);
+    pool->requestFree(blocks);
+    const auto base_before = pool->getBaseAddress();
+    const bool released    = connector_->releaseMemoryCacheBacking();
+    EXPECT_FALSE(released);
+    EXPECT_EQ(pool->getBaseAddress(), base_before);
+    EXPECT_EQ(connector_->cacheKeys().size(), 1u);
+    pool->connectorFree(blocks);
+    if (released) {
+        ASSERT_TRUE(connector_->restoreMemoryCacheBacking());
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, SleepBackingRejectsPinnedCacheEntryWithoutMutation) {
+    const auto block_bytes = memoryCacheBlockBytes();
+    const auto blocks      = putItemsToCache({4003}, block_bytes);
+    ASSERT_EQ(blocks.size(), 1u);
+    auto pool = requireExistingBlockPool(block_bytes);
+    ASSERT_TRUE(connector_->block_cache_->markInFlight(4003, CacheBackingType::MEMORY, blocks[0], -1));
+    bool released = false;
+    EXPECT_NO_THROW(released = connector_->releaseMemoryCacheBacking());
+    EXPECT_FALSE(released);
+    EXPECT_NE(pool->getBaseAddress(), nullptr);
+    EXPECT_EQ(connector_->cacheKeys().size(), 1u);
+    connector_->block_cache_->releaseInFlight(4003, CacheBackingType::MEMORY, blocks[0], -1);
+    EXPECT_TRUE(connector_->releaseMemoryCacheBacking());
+    EXPECT_TRUE(connector_->restoreMemoryCacheBacking());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, SleepBackingRejectsPinnedPrefixEntryWithoutMutation) {
+    auto config                               = createDsv4TypedConnectorConfig();
+    auto kv_config                            = kv_cache_config_;
+    kv_config.memory_cache_size_mb            = 1;
+    kv_config.enable_prefix_tree_memory_cache = true;
+    auto conn                                 = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    auto pool = conn->compressed_pool_;
+    ASSERT_NE(pool, nullptr);
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    PrefixTreeMemoryBlockCache::CacheItem item;
+    item.cache_key    = 4004;
+    item.kind         = CacheBlockKind::COMPRESSED_KV;
+    item.block_index  = blocks[0];
+    item.backing_type = CacheBackingType::MEMORY;
+    ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(4004, BlockDependency{}, item).first);
+    pool->blockCacheReference(blocks);
+    pool->requestFree(blocks);
+    const auto match = conn->prefix_block_cache_->matchAndMarkInFlight(4004, item.kind);
+    ASSERT_TRUE(match.found);
+    bool released = false;
+    EXPECT_NO_THROW(released = conn->releaseMemoryCacheBacking());
+    EXPECT_FALSE(released);
+    EXPECT_NE(pool->getBaseAddress(), nullptr);
+    EXPECT_EQ(conn->prefix_block_cache_->size(), 1u);
+    conn->prefix_block_cache_->releaseInFlight(4004, item.kind, item.backing_type, blocks[0], -1, match.generation);
+    EXPECT_TRUE(conn->releaseMemoryCacheBacking());
+    EXPECT_TRUE(conn->restoreMemoryCacheBacking());
+}
+
 // Sleep flips the memory-cache backing on/off via release/restore while a
 // GetCacheStatus caller can concurrently read the cache keys (cacheKeys() is
 // lock-free w.r.t. malloc_mutex_). The backing object address stays stable and

@@ -1,12 +1,14 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerAdmission.h"
 
 namespace rtp_llm {
 
@@ -24,45 +26,6 @@ enum class SleepState {
 };
 
 std::string sleepStateToString(SleepState state);
-
-class SleepLifecycleController;
-
-// Move-only proof that a root request or internal KV continuation was admitted.
-// Destruction releases exactly one active admission.
-class AdmissionLease {
-public:
-    AdmissionLease() = default;
-    ~AdmissionLease();
-
-    AdmissionLease(const AdmissionLease&)            = delete;
-    AdmissionLease& operator=(const AdmissionLease&) = delete;
-
-    AdmissionLease(AdmissionLease&& other) noexcept;
-    AdmissionLease& operator=(AdmissionLease&& other) noexcept;
-
-    explicit operator bool() const {
-        return controller_ != nullptr;
-    }
-
-private:
-    explicit AdmissionLease(SleepLifecycleController* controller): controller_(controller) {}
-    void release();
-
-    SleepLifecycleController* controller_ = nullptr;
-
-    friend class SleepLifecycleController;
-};
-
-struct ControllerAdmissionResult {
-    AdmissionLease lease;
-    SleepState     state       = SleepState::RUNNING;
-    int64_t        sleep_epoch = 0;
-    bool           accepted    = false;
-
-    bool admitted() const {
-        return accepted;
-    }
-};
 
 // Tracks where the KV physical memory currently is.
 enum class KvMemoryState {
@@ -134,8 +97,12 @@ struct SleepStatus {
     std::string gpu_resource_state;
     std::string last_error;
     // Control-plane capability/identity; no per-step status collection.
-    int32_t     quiesce_protocol = 1;
+    int32_t quiesce_protocol = 1;
+    // Static capability, unlike wake_prepared's per-operation completion fact.
+    int32_t wake_prepare_protocol = 1;
     std::string worker_incarnation;
+    // Completion fact for this incarnation + sleep_epoch, not merely WAKING_UP.
+    bool wake_prepared = false;
 };
 
 // Lightweight result type so the core state machine stays free of grpc/absl deps
@@ -210,7 +177,8 @@ struct SleepHooks {
     std::function<bool()> restartEngine;
     // Abort a prepared sleep from DRAINING and resume the engine loop.
     std::function<bool()> cancelQuiesceAndRestartEngine;
-    // Warmup + health self-check before going back online.
+    // Legacy name: non-forward resource self-check while execution is parked.
+    // Must not launch model work; completes before acknowledging wake prepare.
     std::function<bool()> warmupAndHealthCheck;
 
     // Idempotent reporting switch. May partially apply before returning false
@@ -227,8 +195,8 @@ struct SleepHooks {
 // Thread-safe sleep/wake_up lifecycle state machine. Owns the authoritative
 // SleepState, sleep_epoch, kv_memory_state, device_kv_cache_valid and
 // last_error. State transitions are serialized through transition_mutex_.
-// Admission count and state share one atomic word. Admission and closing the
-// gate are linearized by CAS; serving requests never acquire a lifecycle mutex.
+// SchedulerAdmission owns admission and its leases; serving requests never
+// acquire the lifecycle transition mutex.
 class SleepLifecycleController {
 public:
     explicit SleepLifecycleController(bool enabled = false);
@@ -291,15 +259,12 @@ public:
     // AdmissionGate hook: true only when fully RUNNING.
     bool admit() const;
 
-    // Atomically check RUNNING and, if admitted, increment the controller-owned
-    // active admission tracker. The returned lease releases the tracker once.
-    ControllerAdmissionResult acquireAdmission();
-    // INTERNAL KV continuations only. Root leases / connector inflight counters
-    // cover their parent work. Keep them admitted during all-rank drain, then
-    // atomically close/re-drain before acknowledging freeze.
-    // Never use this for new inference roots or reopen it after freeze.
-    ControllerAdmissionResult acquireCacheTransferAdmission();
-    int64_t                   activeAdmissionCount() const;
+    // Bound once during engine initialization; the scheduler owns the ledger.
+    void                                bindAdmission(std::shared_ptr<SchedulerAdmission> admission);
+    std::shared_ptr<SchedulerAdmission> admission() const {
+        return admission_;
+    }
+    int64_t activeAdmissionCount() const;
 
     int64_t sleepEpoch() const;
 
@@ -317,10 +282,9 @@ private:
     // Also true after a partial hook failure, until compensation succeeds.
     bool        metrics_reporting_paused_ = false;
 
-    void                      releaseAdmission();
-    ControllerAdmissionResult acquireAdmissionImpl(bool cache_transfer);
-    SleepResult               closeCacheTransferAdmissionAndDrain(const SleepOptions& opt);
-    void                      setLastError(const std::string& msg);
+    SleepResult closeCacheTransferAdmissionAndDrain(const SleepOptions& opt);
+    SleepResult drainAfterQuiesce(const SleepOptions& opt, std::chrono::steady_clock::time_point quiesce_started);
+    void        setLastError(const std::string& msg);
     // Read last_error_ under status_mutex_ only. Error paths use this instead of
     // status().last_error so they do not fire the activeRequestCount /
     // activeCacheTransferCount engine hooks as a side effect (those reach into
@@ -328,12 +292,8 @@ private:
     std::string lastError() const;
     std::string disabledReason() const;
 
-    static constexpr uint64_t kAdmissionStateShift     = 61;
-    static constexpr uint64_t kCacheTransferClosedMask = uint64_t{1} << 60;
-    static constexpr uint64_t kAdmissionCountMask      = kCacheTransferClosedMask - 1;
-    // State, continuation gate and count share a CAS word: closing the gate
-    // cannot miss a concurrent lease. RUNNING is zero with both gates open.
-    std::atomic<uint64_t> admission_state_{0};
+    std::shared_ptr<SchedulerAdmission> admission_;
+    std::atomic<SleepState>             state_{SleepState::RUNNING};
     std::atomic<int64_t>  sleep_epoch_{0};
     std::atomic<bool>     enabled_{false};
     std::atomic<bool>     runtime_supported_{true};
@@ -350,7 +310,10 @@ private:
 
     std::atomic<KvMemoryState> kv_memory_state_{KvMemoryState::ACTIVE};
     std::atomic<bool>          device_kv_cache_valid_{true};
-    std::atomic<bool>          engine_quiesced_{false};
+    // Prepared ACK: execution is parked AND cleanup spawned by its final CPU
+    // runners has drained. An execution-only success must not publish this.
+    std::atomic<bool> engine_quiesced_{false};
+    std::atomic<bool> wake_prepared_{false};
     // Guarded by transition_mutex_. Tokens fence delayed control messages;
     // incarnation + expected epoch also fence a delayed initial drain request.
     const std::string       worker_incarnation_;
@@ -373,7 +336,6 @@ private:
     mutable std::mutex hooks_mutex_;
     SleepHooks         hooks_;
 
-    friend class AdmissionLease;
 };
 
 }  // namespace rtp_llm

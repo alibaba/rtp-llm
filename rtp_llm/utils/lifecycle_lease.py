@@ -28,14 +28,6 @@ class LifecycleLease:
                 logging.error("failed to establish lifecycle TCPStore: %s", e)
         return self._store
 
-    @property
-    def required(self) -> bool:
-        return self._required
-
-    @required.setter
-    def required(self, value: bool) -> None:
-        self._required = bool(value)
-
     def record(self, operation: str) -> str:
         return json.dumps(
             {"holder": self._holder, "operation": operation},

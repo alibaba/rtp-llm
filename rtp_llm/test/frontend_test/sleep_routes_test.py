@@ -50,12 +50,14 @@ class _SleepBudgetRank:
     address: str
     continuation_finish_ms: int
     state: str = "RUNNING"
+    sleep_epoch: int = 0
     token: str = ""
     frozen: bool = False
     quiesced: bool = False
     releases: int = 0
     rollbacks: int = 0
     budgets: list[tuple[str, int, float]] = field(default_factory=list)
+    commit_budgets: list[tuple[int, float]] = field(default_factory=list)
 
 
 def lifecycle_operation_for_state(state: str) -> str:
@@ -536,13 +538,13 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
                 self.assertFalse(task.done())
                 self.assertTrue(wrapper._lifecycle_lock.locked())
-                self.assertTrue(store.values[wrapper.LIFECYCLE_LEASE_KEY])
+                self.assertTrue(store.values[wrapper._lifecycle_lease.KEY])
             finally:
                 release.set()
                 result = await asyncio.wait_for(task, 5)
             self.assertEqual(result, {"status": "ok"})
             self.assertEqual(reporting.reporting_epoch(), 1)
-            self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+            self.assertEqual(store.values[wrapper._lifecycle_lease.KEY], "")
 
     async def test_delayed_status_query_cannot_change_reporting(self):
         from rtp_llm.aios.kmonitor.python_client.kmonitor import reporting
@@ -570,20 +572,31 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(reporting.reporting_epoch() % 2 == 0, enabled)
 
     async def test_partial_wake_failure_never_notifies_metrics_resume(self):
-        wrapper, _ = self._build_wrapper(control_addresses=["rank-0", "rank-1"])
-        wrapper._broadcast_control_rpc_to = AsyncMock(return_value=[])
+        wrapper, pb2 = self._build_wrapper(control_addresses=["rank-0", "rank-1"])
+        snapshots = [
+            {"address": address, "worker_incarnation": address, "sleep_epoch": 1}
+            for address in wrapper.control_addresses
+        ]
         wrapper._raw_sleep_statuses = AsyncMock(
             return_value=[
-                {"address": "rank-0", "state": "RUNNING"},
-                {"address": "rank-1", "state": "ERROR"},
+                {**snapshots[0], "state": "RUNNING"},
+                {**snapshots[1], "state": "ERROR"},
             ]
         )
-        wrapper._call_control_rpc = AsyncMock()
+        wrapper._call_control_rpc = AsyncMock(return_value={})
+        wrapper._resume_metrics_after_wake = AsyncMock()
         result = await wrapper._converge_commit(
-            "commit wake_up", "WakeUpServing", None, 600, "WAKING_UP", "RUNNING"
+            "commit wake_up",
+            "WakeUpServing",
+            pb2.WakeUpRequestPB(commit_only=True),
+            600,
+            "WAKING_UP",
+            "RUNNING",
+            snapshots,
         )
         self.assertTrue(result["recovery_required"])
-        wrapper._call_control_rpc.assert_not_awaited()
+        self.assertEqual(wrapper._call_control_rpc.await_count, 2)
+        wrapper._resume_metrics_after_wake.assert_not_awaited()
 
     async def test_resume_notification_retries_with_each_rank_identity(self):
         wrapper, _ = self._build_wrapper(control_addresses=["rank-0", "rank-1"])
@@ -664,18 +677,19 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             self.assertFalse(task.done())
             self.assertTrue(wrapper._lifecycle_lock.locked())
-            self.assertTrue(store.values[wrapper.LIFECYCLE_LEASE_KEY])
+            self.assertTrue(store.values[wrapper._lifecycle_lease.KEY])
         finally:
             release.set()
             result = await asyncio.wait_for(task, 5)
         self.assertEqual(result, {"status": "ok"})
-        self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+        self.assertEqual(store.values[wrapper._lifecycle_lease.KEY], "")
 
     def _build_wrapper(
         self,
         control_addresses=None,
         expected_control_address_count=None,
         lifecycle_store=None,
+        require_instance_lease=False,
     ):
         import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
         from rtp_llm.utils import grpc_client_wrapper
@@ -688,6 +702,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             control_addresses=control_addresses or ["127.0.0.1:10001"],
             expected_control_address_count=expected_control_address_count,
             lifecycle_store=lifecycle_store,
+            require_instance_lease=require_instance_lease,
         )
         wrapper.channel = MagicMock()
         wrapper.stub = MagicMock()
@@ -710,6 +725,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
     def _status_pb(self, pb2, **kwargs):
         defaults = {
             "quiesce_protocol": 1,
+            "wake_prepare_protocol": 1,
             "worker_incarnation": "test-worker",
             "state": "RUNNING",
             "sleep_mode_enabled": True,
@@ -723,7 +739,9 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         defaults.update(kwargs)
         return pb2.SleepStatusResponsePB(**defaults)
 
-    async def _run_freeze_budget_case(self, drain_timeout_ms, continuation_finish_ms):
+    async def _run_freeze_budget_case(
+        self, drain_timeout_ms, continuation_finish_ms, commit_finish_ms=0
+    ):
         addresses = ["rank-0", "rank-1"]
         wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
         ranks = [
@@ -738,6 +756,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                     pb2,
                     state=rank.state,
                     worker_incarnation=rank.address,
+                    sleep_epoch=rank.sleep_epoch,
                     kv_memory_state="PAUSED" if sleeping else "ACTIVE",
                     device_kv_cache_valid=not sleeping,
                     gpu_resource_state="RELEASED" if sleeping else "ACTIVE",
@@ -747,12 +766,23 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                 if request.commit_only:
                     self.assertTrue(rank.quiesced)
                     rank.releases += 1
+                    rank.commit_budgets.append((request.timeout_ms, timeout))
+                    rank.state = "SUSPENDING"
+                    # Resource release continues after a transport deadline.
+                    # Model its duration without a wall-clock sleep.
+                    if commit_finish_ms >= timeout * 1000:
+                        raise self._aio_error(
+                            grpc.StatusCode.DEADLINE_EXCEEDED,
+                            "sleep commit RPC deadline",
+                        )
                     rank.state = "SLEEPING"
                 else:
                     self.assertTrue(request.drain_only)
                     self.assertEqual(rank.state, "RUNNING")
                     rank.budgets.append(("drain", request.timeout_ms, timeout))
                     rank.token = request.quiesce_token
+                    # Mirror the backend's RUNNING -> DRAINING generation.
+                    rank.sleep_epoch += 1
                     rank.state = "DRAINING"
                     # Model roots completing at their own deadline. Freeze must
                     # still receive a fresh per-stage budget, not a remainder.
@@ -848,6 +878,32 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([rank.state for rank in ranks], ["RUNNING", "RUNNING"])
         self.assertEqual([rank.releases for rank in ranks], [0, 0])
         self.assertEqual([rank.rollbacks for rank in ranks], [1, 1])
+
+    async def test_sleep_commit_deadline_has_floor_and_preserves_long_budget(self):
+        for budget_ms, commit_timeout_s in (
+            (0, 600),
+            (1, 600),
+            (60000, 600),
+            (3600000, 3630),
+        ):
+            with self.subTest(budget_ms=budget_ms):
+                result, ranks = await self._run_freeze_budget_case(
+                    budget_ms, 0, commit_finish_ms=104000
+                )
+                self.assertEqual(result, {"status": "ok"})
+                prepare_timeout_s = max(60.0, budget_ms / 1000.0 + 30.0)
+                for rank in ranks:
+                    self.assertEqual(
+                        rank.budgets,
+                        [
+                            ("drain", budget_ms, prepare_timeout_s),
+                            ("freeze", budget_ms, prepare_timeout_s),
+                        ],
+                    )
+                    self.assertEqual(rank.commit_budgets, [(0, commit_timeout_s)])
+                    self.assertEqual(rank.state, "SLEEPING")
+                    self.assertEqual(rank.releases, 1)
+                    self.assertEqual(rank.rollbacks, 0)
 
     async def test_round_fence_waits_for_all_freeze_acks_before_target(self):
         from rtp_llm.utils.lifecycle_quiesce import prepare_sleep_rounds
@@ -1442,7 +1498,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                                     await asyncio.sleep(0)
                             self.assertFalse(task.done())
                             self.assertTrue(wrapper._lifecycle_lock.locked())
-                            self.assertTrue(store.values[wrapper.LIFECYCLE_LEASE_KEY])
+                            self.assertTrue(store.values[wrapper._lifecycle_lease.KEY])
                         finally:
                             release_rollback.set()
                         if prepare_cancelled:
@@ -1453,9 +1509,11 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                             self.assertIn("rolled back", result["error"])
                             self.assertNotIn("recovery_required", result)
                         self.assertEqual(set(states.values()), {"RUNNING"})
-                        self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+                        self.assertEqual(store.values[wrapper._lifecycle_lease.KEY], "")
                         self.assertFalse(wrapper._lifecycle_lock.locked())
-                        next_status = await wrapper._initial_lifecycle_status("wake_up")
+                        next_status = await wrapper._initial_lifecycle_status(
+                            "wake_up", rank_snapshots=[]
+                        )
                         self.assertEqual(next_status["state"], "RUNNING")
                         for address in addresses:
                             wrapper._dp_stubs[
@@ -1597,6 +1655,349 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
         self.assertIn("prepare_only", result["error"])
         wrapper._dp_stubs[address].GetSleepStatus.assert_not_awaited()
+
+    async def test_sleep_commit_keeps_waiting_for_a_suspending_rank(self):
+        wrapper, pb2 = self._build_wrapper()
+        address = wrapper.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        wrapper._broadcast_control_rpc_to = AsyncMock(return_value=[])
+        wrapper._raw_sleep_statuses = AsyncMock(
+            side_effect=[
+                [{**snapshot, "state": "SUSPENDING"}],
+                [{**snapshot, "state": "SLEEPING"}],
+            ]
+        )
+        result = await wrapper._converge_commit(
+            "commit sleep",
+            "SleepServing",
+            pb2.SleepRequestPB(commit_only=True),
+            1,
+            "DRAINING",
+            "SLEEPING",
+            [snapshot],
+        )
+        self.assertEqual(result, {"status": "ok"})
+
+    async def test_wake_commit_does_not_fail_merely_after_three_fast_retries(self):
+        wrapper, pb2 = self._build_wrapper()
+        address = wrapper.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        wrapper._call_control_rpc = AsyncMock(return_value={})
+        wrapper._raw_sleep_statuses = AsyncMock(
+            side_effect=[[{**snapshot, "state": "WAKING_UP"}] for _ in range(4)]
+            + [[{**snapshot, "state": "RUNNING"}]]
+        )
+        wrapper._resume_metrics_after_wake = AsyncMock(return_value={"status": "ok"})
+        result = await wrapper._converge_commit(
+            "commit wake_up",
+            "WakeUpServing",
+            pb2.WakeUpRequestPB(commit_only=True),
+            1,
+            "WAKING_UP",
+            "RUNNING",
+            [snapshot],
+        )
+        self.assertEqual(result, {"status": "ok"})
+
+    async def test_wake_rejects_initial_rank_without_a_valid_identity(self):
+        for malformed in (
+            {"worker_incarnation": ""},
+            {"worker_incarnation": None},
+            {"sleep_epoch": None},
+            {"sleep_epoch": -1},
+            {"sleep_epoch": "not-an-epoch"},
+            {"sleep_epoch": True},
+        ):
+            with self.subTest(malformed=malformed):
+                wrapper, _ = self._build_wrapper()
+                snapshot = {
+                    "address": wrapper.control_addresses[0],
+                    "worker_incarnation": "original",
+                    "sleep_epoch": "1",
+                    "state": "SLEEPING",
+                    "effective": True,
+                    "wake_prepare_protocol": 1,
+                    **malformed,
+                }
+                wrapper._raw_sleep_statuses = AsyncMock(return_value=[snapshot])
+                wrapper._wake_up_to_terminal = AsyncMock(return_value={"status": "ok"})
+                result = await wrapper._wake_up_serving_locked()
+                self.assertTrue(result.get("recovery_required"), result)
+                wrapper._wake_up_to_terminal.assert_not_awaited()
+
+    async def test_wake_prepare_timeout_is_not_a_prepared_ack(self):
+        wrapper, pb2 = self._build_wrapper()
+        address = wrapper.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        wrapper._call_control_rpc = AsyncMock(
+            return_value={"address": address, "error": "prepare RPC timed out"}
+        )
+        wrapper._raw_sleep_statuses = AsyncMock(
+            side_effect=[
+                [{**snapshot, "state": "WAKING_UP", "wake_prepared": False}],
+                [
+                    {
+                        **snapshot,
+                        "state": "ERROR",
+                        "last_error": "restore failed",
+                    }
+                ],
+            ]
+        )
+        wrapper._converge_commit = AsyncMock(return_value={"status": "ok"})
+
+        result = await wrapper._wake_up_to_terminal(
+            pb2.WakeUpRequestPB(prepare_only=True),
+            pb2.WakeUpRequestPB(commit_only=True),
+            [snapshot],
+        )
+
+        self.assertIn("error", result)
+        wrapper._converge_commit.assert_not_awaited()
+
+    async def _check_unsupported_wake_prepare_protocol(self, operation):
+        from rtp_llm.utils import grpc_client_wrapper
+
+        # Both protocol-1 round fencing and valid operation identities already
+        # existed before wake_prepared. They do not establish the new capability.
+        for version in ("missing", 0, 2, -1):
+            for mixed in (False, True):
+                with self.subTest(operation=operation, version=version, mixed=mixed):
+                    addresses = ["rank-0", "rank-1"]
+                    wrapper, _ = self._build_wrapper(control_addresses=addresses)
+                    snapshots = [
+                        {
+                            "address": address,
+                            "worker_incarnation": address,
+                            "sleep_epoch": 1,
+                            "quiesce_protocol": 1,
+                            "wake_prepare_protocol": 1,
+                            "wake_prepared": False,
+                            "state": "RUNNING" if operation == "sleep" else "SLEEPING",
+                            "sleep_mode_enabled": True,
+                            "effective": True,
+                            "supported_levels": [1],
+                            "supported_modes": ["wait", "abort"],
+                        }
+                        for address in addresses
+                    ]
+                    unsupported = snapshots[1:] if mixed else snapshots
+                    for snapshot in unsupported:
+                        if version == "missing":
+                            snapshot.pop("wake_prepare_protocol")
+                        else:
+                            snapshot["wake_prepare_protocol"] = version
+                    wrapper._raw_sleep_statuses = AsyncMock(return_value=snapshots)
+                    wrapper._wake_up_to_terminal = AsyncMock(
+                        return_value={"status": "ok"}
+                    )
+                    wrapper._converge_commit = AsyncMock(return_value={"status": "ok"})
+                    wrapper._call_control_rpc = AsyncMock()
+                    wrapper._broadcast_control_rpc = AsyncMock()
+                    with patch.object(
+                        grpc_client_wrapper,
+                        "prepare_sleep_rounds",
+                        AsyncMock(
+                            return_value=[{"address": address} for address in addresses]
+                        ),
+                    ) as prepare:
+                        result = (
+                            await wrapper._sleep_serving_locked({"level": 1})
+                            if operation == "sleep"
+                            else await wrapper._wake_up_serving_locked()
+                        )
+                    self.assertEqual(result.get("grpc_status"), "UNIMPLEMENTED", result)
+                    self.assertFalse(result.get("recovery_required"), result)
+                    self.assertIn("upgrade", str(result).lower())
+                    for snapshot in unsupported:
+                        self.assertIn(snapshot["address"], str(result))
+                    prepare.assert_not_awaited()
+                    wrapper._wake_up_to_terminal.assert_not_awaited()
+                    wrapper._converge_commit.assert_not_awaited()
+                    wrapper._call_control_rpc.assert_not_awaited()
+                    wrapper._broadcast_control_rpc.assert_not_awaited()
+
+    async def test_sleep_rejects_unsupported_wake_protocol_before_any_drain(self):
+        await self._check_unsupported_wake_prepare_protocol("sleep")
+
+    async def test_wake_rejects_unsupported_wake_protocol_before_any_restore(self):
+        await self._check_unsupported_wake_prepare_protocol("wake")
+
+    async def test_wake_prepared_false_does_not_mean_protocol_unsupported(self):
+        from rtp_llm.utils import grpc_client_wrapper
+
+        for operation in ("sleep", "wake"):
+            with self.subTest(operation=operation):
+                wrapper, pb2 = self._build_wrapper()
+                address = wrapper.control_addresses[0]
+                sleeping = operation == "wake"
+                wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
+                    return_value=self._status_pb(
+                        pb2,
+                        state="SLEEPING" if sleeping else "RUNNING",
+                        sleep_epoch=1,
+                        wake_prepared=False,
+                        wake_prepare_protocol=1,
+                    )
+                )
+                wrapper._wake_up_to_terminal = AsyncMock(return_value={"status": "ok"})
+                wrapper._converge_commit = AsyncMock(return_value={"status": "ok"})
+                with patch.object(
+                    grpc_client_wrapper,
+                    "prepare_sleep_rounds",
+                    AsyncMock(return_value=[{"address": address}]),
+                ) as prepare:
+                    result = (
+                        await wrapper._wake_up_serving_locked()
+                        if sleeping
+                        else await wrapper._sleep_serving_locked({"level": 1})
+                    )
+                self.assertEqual(result, {"status": "ok"})
+                if sleeping:
+                    wrapper._wake_up_to_terminal.assert_awaited_once()
+                else:
+                    prepare.assert_awaited_once()
+                    wrapper._converge_commit.assert_awaited_once()
+
+    async def test_lost_prepare_reply_waits_for_actual_completion(self):
+        wrapper, pb2 = self._build_wrapper()
+        address = wrapper.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        wrapper._call_control_rpc = AsyncMock(
+            return_value={"address": address, "error": "lost reply"}
+        )
+        wrapper._raw_sleep_statuses = AsyncMock(
+            side_effect=[
+                [{**snapshot, "state": "WAKING_UP", "wake_prepared": False}],
+                [{**snapshot, "state": "WAKING_UP", "wake_prepared": True}],
+            ]
+        )
+        wrapper._converge_commit = AsyncMock(return_value={"status": "ok"})
+        result = await wrapper._wake_up_to_terminal(
+            pb2.WakeUpRequestPB(prepare_only=True),
+            pb2.WakeUpRequestPB(commit_only=True),
+            [snapshot],
+        )
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(wrapper._raw_sleep_statuses.await_count, 2)
+        wrapper._converge_commit.assert_awaited_once()
+
+    async def test_prepared_ack_from_replaced_rank_or_epoch_is_rejected(self):
+        for incarnation, epoch in [("replacement", 5), ("original", 6)]:
+            with self.subTest(incarnation=incarnation, epoch=epoch):
+                wrapper, pb2 = self._build_wrapper()
+                address = wrapper.control_addresses[0]
+                original = {
+                    "address": address,
+                    "worker_incarnation": "original",
+                    "sleep_epoch": 5,
+                }
+                wrapper._call_control_rpc = AsyncMock(
+                    return_value={"address": address, "error": "lost reply"}
+                )
+                wrapper._raw_sleep_statuses = AsyncMock(
+                    return_value=[
+                        {
+                            "address": address,
+                            "worker_incarnation": incarnation,
+                            "sleep_epoch": epoch,
+                            "state": "WAKING_UP",
+                            "wake_prepared": True,
+                        }
+                    ]
+                )
+                wrapper._converge_commit = AsyncMock(return_value={"status": "ok"})
+                result = await wrapper._wake_up_to_terminal(
+                    pb2.WakeUpRequestPB(prepare_only=True),
+                    pb2.WakeUpRequestPB(commit_only=True),
+                    [original],
+                )
+                self.assertTrue(result["recovery_required"])
+                wrapper._converge_commit.assert_not_awaited()
+                request = wrapper._call_control_rpc.await_args.args[2]
+                self.assertEqual(request.expected_incarnation, "original")
+                self.assertEqual(request.expected_sleep_epoch, 5)
+
+    async def test_commit_total_deadline_is_bounded_and_reports_incomplete_work(self):
+        from rtp_llm.utils import grpc_client_wrapper
+
+        wrapper, pb2 = self._build_wrapper()
+        address = wrapper.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        wrapper._broadcast_control_rpc_to = AsyncMock(return_value=[])
+        wrapper._raw_sleep_statuses = AsyncMock(
+            return_value=[{**snapshot, "state": "SUSPENDING"}]
+        )
+        now = [0.0]
+
+        async def advance(seconds):
+            now[0] += seconds
+
+        with patch.object(
+            grpc_client_wrapper, "perf_counter", side_effect=lambda: now[0]
+        ), patch.object(
+            grpc_client_wrapper.asyncio,
+            "sleep",
+            side_effect=advance,
+        ):
+            result = await wrapper._converge_commit(
+                "commit sleep",
+                "SleepServing",
+                pb2.SleepRequestPB(commit_only=True),
+                0.1,
+                "DRAINING",
+                "SLEEPING",
+                [snapshot],
+            )
+        self.assertTrue(result["recovery_required"])
+        self.assertIn("deadline exceeded", result["error"])
+        self.assertIn("does not prove", result["error"])
+        self.assertAlmostEqual(now[0], 0.3)
+
+    async def test_commit_rejects_duplicate_rank_status_coverage(self):
+        wrapper, pb2 = self._build_wrapper(control_addresses=["rank-0", "rank-1"])
+        snapshots = [
+            {"address": address, "worker_incarnation": address, "sleep_epoch": 1}
+            for address in wrapper.control_addresses
+        ]
+        wrapper._broadcast_control_rpc_to = AsyncMock(return_value=[])
+        wrapper._raw_sleep_statuses = AsyncMock(
+            return_value=[
+                {"address": "rank-0", "state": "SLEEPING"},
+                {"address": "rank-0", "state": "SLEEPING"},
+            ]
+        )
+        result = await wrapper._converge_commit(
+            "commit sleep",
+            "SleepServing",
+            pb2.SleepRequestPB(commit_only=True),
+            1,
+            "DRAINING",
+            "SLEEPING",
+            snapshots,
+        )
+        self.assertTrue(result["recovery_required"])
+        self.assertIn("coverage", result["error"])
 
     async def test_wake_up_serving_success(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
@@ -2176,8 +2577,8 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_wake_up_prepare_rpc_failure_commits_if_all_ranks_prepared(self):
         # A deadline/transport error may race with a backend that completed the
-        # prepare hook. If every rank reports WAKING_UP, it is safe and necessary
-        # to finish the irreversible transition instead of requiring a restart.
+        # prepare hook. Require an explicit completion fact for the original
+        # incarnation/epoch, not just the WAKING_UP state.
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
         wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
         rank_statuses = {address: "SLEEPING" for address in addresses}
@@ -2190,6 +2591,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                     pb2,
                     state=state,
                     sleep_epoch=1,
+                    wake_prepared=state == "WAKING_UP",
                     kv_memory_state="ACTIVE" if state != "SLEEPING" else "PAUSED",
                     gpu_resource_state=(
                         "ACTIVE" if state == "RUNNING" else "RESTORING"
@@ -2302,7 +2704,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
                     resume.set()
                     result = await asyncio.wait_for(task, timeout=2)
                 self.assertEqual(result, {"status": "ok"})
-                self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+                self.assertEqual(store.values[wrapper._lifecycle_lease.KEY], "")
 
     async def test_cancelled_acquisition_releases_late_lease_before_propagating(self):
         store = _FakeStore()
@@ -2323,7 +2725,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=2)
         wrapper._sleep_serving_locked.assert_not_awaited()
-        self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+        self.assertEqual(store.values[wrapper._lifecycle_lease.KEY], "")
         self.assertFalse(wrapper._lifecycle_lock.locked())
 
     async def test_cancelled_release_finishes_before_unlocking(self):
@@ -2350,7 +2752,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             resume.set()
             result = await asyncio.wait_for(task, timeout=2)
         self.assertEqual(result, {"status": "ok"})
-        self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+        self.assertEqual(store.values[wrapper._lifecycle_lease.KEY], "")
 
     async def test_independent_wrappers_compete_for_instance_lease(self):
         store = _FakeStore()
@@ -2371,8 +2773,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         await holder._release_lifecycle_lease(record)
 
     async def test_required_instance_store_unavailable_fails_closed(self):
-        wrapper, _ = self._build_wrapper()
-        wrapper._require_instance_lease = True
+        wrapper, _ = self._build_wrapper(require_instance_lease=True)
         address = wrapper.control_addresses[0]
         wrapper._dp_stubs[address].GetSleepStatus = AsyncMock()
         wrapper._dp_stubs[address].SleepServing = AsyncMock()
@@ -2391,14 +2792,14 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
 
         record, error = await holder._acquire_lifecycle_lease("sleep")
         self.assertFalse(error)
-        await other._release_lifecycle_lease(other._lease_record("sleep"))
+        await other._release_lifecycle_lease(other._lifecycle_lease.record("sleep"))
         self.assertEqual(
-            store.values[holder.LIFECYCLE_LEASE_KEY],
+            store.values[holder._lifecycle_lease.KEY],
             record,
         )
 
         await holder._release_lifecycle_lease(record)
-        self.assertEqual(store.values[holder.LIFECYCLE_LEASE_KEY], "")
+        self.assertEqual(store.values[holder._lifecycle_lease.KEY], "")
 
     async def test_partial_sleep_commit_retries_only_draining_rank(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
@@ -2410,15 +2811,15 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         wrapper._dp_stubs[addresses[0]].GetSleepStatus = AsyncMock(
             side_effect=[
                 self._status_pb(pb2, state="RUNNING"),
-                self._status_pb(pb2, state="SLEEPING"),
-                self._status_pb(pb2, state="SLEEPING"),
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
             ]
         )
         wrapper._dp_stubs[addresses[1]].GetSleepStatus = AsyncMock(
             side_effect=[
                 self._status_pb(pb2, state="RUNNING"),
-                self._status_pb(pb2, state="DRAINING"),
-                self._status_pb(pb2, state="SLEEPING"),
+                self._status_pb(pb2, state="DRAINING", sleep_epoch=1),
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
             ]
         )
 

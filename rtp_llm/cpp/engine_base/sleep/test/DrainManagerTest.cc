@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/engine_base/sleep/test/BoundSleepLifecycleController.h"
 #include "rtp_llm/cpp/engine_base/sleep/DrainManager.h"
 
 #include <atomic>
@@ -26,7 +27,6 @@ protected:
     DrainManager manager_;
 };
 
-// §3 M3: drained is true only when every registered counter reads zero.
 TEST_F(DrainManagerTest, DrainedOnlyWhenAllCountersZero) {
     // No counters registered yet: trivially drained.
     EXPECT_TRUE(manager_.drained());
@@ -58,7 +58,7 @@ TEST_F(DrainManagerTest, DrainedOnlyWhenAllCountersZero) {
     EXPECT_TRUE(manager_.drained());
 }
 
-TEST_F(DrainManagerTest, RegisterReplaceAndUnregister) {
+TEST_F(DrainManagerTest, RegisterReplaceAndRejectNullProvider) {
     std::atomic<size_t> count{5};
     manager_.registerCounter("frontend_active", [&]() { return count.load(); });
     EXPECT_FALSE(manager_.drained());
@@ -67,18 +67,15 @@ TEST_F(DrainManagerTest, RegisterReplaceAndUnregister) {
     manager_.registerCounter("frontend_active", []() { return size_t(0); });
     EXPECT_TRUE(manager_.drained());
 
-    manager_.registerCounter("frontend_active", [&]() { return count.load(); });
-    EXPECT_FALSE(manager_.drained());
-
-    manager_.unregisterCounter("frontend_active");
-    EXPECT_TRUE(manager_.drained());
-
     // Null provider must be rejected (not registered, not crash).
     manager_.registerCounter("null_provider", nullptr);
     EXPECT_TRUE(manager_.drained());
+
+    manager_.registerCounter("frontend_active", [&]() { return count.load(); });
+    manager_.registerCounter("frontend_active", nullptr);
+    EXPECT_FALSE(manager_.drained());
 }
 
-// §3 M3: graceful drain timeout returns false (caller stays DRAINING).
 TEST_F(DrainManagerTest, WaitDrainedTimesOutWhileBusy) {
     std::atomic<size_t> inflight{1};
     manager_.registerCounter("scheduler_onflight", [&]() { return inflight.load(); });
@@ -113,7 +110,7 @@ TEST_F(DrainManagerTest, WaitDrainedReturnsPromptlyAfterCountersReachZero) {
     worker.join();
 }
 
-// §3 M3: force invokes the injected cancel callback (which cancels
+// Force invokes the injected cancel callback (which cancels
 // non-streaming requests only) and then keeps waiting for full drain;
 // streaming requests finish naturally.
 TEST_F(DrainManagerTest, ForceDrainInvokesCancelAndKeepsWaitingForStreaming) {
@@ -139,7 +136,7 @@ TEST_F(DrainManagerTest, ForceDrainInvokesCancelAndKeepsWaitingForStreaming) {
     SleepOptions opt;
     opt.mode       = "abort";
     opt.timeout_ms = 10000;
-    EXPECT_TRUE(manager_.drain(opt));
+    EXPECT_TRUE(manager_.drain(opt.timeout_ms, opt.mode == "abort"));
 
     EXPECT_EQ(cancel_called.load(), 1);
     EXPECT_EQ(non_streaming.load(), 0u);
@@ -155,10 +152,10 @@ TEST_F(DrainManagerTest, ForceDrainWithoutCancelCallbackStillWaits) {
     opt.mode       = "abort";
     opt.timeout_ms = 30;
     // No cancel callback injected: force degrades to graceful wait and times out.
-    EXPECT_FALSE(manager_.drain(opt));
+    EXPECT_FALSE(manager_.drain(opt.timeout_ms, opt.mode == "abort"));
 
     inflight = 0;
-    EXPECT_TRUE(manager_.drain(opt));
+    EXPECT_TRUE(manager_.drain(opt.timeout_ms, opt.mode == "abort"));
 }
 
 TEST_F(DrainManagerTest, GracefulDrainDoesNotInvokeCancel) {
@@ -168,11 +165,10 @@ TEST_F(DrainManagerTest, GracefulDrainDoesNotInvokeCancel) {
     SleepOptions opt;
     opt.mode       = "wait";
     opt.timeout_ms = 10;
-    EXPECT_TRUE(manager_.drain(opt));
+    EXPECT_TRUE(manager_.drain(opt.timeout_ms, opt.mode == "abort"));
     EXPECT_EQ(cancel_called.load(), 0);
 }
 
-// §3 M3 + M1 status(): aggregate values reported per counter kind.
 TEST_F(DrainManagerTest, AggregateCountsByKind) {
     std::atomic<size_t> frontend{2};
     std::atomic<size_t> scheduler{3};
@@ -214,9 +210,11 @@ TEST_F(DrainManagerTest, InstallHooksDrivesSleepLifecycleController) {
         "connector_inflight", [&]() { return transfers.load(); }, DrainManager::CounterKind::CACHE_TRANSFER);
     manager_.setCancelCallback([&]() { cancel_called++; });
 
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
-    manager_.installHooks(hooks);
+    hooks.drain = [this](const SleepOptions& opt) { return manager_.drain(opt.timeout_ms, opt.mode == "abort"); };
+    hooks.activeRequestCount       = [this]() { return manager_.activeRequestCount(); };
+    hooks.activeCacheTransferCount = [this]() { return manager_.activeCacheTransferCount(); };
     controller.setHooks(hooks);
 
     // Counters flow into controller status().
@@ -243,13 +241,12 @@ TEST_F(DrainManagerTest, InstallHooksDrivesSleepLifecycleController) {
     EXPECT_EQ(status.active_cache_transfer_count, 0);
 }
 
-// §3 M3: concurrent register/unregister/query must be race-free.
 TEST_F(DrainManagerTest, ConcurrentRegisterAndQuery) {
     std::atomic<bool>   stop{false};
     std::atomic<size_t> shared_count{1};
 
     std::vector<std::thread> threads;
-    // Writers: register/replace/unregister counters concurrently.
+    // Writers: register/replace counters concurrently.
     for (int w = 0; w < 4; ++w) {
         threads.emplace_back([&, w]() {
             for (int i = 0; i < 500; ++i) {
@@ -258,9 +255,6 @@ TEST_F(DrainManagerTest, ConcurrentRegisterAndQuery) {
                     name,
                     [&]() { return shared_count.load(); },
                     (i % 2 == 0) ? DrainManager::CounterKind::REQUEST : DrainManager::CounterKind::CACHE_TRANSFER);
-                if (i % 3 == 0) {
-                    manager_.unregisterCounter(name);
-                }
             }
         });
     }

@@ -821,6 +821,8 @@ message SleepStatusResponsePB {
     string disabled_reason = 13;
     int32 quiesce_protocol = 14;  // 1 = drain, freeze, catch-up, commit; 0 = older backend
     string worker_incarnation = 15;
+    bool wake_prepared = 16;      // restore/MR/non-forward health completed for this incarnation + sleep_epoch
+    int32 wake_prepare_protocol = 17; // 1 = explicit wake preparation completion; 0 = unsupported older backend
 }
 
 message IsSleepingResponsePB {

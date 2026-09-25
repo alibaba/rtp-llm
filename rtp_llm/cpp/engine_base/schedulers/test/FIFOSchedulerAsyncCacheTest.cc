@@ -1,7 +1,10 @@
 
 #include <algorithm>
+#include <atomic>
+#include <future>
 #include <memory>
 #include <unistd.h>
+#include <c10/util/ScopeExit.h>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -18,7 +21,9 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/engine_base/sleep/SleepLifecycleController.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -870,6 +875,136 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testGroupedSurvivorContinuesLoadingAfterPeer
     ASSERT_EQ(final_result.value().size(), 1);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::RUNNING);
     EXPECT_TRUE(scheduler->loading_cache_group_queue_.empty());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, SleepWaitsForConnectorWriteCreatedByDeferredRunnerCleanup) {
+    using namespace std::chrono_literals;
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto admission = scheduler->admission()->admit();
+    ASSERT_TRUE(admission.accepted);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+    ASSERT_GT(stream->streamCacheResource().curBlocksNum(), 0);
+
+    // Keep the production coordinator/ref ownership and delay only the final
+    // connector's completion. Install after initial scheduling so no mock read
+    // can obscure the real FINISHED -> releaseResource -> asyncStoreCache path.
+    auto              coordinator = std::make_shared<KVCacheConnectorCoordinator>(cache_manager_->config_,
+                                                                     cache_manager_->kv_cache_config_,
+                                                                     cache_manager_->runtime_config_,
+                                                                     ParallelismConfig{},
+                                                                     SpeculativeExecutionConfig{},
+                                                                     cache_manager_->allocator_);
+    auto              connector   = std::make_shared<NiceMock<MockKVCacheConnector>>();
+    auto              pending     = std::make_shared<NiceMock<MockAsyncContext>>();
+    std::atomic<bool> transfer_done{false};
+    ON_CALL(*pending, done()).WillByDefault([&] { return transfer_done.load(); });
+    ON_CALL(*pending, success()).WillByDefault(Return(true));
+    std::mutex                       resource_mutex;
+    std::shared_ptr<KVCacheResource> transfer_resource;
+    std::atomic<int>                 writes{0};
+    EXPECT_CALL(*connector, asyncWrite(_, _))
+        .WillOnce([&](const std::shared_ptr<KVCacheResource>& resource, const std::shared_ptr<Meta>& meta) {
+            EXPECT_TRUE(meta->enableMemoryCache());
+            {
+                std::lock_guard<std::mutex> lock(resource_mutex);
+                transfer_resource = resource;
+            }
+            ++writes;
+            return std::static_pointer_cast<AsyncContext>(pending);
+        });
+    coordinator->connectors_.push_back(connector);
+    cache_manager_->coordinator_ = coordinator;
+    scheduler->drainManager().registerCounter(
+        "connector_inflight",
+        [coordinator] { return coordinator->inflightTransferCount(); },
+        DrainManager::CounterKind::CACHE_TRANSFER);
+    auto cleanup = c10::make_scope_exit([&] {
+        transfer_done = true;
+        if (stream->hasPendingAsyncBookkeeping()) {
+            stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        }
+        coordinator->processWriteContexts();
+        std::lock_guard<std::mutex> lock(resource_mutex);
+        transfer_resource.reset();
+    });
+
+    // Model the executor worker's real resource reference. The state machine
+    // must retire the finished stream without prematurely freeing its blocks.
+    stream->incPendingAsyncBookkeeping();
+    stream->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::FINISHED);
+    ASSERT_EQ(scheduler->onflightStreams(), 0);
+    ASSERT_TRUE(stream->isDeferredReleasePending());
+    ASSERT_FALSE(stream->streamCacheResource().isResourceReleased());
+    admission.complete();  // The response/context can finish while the worker still owns the stream.
+    ASSERT_TRUE(scheduler->drainManager().drained());
+
+    SleepLifecycleController controller(true);
+    controller.bindAdmission(scheduler->admission());
+    std::promise<void> runner_retired;
+    auto               retired = runner_retired.get_future();
+    std::promise<void> after_quiesce;
+    auto               next_phase = after_quiesce.get_future();
+    std::atomic<bool>  phase_observed{false};
+    auto               observe_phase = [&] {
+        if (!phase_observed.exchange(true)) {
+            after_quiesce.set_value();
+        }
+    };
+    std::atomic<int> resource_hooks{0};
+    SleepHooks       hooks;
+    hooks.drain = [&](const SleepOptions& options) {
+        if (writes.load() != 0) {
+            observe_phase();
+        }
+        return scheduler->drainManager().drain(options.timeout_ms, options.mode == "abort");
+    };
+    hooks.quiesceEngine = [&](const SleepOptions&) {
+        // This is the last action of the owned runner joined by engine quiesce,
+        // not a synthetic increment: it calls the production release/store path.
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        EXPECT_EQ(writes.load(), 1);
+        EXPECT_EQ(coordinator->inflightTransferCount(), 1);
+        runner_retired.set_value();
+        return true;
+    };
+    hooks.synchronizeAndDeregisterMr = [&](const SleepOptions&) {
+        ++resource_hooks;
+        observe_phase();
+        EXPECT_EQ(coordinator->inflightTransferCount(), 0)
+            << "MR/resource release must not begin with the late connector write in flight";
+        return true;
+    };
+    controller.setHooks(hooks);
+    SleepOptions options;
+    options.timeout_ms = 5000;
+    auto sleeping      = std::async(std::launch::async, [&] { return controller.sleep(options); });
+
+    EXPECT_EQ(retired.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(next_phase.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(sleeping.wait_for(0ms), std::future_status::timeout);
+    EXPECT_EQ(resource_hooks.load(), 0);
+    EXPECT_FALSE(scheduler->drainManager().drained());
+
+    // Always finish the fake transport before joining, including on RED, so a
+    // failed assertion cannot strand a worker or leave allocator references live.
+    transfer_done = true;
+    coordinator->processWriteContexts();
+    {
+        std::lock_guard<std::mutex> lock(resource_mutex);
+        transfer_resource.reset();
+    }
+    scheduler->drainManager().notifyDrainProgress();
+    const auto result = sleeping.get();
+    EXPECT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+    EXPECT_EQ(resource_hooks.load(), 1);
+    EXPECT_EQ(coordinator->inflightTransferCount(), 0);
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
 }
 
 }  // namespace rtp_llm

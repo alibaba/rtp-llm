@@ -1,6 +1,7 @@
 #pragma once
 
 #include <list>
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -10,12 +11,28 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerAdmission.h"
+#include "rtp_llm/cpp/engine_base/sleep/DrainManager.h"
 
 namespace rtp_llm {
 
 class SchedulerBase {
 public:
+    SchedulerBase(): admission_(std::make_shared<SchedulerAdmission>()) {
+        drain_manager_.registerCounter("admission_leases",
+                                       [admission = admission_]() { return admission->activeCount(); });
+        // Queries only run after construction and must be joined before the
+        // scheduler is destroyed. Never evaluate providers under a queue lock.
+        drain_manager_.registerCounter(
+            "scheduler_onflight", [this]() { return static_cast<size_t>(std::max<int64_t>(0, onflightStreams())); });
+    }
     virtual ~SchedulerBase() {}
+    std::shared_ptr<SchedulerAdmission> admission() const {
+        return admission_;
+    }
+    DrainManager& drainManager() {
+        return drain_manager_;
+    }
     virtual absl::Status enqueue(const GenerateStreamPtr& stream) = 0;
     virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams)     = 0;
@@ -47,6 +64,10 @@ public:
         return {};
     }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
+
+private:
+    std::shared_ptr<SchedulerAdmission> admission_;
+    DrainManager                        drain_manager_;
 };
 
 }  // namespace rtp_llm
