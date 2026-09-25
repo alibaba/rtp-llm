@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from cases.config import configure_program
 from reporting import discover_reports, read_bundle, render, write_bundle
@@ -62,13 +63,16 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_template_reuse_and_local_difference_do_not_mutate_other_case(self):
         reports = {}
-        for case in ("cache_scale_in", "balance_distribution"):
+        for case in ("cache_scale_in", "master_performance", "trace_scale_out",
+                     "balance_distribution"):
             path = ROOT / "config/scenarios" / f"{case}.yaml"
             doc = configure_program(load_document(path), str(path))
             reports[case] = doc["variants"][0]["test"]["reports"]
         self.assertEqual(reports["cache_scale_in"]["default"]["template"], "workload")
         self.assertEqual(reports["balance_distribution"]["default"]["template"], "workload")
         self.assertEqual(reports["cache_scale_in"]["custom"], ["gate"])
+        self.assertEqual(reports["master_performance"]["custom"], ["gate"])
+        self.assertEqual(reports["trace_scale_out"]["custom"], [])
         self.assertEqual(reports["balance_distribution"]["custom"], [])
         series = {
             f'1/mock/qps/{{"engine_name":"p-{i}"}}': [[0, i], [1, i + 1]]
@@ -105,6 +109,22 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual(json.loads((gate / "report-spec.json").read_text())["timeAxis"],
                              dict(min=0, max=2))
             self.assertEqual(spec["timeAxis"], dict(min=0, max=1))
+
+    def test_master_performance_gate_is_discoverable_by_default_run(self):
+        from workload.performance_gate import report
+
+        with tempfile.TemporaryDirectory() as d, mock.patch(
+            "workload.performance_views.panel",
+            return_value=(dict(id="performance", title="Performance", series=[]), {}),
+        ):
+            gate = report(d, {"criteria": {"measure_s": 1}},
+                          {"verdict": "PASS", "checks": [], "errors": [], "metrics": {}})
+            self.assertEqual(discover_reports(d, role="gate"),
+                             [str((gate / "report.html").resolve())])
+            run = write_report(d, payload(gates=discover_reports(d, role="gate")),
+                               reports=declaration({"custom": ["gate"]}, kind="workload"))
+            spec = json.loads((run / "report-spec.json").read_text())
+            self.assertIn("../master-performance/report.html", json.dumps(spec["sections"]))
 
     def test_invalid_declarations_reject_unsafe_or_unknown_views(self):
         for value in (

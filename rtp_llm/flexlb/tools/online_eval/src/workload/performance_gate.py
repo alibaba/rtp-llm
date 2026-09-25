@@ -477,6 +477,7 @@ def report(directory, evidence, result=None, telemetry_directory=None):
             evidence=dict(file="performance-gate-evidence.json"),
         ),
         producer="performance-gate",
+        role="gate",
     )
 
 

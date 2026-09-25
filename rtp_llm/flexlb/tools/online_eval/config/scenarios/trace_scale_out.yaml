@@ -122,3 +122,6 @@ test:
   description: Java background traffic persists across Python checkpoints and Decode
     scale-out
   collection: request
+reports:
+  default:
+    template: workload

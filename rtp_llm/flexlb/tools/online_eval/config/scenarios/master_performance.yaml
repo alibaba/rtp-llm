@@ -93,3 +93,7 @@ test:
   description: Frozen trace/model absolute regression gate; provisional floors, 100%
     full-Fetch success, optional batch/single observation
   collection: request
+reports:
+  default:
+    template: workload
+  custom: [gate]
