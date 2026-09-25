@@ -8,6 +8,7 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.opentelemetry.api.GlobalOpenTelemetry;
@@ -30,8 +31,6 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.condition.EnabledOnOs;
-import org.junit.jupiter.api.condition.OS;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
@@ -49,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -67,9 +67,9 @@ class FlexlbGrpcForwarderAsyncTest {
     }
 
     @Test
-    @EnabledOnOs(OS.LINUX)
     @Timeout(value = 15, unit = TimeUnit.SECONDS)
     void forwardsScheduleUsingEpollTransport() throws Exception {
+        assumeTrue(Epoll.isAvailable(), "Epoll native transport is unavailable on this platform");
         assertScheduleWithTransport(new EpollEventLoopGroup(1));
     }
 
