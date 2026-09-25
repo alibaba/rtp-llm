@@ -88,4 +88,4 @@ test:
 reports:
   default:
     template: workload
-  custom: [gate]
+  custom: [cache_scale_in.yaml]

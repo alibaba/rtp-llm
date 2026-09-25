@@ -96,4 +96,4 @@ test:
 reports:
   default:
     template: workload
-  custom: [gate]
+  custom: [master_performance.yaml]

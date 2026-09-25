@@ -4,6 +4,7 @@ import copy
 import os
 from pathlib import Path
 from workload.report_panels import build_panels
+from reporting.view_config import custom_view
 from reporting import (
     bundle_path,
     details,
@@ -35,10 +36,12 @@ def build_spec(payload, directory, reports=None):
     gates = payload.get("gate_reports")
     if gates is None:
         gates = [payload["gate_report"]] if payload.get("gate_report") else []
-    if reports is not None and "gate" not in reports["custom"]:
-        gates = []
-    if reports is not None and "gate" in reports["custom"] and not gates:
-        raise ValueError("declared gate report was not produced")
+    if reports is not None:
+        selected = {custom_view(name)["report"] for name in reports["custom"]}
+        gates = [gate for gate in gates if Path(gate).parent.name in selected]
+        missing = selected - {Path(gate).parent.name for gate in gates}
+        if missing:
+            raise ValueError("declared report was not produced: " + ", ".join(sorted(missing)))
     for gate in gates:
         items.append(
             dict(

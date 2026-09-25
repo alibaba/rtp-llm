@@ -1,22 +1,2 @@
-kind: timeline
-title: P scale-in cache-collapse regression
-align: {stage: scale_in, edge: start}
-events:
-- {stage: traffic, edge: start, label: Java sender starts}
-- {stage: scale_in, edge: end, label: Scale-in observation ends}
-- {stage: stop, edge: start, label: Stop sending}
-panels:
-- title: Completed prefill token hit and gate floor
-  metrics: [gate/token_hit, gate/hit_floor]
-- title: Actual Prefill count
-  metrics: [gate/p]
-- title: Waiting and running
-  metrics: [gate/waiting, gate/running]
-- title: Completion traffic
-  metrics: [gate/success, gate/failure, gate/prefill]
-- title: Device and Memory reuse tokens per request
-  metrics: [gate/device_tokens, gate/memory_tokens]
-- title: Context batch size
-  metrics: [gate/batch_size]
-- title: Successful TTFT p95 in completion windows
-  metrics: [gate/ttft_p95_ms]
+kind: gate
+report: cache-scale-in

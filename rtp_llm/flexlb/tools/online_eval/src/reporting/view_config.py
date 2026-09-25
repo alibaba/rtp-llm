@@ -1,12 +1,25 @@
 """Validated, data-only report view declarations and the shared presentation template."""
 
+import re
 from pathlib import Path
 
 from scenario.loader import ScenarioError, load_document
 
-TEMPLATES = Path(__file__).resolve().parents[2] / "config/report_views.yaml"
-REGISTERED_VIEWS = frozenset({"gate"})
+VIEWS = Path(__file__).resolve().parents[2] / "config/report_views"
+TEMPLATES = VIEWS / "workload.yaml"
 CURVES = frozenset({"mean", "max", "detail"})
+
+
+def custom_view(name, path="reports.custom"):
+    if type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*\.yaml", name):
+        _fail(path, "expected a report view filename under config/report_views")
+    view = load_document(VIEWS / name)
+    if set(view) != {"kind", "report"} or view["kind"] != "gate" or (
+        type(view["report"]) is not str
+        or not re.fullmatch(r"[a-z][a-z0-9-]*", view["report"])
+    ):
+        _fail(str(VIEWS / name), "expected gate view with a report bundle name")
+    return view
 
 
 def _fail(path, message):
@@ -96,9 +109,11 @@ def declaration(value, *, kind, path="reports"):
             _curve_names(curves, path + ".default.presets." + name)
     custom = value.get("custom", [])
     if not isinstance(custom, list) or any(
-        type(name) is not str or name not in REGISTERED_VIEWS for name in custom
+        type(name) is not str for name in custom
     ) or len(set(custom)) != len(custom):
-        _fail(path + ".custom", "expected unique registered report views")
+        _fail(path + ".custom", "expected unique report view filenames")
+    for name in custom:
+        custom_view(name, path + ".custom")
     if not default["enabled"] and not custom:
         _fail(path, "at least one view must be enabled")
     return {"default": default, "custom": list(custom)}

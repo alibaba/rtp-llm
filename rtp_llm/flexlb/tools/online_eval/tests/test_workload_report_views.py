@@ -70,8 +70,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
             reports[case] = doc["variants"][0]["test"]["reports"]
         self.assertEqual(reports["cache_scale_in"]["default"]["template"], "workload")
         self.assertEqual(reports["balance_distribution"]["default"]["template"], "workload")
-        self.assertEqual(reports["cache_scale_in"]["custom"], ["gate"])
-        self.assertEqual(reports["master_performance"]["custom"], ["gate"])
+        self.assertEqual(reports["cache_scale_in"]["custom"], ["cache_scale_in.yaml"])
+        self.assertEqual(reports["master_performance"]["custom"], ["master_performance.yaml"])
         self.assertEqual(reports["trace_scale_out"]["custom"], [])
         self.assertEqual(reports["balance_distribution"]["custom"], [])
         series = {
@@ -95,17 +95,18 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_declared_gate_and_default_are_independent_verified_bundles(self):
         with tempfile.TemporaryDirectory() as d:
-            gate = write_bundle(d, "run", "gate", {"verdict": "PASS"},
+            gate = write_bundle(d, "run", "cache-scale-in", {"verdict": "PASS"},
                                 dict(title="Gate", timeAxis=dict(min=0, max=2), panels=[]),
                                 role="gate")
-            declared = declaration({"default": {"template": "workload"}, "custom": ["gate"]},
+            declared = declaration({"default": {"template": "workload"},
+                                    "custom": ["cache_scale_in.yaml"]},
                                    kind="workload")
             run = write_report(d, payload(gates=discover_reports(d, role="gate")),
                                reports=declared)
             read_bundle(run)
             read_bundle(gate)
             spec = json.loads((run / "report-spec.json").read_text())
-            self.assertIn("../gate/report.html", json.dumps(spec["sections"]))
+            self.assertIn("../cache-scale-in/report.html", json.dumps(spec["sections"]))
             self.assertEqual(json.loads((gate / "report-spec.json").read_text())["timeAxis"],
                              dict(min=0, max=2))
             self.assertEqual(spec["timeAxis"], dict(min=0, max=1))
@@ -122,9 +123,18 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual(discover_reports(d, role="gate"),
                              [str((gate / "report.html").resolve())])
             run = write_report(d, payload(gates=discover_reports(d, role="gate")),
-                               reports=declaration({"custom": ["gate"]}, kind="workload"))
+                               reports=declaration({"custom": ["master_performance.yaml"]},
+                                                   kind="workload"))
             spec = json.loads((run / "report-spec.json").read_text())
             self.assertIn("../master-performance/report.html", json.dumps(spec["sections"]))
+
+    def test_declared_view_requires_its_own_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            gate = write_bundle(d, "run", "unrelated", {"verdict": "PASS"},
+                                dict(title="Other", panels=[]), role="gate")
+            reports = declaration({"custom": ["cache_scale_in.yaml"]}, kind="workload")
+            with self.assertRaisesRegex(ValueError, "cache-scale-in"):
+                write_report(d, payload(gates=[str(gate / "report.html")]), reports=reports)
 
     def test_invalid_declarations_reject_unsafe_or_unknown_views(self):
         for value in (
@@ -132,13 +142,14 @@ class WorkloadReportViewsTest(unittest.TestCase):
             {"default": {"template": "unknown"}},
             {"default": {"default_visible": ["detail"]}},
             {"default": False},
-            {"custom": ["gate", "gate"]},
+            {"custom": ["cache_scale_in.yaml", "cache_scale_in.yaml"]},
+            {"custom": ["../cache_scale_in.yaml"]},
             {"custom": [{"action": "write"}]},
         ):
             with self.subTest(value=value), self.assertRaises(ScenarioError):
                 declaration(value, kind="workload")
         with self.assertRaisesRegex(ScenarioError, "test.kind=workload"):
-            declaration({"custom": ["gate"]}, kind="functional")
+            declaration({"custom": ["cache_scale_in.yaml"]}, kind="functional")
 
 
 if __name__ == "__main__":
