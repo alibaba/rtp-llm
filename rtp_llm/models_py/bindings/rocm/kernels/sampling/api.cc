@@ -14,6 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#if USING_DCU
+#ifndef TORCH_CUDA_CPP_API
+#define TORCH_CUDA_CPP_API C10_IMPORT
+#endif
+#endif
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 
 #include "sampling.h"

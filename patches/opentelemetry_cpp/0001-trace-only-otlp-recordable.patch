@@ -35,3 +35,20 @@ diff --git a/exporters/otlp/BUILD b/exporters/otlp/BUILD
          "@com_github_opentelemetry_proto//:trace_service_proto_cc",
      ],
  )
+diff --git a/bazel/BUILD b/bazel/BUILD
+--- a/bazel/BUILD
++++ b/bazel/BUILD
+@@ -1,6 +1,13 @@
+ # Copyright The OpenTelemetry Authors
+ # SPDX-License-Identifier: Apache-2.0
+ 
++exports_files([
++    "curl.BUILD",
++    "nlohmann_json.BUILD",
++    "opentelemetry_proto.BUILD",
++    "zlib.BUILD",
++])
++
+ package(default_visibility = ["//:__subpackages__"])
+ 
+ config_setting(

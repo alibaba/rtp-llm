@@ -282,6 +282,7 @@ class Qwen35Moe(Qwen3NextBase):
         from rtp_llm.models_py.utils.arch import (
             get_device_type,
             is_cuda,
+            is_dcu,
             is_hip,
             is_ppu,
         )
@@ -289,7 +290,7 @@ class Qwen35Moe(Qwen3NextBase):
         # Per-model allowlist: a device belongs here once it has the attention,
         # MoE and MRoPE impls Qwen35Model needs. Naming the device in the message
         # keeps it truthful as the list grows.
-        if not is_cuda() and not is_hip() and not is_ppu():
+        if not is_cuda() and not is_dcu() and not is_hip() and not is_ppu():
             raise RuntimeError(
                 "Qwen3Next has no python-model implementation for "
                 f"{get_device_type().name}"

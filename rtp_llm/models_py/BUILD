@@ -14,11 +14,14 @@ deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn = ["flash_attn","flash-attn-3"]
+# DCU MoE/attention kernels (DAS prebuilt wheel, dcu lock only)
+aiter_dcu = ["aiter"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
+requirement(aiter_dcu)
 
 
 filegroup(
@@ -65,6 +68,7 @@ py_library(
         "//rtp_llm/models_py/distributed:moriep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
+        ":aiter",
     ] + select({
         # cuda13 locks ship flashinfer-python; deep-ep only in the x86 lock.
         "@//:using_cuda13_x86": flashinfer + deep,
@@ -133,6 +137,15 @@ py_library(
 )
 
 py_library(
+    name = "modules_dcu",
+    srcs = glob([
+        "modules/dcu/*.py",
+        "modules/dcu/**/*.py",
+    ]),
+    visibility = [":__subpackages__"],
+)
+
+py_library(
     name = "kernels",
     srcs = glob([
         "kernels/*.py",
@@ -168,6 +181,9 @@ py_library(
         ],
         "@//:using_rocm": [
             ":modules_rocm"
+        ],
+        "@//:using_dcu": [
+            ":modules_dcu"
         ],
         "//conditions:default": [],
     }),

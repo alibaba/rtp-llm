@@ -8,6 +8,11 @@
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
+#if USING_DCU
+#include "rtp_llm/models_py/bindings/dcu/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/dcu/hip_host_utils.h"
+#endif
+
 namespace rtp_llm {
 namespace kernels {
 
@@ -32,7 +37,7 @@ static inline int getMultiProcessorCount() {
 
 #if USING_CUDA
 static constexpr size_t WARP_SIZE = 32;
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 static constexpr size_t WARP_SIZE = 64;
 #endif
 
@@ -61,7 +66,7 @@ batchCopyRowAlignedKernel(char* const* __restrict__ dst, char const* const* __re
 #if USING_CUDA
         CopyUnit temp = __ldcs(&row_src[lane_id]);
         __stcs(&row_dst[lane_id], temp);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
         CopyUnit temp    = row_src[lane_id];
         row_dst[lane_id] = temp;
 #endif
@@ -127,7 +132,7 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
 #if USING_CUDA
                 const auto tmp = __ldcs(reinterpret_cast<uint4 const*>(seg_src));
                 __stcs(reinterpret_cast<uint4*>(seg_dst), tmp);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
                 const auto tmp                     = *reinterpret_cast<uint4 const*>(seg_src);
                 *reinterpret_cast<uint4*>(seg_dst) = tmp;
 #endif
@@ -138,7 +143,7 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
 #if USING_CUDA
                     const auto tmp = __ldcs(reinterpret_cast<uint4 const*>(seg_src));
                     __stcs(reinterpret_cast<uint4*>(seg_dst), tmp);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
                     const auto tmp                     = *reinterpret_cast<uint4 const*>(seg_src);
                     *reinterpret_cast<uint4*>(seg_dst) = tmp;
 #endif
@@ -149,7 +154,7 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
 #if USING_CUDA
                         const auto tmp = __ldcs(reinterpret_cast<uint4 const*>(seg_src));
                         __stcs(reinterpret_cast<uint4*>(seg_dst), tmp);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
                         const auto tmp                     = *reinterpret_cast<uint4 const*>(seg_src);
                         *reinterpret_cast<uint4*>(seg_dst) = tmp;
 #endif
@@ -163,7 +168,7 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
 #if USING_CUDA
                             const auto tmp = __ldcs(cur_src + byte_offset);
                             __stcs(cur_dst + byte_offset, tmp);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
                             const auto tmp           = *(cur_src + byte_offset);
                             *(cur_dst + byte_offset) = tmp;
 #endif
@@ -171,6 +176,8 @@ static __global__ void batchCopy(char* __restrict__ const* __restrict__ dst,
                     }
 #if USING_CUDA
                     __syncwarp();
+#elif USING_DCU
+                    __syncthreads();
 #endif
                 }
             }
@@ -241,7 +248,7 @@ void invokeBatchCopy(void* const*           dst,
         const int grid_size = batch_size;
 #if USING_CUDA
         constexpr int block_size = 512;
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
         constexpr int block_size = 1024;
 #endif
 

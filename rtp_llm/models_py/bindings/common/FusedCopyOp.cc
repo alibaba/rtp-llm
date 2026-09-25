@@ -11,13 +11,18 @@
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #include <hip/hip_runtime.h>
 #endif
+#if USING_DCU
+#include <ATen/hip/HIPContext.h>
+#include "rtp_llm/models_py/bindings/dcu/cuda_shims.h"
+#include <hip/hip_runtime.h>
+#endif
 
 namespace rtp_llm {
 
 void fusedCopy(const FusedD2DCopyParams& params) {
 #if USING_CUDA
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     hipStream_t stream = at::hip::getCurrentHIPStream();
 #else
     throw std::runtime_error("No supported GPU backend found for fusedCopy");
@@ -29,7 +34,7 @@ void fusedCopy(const FusedD2DCopyParams& params) {
 void fusedStridedCopy(const FusedStridedCopyParams& params) {
 #if USING_CUDA
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     hipStream_t stream = at::hip::getCurrentHIPStream();
 #else
     throw std::runtime_error("No supported GPU backend found for fusedStridedCopy");

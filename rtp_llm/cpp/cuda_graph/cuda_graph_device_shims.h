@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #include <ATen/hip/HIPGraph.h>
 #include <ATen/hip/HIPContext.h>
 #include <c10/hip/HIPGuard.h>
@@ -24,7 +24,7 @@
 namespace py = pybind11;
 
 namespace rtp_llm {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 namespace rocm {
 void  setHipGraphCaptureEnabled(bool enabled);
 void* getHipGraphTpNcclComm();
@@ -50,7 +50,7 @@ using GraphPoolHandle = c10::cuda::MempoolId_t;
 struct GraphPoolHandle {};
 #endif
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 using GraphStream      = at::hip::HIPStream;
 using GraphStreamGuard = at::hip::HIPStreamGuard;
 #else
@@ -59,7 +59,7 @@ using GraphStreamGuard = at::cuda::CUDAStreamGuard;
 #endif
 
 inline GraphStream toGraphStream(const torch::Stream& stream) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     return at::hip::HIPStream(stream);
 #else
     return at::cuda::CUDAStream(stream);
@@ -67,7 +67,7 @@ inline GraphStream toGraphStream(const torch::Stream& stream) {
 }
 
 inline void setDevice(int rank) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     auto result = hipSetDevice(rank);
     RTP_LLM_CHECK_WITH_INFO(result == hipSuccess, "hipSetDevice(%d) failed: %s", rank, hipGetErrorString(result));
     at::hip::set_device(rank);
@@ -78,7 +78,7 @@ inline void setDevice(int rank) {
 }
 
 inline void* getGraphCaptureTpNcclComm() {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     return rocm::getHipGraphTpNcclComm();
 #else
     return nullptr;
@@ -86,7 +86,7 @@ inline void* getGraphCaptureTpNcclComm() {
 }
 
 inline GraphStream graphGetStreamFromPool(bool is_high_priority) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     return at::hip::getStreamFromPool(is_high_priority);
 #else
     return at::cuda::getStreamFromPool(is_high_priority);
@@ -94,7 +94,7 @@ inline GraphStream graphGetStreamFromPool(bool is_high_priority) {
 }
 
 inline GraphStream graphGetCurrentStream() {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     return at::hip::getCurrentHIPStream(at::hip::current_device());
 #else
     return at::cuda::getCurrentCUDAStream(at::cuda::current_device());
@@ -102,7 +102,7 @@ inline GraphStream graphGetCurrentStream() {
 }
 
 inline void graphSetCurrentStream(GraphStream stream) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     at::hip::setCurrentHIPStream(stream);
 #else
     at::cuda::setCurrentCUDAStream(stream);
@@ -113,7 +113,7 @@ inline torch::Event makeGraphEvent() {
     return torch::Event(GRAPH_DEVICE_TYPE);
 }
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 py::module_& getCollectiveTorchModule();
 #endif
 

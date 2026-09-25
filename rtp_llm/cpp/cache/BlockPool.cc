@@ -1,4 +1,215 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
+
+// ---- dcu leak-probe (combined): ledger + block-level account ----
+#include <atomic>
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <unordered_map>
+namespace rtp_llm {
+std::atomic<size_t> g_probe_malloc_total{0};
+std::atomic<size_t> g_probe_reqfree_total{0};
+thread_local int64_t g_tl_probe_request_id = 0;
+thread_local void* g_tl_probe_owner_ids   = nullptr;
+std::atomic<int>   g_probe_pool_seq{0};
+struct ProbeBlockInfo {
+    int64_t request_id;
+    int64_t alloc_ms;
+    void*   frames[8];
+    void*   owner_ids;   // address of the BlockIds object this block was appended to
+    int     pool_seq;
+};
+std::mutex                                              g_probe_block_mu;
+std::unordered_map<int, ProbeBlockInfo> g_probe_blocks;
+#include <execinfo.h>
+#include <array>
+#include <climits>
+#include <vector>
+#include <algorithm>
+void probeRecordBlocks(const BlockIndicesType& block_ids) {
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    void* frames[11] = {};
+    const int n = backtrace(frames, 11);
+    ProbeBlockInfo info;
+    info.request_id = g_tl_probe_request_id;
+    info.alloc_ms   = now_ms;
+    info.owner_ids  = g_tl_probe_owner_ids;
+    info.pool_seq   = g_probe_pool_seq.fetch_add(1) + 1;
+    for (int i = 0; i < 8; ++i) {
+        info.frames[i] = (2 + i < n) ? frames[2 + i] : nullptr;
+    }
+    std::lock_guard<std::mutex> g(g_probe_block_mu);
+    for (int idx : block_ids) {
+        g_probe_blocks[idx] = info;
+    }
+}
+void probeEraseBlocks(const BlockIndicesType& block_ids) {
+    std::lock_guard<std::mutex> g(g_probe_block_mu);
+    for (int idx : block_ids) {
+        g_probe_blocks.erase(idx);
+    }
+}
+void probeDumpHanging(const char* pool) {
+    std::lock_guard<std::mutex> g(g_probe_block_mu);
+    if (g_probe_blocks.empty()) {
+        return;
+    }
+    std::unordered_map<int64_t, size_t> by_req;
+    std::map<std::array<void*, 8>, size_t> by_stack;
+    for (auto& kv : g_probe_blocks) {
+        by_req[kv.second.request_id] += 1;
+        std::array<void*, 8> key;
+        for (int i = 0; i < 8; ++i) {
+            key[static_cast<size_t>(i)] = kv.second.frames[static_cast<size_t>(i)];
+        }
+        by_stack[key] += 1;
+    }
+    std::string req_hist;
+    size_t shown = 0;
+    for (auto it = by_req.begin(); it != by_req.end() && shown < 8; ++it, ++shown) {
+        req_hist += " req=" + std::to_string(it->first) + ":" + std::to_string(it->second);
+    }
+    std::map<void*, size_t> by_owner;
+    for (auto& kv : g_probe_blocks) {
+        by_owner[kv.second.owner_ids] += 1;
+    }
+    std::string owner_hist;
+    size_t os = 0;
+    char obuf[128];
+    for (auto it = by_owner.rbegin(); it != by_owner.rend() && os < 12; ++it, ++os) {
+        snprintf(obuf, sizeof(obuf), " %p:%zu", it->first, it->second);
+        owner_hist += obuf;
+    }
+    std::string idx_hist;
+    {
+        // a few concrete hanging block indices from the biggest owner
+        char ibuf[160];
+        size_t taken = 0;
+        void*  best_owner = nullptr;
+        size_t best_cnt = 0;
+        for (auto& kv : by_owner) {
+            if (kv.second > best_cnt) { best_cnt = kv.second; best_owner = kv.first; }
+        }
+        if (best_owner != nullptr) {
+            std::vector<int> sample;
+            for (auto& kv : g_probe_blocks) {
+                if (kv.second.owner_ids == best_owner && taken < 8) {
+                    sample.push_back(kv.first);
+                    ++taken;
+                }
+            }
+            std::string s;
+            for (size_t i = 0; i < sample.size(); ++i) {
+                s += std::to_string(sample[i]);
+                if (i + 1 < sample.size()) s += ",";
+            }
+            snprintf(ibuf, sizeof(ibuf), " best_owner=%p idx=[%s]", best_owner, s.c_str());
+            idx_hist = ibuf;
+        }
+    }
+    RTP_LLM_LOG_WARNING("[dcu-owner] pool=%s owners%s%s",
+                        pool,
+                        owner_hist.c_str(),
+                        idx_hist.c_str());
+    std::string stack_hist;
+    shown = 0;
+    char buf[640];
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    for (auto it = by_stack.begin(); it != by_stack.end() && shown < 4; ++it, ++shown) {
+        int64_t tmin = INT64_MAX, tmax = 0;
+        for (auto& kv : g_probe_blocks) {
+            std::array<void*, 8> key;
+            for (int i = 0; i < 8; ++i) {
+                key[static_cast<size_t>(i)] = kv.second.frames[static_cast<size_t>(i)];
+            }
+            if (key == it->first) {
+                tmin = std::min(tmin, kv.second.alloc_ms);
+                tmax = std::max(tmax, kv.second.alloc_ms);
+            }
+        }
+        snprintf(buf, sizeof(buf), " ST%d:[%p|%p]x%zu age(-%lld..-%lldms)",
+                 shown,
+                 it->first[0], it->first[1],
+                 it->second,
+                 (long long)(now_ms - tmax), (long long)(now_ms - tmin));
+        stack_hist += buf;
+    }
+    RTP_LLM_LOG_WARNING("[dcu-hang] pool=%s hanging=%zu distinct_req=%zu%s stacks:%s",
+                        pool,
+                        g_probe_blocks.size(),
+                        by_req.size(),
+                        req_hist.c_str(),
+                        stack_hist.c_str());
+}
+void probeCheckLeakClear(const BlockIndicesType& blocks, void* owner_ids) {
+    std::lock_guard<std::mutex> g(g_probe_block_mu);
+    int unreturned = 0;
+    for (int idx : blocks) {
+        if (g_probe_blocks.count(idx)) {
+            ++unreturned;
+        }
+    }
+    if (unreturned > 0) {
+        void* frames[8] = {};
+        const int n = backtrace(frames, 8);
+        RTP_LLM_LOG_WARNING("[dcu-clear-leak] unreturned=%d total=%zu owner=%p bt=[%p|%p|%p|%p]",
+                            unreturned,
+                            blocks.size(),
+                            owner_ids,
+                            (2 < n) ? frames[2] : nullptr,
+                            (3 < n) ? frames[3] : nullptr,
+                            (4 < n) ? frames[4] : nullptr,
+                            (5 < n) ? frames[5] : nullptr);
+    }
+}
+void probeOnBlockIdsDtor(const BlockIndicesType& blocks, void* self) {
+    std::lock_guard<std::mutex> g(g_probe_block_mu);
+    int unreturned = 0;
+    for (int idx : blocks) {
+        if (g_probe_blocks.count(idx)) {
+            ++unreturned;
+        }
+    }
+    if (unreturned > 0) {
+        void* frames[8] = {};
+        const int n = backtrace(frames, 8);
+        RTP_LLM_LOG_WARNING("[dcu-dtor-leak] unreturned=%d total=%zu ids=%p bt=[%p|%p|%p|%p]",
+                            unreturned,
+                            blocks.size(),
+                            self,
+                            (2 < n) ? frames[2] : nullptr,
+                            (3 < n) ? frames[3] : nullptr,
+                            (4 < n) ? frames[4] : nullptr,
+                            (5 < n) ? frames[5] : nullptr);
+    }
+}
+void probeLedgerDump(const char* pool, const char* where) {
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    static std::mutex              s_mu;
+    static std::map<std::string, int64_t> s_last;
+    {
+        std::lock_guard<std::mutex> g(s_mu);
+        auto it = s_last.find(pool);
+        if (it != s_last.end() && now_ms - it->second < 30000) {
+            return;
+        }
+        s_last[pool] = now_ms;
+    }
+    RTP_LLM_LOG_WARNING("[dcu-ledger] pool=%s at=%s malloc=%zu reqfree=%zu",
+                        pool,
+                        where,
+                        g_probe_malloc_total.load(),
+                        g_probe_reqfree_total.load());
+    probeDumpHanging(pool);
+}
+}  // namespace rtp_llm
+// ---- end dcu leak-probe ----
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -510,6 +721,9 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
         req_con_ref_counter_.incrementRefCounter(block_ids);
         req_cache_ref_counter_.incrementRefCounter(block_ids);
     }
+    g_probe_malloc_total.fetch_add(block_ids.size());
+    probeRecordBlocks(block_ids);
+    probeLedgerDump(config_.pool_name.c_str(), "malloc");
 
     return block_ids;
 }
@@ -526,6 +740,9 @@ void BlockPool::requestFree(const BlockIndicesType& block_ids) {
     req_con_ref_counter_.decrementRefCounter(block_ids);
     req_cache_ref_counter_.decrementRefCounter(block_ids);
     tryFreeBlocks(block_ids);
+    g_probe_reqfree_total.fetch_add(block_ids.size());
+    probeEraseBlocks(block_ids);
+    probeLedgerDump(config_.pool_name.c_str(), "requestFree");
 }
 
 void BlockPool::connectorFree(BlockIdxType block_idx) {

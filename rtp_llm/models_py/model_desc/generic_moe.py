@@ -219,6 +219,7 @@ class GenericMoeLayer(nn.Module):
             activation="SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
+        #print(f"{experts_output[-1,:10]=}")
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,

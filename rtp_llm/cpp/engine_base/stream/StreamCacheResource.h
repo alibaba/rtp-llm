@@ -24,7 +24,19 @@ public:
         resource_context_(resource_context),
         need_release_resource_(need_release_resource) {}
 
-    ~StreamCacheResource() = default;
+    // dcu-leak-fix: last-owner safety net. If this resource still holds pool
+    // blocks when it is destroyed without a proper releaseResource() (observed
+    // on the C2 pause path where a stream's resource is abandoned after a
+    // batch init), release them back to the pool instead of leaking.
+    ~StreamCacheResource();
+
+    // Requeue support: after releaseResource() the stream re-runs its context
+    // pass. Reset the released flag so the final cleanup releases the second
+    // lifecycle's blocks instead of skipping (which leaked them).
+    void reactivateAfterRequeue() {
+        resource_released_ = false;
+        load_cache_once_.store(false, std::memory_order_release);
+    }
 
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;

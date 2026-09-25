@@ -1,5 +1,12 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
+// dcu-leak-probe: detect block-table shrink that discards un-returned blocks
+namespace rtp_llm {
+void probeCheckLeakClear(const BlockIndicesType& blocks, void* owner_ids);
+void probeOnBlockIdsDtor(const BlockIndicesType& blocks, void* self);
+}
+
+
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
@@ -55,9 +62,19 @@ size_t BlockIds::kernelBlocksPerKvBlock() const {
     return kernel_blocks_per_kv_block_;
 }
 
+BlockIds::~BlockIds() {
+    if (!block_indices.empty()) {
+        rtp_llm::probeOnBlockIdsDtor(block_indices, static_cast<void*>(this));
+    }
+}
+
 BlockIdxType BlockIds::popBack() {
     RTP_LLM_CHECK(!block_indices.empty());
     const BlockIdxType val = block_indices.back();
+    if (!isNullBlockIdx(val)) {
+        BlockIndicesType one{val};
+        rtp_llm::probeCheckLeakClear(one, static_cast<void*>(this));
+    }
     block_indices.pop_back();
     kernel_block_indices_.resize(block_indices.size() * kernel_blocks_per_kv_block_);
     return val;
@@ -102,11 +119,13 @@ void BlockIds::swap(size_t pos_a, size_t pos_b) {
 }
 
 void BlockIds::assign(const BlockIndicesType& new_block_indices) {
+    rtp_llm::probeCheckLeakClear(block_indices, static_cast<void*>(this));
     block_indices = new_block_indices;
     syncKernelBlocks();
 }
 
 void BlockIds::assign(BlockIndicesType&& new_block_indices) {
+    rtp_llm::probeCheckLeakClear(block_indices, static_cast<void*>(this));
     block_indices = std::move(new_block_indices);
     syncKernelBlocks();
 }
@@ -158,6 +177,12 @@ void BlockIds::syncKernelBlocks() {
 
 void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
     for (auto& group : group_block_ids) {
+        const size_t old_size = group->blocksNum();
+        if (static_cast<size_t>(reserver_blocks) < old_size) {
+            const auto& blocks_ref = group->blocks();
+            BlockIndicesType dropped(blocks_ref.begin() + reserver_blocks, blocks_ref.end());
+            rtp_llm::probeCheckLeakClear(dropped, reinterpret_cast<void*>(group.get()));
+        }
         group->resize(reserver_blocks, value);
     }
 }

@@ -8,6 +8,11 @@ config_setting(
     values = {"define": "using_rocm=true"},
 )
 
+config_setting(
+    name = "using_dcu",
+    values = {"define": "using_dcu=true"},
+)
+
 cc_library(
     name = "torch",
     srcs = [
@@ -27,6 +32,26 @@ cc_library(
             "torch/lib/libnvToolsExt*.so*",
         ]),
         "@//:using_rocm": [
+            # "torch/lib/librocfft.so",
+            # "torch/lib/librocsolver.so",
+            # "torch/lib/libnuma.so",
+            "torch/lib/libcaffe2_nvrtc.so",
+            "torch/lib/libtorch_hip.so",
+            "torch/lib/libc10_hip.so",
+        ] +  glob([
+            "torch/lib/libaotriton_v2.so*",
+            # "torch/lib/libmagma*.so*",
+            # "torch/lib/libtinfo.so*",
+            # "torch/lib/libsuitesparseconfig.so*",
+            # "torch/lib/libcholmod.so*",
+            # "torch/lib/libsatlas.so*",
+            # "torch/lib/libgfortran.so*",
+            # "torch/lib/libquadmath.so*",
+            # "torch/lib/libgomp*.so*",
+            # "torch/lib/libhip*.so*",
+            # "torch/lib/lib*amd*.so*",
+        ]),
+        "@//:using_dcu": [
             # "torch/lib/librocfft.so",
             # "torch/lib/librocsolver.so",
             # "torch/lib/libnuma.so",

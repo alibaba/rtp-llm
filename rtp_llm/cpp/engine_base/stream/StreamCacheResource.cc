@@ -276,6 +276,35 @@ void StreamCacheResource::init(int batch_size) {
     resource_released_ = false;
 }
 
+StreamCacheResource::~StreamCacheResource() {
+    // resource_released_ alone is not trusted here: a released-then-reactivated
+    // (requeue) resource can still hold second-lifecycle blocks if its final
+    // release was skipped. Reclaim whenever real blocks remain.
+    if (fake_inited_) {
+        return;
+    }
+    if (!resource_context_.cache_manager) {
+        return;
+    }
+    const int held = curBlocksNum();
+    if (held <= 0) {
+        return;
+    }
+    // Defensive: only reclaim when this object is the last owner of the batch
+    // resource and the blocks were really taken from the pool.
+    if (batch_kv_cache_resource_.use_count() > 1) {
+        RTP_LLM_LOG_WARNING("[dcu-leak-fix] dtor skipped (shared resource, refs=%ld, blocks=%d)",
+                            static_cast<long>(batch_kv_cache_resource_.use_count()),
+                            held);
+        return;
+    }
+    RTP_LLM_LOG_WARNING("[dcu-leak-fix] dtor reclaiming orphaned kv blocks: blocks=%d stream=%ld",
+                        held,
+                        stream_ ? stream_->streamId() : -1);
+    tryReleaseKVBlock(static_cast<size_t>(held));
+    batch_kv_cache_resource_->clearBlocks();
+}
+
 void StreamCacheResource::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
@@ -303,8 +332,15 @@ void StreamCacheResource::releaseResource() {
                           std::hash<std::thread::id>{}(std::this_thread::get_id()));
         abort();
     }
+    RTP_LLM_LOG_WARNING("[dcu-leak-probe] releaseResource enter: stream=%ld curBlocks=%d need_release=%d",
+                         stream_->streamId(),
+                         curBlocksNum(),
+                         need_release_resource_);
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasErrorWithoutLock())) {
+        RTP_LLM_LOG_WARNING("[dcu-leak-probe] releaseResource EARLY-RETURN without free: stream=%ld curBlocks=%d",
+                            stream_->streamId(),
+                            curBlocksNum());
         return;
     }
     RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
@@ -319,7 +355,12 @@ void StreamCacheResource::releaseResource() {
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("stream [%s] try release [%lu] blocks", stream_->streamLogTag().c_str(), nums);
+    RTP_LLM_LOG_WARNING("[dcu-leak-probe] tryRelease enter: stream=%ld nums=%lu total=%d fake=%d reuse=%d",
+                         stream_->streamId(),
+                         nums,
+                         curBlocksNum(),
+                         fake_inited_,
+                         reuseCache());
 
     if (fake_inited_) {
         int max_blocks_num = curBlocksNum();
@@ -363,6 +404,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         free_info.request_id = stream_->streamId();
 
         resource_context_.cache_manager->free(free_info);
+        RTP_LLM_LOG_WARNING("[dcu-leak-probe] tryRelease freed: stream=%ld total=%d curBlocksNow=%d",
+                            stream_->streamId(),
+                            total_blocks,
+                            curBlocksNum());
     }
 
     return total_blocks;
@@ -463,7 +508,30 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
+#if USING_DCU
+        // Mirror initKVBlock()'s retryable/permanent split so that a transient
+        // KV shortage surfaces as Unavailable and callers can pause-wait
+        // instead of terminating the stream (DCU KV recovery, DcuKVRecover.h).
+        // The incremental allocator path never runs the init-time capacity
+        // preflight: HybridKVCacheAllocator::incrMalloc reports every shortage
+        // via MallocResult{false, 0}, whose constructor reclassifies an absent
+        // status as INTERNAL_ERROR. An incremental need is 1..few blocks, so
+        // by construction it is transiently unsatisfiable at worst — map it to
+        // the retryable bucket. PERMANENT verdicts only make sense for the
+        // first (context-sized) malloc and keep failing the request.
+        switch (result.status) {
+            case MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED:
+            case MallocStatus::NONE:
+            case MallocStatus::INTERNAL_ERROR:
+                return absl::UnavailableError("kv cache is temporarily unavailable");
+            case MallocStatus::PERMANENT_RESOURCE_EXHAUSTED:
+                return absl::ResourceExhaustedError("request exceeds usable kv cache capacity");
+            default:
+                return absl::InternalError("malloc failed");
+        }
+#else
         return absl::InternalError("malloc failed");
+#endif
     }
 
     if (result.reuse_len > 0) {

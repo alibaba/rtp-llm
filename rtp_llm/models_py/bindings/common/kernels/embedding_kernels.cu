@@ -192,7 +192,7 @@ void invokeEmbeddingLookupVec(T*           from_tensor,
     assert(hidden_units % vector_size == 0);
     assert(!pos_table && !type_table && !input_mask);
     dim3 grid(std::min(token_num, 65536));
-    dim3 block(std::min(int(hidden_units / vector_size), 1024));
+    dim3 block(std::min(int(hidden_units / vector_size), USING_DCU ? 256 : 1024));
     INVOKE_WORD_EMBED_LOOKUP_VEC(false, false, false);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
@@ -214,7 +214,7 @@ void invokeEmbeddingLookup(T*           from_tensor,
                            const int    hidden_units,
                            cudaStream_t stream) {
     dim3 grid(std::min(token_num, 65536));
-    dim3 block(std::min(hidden_units, 1024));
+    dim3 block(std::min(hidden_units, USING_DCU ? 256 : 1024));
     if (!pos_table) {
         if (!type_table) {
             if (!input_mask) {

@@ -189,8 +189,10 @@ private:
                                     local_kv_heads,
                                     physical_seq_size);
             const int64_t head_dim = k_block_elems / (local_kv_heads * physical_seq_size);
+#if !USING_DCU
             RTP_LLM_CHECK_WITH_INFO(
                 buffers.kv_addr.is_contiguous(), "MHA KV cache base for tag=%s must be contiguous", group.tag.c_str());
+#endif
             const int64_t expected_numel = kernel_block_num * 2 * local_kv_heads * kernel_seq_size * head_dim;
             RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.numel() == expected_numel,
                                     "MHA KV cache elements=%ld expected=%ld for layer=%d tag=%s",
@@ -198,8 +200,18 @@ private:
                                     expected_numel,
                                     layer_id,
                                     group.tag.c_str());
+#if USING_DCU
+            // DCU initializes the KV cache storage so this reshape is a pure view:
+            // [2, kernel_block_num, kv_heads * kernel_seq_size * head_dim].
+            result.kv_cache_base = buffers.kv_addr
+                                       .reshape({2,
+                                                 kernel_block_num,
+                                                 local_kv_heads * kernel_seq_size * head_dim})
+                                       .contiguous();
+#else
             result.kv_cache_base =
                 buffers.kv_addr.view({kernel_block_num, 2, local_kv_heads, kernel_seq_size, head_dim});
+#endif
             if (buffers.kv_scale_addr.defined()) {
                 RTP_LLM_CHECK_WITH_INFO(buffers.kv_scale_addr.is_contiguous() && buffers.kv_scale_addr.dim() > 0
                                             && buffers.kv_scale_addr.size(0) == physical_block_num

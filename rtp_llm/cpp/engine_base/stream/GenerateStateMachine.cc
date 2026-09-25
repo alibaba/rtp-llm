@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
+#include "rtp_llm/cpp/engine_base/stream/DcuKVRecover.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -19,6 +20,11 @@ bool asyncDebugEnabled() {
 // ============================================================================
 // GenerateStateMachine method implementations
 // ============================================================================
+
+std::string GenerateStateMachine::streamLogTagForLog() const {
+    auto stream = stream_cache_resource_ ? stream_cache_resource_->stream() : nullptr;
+    return stream ? stream->streamLogTag() : std::string("<null-stream>");
+}
 
 StreamState GenerateStateMachine::moveToNext() {
     // Error 最高优先级，任何状态下直接终止
@@ -113,10 +119,24 @@ void GenerateStateMachine::handleWaiting() {
     // cache block tables aligned with the growing sequence length.
     auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
+#if USING_DCU
+        if (absl::IsUnavailable(result) && dcuKVRecoverEnabled()) {
+            if (!isKvAllocPaused()) {
+                RTP_LLM_LOG_WARNING("[dcu-kv-recover] stream incrKVBlock retryable shortage in WAITING, pause-wait: %s",
+                                    streamLogTagForLog().c_str());
+                pauseOnKvAlloc();
+            }
+            return;
+        }
+#endif
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
         return;
+    }
+    if (isKvAllocPaused()) {
+        RTP_LLM_LOG_INFO("[dcu-kv-recover] stream resumed from KV pause in WAITING: %s", streamLogTagForLog().c_str());
+        clearKvAllocPause();
     }
     auto stream = stream_cache_resource_->stream();
     if (stream != nullptr) {
@@ -197,10 +217,29 @@ void GenerateStateMachine::handleRunning() {
     }
     auto result = stream_cache_resource_->incrKVBlock(seq_len_override);
     if (!result.ok()) {
+#if USING_DCU
+        if (absl::IsUnavailable(result) && dcuKVRecoverEnabled()) {
+            // Pause-wait: keep the stream RUNNING (it is excluded from the
+            // executed batch by the scheduler) and retry the allocation on the
+            // next scheduling round, instead of terminating the stream — the
+            // terminate path leaves DCU GPU state that can hang the engine.
+            if (!isKvAllocPaused()) {
+                RTP_LLM_LOG_WARNING("[dcu-kv-recover] stream incrKVBlock retryable shortage in RUNNING, pause-wait: %s",
+                                    streamLogTagForLog().c_str());
+                pauseOnKvAlloc();
+            }
+            return;
+        }
+#endif
         // Report Error event so moveToNext() won't be called again on this stream
         reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
+        return;
+    }
+    if (isKvAllocPaused()) {
+        RTP_LLM_LOG_INFO("[dcu-kv-recover] stream resumed from KV pause in RUNNING: %s", streamLogTagForLog().c_str());
+        clearKvAllocPause();
     }
 }
 

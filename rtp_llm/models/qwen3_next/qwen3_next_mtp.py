@@ -1,6 +1,9 @@
 from typing import Any, Dict, List, Optional
 
+import os
+
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import is_dcu
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
@@ -20,6 +23,17 @@ class Qwen3NextMTPWeight(Qwen3NextWeight):
         super().__init__(*args, **kwargs)
         self.prefix = "mtp."
         self.model_prefix = "model."
+
+    @staticmethod
+    def _mtp_norm_trans() -> Any:
+        # Qwen3Next family ckpts store gemma-style norm.weight (effective value =
+        # stored + 1), handled by plus_one at load time. zengen-27b exports the
+        # already-effective RMSNorm weight directly, so on DCU we default to
+        # identity and keep an env switch for the gemma convention.
+        force_effective = os.environ.get("RTP_LLM_MTP_NORM_EFFECTIVE", "1")
+        if is_dcu() and force_effective != "0":
+            return identity
+        return plus_one
 
     def _get_weight_info(self):
         weights: List[WeightModule] = [
@@ -54,7 +68,7 @@ class Qwen3NextMTPWeight(Qwen3NextWeight):
             ),
             AtomicWeight(
                 W.final_ln_gamma,
-                [CkptWeightInfo(self.prefix + "norm.weight", plus_one)],
+                [CkptWeightInfo(self.prefix + "norm.weight", self._mtp_norm_trans())],
                 identity,
             ),
         ]

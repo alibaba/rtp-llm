@@ -35,7 +35,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/vec_dtypes.cuh"
 #endif
 
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
 #include "rtp_llm/models_py/bindings/rocm/kernels/rocm_utils/vec_dtypes_hip.h"
 #endif
 

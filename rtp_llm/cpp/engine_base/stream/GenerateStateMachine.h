@@ -70,6 +70,34 @@ public:
         reserve_step_ = reserve_step;
     }
 
+    // ---- DCU KV-recovery (see DcuKVRecover.h) ----
+    // Set when an incremental KV allocation failed with a retryable shortage and
+    // the stream was paused instead of terminated (DCU backend only). Cleared on
+    // the next successful allocation or on requeue reset.
+    void pauseOnKvAlloc() {
+        kv_alloc_paused_.store(true, std::memory_order_release);
+    }
+    void clearKvAllocPause() {
+        kv_alloc_paused_.store(false, std::memory_order_release);
+    }
+    bool isKvAllocPaused() const {
+        return kv_alloc_paused_.load(std::memory_order_acquire);
+    }
+    int kvRequeueCount() const {
+        return kv_requeue_count_;
+    }
+    void incKvRequeueCount() {
+        ++kv_requeue_count_;
+    }
+    // Reset a KV-evicted stream back to WAITING so it re-prefills the full
+    // sequence (input + generated tokens) and resumes generation. Caller holds
+    // GenerateStream::mutex_ and has already released the KV blocks.
+    void resetForKvRequeue() {
+        error_info = ErrorInfo();
+        clearKvAllocPause();
+        status.store(StreamState::WAITING, std::memory_order_release);
+    }
+
     // 公开的状态和错误信息，GenerateStream 等外部代码直接访问
     // status 使用 atomic 保证线程安全：moveToNext() 在 mutex_ 下写入，getStatus() 无锁读取
     std::atomic<StreamState> status = StreamState::WAITING;
@@ -80,6 +108,10 @@ private:
     void handleLoading();
     void handleRunning();
     void releaseResource();
+    std::string streamLogTagForLog() const;
+
+    std::atomic<bool> kv_alloc_paused_{false};
+    int               kv_requeue_count_ = 0;
 
     StreamEvents events_;
 

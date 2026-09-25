@@ -9,13 +9,13 @@ def clean_dep(dep):
 def git_deps():
     git_repository(
         name = "rules_cc",
-        remote = "https://github.com/bazelbuild/rules_cc.git",
+        remote = "file:///home/bazel_mirrors/rules_cc.git",
         commit = "1477dbab59b401daa94acedbeaefe79bf9112167",
     )
 
     git_repository(
         name = "rules_python",
-        remote = "https://github.com/bazelbuild/rules_python.git",
+        remote = "file:///home/bazel_mirrors/rules_python.git",
         commit = "084b877c98b580839ceab2b071b02fc6768f3de6",
         patches = [
             "@rtp_llm//patches/rules_python:0001-add-extra-data.patch",
@@ -26,21 +26,21 @@ def git_deps():
 
     new_git_repository(
         name = "cutlass",
-        remote = "https://github.com/NVIDIA/cutlass.git",
+        remote = "file:///home/bazel_mirrors/cutlass.git",
         commit = "80243e0b8c644f281e2beb0c20fe78cf7b267061",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
     new_git_repository(
         name = "cutlass_h_moe",
-        remote = "https://github.com/NVIDIA/cutlass.git",
+        remote = "file:///home/bazel_mirrors/cutlass.git",
         commit = "19b4c5e065e7e5bbc8082dfc7dbd792bdac850fc",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
     new_git_repository(
         name = "cutlass3.6",
-        remote = "https://github.com/NVIDIA/cutlass.git",
+        remote = "file:///home/bazel_mirrors/cutlass.git",
         commit = "cc3c29a81a140f7b97045718fb88eb0664c37bd7",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
         patches = ["@rtp_llm//3rdparty/cutlass:0001-cuda12.4-compat.patch"],
@@ -48,28 +48,28 @@ def git_deps():
 
     new_git_repository(
         name = "cutlass4.0",
-        remote = "https://github.com/NVIDIA/cutlass.git",
+        remote = "file:///home/bazel_mirrors/cutlass.git",
         commit = "dc4817921edda44a549197ff3a9dcf5df0636e7b",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
     new_git_repository(
         name = "cutlass_cu13",
-        remote = "https://github.com/NVIDIA/cutlass.git",
+        remote = "file:///home/bazel_mirrors/cutlass.git",
         commit = "b84e9802d84b16bcb4e92338fcf0a04785df9236",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
     new_git_repository(
         name = "cutlass3.6_cu13",
-        remote = "https://github.com/NVIDIA/cutlass.git",
+        remote = "file:///home/bazel_mirrors/cutlass.git",
         commit = "b84e9802d84b16bcb4e92338fcf0a04785df9236",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
     new_git_repository(
         name = "flashinfer_cpp",
-        remote = "https://github.com/flashinfer-ai/flashinfer.git",
+        remote = "file:///home/bazel_mirrors/flashinfer.git",
         commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
         build_file = str(Label("@rtp_llm//3rdparty/flashinfer:flashinfer.BUILD")),
         patches = [
@@ -87,7 +87,7 @@ def git_deps():
 
     new_git_repository(
         name = "flashinfer_cpp_cu13",
-        remote = "https://github.com/flashinfer-ai/flashinfer.git",
+        remote = "file:///home/bazel_mirrors/flashinfer.git",
         commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
         build_file = str(Label("@rtp_llm//3rdparty/flashinfer:flashinfer_cu13.BUILD")),
         patches = [
@@ -110,7 +110,7 @@ def git_deps():
 
     new_git_repository(
         name = "flashmla",
-        remote = "https://github.com/deepseek-ai/FlashMLA.git",
+        remote = "file:///home/bazel_mirrors/FlashMLA.git",
         commit = "b31bfe72a83ea205467b3271a5845440a03ed7cb",
         build_file = str(Label("@rtp_llm//3rdparty/flashmla:flashmla.BUILD")),
         patches = [
@@ -120,7 +120,7 @@ def git_deps():
 
     git_repository(
         name = "com_google_googletest",
-        remote = "https://github.com/google/googletest.git",
+        remote = "file:///home/bazel_mirrors/googletest.git",
         commit = "f8d7d77c06936315286eb55f8de22cd23c188571",
         shallow_since = "1640057570 +0800",
     )
@@ -131,8 +131,8 @@ def git_deps():
         build_file = "@grpc//third_party:nanopb.BUILD",
         strip_prefix = "nanopb-f8ac463766281625ad710900479130c7fcb4d63b",
         urls = [
-            "http://storage.googleapis.com/mirror.tensorflow.org/github.com/nanopb/nanopb/archive/f8ac463766281625ad710900479130c7fcb4d63b.tar.gz",
-            "http://github.com/nanopb/nanopb/archive/f8ac463766281625ad710900479130c7fcb4d63b.tar.gz",
+            "file:///home/bazel_mirrors/nanopb-f8ac463766281625ad710900479130c7fcb4d63b.tar.gz",
+            "file:///home/bazel_mirrors/nanopb-f8ac463766281625ad710900479130c7fcb4d63b.tar.gz",
         ],
     )
 
@@ -142,8 +142,8 @@ def git_deps():
         sha256 = "105f8d68616f8248e24bf0e9372ef04d3cc10104f1980f54d57b2ce73a5ad56a",
         strip_prefix = "six-1.10.0",
         urls = [
-            "http://mirror.bazel.build/pypi.python.org/packages/source/s/six/six-1.10.0.tar.gz",
-            "http://pypi.python.org/packages/source/s/six/six-1.10.0.tar.gz",
+            "file:///home/bazel_mirrors/six-1.10.0.tar.gz",
+            "file:///home/bazel_mirrors/six-1.10.0.tar.gz",
         ],
     )
 
@@ -152,14 +152,14 @@ def git_deps():
         build_file = clean_dep("@rtp_llm//3rdparty/zlib:zlib.BUILD"),
         strip_prefix = "zlib-1.2.11",
         urls = [
-            "https://www.zlib.net/fossils/zlib-1.2.11.tar.gz",
+            "file:///home/bazel_mirrors/zlib-1.2.11.tar.gz",
         ],
         sha256 = "c3e5e9fdd5004dcb542feda5ee4f0ff0744628baf8ed2dd5d66f8ca1197cb1a1",
     )
 
     git_repository(
         name = "com_google_absl",
-        remote = "https://github.com/abseil/abseil-cpp.git",
+        remote = "file:///home/bazel_mirrors/abseil-cpp.git",
         patch_cmds = [
             "sed -i -e 's/^#define ABSL_OPTION_USE_STD_STRING_VIEW 2/#define ABSL_OPTION_USE_STD_STRING_VIEW 0/' 'absl/base/options.h'",
             "sed 's$@bazel_tools//platforms:(linux|osx|windows|android|freebsd|ios|os)$@platforms//os:\\1$' -E -i absl/BUILD.bazel",
@@ -178,7 +178,7 @@ def git_deps():
 
     new_git_repository(
         name = "rapidjson",
-        remote = "https://github.com/Tencent/rapidjson.git",
+        remote = "file:///home/bazel_mirrors/rapidjson.git",
         # tag = "v1.1.0",
         commit = "f54b0e47a08782a6131cc3d60f94d038fa6e0a51",
         patches = ["@rtp_llm//3rdparty/rapidjson:0001-document_h.patch"],
@@ -187,7 +187,7 @@ def git_deps():
 
     new_git_repository(
         name = "havenask",
-        remote = "https://github.com/alibaba/havenask.git",
+        remote = "file:///home/bazel_mirrors/havenask.git",
         commit = "3c973500afbd40933eb0a80cfdfb6592274377fb",
         shallow_since = "1704038400 +0800",
         patches=[
@@ -200,7 +200,7 @@ def git_deps():
 
     new_git_repository(
         name = "nacos_sdk_cpp",
-        remote = "https://github.com/nacos-group/nacos-sdk-cpp.git",
+        remote = "file:///home/bazel_mirrors/nacos-sdk-cpp.git",
         commit = "2b4104d2524776dff236a228ad2abff4676fb916",
         patches = [
             "@rtp_llm//patches/nacos_sdk_cpp:nacos-compile.patch",
@@ -214,17 +214,16 @@ def git_deps():
         sha256 = "e9c37986337743f37fd14fe8737f246e97aec94b39d1b71e8a5973f72a9fc4f5",
         strip_prefix = "curl-7.60.0",
         urls = [
-            "https://mirror.bazel.build/curl.haxx.se/download/curl-7.60.0.tar.gz",
-            "https://curl.haxx.se/download/curl-7.60.0.tar.gz",
+            "file:///home/bazel_mirrors/curl-7.60.0.tar.gz",
+            "file:///home/bazel_mirrors/curl-7.60.0.tar.gz",
         ],
     )
 
-    git_repository(
+    http_archive(
         name = "grpc",
-        remote = "https://github.com/grpc/grpc.git",
-        commit = "109c570727c3089fef655edcdd0dd02cc5958010",
-        patches = ["@rtp_llm//patches/grpc:0001-Rename-gettid-functions.patch"],
-        shallow_since = "1518192000 +0800",
+        urls = ["file:///home/bazel_mirrors/grpc-109c570727c3089fef655edcdd0dd02cc5958010.tar.gz"],
+        sha256 = "ddd5c9c42bc609108c2e9494e9cfa34ea42d0efd0eb4b183db8a4124dabdc1c2",
+        strip_prefix = "grpc-109c570727c3089fef655edcdd0dd02cc5958010",
     )
 
     http_archive(
@@ -232,8 +231,8 @@ def git_deps():
         sha256 = "1188e29000013ed6517168600fc35a010d58c5d321846d6a6dfee74e4c788b45",
         strip_prefix = "boringssl-7f634429a04abc48e2eb041c81c5235816c96514",
         urls = [
-            "https://mirror.bazel.build/github.com/google/boringssl/archive/7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
-            "https://github.com/google/boringssl/archive/7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
+            "file:///home/bazel_mirrors/boringssl-7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
+            "file:///home/bazel_mirrors/boringssl-7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
         ],
     )
 

@@ -82,6 +82,9 @@ py_library(
         "@//:using_ppu": [
             "//rtp_llm:deep_gemm",
         ],
+        "@//:using_dcu": [
+            #"//rtp_llm:amdsmi",
+        ],
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda13_x86": ["//rtp_llm:flash-mla"],

@@ -26,6 +26,9 @@ cc_library(
         "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers",
                            "@local_config_rocm//rocm:rocm",
                            "//rtp_llm/models_py/bindings/rocm:rocm_types_hdr"],
+        "@//:using_dcu": ["@local_config_rocm//rocm:rocm_headers",
+                          "@local_config_rocm//rocm:rocm",
+                          "//rtp_llm/models_py/bindings/dcu:dcu_types_hdr"],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -103,6 +106,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
     ] + torch_deps() + select({
         "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers"],
+        "@//:using_dcu": ["@local_config_rocm//rocm:rocm_headers"],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -247,6 +251,12 @@ cc_library(
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+	],
+	"@//:using_dcu": [
+            "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/dcu:dcu_host_utils",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
         ],
         "//conditions:default": [],
     }),
@@ -297,6 +307,13 @@ cc_library(
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],
+	"@//:using_dcu": [
+            "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/dcu:speculative_sampling",
+            "//rtp_llm/models_py/bindings/dcu:dcu_host_utils",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
@@ -331,6 +348,13 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+        ],
+        "@//:using_dcu": [
+            "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/dcu:speculative_sampling",
+            "//rtp_llm/models_py/bindings/dcu:dcu_host_utils",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
         ],
         "//conditions:default": [],
     }),

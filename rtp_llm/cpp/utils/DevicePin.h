@@ -7,7 +7,7 @@
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 #include <c10/hip/HIPFunctions.h>
 #include <c10/hip/HIPStream.h>
 #include <hip/hip_runtime.h>
@@ -65,7 +65,7 @@ inline void setCurrentThreadDeviceContext(int device_id) {
         throw std::runtime_error("cudaSetDevice(" + std::to_string(device_id) + ") failed: " + cudaGetErrorString(err));
     }
     at::cuda::set_device(device_id);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     auto err = hipSetDevice(device_id);
     if (err != hipSuccess) {
         throw std::runtime_error("hipSetDevice(" + std::to_string(device_id) + ") failed: " + hipGetErrorString(err));
@@ -83,7 +83,7 @@ inline void setCurrentThreadDefaultStream(int device_id) {
 
 #if USING_CUDA
     at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     c10::hip::setCurrentHIPStream(c10::hip::getDefaultHIPStream(device_id));
 #else
     // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
@@ -98,7 +98,7 @@ inline int getCurrentThreadDeviceContext() {
         throw std::runtime_error(std::string("cudaGetDevice failed: ") + cudaGetErrorString(err));
     }
     return device_id;
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     int  device_id = -1;
     auto err       = hipGetDevice(&device_id);
     if (err != hipSuccess) {

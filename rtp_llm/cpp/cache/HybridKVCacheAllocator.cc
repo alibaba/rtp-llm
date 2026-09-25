@@ -1,4 +1,12 @@
+#include <atomic>
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
+// ---- dcu leak-probe: malloc site tags ----
+namespace rtp_llm {
+extern thread_local int64_t g_tl_probe_request_id;
+static std::atomic<size_t> g_probe_site_init{0};
+static std::atomic<size_t> g_probe_site_incr{0};
+}  // namespace rtp_llm
+// ---- end ----
 
 #include <algorithm>
 #include <unordered_map>
@@ -277,6 +285,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         // Snapshot the slot count before the call so a failure can report this
         // group's exact physical request in the error_code=602 record.
         const int blocks_before = static_cast<int>(block_ids_0.blocksNum());
+        g_probe_site_init.fetch_add(1);
+        g_tl_probe_request_id = malloc_info.request_id;
         if (!group->malloc(block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
             logMallocFailure(
                 malloc_info, "init_group_malloc", 0, gid, false, group->needBlocksNum(group_seq_len, blocks_before, 0));
@@ -323,6 +333,8 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
             // Snapshot the slot count before the call so a failure can report this
             // group's exact physical request in the error_code=602 record.
             const int blocks_before = static_cast<int>(block_ids.blocksNum());
+            g_probe_site_incr.fetch_add(1);
+            g_tl_probe_request_id = malloc_info.request_id;
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                     block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
                 all_success        = false;
@@ -870,6 +882,19 @@ void HybridKVCacheAllocator::rollbackBlockIdsToSize(int gid, BlockIds& block_ids
 void HybridKVCacheAllocator::rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                                 const std::vector<BlockIndicesType>& referenced_blocks,
                                                 const std::vector<size_t>&           original_sizes) {
+    {
+        // dcu-leak-probe: what does this rollback discard?
+        size_t discard = 0;
+        for (int gid = 0; gid < kv_resource.groupNums(); ++gid) {
+            discard += kv_resource.blocksNum(0, gid);
+        }
+        if (discard > 0) {
+            RTP_LLM_LOG_WARNING("[dcu-rollback] DISCARD without free: req=%ld blocks=%zu orig_sizes=%zu",
+                                g_tl_probe_request_id,
+                                discard,
+                                original_sizes.size());
+        }
+    }
     for (int gid = 0; gid < kv_resource.groupNums(); ++gid) {
         auto& block_ids = kv_resource.mutableBlockIds(0, gid);
         if (!original_sizes.empty() && static_cast<size_t>(gid) < original_sizes.size()

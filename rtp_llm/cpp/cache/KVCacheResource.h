@@ -39,6 +39,8 @@ public:
     explicit BlockIds(size_t kernel_blocks_per_kv_block = 1):
         kernel_blocks_per_kv_block_(kernel_blocks_per_kv_block > 0 ? kernel_blocks_per_kv_block : 1) {}
 
+    ~BlockIds();
+
     size_t blocksNum() const;
 
     const BlockIndicesType& blocks() const;

@@ -28,14 +28,14 @@
 #include <utility>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #endif
 #include <pybind11/functional.h>
 
 #if USING_CUDA
 using DeviceGuard = c10::cuda::CUDAGuard;
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
 
@@ -57,6 +57,10 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#elif USING_DCU
+#include <hip/hip_runtime.h>
+#include <ATen/hip/HIPContext.h>
+#include "rtp_llm/models_py/bindings/dcu/hip_host_utils.h"
 #endif
 
 using namespace std;
@@ -532,7 +536,7 @@ torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor we
 torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
     return weight;
 }
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
 torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
     return weight;
 }
@@ -553,7 +557,7 @@ void cudaSyncAndCheck() {
 void cudaCheckLastError() {
 #if USING_CUDA
     check_cuda_error();
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     auto err = hipGetLastError();
     if (err != hipSuccess) {
         RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
@@ -587,7 +591,7 @@ ExecStatus getGpuExecStatus() {
 #if USING_CUDA
     auto error = cudaMemGetInfo(&mem.free_bytes, &total_bytes);
     RTP_LLM_CHECK(error == cudaSuccess);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
     hipMemGetInfo(&mem.free_bytes, &total_bytes);
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
@@ -813,7 +817,7 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
             auto* prop            = at::cuda::getCurrentDeviceProperties();
             resolved_mla_ops_type = prop->major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
         }
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
         RTP_LLM_LOG_INFO("Initialize runtime (ROCm). device_id=%zu", device_id);
         ROCM_CHECK(hipSetDevice(device_id));
 #endif

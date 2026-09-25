@@ -7,6 +7,7 @@ from rtp_llm.device.device_type import (
     DeviceType,
     get_device_type,
     is_cuda,
+    is_dcu,
     is_hip,
     is_ppu,
 )

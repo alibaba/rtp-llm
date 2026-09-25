@@ -96,6 +96,11 @@ config_setting(
 )
 
 config_setting(
+    name = "using_dcu",
+    values = {"define": "using_dcu=true"},
+)
+
+config_setting(
     name = "using_arm",
     values = {"define": "using_arm=true"},
 )
@@ -219,13 +224,21 @@ cc_binary(
             "-lrtp_compute_ops",
             "-Wl,--as-needed",
         ],
+        "@//:using_dcu": [
+            "-Wl,--no-as-needed",
+            "-L$(BINDIR)/rtp_llm/cpp/pybind",
+            "-lrtp_compute_ops",
+        ],
         "//conditions:default": [],
     }),
     linkshared = 1,
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/pybind:th_transformer_lib",
-    ],
+    ]+ select({
+        "@//:using_dcu": [":rtp_compute_ops"],
+        "//conditions:default": [],
+    }),
 )
 
 exports_files(["cc_test_wrapper.sh"])

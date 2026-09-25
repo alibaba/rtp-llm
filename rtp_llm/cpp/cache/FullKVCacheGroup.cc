@@ -1,4 +1,10 @@
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+
+// dcu-leak-probe: record which BlockIds object receives the allocation
+namespace rtp_llm {
+extern thread_local void* g_tl_probe_owner_ids;
+}
+
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -65,6 +71,7 @@ bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
         }
     }
 
+    g_tl_probe_owner_ids = static_cast<void*>(&block_ids);
     auto result = block_pool_->malloc(need_blocks_num);
     if (result.empty()) {
         return false;

@@ -2,7 +2,10 @@ load("@rules_python//python:pip.bzl", "pip_parse")
 
 PIP_EXTRA_ARGS = [
     "--cache-dir=~/.cache/pip",
-    "--extra-index-url=https://mirrors.aliyun.com/pypi/simple/",
+    "--index-url=https://mirrors.aliyun.com/pypi/simple/",
+    "--extra-index-url=https://pypi.tuna.tsinghua.edu.cn/simple/",
+    "--find-links=/home/wheels",
+    "--timeout=30",
     "--verbose",
 ]
 
@@ -82,4 +85,16 @@ def pip_deps():
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 12000,
+    )
+
+    pip_parse(
+        name = "pip_gpu_dcu_torch",
+	requirements_lock = "@rtp_deps//:requirements_lock_dcu.txt",
+        python_interpreter = "/opt/conda310/bin/python3",
+        extra_pip_args = PIP_EXTRA_ARGS,
+        timeout = 12000,
+        # aiter ships triton autotune configs whose file names contain ':' --
+        # invalid in bazel labels, so keep them out of the generated data glob
+        # (runtime reads them from the pip-installed wheel instead).
+        pip_data_exclude = ["site-packages/aiter/ops/triton/configs/**"],
     )

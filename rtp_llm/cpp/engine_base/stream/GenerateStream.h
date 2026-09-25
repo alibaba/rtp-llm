@@ -181,6 +181,20 @@ public:
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
+
+    // ---- DCU KV-recovery (see DcuKVRecover.h) ----
+    // True while the stream is paused on a retryable incremental KV shortage
+    // (excluded from the executed batch, retried every scheduling round).
+    bool isKvAllocPaused() const;
+    int  kvRequeueCount() const;
+    // Evicted by the deadlock breaker: release all KV blocks and reset to
+    // WAITING so the stream re-prefills the full sequence (input + generated
+    // tokens) and resumes generation. The client stream is kept intact.
+    void requeueForKVRecompute();
+    // Evicted with the requeue cap reached: finish via the normal GenerateDone
+    // path (no error), so the client gets a clean (truncated) response.
+    void finishForKVEviction();
+
     int                  nextNeedBlockNums(int reserve_step) const;
     int                  estimateInitialNeedBlocks() const;
     int                  estimatePeakNeedBlocks(int remaining_tokens) const;

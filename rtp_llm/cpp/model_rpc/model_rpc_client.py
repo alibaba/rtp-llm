@@ -48,7 +48,7 @@ from rtp_llm.utils.grpc_util import (
     trans_tensor,
 )
 
-MAX_GRPC_TIMEOUT_SECONDS = 3600
+MAX_GRPC_TIMEOUT_SECONDS = 604800
 RPC_CLEANUP_TIMEOUT_SECONDS = 0.1
 RPC_SETTLE_TIMEOUT_SECONDS = 5.0
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]

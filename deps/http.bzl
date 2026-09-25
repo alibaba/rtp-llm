@@ -6,33 +6,28 @@ def clean_dep(dep):
 def http_deps():
     http_archive(
         name = "rules_pkg",
-        urls = [
-            "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",
-            "https://github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",
-        ],
+        urls = ["file:///home/bazel_mirrors/rules_pkg-0.6.0.tar.gz"],
         sha256 = "62eeb544ff1ef41d786e329e1536c1d541bb9bcad27ae984d57f18f314018e66",
     )
 
     http_archive(
         name = "bazel_skylib",
         sha256 = "cd55a062e763b9349921f0f5db8c3933288dc8ba4f76dd9416aac68acee3cb94",
-        urls = ["https://github.com/bazelbuild/bazel-skylib/releases/download/1.5.0/bazel-skylib-1.5.0.tar.gz"],
+        urls = ["file:///home/bazel_mirrors/bazel-skylib-1.5.0.tar.gz"],
     )
 
     http_archive(
         name = "io_bazel_rules_closure",
         sha256 = "5b00383d08dd71f28503736db0500b6fb4dda47489ff5fc6bed42557c07c6ba9",
         strip_prefix = "rules_closure-308b05b2419edb5c8ee0471b67a40403df940149",
-        urls = [
-            "https://github.com/bazelbuild/rules_closure/archive/refs/tags/0.12.0.zip",
-        ],
+        urls = ["file:///home/bazel_mirrors/rules_closure-0.12.0.zip"],
     )
 
     http_archive(
         name = "torch_2.1_py310_cpu",
-        sha256 = "bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
+        sha256 = "35a9e78b7e4096968b54c1a198687b981569c50ae93e661aa430f9fd208da102",
         urls = [
-            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
+            "file:///home/bazel_mirrors/torch-2.6.0+cpu-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
@@ -80,6 +75,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_dcu",
+        sha256 = "044a3e89a43aa38934fc6cd89a6b0d15ace28531f44d5a4919286f321ccae370",
+	urls = [
+            "file:///home/bazel_mirrors/torch-2.10.0+das.opt1.dtk2604.2606161421.g91a580-cp310-cp310-manylinux_2_28_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "aiter",
         patches = ["@rtp_llm//patches/aiter:0001-gdr-decode-zero-padding.patch"],
         patch_args = ["-p1"],
@@ -111,7 +116,7 @@ def http_deps():
     http_archive(
         # Hedron's Compile Commands Extractor for Bazel
         name = "hedron_compile_commands",
-        urls = ["https://github.com/hedronvision/bazel-compile-commands-extractor/archive/4f28899228fb3ad0126897876f147ca15026151e.tar.gz"],
+        urls = ["file:///home/bazel_mirrors/hedron-compile-commands-4f28899228fb3ad0126897876f147ca15026151e.tar.gz"],
         strip_prefix = "bazel-compile-commands-extractor-4f28899228fb3ad0126897876f147ca15026151e",
         sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
     )

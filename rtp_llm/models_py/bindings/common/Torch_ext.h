@@ -13,6 +13,15 @@
 using bf16_type  = amd_bfloat16;
 using StreamType = hipStream_t;
 #define GET_CURRENT_STREAM() at::hip::getCurrentHIPStream().stream()
+#elif USING_DCU
+#include <rtp_llm/models_py/bindings/dcu/amd_bfloat16.h>
+#include <hip/hip_runtime.h>
+#include <ATen/hip/HIPContext.h>
+#include "rtp_llm/models_py/bindings/dcu/kernels/fused_qk_rmsnorm.h"
+#include "rtp_llm/models_py/bindings/dcu/kernels/layernorm_kernels.h"
+using bf16_type  = amd_bfloat16;
+using StreamType = hipStream_t;
+#define GET_CURRENT_STREAM() at::hip::getCurrentHIPStream().stream()
 #elif USING_CUDA
 #include <cuda_runtime_api.h>
 #include <cuda_runtime.h>

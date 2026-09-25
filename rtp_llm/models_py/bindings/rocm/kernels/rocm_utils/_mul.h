@@ -92,7 +92,7 @@ inline __device__ Float8_ mul(float a, Float8_ b) {
 
 template<>
 inline __device__ uint16_t mul(uint16_t a, uint16_t b) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     __half_raw out = __hmul(*reinterpret_cast<__half_raw*>(&a), *reinterpret_cast<__half_raw*>(&b));
     return *reinterpret_cast<uint16_t*>(&(out.data));
 #else
@@ -106,7 +106,7 @@ inline __device__ uint16_t mul(uint16_t a, uint16_t b) {
 
 template<>
 inline __device__ uint32_t mul(uint32_t a, uint32_t b) {
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     __half2 out = __hmul2(*reinterpret_cast<__half2_raw*>(&a), *reinterpret_cast<__half2_raw*>(&b));
     return *reinterpret_cast<uint32_t*>(&(out.data));
 #else

@@ -5,7 +5,12 @@
 #include <memory>
 #include <typeinfo>
 #include <ATen/Generator.h>
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_DCU
+#ifndef TORCH_CUDA_CPP_API
+#define TORCH_CUDA_CPP_API C10_IMPORT
+#endif
+#endif
+#if defined(USING_CUDA) || defined(USING_ROCM) || defined(USING_DCU)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
@@ -157,7 +162,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     if (generateConfig()->random_seed.has_value()) {
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if defined(USING_CUDA) || defined(USING_ROCM) || defined(USING_DCU)
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
 #else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
@@ -212,6 +217,61 @@ absl::Status GenerateStream::incrKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     return stream_cache_resource_->incrKVBlock();
+}
+
+bool GenerateStream::isKvAllocPaused() const {
+    return generate_status_->isKvAllocPaused();
+}
+
+int GenerateStream::kvRequeueCount() const {
+    return generate_status_->kvRequeueCount();
+}
+
+void GenerateStream::requeueForKVRecompute() {
+    // Follow releaseResource()'s ordering: join in-flight workers before
+    // acquiring mutex_, so KV blocks are freed synchronously here and paused
+    // siblings can succeed on their next retry.
+    waitPendingAsyncBookkeeping();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    generate_status_->incKvRequeueCount();
+    if (!stream_cache_resource_->isResourceReleased()) {
+        RTP_LLM_LOG_WARNING("[dcu-leak-probe] requeue: pre-release curBlocks=%d",
+                            stream_cache_resource_->curBlocksNum());
+        stream_cache_resource_->releaseResource();
+        RTP_LLM_LOG_WARNING("[dcu-leak-probe] requeue: post-release curBlocks=%d",
+                            stream_cache_resource_->curBlocksNum());
+    }
+    // Root fix for the KV-block leak observed under C2 eviction: releaseResource()
+    // marks resource_released_ = true; if the stream then re-runs its context pass
+    // (this requeue path), the final cleanup sees isResourceReleased() == true and
+    // skips the second release, so every block allocated by the recomputed
+    // prefill leaks when the stream object is destroyed. Reactivate the
+    // bookkeeping so the second lifecycle is released normally.
+    stream_cache_resource_->reactivateAfterRequeue();
+    stream_cache_resource_->clearKVBlockUpdateMapping();
+    // Re-run the context pass over the full sequence: token ids [0, seqLength)
+    // already include every generated token in complete_token_ids.
+    setIsContextStream(true);
+    setReuseLength(0);
+    setLocalReuseLength(0);
+    setRemoteReuseLength(0);
+    setMemoryReuseLength(0);
+    setInitialReuseLength(0);
+    // Stale snapshots refer to freed blocks; drop them (MTP is dormant on the
+    // plain-decode path but clear defensively).
+    clearMtpCacheSnapshot();
+    generate_status_->resetForKvRequeue();
+    RTP_LLM_LOG_WARNING("[dcu-kv-recover] stream evicted, requeue for full recompute: %s (count=%d, seq_len=%d)",
+                        streamLogTag().c_str(),
+                        generate_status_->kvRequeueCount(),
+                        seqLength());
+}
+
+void GenerateStream::finishForKVEviction() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    RTP_LLM_LOG_WARNING("[dcu-kv-recover] stream evicted, finish via GenerateDone (requeue cap reached): %s",
+                        streamLogTag().c_str());
+    generate_status_->reportEvent(StreamEvents::GenerateDone);
 }
 
 void GenerateStream::releaseResource() {

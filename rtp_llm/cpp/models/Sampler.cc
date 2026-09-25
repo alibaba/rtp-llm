@@ -123,7 +123,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-#if USING_ROCM
+#if USING_ROCM || USING_DCU
     // ROCm: hipMemcpyAsync from pageable memory is truly async, and
     // Tensor::record_stream() rejects at::hip streams (aborts with a device
     // type check), so keep the blocking transfer here.

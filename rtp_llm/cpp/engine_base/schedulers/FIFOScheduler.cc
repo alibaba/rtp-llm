@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/stream/DcuKVRecover.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -7,6 +8,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <iterator>
 #include <mutex>
 
 using namespace std;
@@ -43,6 +46,16 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      cp_force_single_prefill_,
                      prefill_cp_size_,
                      max_inited_kv_cache_streams_);
+    if (const char* env_val = std::getenv("RTP_KV_ADMISSION_MARGIN_TOKENS")) {
+        char*           end = nullptr;
+        const long long val = std::strtoll(env_val, &end, 10);
+        if (end != env_val && val >= 0) {
+            kv_admission_margin_tokens_ = static_cast<size_t>(val);
+        }
+    }
+    RTP_LLM_LOG_INFO("kv-aware admission margin tokens is [%zu]%s",
+                     kv_admission_margin_tokens_,
+                     kv_admission_margin_tokens_ == 0 ? " (disabled)" : "");
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -149,6 +162,12 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
         return false;
     }
 
+    if (!fitsKVTokenBudget(admitted_running_stream_count,
+                           schedule_runtime.admitted_prefill_token_size_with_cache,
+                           new_stream)) {
+        return false;
+    }
+
     return fitsPrefillTokenLimits(admitted_running_stream_count,
                                   schedule_runtime.admitted_prefill_token_size_with_cache,
                                   schedule_runtime.admitted_prefill_max_seq_len_with_cache,
@@ -184,8 +203,43 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
         admitted_max_seq_len = std::max(admitted_max_seq_len, prefillSeqLenWithCache(stream));
         admitted_sequence_count += static_cast<size_t>(stream->currentBatchSize());
     }
+    if (!fitsKVTokenBudget(admitted_count, admitted_tokens, new_stream)) {
+        return false;
+    }
+
     return fitsPrefillTokenLimits(
         admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream);
+}
+
+bool FIFOScheduler::fitsKVTokenBudget(size_t                   admitted_stream_count,
+                                      size_t                   admitted_prefill_tokens,
+                                      const GenerateStreamPtr& candidate) const {
+    if (kv_admission_margin_tokens_ == 0 || !cache_manager_) {
+        return true;
+    }
+    // Bottleneck-pool view via availableTokensNum(): blocks already held by
+    // running/admitted streams are excluded, but their future decode growth is
+    // not, so reserve one margin per running stream, one per admitted stream,
+    // plus the candidate's own context and margin. The admitted_prefill_tokens
+    // term is a with-cache (upper bound) cost, which keeps this conservative.
+    const size_t left_tokens = cache_manager_->availableTokensNum();
+    const size_t need_tokens = running_streams_.size() * kv_admission_margin_tokens_
+                               + admitted_prefill_tokens
+                               + admitted_stream_count * kv_admission_margin_tokens_
+                               + static_cast<size_t>(candidate->contextLength()) + kv_admission_margin_tokens_;
+    if (left_tokens < need_tokens) {
+        RTP_LLM_LOG_DEBUG("kv-aware admission reject: left_tokens=%zu need_tokens=%zu admitted_streams=%zu "
+                          "admitted_tokens=%zu running=%zu candidate_ctx=%d margin=%zu",
+                          left_tokens,
+                          need_tokens,
+                          admitted_stream_count,
+                          admitted_prefill_tokens,
+                          running_streams_.size(),
+                          candidate->contextLength(),
+                          kv_admission_margin_tokens_);
+        return false;
+    }
+    return true;
 }
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
@@ -566,6 +620,34 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 }
 
+void FIFOScheduler::evictPausedRunningStreamForKV() {
+    // Newest-first: the most recently admitted stream has made the least
+    // decode progress, so evicting it wastes the least computation.
+    for (auto it = running_streams_.rbegin(); it != running_streams_.rend(); ++it) {
+        const auto& stream = *it;
+        if (!stream->isKvAllocPaused() || stream->hasPendingAsyncBookkeeping() || stream->hasNumBeams()
+            || stream->groupSize() > 1) {
+            continue;
+        }
+        RTP_LLM_LOG_WARNING("[dcu-kv-recover] KV deadlock: all %zu running streams paused on KV allocation, "
+                            "evicting newest stream [%s]",
+                            running_streams_.size(),
+                            stream->streamLogTag().c_str());
+        if (stream->kvRequeueCount() < kMaxKvRequeuePerStream) {
+            stream->requeueForKVRecompute();
+            running_streams_.erase(std::next(it).base());
+            // Queue head: the evicted stream re-admits (and re-prefills) as
+            // soon as the pool has room, ahead of fresh waiters.
+            waiting_streams_.push_front(stream);
+        } else {
+            stream->finishForKVEviction();
+        }
+        return;
+    }
+    RTP_LLM_LOG_WARNING("[dcu-kv-recover] KV deadlock detected but no evictable stream "
+                        "(pending bookkeeping / beam search / group), keep pause-waiting");
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
@@ -674,9 +756,33 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
+    // DCU KV-recovery: paused streams hold their blocks but must not execute
+    // (their block tables have no room for the next token). If nothing can
+    // execute and every running stream is paused, the round is deadlocked and
+    // the deadlock breaker evicts one stream to release its blocks.
+    list<GenerateStreamPtr> exec_streams;
+    bool                    kv_recover = false;
+#if USING_DCU
+    kv_recover = dcuKVRecoverEnabled();
+#endif
+    for (const auto& stream : running_streams_) {
+        if (!kv_recover || !stream->isKvAllocPaused()) {
+            exec_streams.push_back(stream);
+        }
+    }
+    if (kv_recover && exec_streams.empty() && !running_streams_.empty()) {
+        bool all_paused = true;
+        for (const auto& stream : running_streams_) {
+            all_paused = all_paused && stream->isKvAllocPaused();
+        }
+        if (all_paused) {
+            evictPausedRunningStreamForKV();
+        }
+    }
+
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return running_streams_;
+    return exec_streams;
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {

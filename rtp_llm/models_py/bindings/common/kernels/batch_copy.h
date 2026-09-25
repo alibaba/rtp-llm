@@ -17,7 +17,7 @@ void invokeBatchCopy(void* const*           dst,
                      const BatchCopyConfig& config,
 #if USING_CUDA
                      cudaStream_t stream);
-#elif USING_ROCM
+#elif USING_ROCM || USING_DCU
                      hipStream_t stream);
 #endif
 

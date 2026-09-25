@@ -1,0 +1,13 @@
+-r requirements_base.txt
+http://42.228.13.241:666/das_release/das1.8.4/+f/044/a3e89a43aa389/torch-2.10.0+das.opt1.dtk2604.2606161421.g91a580-cp310-cp310-manylinux_2_28_x86_64.whl
+http://42.228.13.241:666/das_release/das1.8.4/+f/357/55dc47778e930/torchvision-0.25.0+das.opt1.dtk2604.torch2100.2605071719.g7ffc50-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+pyrsmi==0.2.0
+pyyaml==6.0.2
+http://42.228.13.241:666/das_release/das1.8.4/+f/3c9/94f00387b7eb1/triton-3.6.0+dtk2604.torch2100.2606181426.ge87f7a-cp310-cp310-linux_x86_64.whl
+# http://pypi.sourcefind.cn:666/das_release/dtk25042-rc1/+f/9a5/0b30a2b74c25d/amdsmi-24.5.3+02cbffb.dirty-py3-none-any.whl
+http://42.228.13.241:666/das_release/das1.8.4/+f/1fc/abaf4827a3bdc/flash_attn-2.8.3+das.opt1.dtk2604.torch2100.2606192019.gca46e7-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
+http://42.228.13.241:666/das_release/das1.8.4/+f/e6f/57d7a18386c66/lightop-0.6.0+das.dtk2604.torch2100.2606182021.gb84052-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+# aiter: DAS prebuilt wheel for DCU MoE/attention kernels. Fetched from the
+# Hygon DAS index (http://42.228.13.241:666/release/dtk/, --trusted-host
+# 42.228.13.241) and mirrored into /home/wheels for offline installs.
+aiter==0.1.5+das185.dtk2604.torch2100.2608131714.gb0979d

@@ -16,7 +16,7 @@ void registerExecCtxOps(pybind11::module& m);
 using namespace torch_ext;
 
 PYBIND11_MODULE(librtp_compute_ops, m) {
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA || USING_ROCM || USING_DCU
     registerExecCtxOps(m);
 #endif
 

@@ -80,6 +80,14 @@ private:
                                   size_t                   admitted_max_seq_len,
                                   size_t                   admitted_sequence_count,
                                   const GenerateStreamPtr& candidate) const;
+    bool   fitsKVTokenBudget(size_t                   admitted_stream_count,
+                             size_t                   admitted_prefill_tokens,
+                             const GenerateStreamPtr& candidate) const;
+    // DCU KV-recovery (see DcuKVRecover.h): called when every running stream is
+    // paused on a retryable KV shortage and no batch can execute. Evicts the
+    // newest paused running stream: requeue for full recompute, or clean finish
+    // once the per-stream requeue cap is reached.
+    void   evictPausedRunningStreamForKV();
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
@@ -125,6 +133,15 @@ private:
     // excluded). 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
     const size_t prefill_cp_size_                = 1;
+
+    // KV-aware admission margin (tokens): each admitted or running stream reserves
+    // this many tokens for future decode growth. 0 disables the check entirely.
+    // Default 0: on DCU the KV-recovery path (DcuKVRecover.h) is the default
+    // protection — full-concurrency decode with pause-wait + deadlock eviction
+    // measures 163.89 vs 107.91 tok/s on the c32x400 stress. Enable admission
+    // control explicitly via RTP_KV_ADMISSION_MARGIN_TOKENS when smoother ITL
+    // tails matter more than throughput.
+    size_t kv_admission_margin_tokens_ = 0;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;

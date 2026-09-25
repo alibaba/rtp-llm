@@ -724,13 +724,20 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
     def _is_target_verify(
         attn_inputs: PyAttentionInputs, attn_meta: Qwen3NextMetadata
     ) -> bool:
+        import os as _os
+        _dbg = bool(_os.getenv("RTP_MTP_DEBUG"))
         is_target_verify = attn_meta.is_target_verify
         if (
             torch.version.hip is not None
             and is_target_verify
             and attn_inputs.prefix_lengths.numel() == 0
         ):
+            if _dbg:
+                print(f"[MTP-DBG] DOWNGRADE-TO-DECODE: meta.is_target_verify={is_target_verify} "
+                      f"prefix_lengths.numel()={attn_inputs.prefix_lengths.numel()}", flush=True)
             return False
+        if _dbg and is_target_verify:
+            print(f"[MTP-DBG] VERIFY-KEEP: prefix_lengths.numel()={attn_inputs.prefix_lengths.numel()}", flush=True)
         return is_target_verify
 
     def _get_fla_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
@@ -791,6 +798,19 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
         )
+        import os as _os
+        if _os.getenv("RTP_MTP_DEBUG"):
+            _bm = attn_inputs.kv_cache_kernel_block_id_device
+            _sl = attn_inputs.sequence_lengths_plus_1_device
+            print(f"[MTP-DBG] _fla decode-path: tokens={mixed_qkv.shape[0]} batch={batch} seq={seq} "
+                  f"is_target_verify={is_target_verify} hip={torch.version.hip is not None}", flush=True)
+            if is_target_verify and _bm is not None and _sl is not None:
+                _sl_host = _sl[:8].tolist() if _sl.numel() >= 8 else _sl.tolist()
+                _bm_host = _bm.detach()[:2, :2, :8].to(torch.int64).tolist() if _bm.dim() == 3 else _bm.detach().flatten()[:8].tolist()
+                _r = [((s - 2) // seq_size_per_block) for s in _sl_host]
+                _w = [((s - 1) // seq_size_per_block) for s in _sl_host]
+                print(f"[MTP-DBG] seq_len+1={_sl_host} read_blk_off={_r} write_blk_off0={_w}", flush=True)
+                print(f"[MTP-DBG] block_map[:2,:2,:8]={_bm_host}", flush=True)
         # asserr head_k_dim == head_v_dim
         mixed_qkv = mixed_qkv.reshape(
             batch,
@@ -1674,6 +1694,20 @@ class Qwen3NextModel(GptModelBase):
             # ROCm normal decode can carry the generic flag with no prefixes;
             # normalize only that impossible speculative shape.
             is_target_verify = False
+        import os as _os
+        if _os.getenv("RTP_MTP_DEBUG") and is_target_verify and not attention_inputs.is_cuda_graph:
+            with torch.no_grad():
+                def _v(t):
+                    return t.detach()[:8].to(torch.int64).tolist() if t is not None and t.numel() else None
+                print(f"[MTP-META] prefix_len={_v(attention_inputs.prefix_lengths_device)} "
+                      f"input_len={_v(attention_inputs.input_lengths_device)} "
+                      f"seq_p1={_v(attention_inputs.sequence_lengths_plus_1_device)}", flush=True)
+                try:
+                    _pos_ids = inputs.combo_position_ids
+                    if _pos_ids is not None and _pos_ids.numel():
+                        print(f"[MTP-META] pos_ids[:6]={_pos_ids.detach()[:6].to(torch.int64).tolist()}", flush=True)
+                except Exception:
+                    pass
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
 
         full_prefill_conv1d_meta = None
@@ -1771,12 +1805,42 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            import os as _os
+            if _os.getenv("RTP_MTP_DEBUG") and i < 5:
+                with torch.no_grad():
+                    _step = getattr(Qwen3NextModel, "_dbg_lstep", 0)
+                    Qwen3NextModel._dbg_lstep = _step + 1
+                    _x = hidden_states.detach()
+                    if _os.getenv("RTP_MTP_DUMP") and i in (3, 4) and 5 <= _step <= 9 and _x.size(0) > 0:
+                        torch.save(_x[:2].float().cpu(), f"/tmp/hid_lyr{int(_step)}_{i}.pt")
+                    _kind = "L" if decoder_layer.layer_type == HybridAttentionType.LINEAR else "F"
+                    print(f"[MTP-LYR] s{_step} L{i}{_kind} ({_x[0].float().mean().item():+.6f},{_x[0].float().std().item():.6f},{_x[0,:3].float().tolist()})"
+                          + (f" t1={_x[1].float().mean().item():+.6f}" if _x.size(0) > 1 else ""), flush=True)
             if i in self._mtp_aux_capture_layer_id_set:
                 self.capture_aux_hidden(i, hidden_states, residual)
         if capture_aux_hidden:
             self.finish_aux_hidden_capture()
 
         hidden_states, residual = self.norm(hidden_states, residual)
+        import os as _os
+        if _os.getenv("RTP_MTP_DEBUG"):
+            with torch.no_grad():
+                _step = getattr(Qwen3NextModel, "_dbg_step", 0)
+                Qwen3NextModel._dbg_step = _step + 1
+                _h = hidden_states.detach()
+                if _os.getenv("RTP_MTP_DUMP") and _step < 40:
+                    torch.save(_h[:2].float().cpu(), f"/tmp/hf_{int(_step):02d}.pt")
+                _fp = _h[:2].float()
+                try:
+                    _sl = attention_inputs.sequence_lengths_plus_1_device
+                    _pos = _sl[:4].tolist() if _sl is not None and _sl.numel() else []
+                except Exception:
+                    _pos = []
+                _line = (f"[MTP-HID] step={_step} verify={is_target_verify} pos={_pos} "
+                         f"tok0=(m{_fp[0].mean().item():.6f},s{_fp[0].std().item():.6f},{_fp[0][:3].tolist()})")
+                if _h.size(0) > 1:
+                    _line += f" tok1=(m{_fp[1].mean().item():.6f})"
+                print(_line, flush=True)
         if capture_aux_hidden:
             assert self._mtp_target_hidden_states is not None
             return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
