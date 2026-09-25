@@ -330,11 +330,8 @@ class KimiK3(BaseModel):
             )
 
         config.hybrid_attention_config.enable_hybrid_attention = True
-        # MLA and KDA have different cache shapes and lifetimes.  Keep them in
-        # independent physical pools; speculative models append their own
-        # third pool in CacheConfigCreator instead of sharing either target
-        # pool.
-        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
+        # The main Cache builder separates MLA and KDA by the "full" and
+        # "linear" descriptor tags assigned in _post_build_model_config.
         layer_types: List[HybridAttentionType] = []
         for layer_1based in range(1, config.num_layers + 1):
             layer_types.append(
@@ -531,7 +528,6 @@ class KimiK3Mtp(KimiK3):
         config.num_layers = 1
         config.moe_layer_index = [0]
         config.hybrid_attention_config.enable_hybrid_attention = True
-        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.NONE
         ]
