@@ -12,12 +12,12 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.AbstractStub;
 import io.grpc.stub.MetadataUtils;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.socket.nio.NioSocketChannel;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -638,7 +638,7 @@ public class FlexlbGrpcForwarder {
 
     private ManagedChannel createChannel(String ip, int port) {
         return NettyChannelBuilder.forAddress(ip, port)
-                .channelType(NioSocketChannel.class)
+                .channelType(GrpcChannelFactory.channelType(eventLoopGroup))
                 .eventLoopGroup(eventLoopGroup)
                 .executor(executor)
                 .usePlaintext()
