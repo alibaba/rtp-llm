@@ -110,16 +110,18 @@ Spring `server.port`，再回退 JVM `-Dserver.port` 和默认 7001（假定所�
 - `syncLBStatusFromMaster`（每 500ms 调度）与 `dumpLBStatus()` 目前是 **TODO 空实现**
   （`/rtp_llm/schedule_snapshot` 恒返回成功占位）。
 
-### "只有 master 路由"的实际语义
+### Master 转发与本地降级
 
-靠 **slave 转发而非拒绝**，只有两处检查 `isMaster()`：
+`FlexlbServiceImpl` 在启用一致性且本节点非 Master 时通过 gRPC 转发调度请求。
+Master 缺位、明确返回未接管请求的 `NOT_MASTER`，或转发发生网络 I/O 故障时，
+本节点使用已有的路由与调度流程执行本地决策，PV 日志记录 `LOCAL_FALLBACK`。
 
-1. `HttpLoadBalanceServer.processScheduledRequest`：启用一致性且非 master →
-   `forwardRequestToMaster()` 把原始请求代理到 `http://master:port/rtp_llm/schedule`；
-   **master 为空/不可达/超时时降级为本地路由**（`fallbackToLocalRouting`，上报
-   `MASTER_NULL`/`TIMEOUT`/`CONNECT_FAILED`）。所有响应都携带 `realMasterHost` 供客户端
-   感知真正的 master。
-2. `FlexlbControlServer`：cache-match failover 操作非 master 时转发给 master（master 不可用
-   返回 503）。
+网络故障通过异常因果链识别：gRPC `UNAVAILABLE` 或 `UNKNOWN` 携带
+`IOException`（包括连接拒绝、连接重置、连接关闭、DNS 解析失败）或
+`UnresolvedAddressException` 时允许本地决策。只有状态码而没有网络异常证据的失败、
+业务拒绝、RPC 超时和取消不触发本地降级。已过期或取消的请求不再进入本地调度。
 
-因此该保证是 best-effort：网络分区或 master 缺位时 slave 会自行路由（可用性优先）。
+本地降级优先保证可用性，不依赖 ZooKeeper 选主完成。连接断开不能证明原 Master
+未接收请求，因此该模式不提供跨 Master 的严格单次调度保证；本地调用仍沿用原请求 ID
+和截止时间。`FlexlbControlServer` 的 cache-match failover 操作在非 Master 时转发，
+Master 不可用时返回 503。
