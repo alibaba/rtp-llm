@@ -13,6 +13,7 @@ import json
 import math
 import pathlib
 import re
+import subprocess
 import threading
 import time
 import urllib.error
@@ -61,6 +62,10 @@ class SmokeFailure(RuntimeError):
 
 class TransportFailure(SmokeFailure):
     """Only connection failures and transient HTTP responses may be retried."""
+
+
+class SmokeDeadline(SmokeFailure):
+    """A formal request reached the user's five-minute wall-clock limit."""
 
 
 def reject_duplicate_keys(pairs):
@@ -125,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument(
         "--suite",
-        choices=("flow", "main-text", "main-text-64k"),
+        choices=("flow", "main-text", "main-text-64k", "main-text-64k-capped"),
         default="main-text",
     )
     parser.add_argument("--namespace", required=True)
@@ -206,14 +211,14 @@ def parse_args() -> argparse.Namespace:
     expected_owners = (
         (args.decode_dp_size,) if args.decode_dp_size is not None else (8, 16)
     )
-    if args.suite in ("main-text", "main-text-64k") and len(args.decode_role_addrs) not in expected_owners:
+    if args.suite in ("main-text", "main-text-64k", "main-text-64k-capped") and len(args.decode_role_addrs) not in expected_owners:
         parser.error(
             f"--suite=all requires {expected_owners} ordered --decode-role-addr values"
         )
     for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
         if getattr(args, key) < 0:
             parser.error(f"--{key.replace('_', '-')} must be non-negative")
-    if args.suite in ("main-text", "main-text-64k"):
+    if args.suite in ("main-text", "main-text-64k", "main-text-64k-capped"):
         config = json.loads((args.long_prefix_checkpoint / "config.json").read_text())
         config = config.get("text_config", config)
         if config.get("num_hidden_layers") != 93:
@@ -226,8 +231,11 @@ def parse_args() -> argparse.Namespace:
             parser.error("main-text cannot reduce the 110K long-prefix gate")
         if args.chunk_tokens < 65536:
             parser.error("main-text requires a chunk budget of at least 65536")
-        if args.suite == "main-text-64k" and args.chunk_tokens != 65536:
+        if args.suite in ("main-text-64k", "main-text-64k-capped") and args.chunk_tokens != 65536:
             parser.error("main-text-64k requires a 65536-token single-prefill budget")
+        if args.suite == "main-text-64k-capped" and args.block_size != 4096:
+            parser.error("the capped PD427 subset requires 4096-token cache blocks")
+    args.case_deadline_s = 300 if args.suite == "main-text-64k-capped" else None
     if args.reuse_unit_tokens not in (0, args.block_size):
         parser.error(
             "main ordinary layout requires reuse-unit-tokens equal to block-size"
@@ -329,6 +337,7 @@ class Runner:
         self.rdma_prewarm_attempts: list[dict[str, Any]] = []
         self.started_at = time.time()
         self.failures: list[dict[str, Any]] = []
+        self.skipped_cases: list[dict[str, Any]] = []
         self._record_lock = threading.Lock()
         self._artifact_counter = 0
 
@@ -339,9 +348,11 @@ class Runner:
             "profile": "tp8-ep8-sp-no-dcp-text",
             "deferred_by_user": (
                 ["chunk prefill", "over-64K inputs", "chunk budget +1/+7", "110K seed and append"]
-                if self.args.suite == "main-text-64k" else []
+                if self.args.suite in ("main-text-64k", "main-text-64k-capped") else []
             ),
-            "single_prefill_input_limit": 65536 if self.args.suite == "main-text-64k" else None,
+            "single_prefill_input_limit": 65536 if self.args.suite in ("main-text-64k", "main-text-64k-capped") else None,
+            "formal_request_deadline_s": self.args.case_deadline_s,
+            "full_original_suite_passed": self.args.suite == "main-text" and passed and not self.skipped_cases,
             "not_applicable": [
                 "DCP",
                 "PageRR owner",
@@ -375,6 +386,7 @@ class Runner:
             "elapsed_s": round(time.time() - self.started_at, 3),
             "summary": {
                 "case_count": len(self.records),
+                "skipped_case_count": len(self.skipped_cases),
                 "cache_block_boundary_case_count": sum(
                     r.get("cache_block_boundary") is not None for r in self.records
                 ),
@@ -401,6 +413,7 @@ class Runner:
             "stages": self.stages,
             "cases": self.records,
             "failures": self.failures,
+            "skipped_cases": self.skipped_cases,
         }
         self.args.output.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -466,6 +479,16 @@ class Runner:
             with self._record_lock:
                 self.records.append(result)
             return result
+        except SmokeDeadline as exc:
+            audit["skipped"] = True
+            audit["deadline_s"] = self.args.case_deadline_s
+            audit["error"] = f"{type(exc).__name__}: {exc}"
+            with self._record_lock:
+                self.skipped_cases.append(
+                    {"name": case.name, "reason": "five-minute request deadline", "sent": True,
+                     "artifact": str(artifact) if artifact else None}
+                )
+            raise
         except Exception as exc:
             audit["error"] = f"{type(exc).__name__}: {exc}"
             with self._record_lock:
@@ -492,7 +515,7 @@ class Runner:
     ) -> dict[str, Any]:
         if barrier is not None:
             barrier.wait(timeout=30)
-        if self.args.suite == "main-text-64k":
+        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
             if not isinstance(case.prompt, str):
                 raise SmokeFailure("64K profile requires a text prompt")
             input_ids = self.tokenize(case.prompt)
@@ -529,37 +552,54 @@ class Runner:
             }
         audit["request"] = payload
         persist()
-        request = urllib.request.Request(
-            self.endpoint,
-            data=json.dumps(
-                payload, ensure_ascii=False, separators=(",", ":")
-            ).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        wire_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         started = time.time()
         request_timeout = case.timeout_s or self.args.timeout
-        try:
-            with self.opener.open(request, timeout=request_timeout) as response:
-                body = response.read()
-                status = response.status
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            audit.update(status=exc.code, response_body=detail)
-            failure = (
-                TransportFailure
-                if exc.code in (408, 429, 502, 503, 504)
-                else SmokeFailure
+        if self.args.case_deadline_s is not None:
+            marker = b"\n__K3_HTTP_STATUS__"
+            deadline = self.args.case_deadline_s
+            command = ["curl", "--silent", "--show-error", "--noproxy", "*",
+                       "--max-time", str(deadline), "--request", "POST",
+                       "--header", "Content-Type: application/json", "--data-binary", "@-",
+                       "--write-out", marker.decode() + "%{http_code}", self.endpoint]
+            try:
+                response = subprocess.run(command, input=wire_payload, capture_output=True,
+                                          timeout=deadline + 1, check=False)
+            except subprocess.TimeoutExpired as exc:
+                audit["response_body"] = (exc.output or b"").decode("utf-8", errors="replace")
+                raise SmokeDeadline(f"{case.name}: request exceeded {deadline}s") from exc
+            if response.returncode == 28:
+                audit["response_body"] = response.stdout.decode("utf-8", errors="replace")
+                raise SmokeDeadline(f"{case.name}: request exceeded {deadline}s")
+            if response.returncode != 0:
+                raise TransportFailure(f"{case.name}: curl exited {response.returncode}: "
+                                       f"{response.stderr.decode(errors='replace')[:500]}")
+            body, separator, status_bytes = response.stdout.rpartition(marker)
+            if not separator or not status_bytes.isdigit():
+                raise TransportFailure(f"{case.name}: missing HTTP status from capped request")
+            status = int(status_bytes)
+        else:
+            request = urllib.request.Request(
+                self.endpoint, data=wire_payload, headers={"Content-Type": "application/json"}, method="POST"
             )
-            raise failure(f"{case.name}: HTTP {exc.code}: {detail[:1000]}") from exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-            raise TransportFailure(f"{case.name}: request failed: {exc}") from exc
+            try:
+                with self.opener.open(request, timeout=request_timeout) as response:
+                    body = response.read()
+                    status = response.status
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                audit.update(status=exc.code, response_body=detail)
+                failure = TransportFailure if exc.code in (408, 429, 502, 503, 504) else SmokeFailure
+                raise failure(f"{case.name}: HTTP {exc.code}: {detail[:1000]}") from exc
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                raise TransportFailure(f"{case.name}: request failed: {exc}") from exc
         audit.update(
             status=status, response_body=body.decode("utf-8", errors="replace")
         )
         persist()
         if status != 200:
-            raise SmokeFailure(f"{case.name}: HTTP {status}")
+            failure = TransportFailure if status in (408, 429, 502, 503, 504) else SmokeFailure
+            raise failure(f"{case.name}: HTTP {status}")
         try:
             result = json.loads(body)
         except json.JSONDecodeError as exc:
@@ -1172,7 +1212,7 @@ class Runner:
         page = self.args.block_size
         unit = self.reuse_unit_tokens
         boundaries = cache_block_boundaries(page, unit, self.args.chunk_tokens)
-        if self.args.suite == "main-text-64k":
+        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
             boundaries = tuple(b for b in boundaries if b + 1 <= 65536)
         owners = max(1, len(self.decode_role_addrs))
         # Each triplet is cold first, then repeated before another triplet can
@@ -1229,6 +1269,17 @@ class Runner:
                 set(range(page, unit + 1, page)) | {2 * unit, self.args.chunk_tokens}
             )
         )
+        if self.args.suite == "main-text-64k-capped":
+            for boundary in decode_boundaries:
+                for suffix, reason in (("cold", "historical runtime exceeds five minutes"),
+                                       ("repeat", "explicitly deferred by user")):
+                    self.skipped_cases.append({"name": f"decode-page-cross-{boundary}-{suffix}",
+                                               "reason": reason, "sent": False})
+            for suffix in ("cold", "repeat"):
+                self.stages.append({"name": f"decode_page_cross_0_{suffix}", "passed": False,
+                                    "skipped": True, "case_names":
+                                    [f"decode-page-cross-{b}-{suffix}" for b in decode_boundaries]})
+            return
         expected = " ".join(f"{i:03d}" for i in range(max(64, page // 2)))
         last_number = max(64, page // 2) - 1
         for offset in range(0, len(decode_boundaries), 4):
@@ -1520,7 +1571,7 @@ class Runner:
             concurrent=True,
         )
 
-        if self.args.suite == "main-text-64k":
+        if self.args.suite in ("main-text-64k", "main-text-64k-capped"):
             self.run_single_prefill_64k()
             self.run_prefix_branches()
             self.run_cache_block_boundaries()
@@ -1677,6 +1728,7 @@ def main() -> int:
             "flow": runner.run_flow,
             "main-text": runner.run_main_text,
             "main-text-64k": runner.run_main_text,
+            "main-text-64k-capped": runner.run_main_text,
         }
         suites[args.suite]()
         runner.save(passed=True)
