@@ -281,7 +281,7 @@ public class FlexlbGrpcForwarder {
             ForwardGuard guard,
             Throwable error) {
         return new MasterForwardResult(null, true,
-                recordForwardFailure(requestId, guard, error),
+                recordForwardFailure(requestId, guard, ForwardOperation.SCHEDULE, error),
                 nullToEmpty(guard.masterHostIpPort()), error);
     }
 
@@ -290,13 +290,14 @@ public class FlexlbGrpcForwarder {
             ForwardGuard guard,
             Throwable error) {
         return CancelForwardResult.failed(
-                recordForwardFailure(requestId, guard, error),
+                recordForwardFailure(requestId, guard, ForwardOperation.CANCEL, error),
                 nullToEmpty(guard.masterHostIpPort()));
     }
 
     private String recordForwardFailure(
             String requestId,
             ForwardGuard guard,
+            ForwardOperation operation,
             Throwable error) {
         Status status = Status.fromThrowable(error);
         boolean grpcFailure = error instanceof StatusException
@@ -308,17 +309,33 @@ public class FlexlbGrpcForwarder {
         String masterHost = nullToEmpty(guard.masterHostIpPort());
         if (grpcFailure) {
             Logger.warn(
-                    "event=flexlb_forward_failed request_id={} forward_hop={} master={} "
-                            + "local_ip={} status={}",
-                    requestId, guard.nextHop(), masterHost,
-                    guard.localIp(), status.getCode());
+                    "event=flexlb_forward_failed request_id=" + requestId
+                            + " operation=" + operation.logValue()
+                            + " forward_hop=" + guard.nextHop()
+                            + " master=" + masterHost
+                            + " local_ip=" + guard.localIp()
+                            + " status=" + status.getCode()
+                            + " description=" + logDescription(status.getDescription()),
+                    error);
             reportForwardResult(ipOfOrLocal(masterHost), "GRPC_FAILED");
         } else {
-            Logger.error("gRPC forward to master error: request_id={} master={}",
-                    requestId, masterHost, error);
+            Logger.error("event=flexlb_forward_failed request_id=" + requestId
+                    + " operation=" + operation.logValue()
+                    + " forward_hop=" + guard.nextHop()
+                    + " master=" + masterHost
+                    + " local_ip=" + guard.localIp()
+                    + " status=" + failure, error);
             reportForwardResult(ipOfOrLocal(masterHost), "CONNECT_FAILED");
         }
         return failure;
+    }
+
+    private static String logDescription(String description) {
+        if (description == null) {
+            return "";
+        }
+        String singleLine = description.replace('\r', ' ').replace('\n', ' ');
+        return singleLine.length() > 512 ? singleLine.substring(0, 512) : singleLine;
     }
 
     private void reportForwardResult(String target, String result) {
