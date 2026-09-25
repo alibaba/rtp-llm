@@ -471,6 +471,7 @@ py_library(
     name = "sdk",
     srcs = [
         '__init__.py',
+        'kimi_k3_runtime.py',
         'model_factory.py',
         'start_server.py',
         'start_frontend_server.py',
@@ -746,7 +747,7 @@ rename_wheel(
 # Run: python -m rtp_llm.dash_sc.server [--port 8000] or: rtp-llm-dash-sc-grpc [--port 8000]
 py_library(
     name = "dash_sc_grpc_standalone_lib",
-    srcs = ["__init__.py"],
+    srcs = ["__init__.py", "kimi_k3_runtime.py"],
     deps = [
         "//rtp_llm/dash_sc:dash_sc_grpc_server",
     ],

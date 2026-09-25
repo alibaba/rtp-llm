@@ -1,4 +1,6 @@
-# Optional K3 native MLA runtime; base RTP dependencies remain unchanged.
-# Validated with CUDA 13, PyTorch 2.11 and nvidia-cutlass-dsl 4.4.2.
+# Optional K3 native operator runtime; base RTP dependencies remain unchanged.
+# Native router requires CUTLASS DSL 4.7.1; validated with PyTorch 2.11/CUDA 13.
 tokenspeed-mla==0.1.8
 tokenspeed-triton==3.8.10.post20260906
+nvidia-cutlass-dsl[cu13]==4.7.1
+flashinfer-python==0.6.18.post1

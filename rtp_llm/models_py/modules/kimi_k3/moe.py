@@ -15,7 +15,7 @@ from .attention import linear
 from .router import KimiK3RouterProjection
 from .routing import grouped_topk
 from .moe_backend import get_k3_moe_backend
-from .linear import KimiK3Bf16Linear, bf16_linear
+from .linear import KimiK3Bf16Linear, KimiK3LatentDownLinear, bf16_linear
 
 
 def situ(gate, up, beta, linear_beta, *, inplace=False):
@@ -61,7 +61,12 @@ class KimiK3LatentMoE(nn.Module):
         )
         self.router = KimiK3RouterProjection(weights[K3W.MOE_GATE])
         self.correction = weights[K3W.MOE_CORRECTION_BIAS].float()
-        self.down = linear(weights, K3W.MOE_ROUTED_DOWN, hardware)
+        down_weight = weights[K3W.MOE_ROUTED_DOWN]
+        self.down = (
+            KimiK3LatentDownLinear(down_weight)
+            if down_weight.is_cuda and down_weight.dtype == torch.bfloat16
+            else linear(weights, K3W.MOE_ROUTED_DOWN, hardware)
+        )
         self.up = linear(weights, K3W.MOE_ROUTED_UP, hardware)
         self.norm = (
             KimiK3LatentRMSNorm(weights[K3W.MOE_ROUTED_NORM], config.layernorm_eps)

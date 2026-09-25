@@ -386,3 +386,18 @@ cc_library(
         "--cuda-gpu-arch=sm_100f",
     ],
 )
+
+
+cc_library(
+    name = "kimi_k3_fused_a_gemm",
+    srcs = ["kimi_k3_fused_a_gemm.cu"],
+    hdrs = ["kimi_k3_fused_a_gemm.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        "--cuda-gpu-arch=sm_100f",
+    ],
+)

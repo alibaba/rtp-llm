@@ -231,8 +231,8 @@ cc_library(
         "RegisterCudaOps.cc",
     ],
     copts = copts() + ["-fno-strict-aliasing"] + select({
-        "@//:using_cuda13_x86": ["-DRTP_K3_NATIVE_ATTNRES", "-DRTP_K3_NATIVE_ROUTING", "-DRTP_K3_NATIVE_RMS_NORM"],
-        "@//:using_cuda13_arm": ["-DRTP_K3_NATIVE_ATTNRES", "-DRTP_K3_NATIVE_ROUTING", "-DRTP_K3_NATIVE_RMS_NORM"],
+        "@//:using_cuda13_x86": ["-DRTP_K3_NATIVE_ATTNRES", "-DRTP_K3_NATIVE_ROUTING", "-DRTP_K3_NATIVE_RMS_NORM", "-DRTP_K3_NATIVE_FUSED_A"],
+        "@//:using_cuda13_arm": ["-DRTP_K3_NATIVE_ATTNRES", "-DRTP_K3_NATIVE_ROUTING", "-DRTP_K3_NATIVE_RMS_NORM", "-DRTP_K3_NATIVE_FUSED_A"],
         "//conditions:default": [],
     }),
     deps = [
@@ -241,8 +241,8 @@ cc_library(
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
     ] + select({
-        "@//:using_cuda13_x86": ["//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_attn_res", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_topk", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_rms_norm"],
-        "@//:using_cuda13_arm": ["//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_attn_res", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_topk", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_rms_norm"],
+        "@//:using_cuda13_x86": ["//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_attn_res", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_topk", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_rms_norm", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_fused_a_gemm"],
+        "@//:using_cuda13_arm": ["//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_attn_res", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_topk", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_rms_norm", "//rtp_llm/models_py/bindings/cuda/kernels:kimi_k3_fused_a_gemm"],
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda12_9": [

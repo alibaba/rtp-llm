@@ -7,6 +7,23 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_fn, cau
 
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA convolution test')
 class KdaConvPrecisionTest(unittest.TestCase):
+    def test_reserved_zero_page_is_opt_in(self):
+        x = torch.arange(16 * 8, device="cuda", dtype=torch.float32).reshape(8, 16).bfloat16()
+        weight = torch.ones((16, 4), device="cuda", dtype=torch.float32)
+        ptr = torch.tensor([0, 5, 8], device="cuda", dtype=torch.int32)
+        table = torch.tensor([[1], [0]], device="cuda", dtype=torch.int32)
+        prefix = torch.zeros(2, device="cuda", dtype=torch.int32)
+        outputs = []
+        for reserved in (None, 0):
+            state = torch.full((2, 3, 16), -7, device="cuda", dtype=torch.bfloat16)
+            kwargs = {} if reserved is None else {"reserved_cache_block_id": reserved}
+            outputs.append(causal_conv1d_fn(x.T, weight, None, state.transpose(1, 2),
+                ptr, table, prefix, 128, preserve_input_dtype=True, **kwargs))
+            torch.testing.assert_close(state[1], x[2:5], rtol=0, atol=0)
+            expected_zero = x[5:8] if reserved is None else torch.full_like(state[0], -7)
+            torch.testing.assert_close(state[0], expected_zero, rtol=0, atol=0)
+        torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
+
     def test_fp32_weights_bf16_cache_prefill_and_decode(self):
         generator = torch.Generator().manual_seed(93)
         source = torch.rand(83,16,generator=generator).bfloat16()

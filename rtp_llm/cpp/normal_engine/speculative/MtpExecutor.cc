@@ -1962,6 +1962,13 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
+    // Host rejection sampling compacts draft input rows to accepted lengths.
+    // Its pre-rejection metadata therefore cannot be reused by the forward.
+    // Let PyWrappedModel prepare from the final compact inputs instead.
+    // DSpARK and device-state MTP retain the fixed verify geometry.
+    if (!is_dspark_ && !useStreamAsync() && !useAsyncDeviceState()) {
+        return;
+    }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.

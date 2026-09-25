@@ -16,6 +16,15 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
     def _create_prefill_wrapper(self):
         return KimiK3TokenspeedPrefill()
 
+    def _reuse_kv_cache_indexed_batched(self, compressed_kv, k_pe, kv_cache):
+        latent, suffix = super()._reuse_kv_cache_indexed_batched(
+            compressed_kv, k_pe, kv_cache
+        )
+        # The shared gather reserves full cache pages, but packs only each
+        # request's prefix and query rows. TokenSpeed expects that valid extent.
+        # Narrow before kv_b_proj so unused capacity is neither projected nor read.
+        return latent[: self.total_kv_lens], suffix[: self.total_kv_lens]
+
     def _make_kv_b_proj(self, layer_id):
         weight = self.weights[layer_id][W.mla_kv_b_w]
         if weight.is_cuda and weight.dtype == torch.bfloat16:

@@ -133,6 +133,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
+    RESERVED_CACHE_BLOCK_ID: tl.constexpr,
 ):
     conv_states_ptr = initial_states_ptr
     stride_conv_state_seq = stride_istate_seq
@@ -357,7 +358,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 + dest_idx // SEQ_SIZE_PER_BLOCK
             ).to(tl.int64)
 
-        if write_to_block and write_page_idx >= 0:
+        if write_to_block and write_page_idx >= 0 and write_page_idx != RESERVED_CACHE_BLOCK_ID:
             # tl.device_print("idx_seq:", idx_seq)
             # tl.device_print("stride_block_map:", stride_block_map)
             # tl.device_print("dest_idx:", dest_idx)
@@ -459,6 +460,7 @@ def causal_conv1d_fn(
     metadata: Optional[CausalConv1dMetadata] = None,
     validate_data=False,
     preserve_input_dtype: bool = False,
+    reserved_cache_block_id: int = -1,
 ):
     """support varlen + continuous batching when x is 2D tensor
 
@@ -632,6 +634,7 @@ def causal_conv1d_fn(
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         HAS_CACHE=block_map is not None and conv_states is not None,
+        RESERVED_CACHE_BLOCK_ID=reserved_cache_block_id,
         SEQ_SIZE_PER_BLOCK=seq_size_per_block,
         IS_CONTINUOUS_BATCHING=True,
         USE_PAD_SLOT=pad_slot_id is not None,

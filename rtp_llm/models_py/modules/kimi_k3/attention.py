@@ -1,5 +1,7 @@
 """K3 projections over RTP's MLA and paged KDA implementations."""
 
+from functools import lru_cache
+
 import torch
 from torch import nn
 
@@ -14,7 +16,7 @@ from rtp_llm.models_py.model_desc.kimi_linear import (
 )
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.collectives import reduce_scatter
-from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear
+from rtp_llm.models_py.modules.kimi_k3.linear import KimiK3Bf16Linear, KimiK3MlaLinear
 from rtp_llm.models_py.modules.kimi_k3.native_gated_norm import KimiK3GatedNorm
 from rtp_llm.models_py.modules.kimi_k3.native_mla_ops import (
     fused_q_kv_rmsnorm,
@@ -65,6 +67,8 @@ class KimiK3KDA(nn.Module):
         # Native K3 convolves BF16 input/cache with FP32 checkpoint weights.
         # Keep the activation storage dtype instead of widening to weight dtype.
         self.prefill.preserve_conv_input_dtype = True
+        # K3 padding rows reserve block zero; generic conv callers may use it.
+        self.prefill.conv_reserved_cache_block_id = 0
         self.decode = KimiLinearKDADecode(cfg, parallelism, weights)
         # Preserve FP32 recurrence in block checkpoints instead of widening BF16 snapshots.
         self.prefill.intermediate_states_in_fp32 = True
@@ -84,7 +88,8 @@ class KimiK3KDA(nn.Module):
             else self.decode
         )
         output = kernel(
-            qkv.contiguous(), forget, beta, attention_inputs, cache, metadata
+            qkv if kernel is self.prefill else qkv.contiguous(),
+            forget, beta, attention_inputs, cache, metadata
         )
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:
@@ -93,6 +98,11 @@ class KimiK3KDA(nn.Module):
         output = self.norm(output.reshape(-1, self.dim), gate.reshape(-1, self.dim))
         output = self.output(output.reshape(-1, self.width))
         return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
+
+
+@lru_cache(None)
+def _mla_aux_stream(device):
+    return torch.cuda.Stream(device=device)
 
 
 class KimiK3MLA(nn.Module):
@@ -118,12 +128,29 @@ class KimiK3MLA(nn.Module):
         self.output = linear(weights, W.attn_o_w, hardware)
         self.q_norm = RMSNorm(weights[W.mla_q_a_ln_gamma], config.layernorm_eps)
         self.kv_norm = RMSNorm(weights[W.mla_kv_a_ln_gamma], config.layernorm_eps)
+        self._gate_stream = None
+        weight = weights[W.mla_fusedqkrope_w]
+        if (
+            isinstance(self.input, KimiK3Bf16Linear)
+            and weight.is_cuda and weight.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(weight.device) in ((10, 3), (10, 7))
+            and (self.q_rank + self.kv_rank + self.suffix_dim,
+                 self.heads * self.v_dim, weight.shape[0]) == (2112, 1536, 7168)
+        ):
+            # One allocation supports fused prefill and contiguous split views.
+            self.input.weight = self.input.weight.contiguous()
+            qkv_rows = self.q_rank + self.kv_rank + self.suffix_dim
+            self.qkv_input = KimiK3MlaLinear(self.input.weight[:qkv_rows].t())
+            self.gate_input = KimiK3MlaLinear(self.input.weight[qkv_rows:].t())
+            self.q_b = KimiK3MlaLinear(weights[W.mla_q_b_w])
+            self._gate_stream = _mla_aux_stream(weight.device)
+            self._gate_start = torch.cuda.Event()
+            self._gate_done = torch.cuda.Event()
 
-    def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None):
-        full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
-        q, kv, gate = self.input(full_hidden).split(
-            [self.q_rank, self.kv_rank + self.suffix_dim, self.heads * self.v_dim],
-            dim=-1,
+
+    def _attend(self, qkv, fmha, cache):
+        q, kv = qkv.split(
+            [self.q_rank, self.kv_rank + self.suffix_dim], dim=-1
         )
         latent, suffix = kv.split([self.kv_rank, self.suffix_dim], dim=-1)
         if q.is_cuda:
@@ -140,7 +167,25 @@ class KimiK3MLA(nn.Module):
         output = fmha.forward(q, latent, suffix, cache, self.layer_idx, None)
         if output is None:
             raise RuntimeError("K3 MLA backend returned no attention output")
-        output = output.reshape(-1, self.heads * self.v_dim)
+        return output.reshape(-1, self.heads * self.v_dim)
+
+    def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None):
+        full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+        qkv_rows = self.q_rank + self.kv_rank + self.suffix_dim
+        if self._gate_stream is not None and full_hidden.shape[0] < 512:
+            # Native event fork/join: attention on current stream, gate on aux.
+            self._gate_start.record()
+            output = self._attend(self.qkv_input(full_hidden), fmha, cache)
+            with torch.cuda.stream(self._gate_stream):
+                self._gate_start.wait()
+                gate = self.gate_input(full_hidden)
+                self._gate_done.record()
+            self._gate_done.wait()
+        else:
+            qkv, gate = self.input(full_hidden).split(
+                [qkv_rows, self.heads * self.v_dim], dim=-1
+            )
+            output = self._attend(qkv, fmha, cache)
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:
             output = torch.where(valid_mask[:, None], output, 0)

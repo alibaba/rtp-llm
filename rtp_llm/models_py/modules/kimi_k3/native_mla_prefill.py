@@ -74,9 +74,14 @@ class KimiK3TokenspeedPrefill:
 
     def run(self, q, k, v):
         shapes = ((self.q_tokens,self.heads,192), (self.k_tokens,self.heads,192), (self.k_tokens,self.heads,128))
-        for tensor, shape in zip((q,k,v), shapes):
+        for name, tensor, shape in zip(("q", "k", "v"), (q,k,v), shapes):
             if tensor.dtype != torch.bfloat16 or tuple(tensor.shape) != shape:
-                raise ValueError("K3 native prefill tensor dtype/shape does not match its plan")
+                raise ValueError(
+                    f"K3 native prefill {name} does not match its plan: "
+                    f"actual_shape={tuple(tensor.shape)} actual_dtype={tensor.dtype} "
+                    f"expected_shape={shape} expected_dtype=torch.bfloat16; "
+                    f"batch={self.batch} q_tokens={self.q_tokens} k_tokens={self.k_tokens}"
+                )
             if tensor.device != self.qo_indptr.device:
                 raise ValueError("K3 native prefill tensor and metadata devices must match")
         if self.q_tokens == 0:

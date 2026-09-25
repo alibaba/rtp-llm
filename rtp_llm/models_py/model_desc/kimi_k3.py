@@ -228,9 +228,9 @@ class KimiK3Model(GptModelBase):
 
             implementation = KimiK3MlaPrefillImpl
         else:
-            return super().prepare_fmha_impl(
-                inputs, is_cuda_graph, cuda_graph_selection_mode
-            )
+            from rtp_llm.models_py.modules.kimi_k3.mla_verify import KimiK3MlaVerifyImpl
+
+            implementation = KimiK3MlaVerifyImpl
 
         def create(attention_inputs):
             return implementation(

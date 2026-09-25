@@ -1,3 +1,6 @@
+#ifdef RTP_K3_NATIVE_FUSED_A
+#include "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_fused_a_gemm.h"
+#endif
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
@@ -25,6 +28,10 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+#ifdef RTP_K3_NATIVE_FUSED_A
+    rtp_ops_m.def("kimi_k3_fused_a_gemm", &kimi_k3_fused_a_gemm,
+                 py::arg("output"), py::arg("input"), py::arg("weight"), py::arg("enable_pdl") = true);
+#endif
 #ifdef RTP_K3_NATIVE_RMS_NORM
     rtp_ops_m.def("kimi_k3_rms_norm", &kimi_k3_rms_norm,
                  py::arg("input"), py::arg("weight"), py::arg("epsilon"));

@@ -44,9 +44,6 @@ def launch_config(args):
         "LOAD_METHOD": "fastsafetensors",
         "LOAD_PYTHON_MODEL": "1",
         "ACT_TYPE": "BF16",
-        # Match native Blackwell batch invariance: prevent split-K from
-        # changing dense down-projection results after prefix-cache reuse.
-        "CUBLAS_WORKSPACE_CONFIG": ":16:8",
         "SP_TYPE": "mtp",
         "SP_MODEL_TYPE": "kimi_k3_mtp",
         "SP_CHECKPOINT_PATH": str(draft),
@@ -86,7 +83,7 @@ def launch_config(args):
         "max_batch_tokens_size": 65536,
         "concurrency_limit": 16,
         "seq_size_per_block": 4096,
-        "kernel_seq_size_per_block": 128,
+        "kernel_seq_size_per_block": 64,
         "linear_step": 1,
         "ssm_state_dtype": "fp32",
         "fp8_kv_cache": 0,

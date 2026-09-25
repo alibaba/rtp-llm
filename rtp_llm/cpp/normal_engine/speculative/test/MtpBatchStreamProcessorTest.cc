@@ -1959,6 +1959,47 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesEvery
     EXPECT_TRUE(torch::equal(actual, expected));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testK3AcceptedStatePayloadUsesLogicalPrefix) {
+    // Candidate i contains the state after the current token and i draft tokens.
+    // Use payload identity as the oracle, independently of host swap helpers.
+    constexpr int32_t block_size = 4096;
+    constexpr int64_t blocks = 8;
+    std::vector<int32_t> previous, accepts;
+    for (int32_t cached : {4094, 4095, 4096, 8190, 8191, 8192}) {
+        for (int32_t accepted_drafts = 0; accepted_drafts <= 3; ++accepted_drafts) {
+            previous.push_back(cached + 1);
+            accepts.push_back(accepted_drafts + 1);
+        }
+    }
+    const int64_t batch = previous.size();
+    auto table = (torch::arange(3 * batch * blocks, torch::kInt32) + 1).reshape({3, batch, blocks});
+    auto advanced = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
+        table.to(torch::kCUDA), torch::tensor(previous, torch::kInt32).to(torch::kCUDA),
+        torch::tensor(accepts, torch::kInt32).to(torch::kCUDA),
+        {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::LINEAR}, block_size).cpu();
+    for (int64_t row = 0; row < batch; ++row) {
+        const int32_t cached = previous[row] - 1;
+        const int32_t count = accepts[row];
+        const int32_t source = cached / block_size + count - 1;
+        const int32_t final_slot = (cached + count - 1) / block_size;
+        for (int64_t group : {0L, 2L}) {
+            EXPECT_EQ(advanced[group][row][final_slot].item<int32_t>(),
+                      table[group][row][source].item<int32_t>())
+                << "cached=" << cached << " accepted_drafts=" << count - 1;
+            // A completed boundary retains its own prefix checkpoint even if
+            // the accepted final state has advanced into the following block.
+            const int32_t until_boundary = block_size - cached % block_size;
+            if (until_boundary < count) {
+                const int32_t boundary_slot = cached / block_size;
+                const int32_t boundary_source = cached / block_size + until_boundary - 1;
+                EXPECT_EQ(advanced[group][row][boundary_slot].item<int32_t>(),
+                          table[group][row][boundary_source].item<int32_t>());
+            }
+        }
+    }
+    EXPECT_TRUE(torch::equal(table.select(0, 1), advanced.select(0, 1)));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelPairAndFreshRows) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

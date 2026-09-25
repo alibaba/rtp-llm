@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.kimi_k3.mla_prefill import KimiK3MlaPrefillImpl
+from rtp_llm.models_py.modules.kimi_k3.mla_prefill import KimiK3MlaPrefillImpl, KimiK3MlaPrefillOp
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import MlaFlashInferPrefillImpl
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, LayerKVCache
@@ -14,6 +14,34 @@ from rtp_llm.utils.model_weight import W
 
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required')
 class KimiK3MlaPrefillTest(unittest.TestCase):
+    def test_partial_page_reuse_excludes_capacity_tail_with_sp_dummy(self):
+        # One accepted token with a 13-token prefix plus seven SP dummy tokens.
+        # The shared gather reserves 128 + 8 rows, but writes only 13 + 8.
+        op = object.__new__(KimiK3MlaPrefillOp)
+        op.kv_cache_type = KvCacheDataType.BASE
+        op.token_per_block = 128
+        op.total_kv_lens = 21
+        op.reuse_cache_page_indice = torch.tensor([1], dtype=torch.int32, device="cuda")
+        op.qo_indptr = torch.tensor([0, 1, 8], dtype=torch.int32, device="cuda")
+        op.batch_reuse_info_vec = torch.tensor(
+            [[0, 13, 0, 1], [1, 0, 1, 0]], dtype=torch.int32, device="cuda"
+        )
+        cache = LayerKVCache()
+        cache.kv_cache_base = torch.full(
+            (2, 128, 576), float("nan"), dtype=torch.bfloat16, device="cuda"
+        )
+        prefix = torch.arange(13 * 576, device="cuda").reshape(13, 576).bfloat16()
+        cache.kv_cache_base[1, :13].copy_(prefix)
+        current = torch.arange(8 * 576, device="cuda").reshape(8, 576).bfloat16()
+        latent, suffix = op._reuse_kv_cache_indexed_batched(
+            current[:, :512].contiguous(), current[:, 512:].contiguous(), cache
+        )
+        self.assertEqual(latent.shape, (21, 512))
+        self.assertEqual(suffix.shape, (21, 64))
+        torch.testing.assert_close(latent, torch.cat([prefix[:, :512], current[:, :512]]), rtol=0, atol=0)
+        torch.testing.assert_close(suffix, torch.cat([prefix[:, 512:], current[:, 512:]]), rtol=0, atol=0)
+        self.assertEqual(latent.dtype, torch.bfloat16)
+
     def test_cached_suffix_and_legacy_defaults(self):
         torch.manual_seed(4921)
         heads, rank, nope, suffix, value, page = 16, 512, 128, 64, 128, 128

@@ -273,7 +273,10 @@ public:
         event_name_ = std::move(name);
     }
 
+    size_t prepare_call_count = 0;
+
     void prepareAttentionInputs(const GptModelInputs& inputs) override {
+        ++prepare_call_count;
         if (prepare_input_holder.test_data.empty()) {
             return;
         }
@@ -1280,6 +1283,11 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     ASSERT_TRUE(status.ok());
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step - 1);
     EXPECT_EQ(draft_prefill_fake_model->forwardCount(), 1u);
+    if (!components.executor->useStreamAsync() && !components.executor->useAsyncDeviceState()) {
+        // This fixture accepts three rows from a five-row verify window.
+        // Preparing the draft before rejection would retain the wrong shape.
+        EXPECT_EQ(draft_prefill_fake_model->prepare_call_count, 0u);
+    }
     if (components.executor->useAsyncPrepare()) {
         EXPECT_FALSE(fake_target_model->hasPendingPrepareInputs());
     }

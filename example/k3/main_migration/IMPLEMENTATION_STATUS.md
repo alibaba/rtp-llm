@@ -1,3 +1,9 @@
+# Current status (2026-09-25)
+
+Read [the BF16 handoff](HANDOFF_BF16_20260925.md) first. Full 93-layer dual-host BF16 PD smoke has 118 completed and independently checked cases; three long repeat cases were deferred by the user. This is not a complete original-suite pass, FP8 completion, or merge-readiness claim. The historical notes below are retained for provenance and are superseded by the handoff.
+
+---
+
 # K3 main migration — work in progress
 
 This branch is not ready to merge or deploy. Neither full-model smoke gate has
