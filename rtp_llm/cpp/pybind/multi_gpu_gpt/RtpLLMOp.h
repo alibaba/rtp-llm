@@ -29,17 +29,24 @@ public:
     void stop();
     void
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
-    void pause();
-    void restart();
+    void     pause();
+    void     restart();
+    py::dict shutdownStatus() const;
+    void     beginShutdown();
+    void     drainShutdown(int64_t timeout_ms, bool seal_continuations);
+    void     freezeShutdown();
+    void     quiesceShutdown(const std::string& token, int64_t timeout_ms);
+    void     terminateShutdown();
 
 private:
-    void             _init(int64_t                                       model_rpc_port,
-                           int64_t                                       http_port,
-                           const EngineInitParams                        maga_init_params,
-                           py::object                                    mm_process_engine,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                           py::object                                    token_processor);
-    EngineInitParams initModel(py::object model, py::object engine_config, py::object vit_config);
+    std::shared_ptr<EngineBase> shutdownEngine() const;
+    void                        _init(int64_t                                       model_rpc_port,
+                                      int64_t                                       http_port,
+                                      const EngineInitParams                        maga_init_params,
+                                      py::object                                    mm_process_engine,
+                                      std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                      py::object                                    token_processor);
+    EngineInitParams            initModel(py::object model, py::object engine_config, py::object vit_config);
     std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object              propose_model,
                                                                    const EngineInitParams& base_params);
     void                                          initRPCServer(const EngineInitParams                        maga_init_params,
@@ -49,13 +56,13 @@ private:
 
 private:
     std::shared_ptr<CpuQuiesceCoordinator> quiesce_coordinator_;
-    std::unique_ptr<RpcServiceImpl> model_rpc_service_;
-    std::shared_ptr<HttpApiServer>  http_server_;
-    std::unique_ptr<grpc::Server>   grpc_server_;
-    std::thread                     grpc_server_thread_;
-    std::atomic<bool>               is_server_ready_{false};
-    std::atomic<bool>               is_server_shutdown_{false};
-    size_t                          model_id_ = 0;
+    std::unique_ptr<RpcServiceImpl>        model_rpc_service_;
+    std::shared_ptr<HttpApiServer>         http_server_;
+    std::unique_ptr<grpc::Server>          grpc_server_;
+    std::thread                            grpc_server_thread_;
+    std::atomic<bool>                      is_server_ready_{false};
+    std::atomic<bool>                      is_server_shutdown_{false};
+    size_t                                 model_id_ = 0;
 };
 
 void registerRtpLLMOp(const py::module& m);

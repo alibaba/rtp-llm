@@ -60,6 +60,7 @@ class LifecycleController:
 
     COMMIT_MAX_ATTEMPTS = 3
     COMMIT_POLL_INTERVAL_S = 0.1
+    WAKE_PREPARE_RECOVERY_TIMEOUT_S = 30.0
 
     def __init__(
         self,
@@ -733,6 +734,14 @@ class LifecycleController:
             )
         )
         failures = [result for result in prepare_results if "error" in result]
+        if failures:
+            # A prepare RPC may consume its entire transport budget while the
+            # backend continues restoring resources. Keep the original budget
+            # for early failures, but allow a bounded final confirmation window
+            # after slow failures; do not restart another full 600-second wait.
+            deadline = max(
+                deadline, perf_counter() + self.WAKE_PREPARE_RECOVERY_TIMEOUT_S
+            )
         while failures:
             statuses = await self._raw_sleep_statuses()
             covered = (

@@ -1440,6 +1440,100 @@ class LifecycleControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller._raw_sleep_statuses.await_count, 2)
         controller._converge_commit.assert_awaited_once()
 
+    async def _run_slow_wake_prepare(self, status_rounds, elapsed_s=600.1):
+        """Consume the RPC budget without sleeping for ten minutes in a test."""
+        controller, pb2 = self._build_controller(control_addresses=["rank-0", "rank-1"])
+        snapshots = [
+            {"address": address, "worker_incarnation": address, "sleep_epoch": 1}
+            for address in controller.control_addresses
+        ]
+        now = [0.0]
+
+        async def prepare(address, rpc_name, request, timeout_s):
+            self.assertEqual(rpc_name, "WakeUpServing")
+            self.assertEqual(timeout_s, 600)
+            self.assertEqual(request.expected_incarnation, address)
+            self.assertEqual(request.expected_sleep_epoch, 1)
+            now[0] = elapsed_s
+            return {"address": address, "error": "prepare RPC timed out"}
+
+        async def poll_sleep(seconds):
+            self.assertGreater(seconds, 0)
+            now[0] += seconds
+
+        responses = [
+            [{**snapshot, **state} for snapshot, state in zip(snapshots, states)]
+            for states in status_rounds
+        ]
+
+        async def status():
+            # Repeat the last snapshot to exercise a bounded, never-ready peer.
+            return responses.pop(0) if len(responses) > 1 else responses[0]
+
+        controller._call_control_rpc = AsyncMock(side_effect=prepare)
+        controller._raw_sleep_statuses = AsyncMock(side_effect=status)
+        controller._converge_commit = AsyncMock(return_value={"status": "ok"})
+        controller.COMMIT_POLL_INTERVAL_S = 10
+        with patch(
+            "rtp_llm.utils.lifecycle_controller.perf_counter",
+            side_effect=lambda: now[0],
+        ), patch(
+            "rtp_llm.utils.lifecycle_controller.asyncio.sleep", side_effect=poll_sleep
+        ):
+            result = await controller._wake_up_to_terminal(
+                pb2.WakeUpRequestPB(prepare_only=True),
+                pb2.WakeUpRequestPB(commit_only=True),
+                snapshots,
+            )
+        return controller, result, now[0] - elapsed_s
+
+    async def test_slow_wake_prepare_keeps_a_bounded_confirmation_window(self):
+        ready = {"state": "WAKING_UP", "wake_prepared": True}
+        pending = {"state": "WAKING_UP", "wake_prepared": False}
+        for elapsed_s in (599, 600.1):
+            with self.subTest(elapsed_s=elapsed_s):
+                controller, result, waited = await self._run_slow_wake_prepare(
+                    [[ready, pending], [ready, ready]], elapsed_s
+                )
+                self.assertEqual(result, {"status": "ok"})
+                self.assertEqual(controller._raw_sleep_statuses.await_count, 2)
+                controller._converge_commit.assert_awaited_once()
+                self.assertGreater(waited, 0)
+
+    async def test_slow_wake_prepare_confirmation_still_expires(self):
+        pending = {"state": "WAKING_UP", "wake_prepared": False}
+        controller, result, waited = await self._run_slow_wake_prepare(
+            [[pending, pending]]
+        )
+        self.assertTrue(result["recovery_required"])
+        self.assertEqual(len(result["prepare_details"]), 2)
+        self.assertAlmostEqual(waited, 30)
+        controller._converge_commit.assert_not_awaited()
+
+    async def test_slow_wake_prepare_confirmation_preserves_rank_fences(self):
+        ready = {"state": "WAKING_UP", "wake_prepared": True}
+        pending = {"state": "WAKING_UP", "wake_prepared": False}
+        for invalid in (
+            {**ready, "worker_incarnation": "replacement"},
+            {**ready, "sleep_epoch": 2},
+            {"state": "ERROR", "last_error": "restore failed"},
+            {"state": "SLEEPING"},
+        ):
+            with self.subTest(invalid=invalid):
+                controller, result, waited = await self._run_slow_wake_prepare(
+                    [[ready, pending], [ready, invalid]]
+                )
+                self.assertTrue(result["recovery_required"])
+                self.assertEqual(controller._raw_sleep_statuses.await_count, 2)
+                controller._converge_commit.assert_not_awaited()
+
+    async def test_slow_wake_prepare_accepts_an_already_prepared_snapshot(self):
+        ready = {"state": "WAKING_UP", "wake_prepared": True}
+        controller, result, waited = await self._run_slow_wake_prepare([[ready, ready]])
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(waited, 0)
+        controller._converge_commit.assert_awaited_once()
+
     async def test_prepared_ack_from_replaced_rank_or_epoch_is_rejected(self):
         for incarnation, epoch in [("replacement", 5), ("original", 6)]:
             with self.subTest(incarnation=incarnation, epoch=epoch):

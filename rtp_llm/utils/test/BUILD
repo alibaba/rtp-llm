@@ -26,6 +26,12 @@ py_test(
 )
 
 py_test(
+    name = "backend_shutdown_test",
+    srcs = ["backend_shutdown_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     srcs = [
         "jit_cache_manager_test.py",
