@@ -37,6 +37,14 @@ def recovery_required(
                 detail["grpc_status"] = status["grpc_status"]
         else:
             detail["state"] = status.get("state", "")
+            for field in (
+                "sleep_epoch",
+                "worker_incarnation",
+                "wake_prepared",
+                "last_error",
+            ):
+                if field in status:
+                    detail[field] = status[field]
         details.append(detail)
     return {
         "error": f"RECOVERY_REQUIRED: {operation} {reason}",
@@ -104,7 +112,9 @@ def aggregate(
     # Per-worker fencing data belongs to the internal coordination protocol,
     # not the public instance status (workers have different incarnations).
     aggregate_status.pop("quiesce_protocol", None)
+    aggregate_status.pop("wake_prepare_protocol", None)
     aggregate_status.pop("worker_incarnation", None)
+    aggregate_status.pop("wake_prepared", None)
     if coverage_error:
         aggregate_status["effective"] = False
         aggregate_status["supported_levels"] = []

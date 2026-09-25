@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <memory>
 #include <tuple>
+#include <stdexcept>
 #include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
@@ -441,6 +442,70 @@ void RtpLLMOp::restart() {
     engine->restart();
 }
 
+py::dict RtpLLMOp::shutdownStatus() const {
+    if (!model_rpc_service_) {
+        throw std::runtime_error("backend lifecycle control is not initialized");
+    }
+    const auto engine = model_rpc_service_->getEngine();
+    const auto status = engine->sleepController().status();
+    py::dict   result;
+    result["supported"]          = engine->executionQuiesceSupported();
+    result["worker_incarnation"] = status.worker_incarnation;
+    result["state"]              = sleepStateToString(status.state);
+    return result;
+}
+
+void RtpLLMOp::beginShutdown() {
+    if (!model_rpc_service_) {
+        throw std::runtime_error("backend lifecycle control is not initialized");
+    }
+    auto engine = model_rpc_service_->getEngine();
+    engine->getScheduler().admission()->beginTermination();
+    engine->requestTermination();
+    // Do not call PrefillBatchRpcServer::beginShutdown here: its final cleanup
+    // cancels deferred work. Counted continuations must first be allowed to drain.
+}
+
+void RtpLLMOp::drainShutdown(int64_t timeout_ms, bool seal_continuations) {
+    auto engine = model_rpc_service_->getEngine();
+    if (!engine->getScheduler().admission()->terminating()) {
+        throw std::runtime_error("shutdown drain requires terminal admission intent");
+    }
+    if (seal_continuations) {
+        engine->getScheduler().admission()->sealContinuations();
+    }
+    if (engine->sleepController().status().state == SleepState::RUNNING) {
+        engine->armCollectiveSleepQuiesce();
+    }
+    auto& drain = engine->getScheduler().drainManager();
+    if (!drain.waitDrained(timeout_ms)) {
+        throw std::runtime_error("shutdown drain deadline exceeded: " + drain.pendingCountersDebugString());
+    }
+}
+
+uint64_t RtpLLMOp::freezeShutdown() {
+    auto engine = model_rpc_service_->getEngine();
+    if (!engine->getScheduler().admission()->terminating() || !engine->getScheduler().admission()->continuationsSealed()
+        || !engine->getScheduler().drainManager().drained()) {
+        throw std::runtime_error("shutdown freeze requires sealed and drained terminal admission");
+    }
+    return engine->freezeSleepRounds();
+}
+
+void RtpLLMOp::quiesceShutdown(uint64_t target_round, int64_t timeout_ms) {
+    const auto status = model_rpc_service_->getEngine()->quiesce(timeout_ms, target_round);
+    if (!status.ok()) {
+        throw std::runtime_error("shutdown quiesce failed: " + status.ToString());
+    }
+}
+
+void RtpLLMOp::terminateShutdown() {
+    const auto status = model_rpc_service_->getEngine()->terminate();
+    if (!status.ok()) {
+        throw std::runtime_error("shutdown terminate failed: " + status.ToString());
+    }
+}
+
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
@@ -458,7 +523,13 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("stop", &RtpLLMOp::stop);
+        .def("stop", &RtpLLMOp::stop)
+        .def("shutdown_status", &RtpLLMOp::shutdownStatus)
+        .def("begin_shutdown", &RtpLLMOp::beginShutdown, py::call_guard<py::gil_scoped_release>())
+        .def("drain_shutdown", &RtpLLMOp::drainShutdown, py::call_guard<py::gil_scoped_release>())
+        .def("freeze_shutdown", &RtpLLMOp::freezeShutdown, py::call_guard<py::gil_scoped_release>())
+        .def("quiesce_shutdown", &RtpLLMOp::quiesceShutdown, py::call_guard<py::gil_scoped_release>())
+        .def("terminate_shutdown", &RtpLLMOp::terminateShutdown, py::call_guard<py::gil_scoped_release>());
 }
 
 }  // namespace rtp_llm

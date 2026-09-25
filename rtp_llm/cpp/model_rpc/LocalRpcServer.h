@@ -32,7 +32,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
-class LocalRpcServer {
+class LocalRpcServer: public std::enable_shared_from_this<LocalRpcServer> {
 public:
     LocalRpcServer() {}
     virtual ~LocalRpcServer() {}
@@ -124,7 +124,7 @@ public:
 
 protected:
     // Non-owning health/status check. Inference entries must use
-    // acquireAdmission() and retain the returned lease for their full scope.
+    // acquireAdmission() and notify completion after their final cleanup.
     grpc::Status checkAdmission() const {
         return admission_gate_ ? admission_gate_->check() : grpc::Status::OK;
     }
@@ -135,6 +135,8 @@ protected:
         return admission_gate_ ? admission_gate_->acquireCacheTransfer() : AdmissionAcquireResult{};
     }
 
+    // Serving instances must have shared ownership before installing callbacks.
+    // Weak callbacks pin the complete derived service only for their invocation.
     // Wire the sleep/wake_up SleepHooks (M3 drain counters, M5 KV memory,
     // M6 weights, engine quiesce) into engine_->sleepController().
     void installSleepHooks();
@@ -168,7 +170,6 @@ protected:
 protected:
     std::shared_ptr<EngineBase>                                engine_;
     std::shared_ptr<AdmissionGate>                             admission_gate_;
-    std::shared_ptr<DrainManager>                              drain_manager_;
     std::shared_ptr<VmmBackend>                                vmm_backend_;
     std::shared_ptr<MultimodalProcessor>                       mm_processor_;
     EngineInitParams                                           maga_init_params_;
@@ -177,9 +178,19 @@ protected:
     std::atomic<size_t>                                        onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta>                      meta_;
     py::object                                                 weight_manager_;
-    mutable std::mutex                                         abortable_streams_mutex_;
-    std::unordered_map<int64_t, std::weak_ptr<GenerateStream>> abortable_streams_;
-    std::shared_ptr<BroadcastManager>                          tp_broadcaster_;
+    // Request cleanup only needs this pure-C++ registry, not the Python-bearing
+    // RPC service. Tokens hold it weakly and can retire without acquiring the GIL.
+    struct AbortableStreamRegistry {
+        mutable std::mutex                                         mutex;
+        std::unordered_map<int64_t, std::weak_ptr<GenerateStream>> streams;
+
+        void erase(int64_t request_id) {
+            std::lock_guard<std::mutex> lock(mutex);
+            streams.erase(request_id);
+        }
+    };
+    std::shared_ptr<AbortableStreamRegistry> abortable_streams_ = std::make_shared<AbortableStreamRegistry>();
+    std::shared_ptr<BroadcastManager>        tp_broadcaster_;
     // Level-2 wake overlaps the host memory-cache pinned rebuild (restoreMemoryCacheBacking,
     // pure host cudaHostAlloc + memcpy) with the GPU weight reload. Launched at the start of
     // restoreRestorableGpuMemory, joined in restoreKvMemoryBackingAndResetMetadata before the

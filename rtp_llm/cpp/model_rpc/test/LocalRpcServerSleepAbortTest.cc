@@ -1,9 +1,12 @@
+#include "rtp_llm/cpp/engine_base/sleep/test/BoundSleepLifecycleController.h"
 #include <chrono>
 #include <future>
 #include <memory>
+#include <optional>
 #include <thread>
 
 #include <gtest/gtest.h>
+#include <pybind11/embed.h>
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
@@ -42,9 +45,9 @@ std::shared_ptr<NormalGenerateStream> makeStream(int64_t request_id, bool stream
 }
 
 // A controller stuck in DRAINING rejects admission: sleep() with a failing drain
-// hook stays in DRAINING per SleepLifecycleController design.
-std::shared_ptr<SleepLifecycleController> drainingController() {
-    auto       controller = std::make_shared<SleepLifecycleController>(true);
+// hook stays in DRAINING per BoundSleepLifecycleController design.
+std::shared_ptr<BoundSleepLifecycleController> drainingController() {
+    auto       controller = std::make_shared<BoundSleepLifecycleController>(true);
     SleepHooks hooks;
     hooks.drain = [](const SleepOptions&) { return false; };
     controller->setHooks(hooks);
@@ -54,8 +57,224 @@ std::shared_ptr<SleepLifecycleController> drainingController() {
 
 }  // namespace
 
+namespace {
+class HookTestScheduler: public SchedulerBase {
+public:
+    absl::Status enqueue(const GenerateStreamPtr&) override {
+        return absl::OkStatus();
+    }
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueGroup(const std::vector<GenerateStreamPtr>&) override {
+        return {{}, {}};
+    }
+    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
+        return std::list<GenerateStreamPtr>{};
+    }
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    bool empty() override {
+        return true;
+    }
+    int64_t lastScheduleTime() override {
+        return 0;
+    }
+    int64_t onflightStreams() override {
+        return 0;
+    }
+};
+
+class HookTestEngine: public EngineBase {
+public:
+    explicit HookTestEngine(int& destructions): EngineBase(EngineInitParams{}), destructions_(destructions) {
+        scheduler_ = std::make_unique<HookTestScheduler>();
+        sleepController().bindAdmission(scheduler_->admission());
+    }
+    ~HookTestEngine() override {
+        ++destructions_;
+    }
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void         enqueue(GenerateStreamPtr&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+private:
+    int& destructions_;
+};
+
+struct HookOwnerTestState {
+    std::atomic<int>   calls{0};
+    std::atomic<int>   destructions{0};
+    std::atomic<bool>  destroyed_with_gil{false};
+    bool               block{false};
+    std::promise<void> entered;
+    std::promise<void> release;
+};
+
+class HookOwnerTestServer: public LocalRpcServer {
+public:
+    explicit HookOwnerTestServer(std::shared_ptr<HookOwnerTestState> state): state_(std::move(state)) {}
+    ~HookOwnerTestServer() override {
+        state_->destroyed_with_gil = !Py_IsInitialized() || PyGILState_Check();
+        ++state_->destructions;
+    }
+    size_t activeCacheTransferCount() override {
+        // Keep the synchronization storage independent of the server so the RED
+        // run can observe premature destruction without dereferencing freed data.
+        auto state = state_;
+        ++state->calls;
+        if (state->block) {
+            state->entered.set_value();
+            state->release.get_future().wait();
+        }
+        return 0;
+    }
+
+private:
+    std::shared_ptr<HookOwnerTestState> state_;
+};
+}  // namespace
+
+TEST(LocalRpcServerSleepAbortTest, CopiedServiceCallbacksRejectExpiredOwner) {
+    for (bool sleep_enabled : {false, true}) {
+        int  destructions = 0;
+        auto engine       = std::make_shared<HookTestEngine>(destructions);
+        engine->sleepController().setEnabled(sleep_enabled);
+        auto state = std::make_shared<HookOwnerTestState>();
+        // Retain storage after shared ownership expires: the old implementation
+        // can fail its assertions without deliberately executing a heap UAF.
+        std::unique_ptr<HookOwnerTestServer> retired;
+        auto server     = std::shared_ptr<HookOwnerTestServer>(new HookOwnerTestServer(state),
+                                                           [&](auto* value) { retired.reset(value); });
+        server->engine_ = engine;
+        server->installSleepHooks();
+        auto&                         drain      = engine->getScheduler().drainManager();
+        auto                          counter    = drain.counters_.at("rpc_cache_transfer").fn;
+        auto                          cancel     = drain.cancel_callback_;
+        auto                          diagnostic = engine->sleepController().hooks_.hookFailureDetail;
+        std::weak_ptr<LocalRpcServer> weak       = server;
+        server.reset();
+        ASSERT_TRUE(weak.expired());
+        EXPECT_THROW(counter(), std::runtime_error);
+        EXPECT_THROW(cancel(), std::runtime_error);
+        EXPECT_THROW(diagnostic("unrelated"), std::runtime_error);
+        EXPECT_EQ(state->calls.load(), 0);
+        EXPECT_FALSE(drain.drained());
+        EXPECT_EQ(drain.activeCacheTransferCount(), 1);
+        retired.reset();
+    }
+}
+
+TEST(LocalRpcServerSleepAbortTest, InFlightCounterKeepsDerivedOwnerAliveAndReleasesWithGil) {
+    // Own the interpreter only in the standalone native test runtime. Declare it
+    // first so every Python-owning fixture and joined callback dies before it.
+    std::optional<py::scoped_interpreter> interpreter;
+    if (!Py_IsInitialized()) {
+        interpreter.emplace();
+    }
+    ASSERT_TRUE(Py_IsInitialized());
+    py::gil_scoped_acquire hold_gil;
+    int                    destructions = 0;
+    auto                   engine       = std::make_shared<HookTestEngine>(destructions);
+    auto                   state        = std::make_shared<HookOwnerTestState>();
+    state->block                        = true;
+    auto server                         = std::make_shared<HookOwnerTestServer>(state);
+    server->engine_                     = engine;
+    server->installSleepHooks();
+    auto                          counter = engine->getScheduler().drainManager().counters_.at("rpc_cache_transfer").fn;
+    std::weak_ptr<LocalRpcServer> weak    = server;
+    auto                          running = std::async(std::launch::async, [counter] { return counter(); });
+    state->entered.get_future().wait();
+    server.reset();
+    EXPECT_FALSE(weak.expired());
+    EXPECT_EQ(state->destructions.load(), 0);
+    state->release.set_value();
+    {
+        std::optional<py::gil_scoped_release> release_gil;
+        if (Py_IsInitialized() && PyGILState_Check()) {
+            release_gil.emplace();
+        }
+        EXPECT_EQ(running.get(), 0);
+    }
+    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(state->destructions.load(), 1);
+    EXPECT_TRUE(state->destroyed_with_gil.load());
+}
+
+TEST(LocalRpcServerSleepAbortTest, AbortRegistrationTokenDoesNotTouchExpiredOwner) {
+    auto                          state  = std::make_shared<HookOwnerTestState>();
+    auto                          server = std::make_shared<HookOwnerTestServer>(state);
+    BoundSleepLifecycleController controller(true);
+    server->admission_gate_ = std::make_shared<AdmissionGate>(&controller, "test_instance");
+    auto stream             = makeStream(987, false);
+    auto token              = server->registerAbortableStreamForScope(stream);
+    ASSERT_NE(token, nullptr);
+    ASSERT_EQ(server->abortable_streams_->streams.size(), 1);
+    std::weak_ptr<LocalRpcServer>                          weak_owner    = server;
+    std::weak_ptr<LocalRpcServer::AbortableStreamRegistry> weak_registry = server->abortable_streams_;
+    server.reset();
+    ASSERT_TRUE(weak_owner.expired());
+    ASSERT_TRUE(weak_registry.expired());
+    token.reset();
+    EXPECT_EQ(state->destructions.load(), 1);
+}
+
+TEST(LocalRpcServerSleepAbortTest, AbortRegistrationTokenCleanupDoesNotRequireGil) {
+    std::optional<py::scoped_interpreter> interpreter;
+    if (!Py_IsInitialized()) {
+        interpreter.emplace();
+    }
+    ASSERT_TRUE(Py_IsInitialized());
+    py::gil_scoped_acquire        hold_gil;
+    BoundSleepLifecycleController controller(true);
+    auto                          server = std::make_shared<LocalRpcServer>();
+    server->admission_gate_              = std::make_shared<AdmissionGate>(&controller, "test_instance");
+    auto stream                          = makeStream(988, false);
+    auto token                           = server->registerAbortableStreamForScope(stream);
+    ASSERT_NE(token, nullptr);
+    auto cleanup = std::async(std::launch::async, [token = std::move(token)]() mutable { token.reset(); });
+    // Keep the GIL on this thread: unregistering a pure C++ registry must not
+    // wait on Python. Release it only after recording the bounded RED result.
+    EXPECT_EQ(cleanup.wait_for(std::chrono::milliseconds(200)), std::future_status::ready);
+    {
+        py::gil_scoped_release release_gil;
+        cleanup.get();
+    }
+    EXPECT_EQ(server->cancelAbortableStreams(), 0u);
+}
+
+TEST(LocalRpcServerSleepAbortTest, ProductionHooksDoNotKeepTheirEngineOwnerAlive) {
+    for (const bool sleep_enabled : {false, true}) {
+        int   destructions  = 0;
+        auto  service_owner = std::make_shared<LocalRpcServer>();
+        auto& server        = *service_owner;
+        auto  engine        = std::make_shared<HookTestEngine>(destructions);
+        engine->sleepController().setEnabled(sleep_enabled);
+        std::weak_ptr<EngineBase> weak_engine = engine;
+        server.engine_                        = engine;
+        server.installSleepHooks();
+        engine.reset();
+        server.engine_.reset();
+        EXPECT_TRUE(weak_engine.expired()) << "sleep_enabled=" << sleep_enabled;
+        EXPECT_EQ(destructions, 1);
+        // Clean up the deliberately reproduced legacy cycle on a red run.
+        if (auto retained = weak_engine.lock()) {
+            retained->sleepController().setHooks({});
+        }
+    }
+}
+
 TEST(LocalRpcServerSleepAbortTest, DirectSleepRpcRejectsNonEmptyTags) {
-    auto           controller = std::make_shared<SleepLifecycleController>(true);
+    auto           controller = std::make_shared<BoundSleepLifecycleController>(true);
     LocalRpcServer server;
     server.admission_gate_ = std::make_shared<AdmissionGate>(controller.get(), "test_instance");
 
@@ -74,7 +293,7 @@ TEST(LocalRpcServerSleepAbortTest, DirectSleepRpcRejectsNonEmptyTags) {
 }
 
 TEST(LocalRpcServerSleepAbortTest, HealthReportsUnavailableWhileSleepingAndOkAfterWake) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [](const SleepOptions&) { return true; };
     controller.setHooks(hooks);
@@ -104,9 +323,10 @@ TEST(LocalRpcServerSleepAbortTest, HealthReportsUnavailableWhileSleepingAndOkAft
 }
 
 TEST(LocalRpcServerSleepAbortTest, AbortRegistryCancelsOnlyNonStreamingStreams) {
-    SleepLifecycleController controller(true);
-    LocalRpcServer server;
-    server.admission_gate_ = std::make_shared<AdmissionGate>(&controller, "test_instance");
+    BoundSleepLifecycleController controller(true);
+    auto                          service_owner = std::make_shared<LocalRpcServer>();
+    auto&                         server        = *service_owner;
+    server.admission_gate_                      = std::make_shared<AdmissionGate>(&controller, "test_instance");
 
     auto streaming     = makeStream(1, true);
     auto non_streaming = makeStream(2, false);
@@ -128,15 +348,15 @@ TEST(LocalRpcServerSleepAbortTest, AbortRegistryCancelsOnlyNonStreamingStreams) 
 
 TEST(LocalRpcServerSleepAbortTest, DisabledSleepDoesNotRegisterAbortableStreams) {
     LocalRpcServer server;
-    auto stream = makeStream(4, false);
+    auto           stream = makeStream(4, false);
     // No sleep admission gate is installed when the startup switch is OFF.
     EXPECT_EQ(server.registerAbortableStreamForScope(stream), nullptr);
-    EXPECT_TRUE(server.abortable_streams_.empty());
+    EXPECT_TRUE(server.abortable_streams_->streams.empty());
     EXPECT_FALSE(stream->hasError());
 }
 
 TEST(LocalRpcServerSleepAbortTest, LegacyControlsCannotBypassSleepAdmission) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [](const SleepOptions&) { return true; };
     controller.setHooks(hooks);
@@ -243,7 +463,7 @@ TEST(LocalRpcServerAdmissionTest, MemoryCopyRejectedBeforeAccessingCache) {
 }
 
 TEST(LocalRpcServerAdmissionTest, ExecuteFunctionAdmittedWhenRunning) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     ASSERT_EQ(controller.state(), SleepState::RUNNING);
 
     LocalRpcServer server;
@@ -328,7 +548,7 @@ TEST(LocalRpcServerAdmissionTest, RemoteCacheContinuationPassesDrainingGate) {
 }
 
 TEST(LocalRpcServerAdmissionTest, KvFunctionsCannotCrossClosedFreezeGate) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepOptions             options;
     options.prepare_only = true;
     ASSERT_TRUE(controller.sleep(options).ok);
@@ -361,7 +581,7 @@ TEST(LocalRpcServerAdmissionTest, P2pFunctionKeepsRootAdmissionDuringDrain) {
 }
 
 TEST(LocalRpcServerAdmissionTest, KvFunctionsRejectSleepingWakingAndErrorAndReopenAfterWake) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     LocalRpcServer           server;
     server.admission_gate_ = std::make_shared<AdmissionGate>(&controller, "cache-peer");
     auto check_status      = [&](grpc::StatusCode expected) {
@@ -417,7 +637,7 @@ TEST(LocalRpcServerAdmissionTest, UpdateWeightsRejectedWhenNotRunning) {
 }
 
 TEST(LocalRpcServerSleepAbortTest, WrongDpRemoteLoadIsNoopBeforeCheckingDrainingOrSleepingAdmission) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     bool                     allow_drain = false;
     hooks.drain                          = [&](const SleepOptions&) { return allow_drain; };

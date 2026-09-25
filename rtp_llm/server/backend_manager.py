@@ -50,6 +50,10 @@ class BackendManager(object):
             kmonitor.init()
         self.engine: Optional["BaseEngine"] = None
         self._shutdown_requested = threading.Event()
+        self._shutdown_control = None
+        self._shutdown_incarnation = None
+        self._stopped = False
+        self._stop_error = None
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -203,6 +207,22 @@ class BackendManager(object):
         # torch's default splitting rather than paying its fragmentation forever.
         release_init_segment_splitting()
 
+        control = getattr(self.engine, "lifecycle_control", None)
+        if control is not None and control.shutdown_status()["supported"]:
+            from rtp_llm.utils.backend_shutdown import register_shutdown_member
+
+            self._shutdown_incarnation = register_shutdown_member(
+                self._distributed_server.store,
+                self.py_env_configs.parallelism_config.world_rank,
+                control,
+            )
+            self._shutdown_control = control
+        else:
+            logging.warning(
+                "backend has no coordinated execution-stop capability; "
+                "shutdown will use the legacy path, not GRACEFUL_SUCCESS"
+            )
+
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""
         # freeze all current tracked objects to reduce gc cost
@@ -222,9 +242,44 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
+        with self.thread_lock_:
+            if self._stopped:
+                return
+            if self._stop_error is not None:
+                raise RuntimeError(
+                    "backend shutdown previously failed; restart required"
+                ) from self._stop_error
+            try:
+                self._stop_impl()
+            except BaseException as error:
+                # Terminal coordination is one-shot per worker incarnation.
+                # Never reuse old TCPStore ACKs or repeat partial destruction.
+                self._stop_error = error
+                raise
+            self._stopped = True
+
+    def _stop_impl(self) -> None:
         if self.engine is not None:
             from rtp_llm.utils.fuser import _nfs_manager
 
+            if self._shutdown_control is not None:
+                from rtp_llm.utils.backend_shutdown import graceful_backend_shutdown
+
+                self.engine.started = False
+                graceful_backend_shutdown(
+                    self._shutdown_control,
+                    self._distributed_server.store,
+                    self.py_env_configs.parallelism_config.world_rank,
+                    self.py_env_configs.parallelism_config.world_size,
+                    self._shutdown_incarnation,
+                    self.py_env_configs.server_config.shutdown_timeout or 600,
+                )
+            else:
+                logging.warning("[BackendShutdown] LEGACY_STOP (not coordinated)")
+
+            # Only close RPC/HTTP and unmount storage after the all-rank stop
+            # barrier. On coordination failure leave resources intact and let
+            # the process supervisor perform an explicitly failed exit.
             engine_stop_error = None
             try:
                 self.engine.stop()

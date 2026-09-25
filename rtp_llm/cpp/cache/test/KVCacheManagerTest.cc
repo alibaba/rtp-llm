@@ -300,6 +300,112 @@ TEST_F(KVCacheManagerTest, NonDsv4LinearStepRemainsConfigurable) {
     }
 }
 
+namespace {
+
+class CountingMemoryBackend: public PhysicalMemoryBackend {
+public:
+    bool isAvailable() const override {
+        return true;
+    }
+    std::string name() const override {
+        return "test-counting";
+    }
+    bool pause(const std::string&) override {
+        ++pause_calls;
+        return true;
+    }
+    bool resume(const std::string&) override {
+        ++resume_calls;
+        return true;
+    }
+    size_t pause_calls  = 0;
+    size_t resume_calls = 0;
+};
+
+std::shared_ptr<CountingMemoryBackend> attachCountingBackend(KVCacheManager& manager) {
+    auto backend                  = std::make_shared<CountingMemoryBackend>();
+    manager.kv_memory_controller_ = std::make_shared<KVCachePhysicalMemoryController>(backend);
+    const auto pool               = manager.allocator_->getBlockPools().front();
+    EXPECT_NE(manager.kv_memory_controller_->allocateOrAttach(pool->getBaseAddress(), pool->getTotalSizeBytes()),
+              nullptr);
+    return backend;
+}
+
+}  // namespace
+
+TEST_F(KVCacheManagerTest, SleepBackingRejectsLiveRefsBeforePhysicalPause) {
+    auto config  = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    auto backend = attachCountingBackend(*manager);
+    auto pool    = manager->allocator_->getBlockPools().front();
+    auto blocks  = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_FALSE(manager->releaseKVCacheMemoryBacking());
+    EXPECT_EQ(backend->pause_calls, 0u);
+    pool->connectorReference(blocks);
+    pool->requestFree(blocks);
+    EXPECT_FALSE(manager->releaseKVCacheMemoryBacking());
+    EXPECT_EQ(backend->pause_calls, 0u);
+    pool->connectorFree(blocks);
+    EXPECT_TRUE(manager->releaseKVCacheMemoryBacking());
+}
+
+TEST_F(KVCacheManagerTest, WakeBackingPreflightsAllPoolsBeforeResumeOrMetadataMutation) {
+    auto manager = std::make_shared<KVCacheManager>(makeCompactDSV4ManagerConfig(8));
+    ASSERT_TRUE(manager->init());
+    const auto pools = manager->allocator_->getBlockPools();
+    ASSERT_GT(pools.size(), 1u);
+    auto backend = attachCountingBackend(*manager);
+    ASSERT_TRUE(manager->kv_memory_controller_->pausePhysicalMemory());
+    auto blocks = pools.back()->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto first_generation = pools.front()->blockCache()->generation();
+    const auto shared_version   = manager->allocator_->sharedBlockCache()->version();
+    EXPECT_FALSE(manager->restoreKVCacheMemoryBackingAndResetMetadata());
+    EXPECT_EQ(backend->resume_calls, 0u);
+    EXPECT_EQ(pools.front()->blockCache()->generation(), first_generation);
+    EXPECT_EQ(manager->allocator_->sharedBlockCache()->version(), shared_version);
+    EXPECT_EQ(pools.back()->requestRefBlocksNum(), 1u);
+    if (pools.back()->requestRefBlocksNum() != 0) {
+        pools.back()->requestFree(blocks);
+    }
+}
+
+TEST_F(KVCacheManagerTest, SleepBackingRejectsOutstandingCoordinatorContextWithoutPoolRefs) {
+    auto config  = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    auto backend = attachCountingBackend(*manager);
+    // Do not start this coordinator's update thread: the test owns retirement.
+    auto coordinator = std::make_shared<MockKVCacheConnectorCoordinator>(
+        config, KVCacheConfig{}, RuntimeConfig{}, manager->allocator_);
+    coordinator->fused_async_write_context_list_.push_back(
+        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{}));
+    manager->coordinator_ = coordinator;
+    EXPECT_FALSE(manager->releaseKVCacheMemoryBacking());
+    EXPECT_EQ(backend->pause_calls, 0u);
+    coordinator->fused_async_write_context_list_.clear();
+    EXPECT_TRUE(manager->releaseKVCacheMemoryBacking());
+}
+
+TEST_F(KVCacheManagerTest, SleepWakeBackingAllowsRetainedPrefixCacheRefs) {
+    auto manager = std::make_shared<KVCacheManager>(makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8));
+    ASSERT_TRUE(manager->init());
+    auto backend = attachCountingBackend(*manager);
+    auto pool    = manager->allocator_->getBlockPools().front();
+    auto blocks  = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    pool->blockCacheReference(blocks);
+    pool->requestFree(blocks);
+    ASSERT_EQ(pool->blockCacheRefBlocksNum(), 1u);
+    EXPECT_TRUE(manager->releaseKVCacheMemoryBacking());
+    EXPECT_TRUE(manager->restoreKVCacheMemoryBackingAndResetMetadata());
+    EXPECT_EQ(backend->pause_calls, 1u);
+    EXPECT_EQ(backend->resume_calls, 1u);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
 TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);

@@ -11,6 +11,9 @@ from google.protobuf.json_format import MessageToDict
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
+from rtp_llm.aios.kmonitor.python_client.kmonitor.reporting import (
+    set_instance_reporting,
+)
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.frontend.sleep_validation import (
     dedupe_addresses,
@@ -62,8 +65,8 @@ def _normalize_json_request(req: Any) -> Dict[str, Any]:
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
-    LIFECYCLE_LEASE_KEY = LifecycleLease.KEY
     COMMIT_MAX_ATTEMPTS = 3
+    COMMIT_POLL_INTERVAL_S = 0.1
 
     def __init__(
         self,
@@ -308,17 +311,6 @@ class GrpcClientWrapper:
             await self._release_lifecycle_lease(record)
             raise
 
-    def _lease_record(self, operation: str) -> str:
-        return self._lifecycle_lease.record(operation)
-
-    @property
-    def _require_instance_lease(self) -> bool:
-        return self._lifecycle_lease.required
-
-    @_require_instance_lease.setter
-    def _require_instance_lease(self, value: bool) -> None:
-        self._lifecycle_lease.required = value
-
     async def _release_lifecycle_lease(self, record: Optional[str]) -> None:
         await self._drive_to_terminal(
             asyncio.to_thread(self._lifecycle_lease.release, record)
@@ -330,7 +322,7 @@ class GrpcClientWrapper:
         )
 
     async def _initial_lifecycle_status(
-        self, operation: str, *, rank_snapshots: Optional[List[Dict[str, Any]]] = None
+        self, operation: str, *, rank_snapshots: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """Probe the pre-condition state shared by every control rank.
 
@@ -351,8 +343,7 @@ class GrpcClientWrapper:
         """
         await self._refresh_control_addresses_if_needed()
         statuses = await self._raw_sleep_statuses()
-        if rank_snapshots is not None:
-            rank_snapshots.extend(statuses)
+        rank_snapshots.extend(statuses)
         status = self._aggregate_sleep_status(statuses)
         _report_sleep_status_metrics(status)
         if "error" in status:
@@ -466,14 +457,37 @@ class GrpcClientWrapper:
         timeout_s: float,
         transitional_state: str,
         final_state: str,
+        rank_snapshots: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         pending = list(self.control_addresses)
         last_statuses: List[Dict[str, Any]] = []
-        for attempt in range(1, self.COMMIT_MAX_ATTEMPTS + 1):
+        # Preserve the former maximum transport budget, but do not confuse
+        # three fast/lost replies with an execution hook that has failed.
+        deadline = perf_counter() + timeout_s * self.COMMIT_MAX_ATTEMPTS
+        attempt = 0
+        expected = {s["address"]: s for s in rank_snapshots}
+        while perf_counter() < deadline:
+            attempt += 1
             attempt_started = perf_counter()
-            await self._broadcast_control_rpc_to(
-                pending, rpc_name, commit_request, timeout_s
-            )
+            rpc_timeout = min(timeout_s, max(0.001, deadline - perf_counter()))
+            if rpc_name == "WakeUpServing":
+                await asyncio.gather(
+                    *(
+                        self._call_control_rpc(
+                            address,
+                            rpc_name,
+                            self._fenced_wake_request(
+                                commit_request, expected[address]
+                            ),
+                            rpc_timeout,
+                        )
+                        for address in pending
+                    )
+                )
+            else:
+                await self._broadcast_control_rpc_to(
+                    pending, rpc_name, commit_request, rpc_timeout
+                )
             last_statuses = await self._raw_sleep_statuses()
             log_sleep_timing(
                 "sleep" if operation.endswith("sleep") else "wake",
@@ -486,7 +500,9 @@ class GrpcClientWrapper:
                     "status_count": len(last_statuses),
                 },
             )
-            if len(last_statuses) != len(self.control_addresses):
+            if len(last_statuses) != len(self.control_addresses) or {
+                s.get("address") for s in last_statuses
+            } != set(self.control_addresses):
                 return recovery_required(
                     operation, "status coverage is incomplete", last_statuses
                 )
@@ -494,8 +510,16 @@ class GrpcClientWrapper:
                 return recovery_required(
                     operation, "status probe failed", last_statuses
                 )
+            if not self._matching_rank_identities(last_statuses, expected):
+                return recovery_required(
+                    operation,
+                    "worker incarnation or sleep epoch changed",
+                    last_statuses,
+                )
             states = [str(status.get("state", "")) for status in last_statuses]
             allowed_states = {transitional_state, final_state}
+            if rpc_name == "SleepServing":
+                allowed_states.add("SUSPENDING")
             if any(state not in allowed_states for state in states):
                 return recovery_required(
                     operation, "observed an unrecoverable rank state", last_statuses
@@ -503,15 +527,115 @@ class GrpcClientWrapper:
             pending = [
                 status["address"]
                 for status, state in zip(last_statuses, states)
-                if state == transitional_state
+                if state != final_state
             ]
             if not pending:
+                if final_state == "RUNNING":
+                    return await self._resume_metrics_after_wake(last_statuses)
+                await asyncio.to_thread(set_instance_reporting, False)
                 return {"status": "ok"}
+            remaining = deadline - perf_counter()
+            if remaining > 0:
+                await asyncio.sleep(min(self.COMMIT_POLL_INTERVAL_S, remaining))
         return recovery_required(
             operation,
-            f"did not converge after {self.COMMIT_MAX_ATTEMPTS} commit attempts",
+            "total commit deadline exceeded while ranks had not completed; "
+            "this does not prove an in-progress resource hook has stopped",
             last_statuses,
         )
+
+    @staticmethod
+    def _valid_rank_identity(status):
+        incarnation = status.get("worker_incarnation")
+        epoch = status.get("sleep_epoch")
+        return (
+            isinstance(incarnation, str)
+            and bool(incarnation)
+            and type(epoch) in (int, str)
+            and 0 <= _as_int(epoch, -1) < (1 << 63)
+        )
+
+    @staticmethod
+    def _wake_prepare_capability_error(
+        operation: str, statuses: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        # A false wake_prepared is a normal pre-wake state, not a capability.
+        # Check static support before either sleep drain or irreversible restore;
+        # otherwise a lost prepare reply from an old rank cannot be reconciled.
+        unsupported = [
+            {
+                "address": status.get("address", ""),
+                "wake_prepare_protocol": status.get("wake_prepare_protocol", 0),
+            }
+            for status in statuses
+            if type(status.get("wake_prepare_protocol")) not in (int, str)
+            or _as_int(status.get("wake_prepare_protocol"), -1) != 1
+        ]
+        if not statuses or unsupported:
+            return {
+                "error": f"{operation} requires wake prepare protocol 1 on every "
+                "backend rank; upgrade frontend and backend together before "
+                "using coordinated sleep/wake",
+                "grpc_status": "UNIMPLEMENTED",
+                "details": unsupported,
+            }
+        return None
+
+    @staticmethod
+    def _matching_rank_identities(statuses, expected):
+        return all(
+            GrpcClientWrapper._valid_rank_identity(status)
+            and status.get("worker_incarnation")
+            == expected[status["address"]].get("worker_incarnation")
+            and _as_int(status.get("sleep_epoch"))
+            == _as_int(expected[status["address"]].get("sleep_epoch"))
+            for status in statuses
+        )
+
+    @staticmethod
+    def _fenced_wake_request(request, status):
+        return pb2.WakeUpRequestPB(
+            prepare_only=request.prepare_only,
+            commit_only=request.commit_only,
+            expected_incarnation=status.get("worker_incarnation", ""),
+            expected_sleep_epoch=_as_int(status.get("sleep_epoch")),
+        )
+
+    async def _resume_metrics_after_wake(
+        self, statuses: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        # Called under the existing lifecycle lease after all ranks reached
+        # RUNNING. Per-rank epoch/incarnation fences late notification retries.
+        pending = {status["address"]: status for status in statuses}
+        failures = []
+        for _ in range(self.COMMIT_MAX_ATTEMPTS):
+            results = await asyncio.gather(
+                *(
+                    self._call_control_rpc(
+                        address,
+                        "WakeUpServing",
+                        pb2.WakeUpRequestPB(
+                            resume_metrics_only=True,
+                            expected_incarnation=status.get("worker_incarnation", ""),
+                            expected_sleep_epoch=_as_int(status.get("sleep_epoch", 0)),
+                        ),
+                        timeout_s=10,
+                    )
+                    for address, status in pending.items()
+                )
+            )
+            failures = [result for result in results if "error" in result]
+            if not failures:
+                await asyncio.to_thread(set_instance_reporting, True)
+                return {"status": "ok"}
+            pending = {
+                result["address"]: pending[result["address"]] for result in failures
+            }
+        return {
+            "error": "all ranks are RUNNING; metrics resume failed, retry wake_up",
+            "grpc_status": "UNAVAILABLE",
+            "details": error_details(failures),
+        }
 
     def _aggregate_sleep_status(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         return aggregate(results, self._control_address_coverage_error())
@@ -637,7 +761,18 @@ class GrpcClientWrapper:
                     "grpc_status": "INVALID_ARGUMENT",
                     "supported_levels": status.get("supported_levels", []),
                 }
+            capability_error = self._wake_prepare_capability_error(
+                "sleep", rank_snapshots
+            )
+            if capability_error:
+                return capability_error
             if status.get("state") == "SLEEPING":
+                # A standalone frontend may have restarted after the backends
+                # slept. Keep the lease until its local sender fence finishes,
+                # even if the caller cancels this idempotent request.
+                await self._drive_to_terminal(
+                    asyncio.to_thread(set_instance_reporting, False)
+                )
                 return {"status": "ok"}
             if status.get("state") != "RUNNING":
                 return {
@@ -660,7 +795,7 @@ class GrpcClientWrapper:
             # Every rank drains while empty peers still execute fake forwards.
             # Only then freeze admission, collect stable ticket snapshots, and
             # allow bounded catch-up. All three stages remain reversible.
-            rpc_timeout_s = max(60.0, timeout_ms / 1000.0 + 30.0)
+            prepare_rpc_timeout_s = max(60.0, timeout_ms / 1000.0 + 30.0)
             try:
                 prepare_results = await prepare_sleep_rounds(
                     request,
@@ -668,7 +803,7 @@ class GrpcClientWrapper:
                     rank_snapshots,
                     self._call_control_rpc,
                     self._broadcast_control_rpc,
-                    rpc_timeout_s,
+                    prepare_rpc_timeout_s,
                 )
             except asyncio.CancelledError:
                 # Prepare only closes admission and drains in-flight work -- no
@@ -732,14 +867,23 @@ class GrpcClientWrapper:
             # The request timeout bounds drain, not cancellation of a commit:
             # once release starts, drive all ranks to SLEEPING (or report a
             # recovery-required failure), even if this request is cancelled.
+            # Host backup/resource release needs at least wake's transport
+            # budget. Preserve any longer deadline previously allowed by drain.
             return await self._drive_to_terminal(
                 self._converge_commit(
                     operation="commit sleep",
                     rpc_name="SleepServing",
                     commit_request=commit_request,
-                    timeout_s=rpc_timeout_s,
+                    timeout_s=max(600.0, prepare_rpc_timeout_s),
                     transitional_state="DRAINING",
                     final_state="SLEEPING",
+                    rank_snapshots=[
+                        {
+                            **snapshot,
+                            "sleep_epoch": _as_int(snapshot.get("sleep_epoch")) + 1,
+                        }
+                        for snapshot in rank_snapshots
+                    ],
                 )
             )
         except grpc.aio.AioRpcError as e:
@@ -780,32 +924,58 @@ class GrpcClientWrapper:
         return result
 
     async def _wake_up_to_terminal(
-        self, prepare_request: Any, commit_request: Any
+        self,
+        prepare_request: Any,
+        commit_request: Any,
+        rank_snapshots: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Run irreversible wake preparation and commit as one protected unit."""
-        prepare_results = await self._broadcast_control_rpc(
-            "WakeUpServing", prepare_request, timeout_s=600
+        deadline = perf_counter() + 600
+        expected = {s["address"]: s for s in rank_snapshots}
+        prepare_results = await asyncio.gather(
+            *(
+                self._call_control_rpc(
+                    address,
+                    "WakeUpServing",
+                    self._fenced_wake_request(prepare_request, expected[address]),
+                    600,
+                )
+                for address in self.control_addresses
+            )
         )
         failures = [result for result in prepare_results if "error" in result]
-        if failures:
+        while failures:
             statuses = await self._raw_sleep_statuses()
-            if (
+            covered = (
                 len(statuses) == len(self.control_addresses)
+                and {s.get("address") for s in statuses} == set(self.control_addresses)
                 and all("error" not in status for status in statuses)
-                and all(status.get("state") == "WAKING_UP" for status in statuses)
+            )
+            matched = covered and self._matching_rank_identities(statuses, expected)
+            if matched and all(
+                s.get("state") == "RUNNING"
+                or (s.get("state") == "WAKING_UP" and s.get("wake_prepared") is True)
+                for s in statuses
             ):
                 logging.warning(
                     "wake_up prepare RPC reported failure, but every control rank "
-                    "reached WAKING_UP; continuing commit convergence"
+                    "confirmed preparation for the same incarnation/epoch; continuing commit"
                 )
-            else:
-                recovery = recovery_required(
-                    "prepare wake_up",
-                    "failed on some control ranks after restoration started",
-                    statuses,
-                )
-                recovery["prepare_details"] = error_details(prepare_results)
-                return recovery
+                break
+            if matched and all(
+                s.get("state") in ("WAKING_UP", "RUNNING") for s in statuses
+            ):
+                remaining = deadline - perf_counter()
+                if remaining > 0:
+                    await asyncio.sleep(min(self.COMMIT_POLL_INTERVAL_S, remaining))
+                    continue
+            recovery = recovery_required(
+                "prepare wake_up",
+                "could not confirm completed preparation for every original rank",
+                statuses,
+            )
+            recovery["prepare_details"] = error_details(prepare_results)
+            return recovery
 
         return await self._converge_commit(
             operation="commit wake_up",
@@ -814,6 +984,7 @@ class GrpcClientWrapper:
             timeout_s=600,
             transitional_state="WAKING_UP",
             final_state="RUNNING",
+            rank_snapshots=rank_snapshots,
         )
 
     async def _wake_up_serving_locked(self, req: Any = None) -> Dict[str, Any]:
@@ -831,7 +1002,10 @@ class GrpcClientWrapper:
                     "error": f"wake_up {unsupported_field} is unsupported",
                     "grpc_status": "INVALID_ARGUMENT",
                 }
-            status = await self._initial_lifecycle_status("wake_up")
+            rank_snapshots: List[Dict[str, Any]] = []
+            status = await self._initial_lifecycle_status(
+                "wake_up", rank_snapshots=rank_snapshots
+            )
             if "error" in status:
                 return status
             if not bool(status.get("effective", False)):
@@ -843,6 +1017,24 @@ class GrpcClientWrapper:
                     "supported_levels": status.get("supported_levels", []),
                     "supported_modes": status.get("supported_modes", []),
                 }
+            # An empty incarnation selects the backend's legacy unfenced path.
+            # Never silently downgrade coordinated wake when a peer omits it.
+            if (
+                len(rank_snapshots) != len(self.control_addresses)
+                or {s.get("address") for s in rank_snapshots}
+                != set(self.control_addresses)
+                or not all(self._valid_rank_identity(s) for s in rank_snapshots)
+            ):
+                return recovery_required(
+                    "wake_up",
+                    "missing or invalid initial rank identity",
+                    rank_snapshots,
+                )
+            capability_error = self._wake_prepare_capability_error(
+                "wake_up", rank_snapshots
+            )
+            if capability_error:
+                return capability_error
             prepare_request = pb2.WakeUpRequestPB(prepare_only=True)
             commit_request = pb2.WakeUpRequestPB(commit_only=True)
 
@@ -850,7 +1042,9 @@ class GrpcClientWrapper:
             # weights from the checkpoint. Protect prepare and commit together so
             # cancellation cannot release the lifecycle lease in WAKING_UP.
             return await self._drive_to_terminal(
-                self._wake_up_to_terminal(prepare_request, commit_request)
+                self._wake_up_to_terminal(
+                    prepare_request, commit_request, rank_snapshots
+                )
             )
         except grpc.aio.AioRpcError as e:
             logging.error(f"Wake_up serving failed: {e.details()}")

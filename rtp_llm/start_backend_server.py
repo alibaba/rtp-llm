@@ -147,6 +147,7 @@ def local_rank_start(
     backend_manager = None
     jit_cache_manager = None
     shutdown_requested = False
+    shutdown_failed = False
     logging.info(f"[PROCESS_START]Start local rank process")
 
     defer_first_sigterm = (
@@ -300,6 +301,7 @@ def local_rank_start(
         backend_manager.serve_forever()
 
     except BaseException as e:
+        shutdown_failed = shutdown_requested
         error_msg = f"start server error: {e}"
         error_trace = traceback.format_exc()
         logging.error(f"{error_msg}, trace: {error_trace}")
@@ -308,7 +310,8 @@ def local_rank_start(
         _send_pipe_status(pipe_writer, "failed", error_msg, error_trace)
         raise e
     finally:
-        clear_cpp_comm_ops()
+        if not shutdown_failed:
+            clear_cpp_comm_ops()
         # Best-effort cleanup: log failures but never skip the hard-exit below.
         try:
             if jit_cache_manager:
@@ -319,13 +322,17 @@ def local_rank_start(
         if shutdown_requested:
             # os._exit skips atexit, so unmount FUSE/NFS first. Only on shutdown:
             # doing so on a startup exception would yank mounts from loading ranks.
-            try:
-                from rtp_llm.utils.fuser import umount_all
+            if not shutdown_failed:
+                try:
+                    from rtp_llm.utils.fuser import umount_all
 
-                umount_all()
-            except Exception:
-                logging.exception("umount_all failed during shutdown")
-            os._exit(0)
+                    umount_all()
+                except Exception:
+                    logging.exception("umount_all failed during shutdown")
+                    shutdown_failed = True
+            # A failed barrier must not look like a successful graceful exit.
+            # Skip resource destructors while CPU/GPU/transport may still run.
+            os._exit(1 if shutdown_failed else 0)
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
@@ -530,9 +537,7 @@ def multi_rank_start(
 
     # Wait for all ranks to report startup status
     try:
-        _wait_for_ranks_startup(
-            processes, rank_pipe_readers, local_world_size, manager
-        )
+        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size, manager)
 
         # Report success via external pipe
         _send_pipe_status(
@@ -639,6 +644,7 @@ def start_backend_server(
     pipe_writer=None,
 ):
     _install_hot_hook_runtime("backend_manager")
+    set_global_controller(global_controller)
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)

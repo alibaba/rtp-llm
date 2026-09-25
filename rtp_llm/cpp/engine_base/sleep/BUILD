@@ -13,6 +13,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/engine_base/schedulers:scheduler_admission",
     ],
     visibility = ["//visibility:public"],
 )
@@ -27,7 +28,6 @@ cc_library(
     ],
     copts = copts(),
     deps = [
-        ":sleep",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],

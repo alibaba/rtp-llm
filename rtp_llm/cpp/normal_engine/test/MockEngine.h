@@ -160,7 +160,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     return rtp_llm_params;
 }
 
-std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
+std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config, bool defer_loop_start = false) {
     rtp_llm::ModelConfig   model_config;
     rtp_llm::RuntimeConfig runtime_config;
     rtp_llm::KVCacheConfig kv_cache_config;
@@ -170,7 +170,7 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };
-    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr);
+    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr, defer_loop_start);
     NormalExecutor::test_model_factory   = nullptr;
     return engine;
 }

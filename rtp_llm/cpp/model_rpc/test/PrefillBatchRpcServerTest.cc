@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/engine_base/sleep/test/BoundSleepLifecycleController.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -115,7 +116,7 @@ public:
 
 class DrainAfterAdmissionServer: public PrefillBatchRpcServer {
 public:
-    DrainAfterAdmissionServer(SleepLifecycleController& controller, int accepted_before_drain):
+    DrainAfterAdmissionServer(BoundSleepLifecycleController& controller, int accepted_before_drain):
         controller_(controller), accepted_before_drain_(accepted_before_drain) {
         admission_gate_ = std::make_shared<AdmissionGate>(&controller_, "partial-batch");
     }
@@ -134,7 +135,7 @@ protected:
     }
 
 private:
-    SleepLifecycleController& controller_;
+    BoundSleepLifecycleController& controller_;
     const int                 accepted_before_drain_;
     mutable int               admission_calls_{0};
 };
@@ -657,12 +658,15 @@ TEST(PrefillBatchRpcServerTest, CancelBeforeRegisterInstallsTombstoneAndRejectsE
     ASSERT_TRUE(server.Cancel(nullptr, &request, &retry_response).ok());
     EXPECT_EQ(retry_response.status(), CancelStatusPB::CANCEL_STATUS_TOMBSTONED);
 
+    EnqueueGroupRequestPB enqueue_request;
+    enqueue_request.set_batch_id(3011);
+    enqueue_request.set_dp_rank(0);
+    enqueue_request.add_requests()->mutable_input()->set_request_id(3011);
     std::vector<PrefillBatchRpcServer::BatchSlot> slots;
-    PrefillBatchRpcServer::BatchSlot              slot;
-    slot.input = std::make_shared<GenerateInputPB>();
-    slot.input->set_request_id(3011);
-    slots.push_back(std::move(slot));
-    EnqueueBatchResponsePB enqueue_response;
+    EnqueueBatchResponsePB                        enqueue_response;
+    ASSERT_TRUE(server.admitGroup(&enqueue_request, &enqueue_response, slots).ok());
+    ASSERT_EQ(slots.size(), 1);
+    ASSERT_NE(slots[0].deferred, nullptr);
     ASSERT_TRUE(server.acceptGroup(std::move(slots), &enqueue_response).ok());
 
     EXPECT_EQ(engine->enqueue_multiple_calls, 0);
@@ -1222,14 +1226,14 @@ protected:
         return slots;
     }
 
-    SleepLifecycleController controller_{true};
+    BoundSleepLifecycleController controller_{true};
     PrefillBatchRpcServer    server_;
     int                      releases_{0};
 };
 
 TEST_F(PrefillBatchSleepTest, RootGroupRejectedDuringDrainWithOneResultPerInput) {
-    auto root = controller_.acquireAdmission();
-    ASSERT_TRUE(root.admitted());
+    auto root = controller_.admission()->admit();
+    ASSERT_TRUE(root.accepted);
     ASSERT_FALSE(controller_.sleep(SleepOptions{}).ok);
     EnqueueGroupRequestPB request;
     request.set_batch_id(4000);
@@ -1338,11 +1342,11 @@ TEST_F(PrefillBatchSleepTest, PublicBatchRpcReturnsOneErrorPerInputInEveryClosed
                       std::string::npos);
         }
     };
-    auto existing = controller_.acquireAdmission();
+    auto existing = controller_.admission()->admit();
     ASSERT_FALSE(controller_.sleep(SleepOptions{}).ok);
     ASSERT_EQ(controller_.state(), SleepState::DRAINING);
     check_rejected();
-    existing.lease = AdmissionLease{};
+    existing.complete();
     ASSERT_TRUE(controller_.sleep(SleepOptions{}).ok);
     ASSERT_EQ(controller_.state(), SleepState::SLEEPING);
     check_rejected();
@@ -1424,19 +1428,19 @@ TEST_F(PrefillBatchSleepTest, CancelAllCannotReleaseAnInFlightCleanupOwner) {
     EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);
 }
 
-TEST_F(PrefillBatchSleepTest, DisabledSleepPreservesUntrackedBatchAdmission) {
-    SleepLifecycleController disabled(false);
+TEST_F(PrefillBatchSleepTest, DisabledSleepStillTracksBatchAdmission) {
+    BoundSleepLifecycleController disabled(false);
     server_.admission_gate_ = std::make_shared<AdmissionGate>(&disabled, "disabled");
     auto slots              = admit(4070, 2);
     ASSERT_EQ(slots.size(), 2);
     server_.buildSlotContexts(slots);
-    EXPECT_EQ(disabled.activeAdmissionCount(), 0);
+    EXPECT_EQ(disabled.activeAdmissionCount(), 2);
     slots.clear();
     EXPECT_EQ(disabled.activeAdmissionCount(), 0);
 }
 
 TEST(PrefillBatchRpcServerTest, DrainAfterThirdAdmissionSplitsExactRequestIdsAndGroupSize) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [&](const SleepOptions&) { return controller.activeAdmissionCount() == 0; };
     controller.setHooks(hooks);
@@ -1494,7 +1498,7 @@ TEST_F(PrefillBatchSleepTest, AcceptedBatchAndLateReceiverCopyMustDrainBeforeFre
         if (++drain_calls == 3) {
             freeze_drain_started.set_value();
         }
-        return drain.drain(options);
+        return drain.drain(options.timeout_ms, options.mode == "abort");
     };
     hooks.freezeEngineRounds = [&] {
         ++freezes;
@@ -1569,7 +1573,7 @@ TEST_F(PrefillBatchSleepTest, AcceptedBatchAndLateReceiverCopyMustDrainBeforeFre
     EXPECT_EQ(freeze.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
     EXPECT_EQ(freezes.load(), 0);
     EXPECT_EQ(releases_, 0);
-    EXPECT_FALSE(controller_.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller_.admission()->admit(true).accepted);
     // Release all async work before fatal assertions or leaving this scope.
     copy->finishCopy();
     const auto rpc_status = rpc.get();
@@ -1602,7 +1606,7 @@ TEST_F(PrefillBatchSleepTest, ConcurrentBatchAdmissionAndDrainCountEveryAccepted
     for (int i = 0; i < 1000; ++i) {
         request.add_requests()->mutable_input()->set_request_id(4101 + i);
     }
-    auto                                          existing = controller_.acquireAdmission();
+    auto                                          existing = controller_.admission()->admit();
     std::atomic<bool>                             start{false};
     EnqueueBatchResponsePB                        response;
     std::vector<PrefillBatchRpcServer::BatchSlot> slots;
@@ -1623,7 +1627,7 @@ TEST_F(PrefillBatchSleepTest, ConcurrentBatchAdmissionAndDrainCountEveryAccepted
     for (const auto& error : response.errors()) {
         EXPECT_EQ(error.error_info().error_code(), static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE));
     }
-    existing.lease = AdmissionLease{};
+    existing.complete();
     slots.clear();
     EXPECT_EQ(controller_.activeAdmissionCount(), 0);
     EXPECT_TRUE(controller_.sleep(SleepOptions{}).ok);

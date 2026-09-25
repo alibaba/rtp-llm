@@ -14,6 +14,13 @@ EngineBase::EngineBase(const EngineInitParams& params) {
 
 EngineBase::~EngineBase() {}
 
+void EngineBase::requestTermination() {
+    termination_requested_.store(true, std::memory_order_release);
+    if (scheduler_) {
+        scheduler_->admission()->beginTermination();
+    }
+}
+
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 EngineBase::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
     throw std::runtime_error("not implemeted");

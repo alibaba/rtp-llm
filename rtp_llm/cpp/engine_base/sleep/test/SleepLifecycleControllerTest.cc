@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/engine_base/sleep/test/BoundSleepLifecycleController.h"
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -11,11 +12,249 @@
 
 namespace rtp_llm {
 
+TEST(SleepLifecycleMetricsTest, CommitPausesAndExplicitWakeResumeRestoresReporting) {
+    BoundSleepLifecycleController controller(true);
+    std::vector<bool>        changes;
+    SleepHooks               hooks;
+    hooks.setMetricsReportingEnabled = [&](bool enabled) {
+        changes.push_back(enabled);
+        return true;
+    };
+    controller.setHooks(hooks);
+    SleepOptions prepare;
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller.sleep(prepare).ok);
+    EXPECT_TRUE(changes.empty());
+    SleepOptions commit;
+    commit.commit_only = true;
+    ASSERT_TRUE(controller.sleep(commit).ok);
+    EXPECT_EQ(changes, std::vector<bool>({false}));
+    ASSERT_TRUE(controller.sleep(commit).ok);
+    EXPECT_EQ(changes.size(), 1);
+    WakeUpOptions wake_prepare;
+    wake_prepare.prepare_only = true;
+    ASSERT_TRUE(controller.wakeUp(wake_prepare).ok);
+    EXPECT_EQ(changes.size(), 1);
+    WakeUpOptions wake_commit;
+    wake_commit.commit_only = true;
+    ASSERT_TRUE(controller.wakeUp(wake_commit).ok);
+    EXPECT_EQ(changes, std::vector<bool>({false}));
+    WakeUpOptions resume;
+    resume.resume_metrics_only  = true;
+    resume.expected_incarnation = controller.status().worker_incarnation;
+    resume.expected_sleep_epoch = controller.sleepEpoch();
+    ASSERT_TRUE(controller.wakeUp(resume).ok);
+    EXPECT_EQ(changes, std::vector<bool>({false, true}));
+    ASSERT_TRUE(controller.wakeUp().ok);
+    EXPECT_EQ(changes.size(), 2);
+}
+
+TEST(SleepLifecycleMetricsTest, RejectsStaleOrPrematureResume) {
+    BoundSleepLifecycleController controller(true);
+    std::vector<bool>        changes;
+    SleepHooks               hooks;
+    hooks.setMetricsReportingEnabled = [&](bool enabled) {
+        changes.push_back(enabled);
+        return true;
+    };
+    controller.setHooks(hooks);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    WakeUpOptions resume;
+    resume.resume_metrics_only  = true;
+    resume.expected_incarnation = controller.status().worker_incarnation;
+    resume.expected_sleep_epoch = controller.sleepEpoch();
+    EXPECT_FALSE(controller.wakeUp(resume).ok);
+    WakeUpOptions prepare, commit;
+    prepare.prepare_only = true;
+    commit.commit_only   = true;
+    ASSERT_TRUE(controller.wakeUp(prepare).ok);
+    ASSERT_TRUE(controller.wakeUp(commit).ok);
+    auto wrong                 = resume;
+    wrong.expected_incarnation = "replaced-worker";
+    EXPECT_FALSE(controller.wakeUp(wrong).ok);
+    wrong             = resume;
+    wrong.commit_only = true;
+    EXPECT_FALSE(controller.wakeUp(wrong).ok);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    ASSERT_TRUE(controller.wakeUp(prepare).ok);
+    ASSERT_TRUE(controller.wakeUp(commit).ok);
+    EXPECT_FALSE(controller.wakeUp(resume).ok);
+    EXPECT_EQ(changes, std::vector<bool>({false, false}));
+    resume.expected_sleep_epoch = controller.sleepEpoch();
+    EXPECT_TRUE(controller.wakeUp(resume).ok);
+}
+
+TEST(SleepLifecycleMetricsTest, MetricsResumeFailureKeepsEngineRunningAndCanBeRetried) {
+    for (bool throws : {false, true}) {
+        BoundSleepLifecycleController controller(true);
+        bool                     fail     = true;
+        int                      restarts = 0;
+        SleepHooks               hooks;
+        hooks.restartEngine = [&] {
+            ++restarts;
+            return true;
+        };
+        hooks.setMetricsReportingEnabled = [&](bool enabled) {
+            if (enabled && fail && throws) {
+                throw std::runtime_error("monitor unavailable");
+            }
+            return !enabled || !fail;
+        };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+        EXPECT_FALSE(controller.wakeUp().ok);
+        EXPECT_EQ(controller.state(), SleepState::RUNNING);
+        EXPECT_EQ(controller.status().kv_memory_state, "ACTIVE");
+        fail = false;
+        EXPECT_TRUE(controller.wakeUp().ok);
+        EXPECT_EQ(restarts, 1);
+    }
+}
+
+TEST(SleepLifecycleMetricsTest, PartialPauseFailureRollsBackBeforeResourceReleaseAndCanRetry) {
+    for (bool throws : {false, true}) {
+        BoundSleepLifecycleController controller(true);
+        bool                          cpp_enabled = true, python_enabled = true, fail_pause = true;
+        std::vector<std::string>      releases;
+        SleepHooks                    hooks;
+        hooks.setMetricsReportingEnabled = [&](bool enabled) {
+            cpp_enabled = enabled;
+            if (!enabled && fail_pause) {
+                if (throws) {
+                    throw std::runtime_error("Python reporting failed after C++ pause");
+                }
+                return false;
+            }
+            python_enabled = enabled;
+            return true;
+        };
+        hooks.synchronizeAndDeregisterMr = [&](const SleepOptions&) {
+            EXPECT_FALSE(cpp_enabled);
+            EXPECT_FALSE(python_enabled);
+            releases.push_back("mr");
+            return true;
+        };
+        hooks.releaseKvMemoryBacking = [&](const SleepOptions&) {
+            releases.push_back("kv");
+            return true;
+        };
+        hooks.releaseRestorableGpuMemory = [&](const SleepOptions&) {
+            releases.push_back("weights");
+            return true;
+        };
+        controller.setHooks(hooks);
+        SleepOptions prepare, commit;
+        prepare.prepare_only = true;
+        commit.commit_only   = true;
+        ASSERT_TRUE(controller.sleep(prepare).ok);
+        const auto epoch = controller.sleepEpoch();
+        EXPECT_FALSE(controller.sleep(commit).ok);
+        EXPECT_EQ(controller.state(), SleepState::DRAINING);
+        EXPECT_EQ(controller.status().kv_memory_state, "ACTIVE");
+        EXPECT_TRUE(controller.status().device_kv_cache_valid);
+        EXPECT_TRUE(releases.empty());
+        EXPECT_TRUE(cpp_enabled);
+        EXPECT_TRUE(python_enabled);
+        EXPECT_FALSE(controller.admit());
+
+        fail_pause = false;
+        ASSERT_TRUE(controller.sleep(commit).ok);
+        EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+        EXPECT_EQ(controller.sleepEpoch(), epoch);
+        EXPECT_EQ(releases, std::vector<std::string>({"mr", "kv", "weights"}));
+        ASSERT_TRUE(controller.wakeUp().ok);
+        EXPECT_TRUE(cpp_enabled);
+        EXPECT_TRUE(python_enabled);
+    }
+}
+
+TEST(SleepLifecycleMetricsTest, FailedPauseCompensationRemainsRetryableThroughDrainCancellation) {
+    for (bool throws : {false, true}) {
+        BoundSleepLifecycleController controller(true);
+        bool                          cpp_enabled = true, python_enabled = true, fail_resume = true;
+        int                           restarts = 0;
+        SleepHooks                    hooks;
+        hooks.setMetricsReportingEnabled = [&](bool enabled) {
+            if (!enabled) {
+                cpp_enabled = false;
+                throw std::runtime_error("partial pause");
+            }
+            if (fail_resume) {
+                if (throws) {
+                    throw std::runtime_error("compensation unavailable");
+                }
+                return false;
+            }
+            cpp_enabled = python_enabled = true;
+            return true;
+        };
+        hooks.cancelQuiesceAndRestartEngine = [&] {
+            ++restarts;
+            return true;
+        };
+        hooks.releaseKvMemoryBacking = [](const SleepOptions&) {
+            ADD_FAILURE() << "metrics failure must precede GPU release";
+            return true;
+        };
+        controller.setHooks(hooks);
+        EXPECT_FALSE(controller.sleep(SleepOptions{}).ok);
+        EXPECT_EQ(controller.state(), SleepState::DRAINING);
+        EXPECT_FALSE(cpp_enabled);
+        EXPECT_TRUE(python_enabled);
+        EXPECT_FALSE(controller.wakeUp().ok);
+        EXPECT_EQ(controller.state(), SleepState::RUNNING);
+        EXPECT_EQ(controller.status().kv_memory_state, "ACTIVE");
+        WakeUpOptions cancel;
+        cancel.cancel_quiesce_token = "late-cancel";
+        EXPECT_FALSE(controller.wakeUp(cancel).ok);
+        fail_resume = false;
+        EXPECT_TRUE(controller.wakeUp(cancel).ok);
+        EXPECT_TRUE(cpp_enabled);
+        EXPECT_TRUE(python_enabled);
+        EXPECT_EQ(restarts, 1);
+    }
+}
+
+TEST(SleepLifecycleMetricsTest, FailedReleaseRestoresReportingAndFailedWakeDoesNotReconnect) {
+    for (bool fail_sleep : {false, true}) {
+        BoundSleepLifecycleController controller(true);
+        std::vector<bool>        changes;
+        SleepHooks               hooks;
+        hooks.releaseRestorableGpuMemory = [&](const SleepOptions&) { return !fail_sleep; };
+        hooks.warmupAndHealthCheck       = [] { return false; };
+        hooks.setMetricsReportingEnabled = [&](bool enabled) {
+            changes.push_back(enabled);
+            return true;
+        };
+        controller.setHooks(hooks);
+        if (fail_sleep) {
+            EXPECT_FALSE(controller.sleep(SleepOptions{}).ok);
+            EXPECT_EQ(changes, std::vector<bool>({false, true}));
+        } else {
+            ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+            EXPECT_FALSE(controller.wakeUp().ok);
+            EXPECT_EQ(changes, std::vector<bool>({false}));
+        }
+    }
+}
+
+TEST(SleepLifecycleMetricsTest, DisabledModeNeverSwitchesReporting) {
+    BoundSleepLifecycleController controller(false);
+    SleepHooks               hooks;
+    hooks.setMetricsReportingEnabled = [](bool) {
+        ADD_FAILURE() << "disabled sleep must not change reporting";
+        return true;
+    };
+    controller.setHooks(hooks);
+    EXPECT_FALSE(controller.sleep(SleepOptions{}).ok);
+    EXPECT_FALSE(controller.wakeUp().ok);
+}
+
 TEST(SleepLifecycleControllerConcurrencyTest, ConcurrentAdmissionCannotEscapeClosedGate) {
-    SleepLifecycleController controller(true);
-    std::atomic<bool> stop{false};
-    std::atomic<int> accepted{0};
-    SleepHooks hooks;
+    BoundSleepLifecycleController controller(true);
+    std::atomic<bool>        stop{false};
+    std::atomic<int>         accepted{0};
+    SleepHooks               hooks;
     hooks.drain = [&](const SleepOptions&) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (controller.activeAdmissionCount() != 0) {
@@ -28,7 +267,7 @@ TEST(SleepLifecycleControllerConcurrencyTest, ConcurrentAdmissionCannotEscapeClo
     };
     hooks.releaseKvMemoryBacking = [&](const SleepOptions&) {
         EXPECT_EQ(controller.activeAdmissionCount(), 0);
-        EXPECT_FALSE(controller.acquireAdmission().admitted());
+        EXPECT_FALSE(controller.admission()->admit().accepted);
         return true;
     };
     controller.setHooks(hooks);
@@ -36,11 +275,12 @@ TEST(SleepLifecycleControllerConcurrencyTest, ConcurrentAdmissionCannotEscapeClo
     for (int i = 0; i < 8; ++i) {
         workers.emplace_back([&] {
             while (!stop.load()) {
-                auto result = controller.acquireAdmission();
-                if (result.admitted()) {
+                auto result = controller.admission()->admit();
+                if (result.accepted) {
                     accepted.fetch_add(1);
                     // Let close race with requests holding actual leases.
                     std::this_thread::yield();
+                    result.complete();
                 }
             }
         });
@@ -53,7 +293,7 @@ TEST(SleepLifecycleControllerConcurrencyTest, ConcurrentAdmissionCannotEscapeClo
         EXPECT_EQ(controller.state(), SleepState::SLEEPING);
         EXPECT_EQ(controller.activeAdmissionCount(), 0);
         for (int check = 0; check < 20; ++check) {
-            EXPECT_FALSE(controller.acquireAdmission().admitted());
+            EXPECT_FALSE(controller.admission()->admit().accepted);
         }
         EXPECT_TRUE(controller.wakeUp().ok);
     }
@@ -75,7 +315,7 @@ SleepOptions gracefulOptions() {
 
 }  // namespace
 
-static SleepOptions coordinatedDrain(const SleepLifecycleController& controller, const std::string& token) {
+static SleepOptions coordinatedDrain(const BoundSleepLifecycleController& controller, const std::string& token) {
     auto options                 = gracefulOptions();
     options.prepare_only         = true;
     options.drain_only           = true;
@@ -86,7 +326,7 @@ static SleepOptions coordinatedDrain(const SleepLifecycleController& controller,
 }
 
 TEST(SleepLifecycleControllerTest, CoordinatedDrainFreezeCatchupAndCommitAreSeparate) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::vector<std::string> calls;
     SleepHooks               hooks;
     hooks.requiresCoordinatedQuiesce = true;
@@ -131,9 +371,9 @@ TEST(SleepLifecycleControllerTest, CoordinatedDrainFreezeCatchupAndCommitAreSepa
     ASSERT_TRUE(controller.quiesce(quiesce, frozen).ok);
     quiesce.target_round = 8;
     EXPECT_FALSE(controller.quiesce(quiesce, frozen).ok);
-    EXPECT_EQ(calls, std::vector<std::string>({"drain", "drain", "freeze", "quiesce"}));
+    EXPECT_EQ(calls, std::vector<std::string>({"drain", "drain", "freeze", "quiesce", "drain"}));
     ASSERT_TRUE(controller.sleep(commit).ok);
-    EXPECT_EQ(calls, std::vector<std::string>({"drain", "drain", "freeze", "quiesce", "release"}));
+    EXPECT_EQ(calls, std::vector<std::string>({"drain", "drain", "freeze", "quiesce", "drain", "release"}));
     EXPECT_EQ(controller.state(), SleepState::SLEEPING);
     WakeUpOptions cancel;
     cancel.cancel_quiesce_token = "operation-1";
@@ -142,7 +382,7 @@ TEST(SleepLifecycleControllerTest, CoordinatedDrainFreezeCatchupAndCommitAreSepa
 }
 
 TEST(SleepLifecycleControllerTest, CancelBeforeDelayedInitialDrainFencesThatRequest) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     const auto               old_drain = coordinatedDrain(controller, "old");
     WakeUpOptions            cancel;
     cancel.cancel_quiesce_token = "old";
@@ -156,14 +396,14 @@ TEST(SleepLifecycleControllerTest, CancelBeforeDelayedInitialDrainFencesThatRequ
 }
 
 TEST(SleepLifecycleControllerTest, OldWorkerIncarnationCannotPrepareANewWorker) {
-    SleepLifecycleController old_worker(true), new_worker(true);
+    BoundSleepLifecycleController old_worker(true), new_worker(true);
     EXPECT_NE(old_worker.status().worker_incarnation, new_worker.status().worker_incarnation);
     EXPECT_FALSE(new_worker.sleep(coordinatedDrain(old_worker, "old-process")).ok);
     EXPECT_EQ(new_worker.state(), SleepState::RUNNING);
 }
 
 TEST(SleepLifecycleControllerTest, OldFreezeTargetCommitAndCancelCannotAffectANewDrain) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     auto                     old = coordinatedDrain(controller, "old");
     ASSERT_TRUE(controller.sleep(old).ok);
     WakeUpOptions cancel;
@@ -182,7 +422,7 @@ TEST(SleepLifecycleControllerTest, OldFreezeTargetCommitAndCancelCannotAffectANe
 }
 
 TEST(SleepLifecycleControllerTest, DrainTimeoutNeverFreezesAndCanRollBack) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     int                      frozen = 0, released = 0;
     SleepHooks               hooks;
     hooks.drain              = [](const SleepOptions&) { return false; };
@@ -207,7 +447,7 @@ TEST(SleepLifecycleControllerTest, DrainTimeoutNeverFreezesAndCanRollBack) {
 }
 
 TEST(SleepLifecycleControllerTest, FailedAsyncQuiesceCannotCommitResources) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     int                      released = 0;
     SleepHooks               hooks;
     hooks.quiesceEngineAtRound   = [](uint64_t, int64_t) -> bool { throw std::runtime_error("async CPU error"); };
@@ -229,7 +469,7 @@ TEST(SleepLifecycleControllerTest, FailedAsyncQuiesceCannotCommitResources) {
 }
 
 TEST(SleepLifecycleControllerTest, InitialStateIsRunning) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     EXPECT_EQ(controller.state(), SleepState::RUNNING);
     EXPECT_TRUE(controller.admit());
     EXPECT_TRUE(controller.enabled());
@@ -246,7 +486,7 @@ TEST(SleepLifecycleControllerTest, InitialStateIsRunning) {
 }
 
 TEST(SleepLifecycleControllerTest, DisabledByDefaultRejectsSleepAndReportsCapability) {
-    SleepLifecycleController controller;
+    BoundSleepLifecycleController controller;
     EXPECT_FALSE(controller.enabled());
     EXPECT_FALSE(controller.effective());
 
@@ -264,7 +504,7 @@ TEST(SleepLifecycleControllerTest, DisabledByDefaultRejectsSleepAndReportsCapabi
 }
 
 TEST(SleepLifecycleControllerTest, RuntimeUnsupportedReportsNotEffectiveEvenWhenEnabled) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     controller.setRuntimeSupport(false, "torch_memory_saver preload shim is not available");
 
     EXPECT_TRUE(controller.enabled());
@@ -286,7 +526,7 @@ TEST(SleepLifecycleControllerTest, RuntimeUnsupportedReportsNotEffectiveEvenWhen
 }
 
 TEST(SleepLifecycleControllerTest, SleepWithDefaultHooksReachesSleeping) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     const auto               result = controller.sleep(gracefulOptions());
     EXPECT_TRUE(result.ok) << result.message;
     EXPECT_EQ(controller.state(), SleepState::SLEEPING);
@@ -304,7 +544,7 @@ TEST(SleepLifecycleControllerTest, SleepWithDefaultHooksReachesSleeping) {
 TEST(SleepLifecycleControllerTest, NonEmptyTagsRejectBeforeDrainOrRelease) {
     for (const auto& tag : {"weights", "kv_cache"}) {
         for (const auto phase : {0, 1, 2}) {
-            SleepLifecycleController controller(true);
+            BoundSleepLifecycleController controller(true);
             int                      hook_calls = 0;
             SleepHooks               hooks;
             hooks.drain = [&](const SleepOptions&) {
@@ -335,7 +575,7 @@ TEST(SleepLifecycleControllerTest, NonEmptyTagsRejectBeforeDrainOrRelease) {
 }
 
 TEST(SleepLifecycleControllerTest, LevelZeroIsDefinedButUnimplemented) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     auto                     opt = gracefulOptions();
     opt.level                    = 0;
 
@@ -349,7 +589,7 @@ TEST(SleepLifecycleControllerTest, LevelZeroIsDefinedButUnimplemented) {
 }
 
 TEST(SleepLifecycleControllerTest, DefaultModeRejectsLevelTwo) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     auto                     opt = gracefulOptions();
     opt.level                    = 2;
 
@@ -363,7 +603,7 @@ TEST(SleepLifecycleControllerTest, DefaultModeRejectsLevelTwo) {
 }
 
 TEST(SleepLifecycleControllerTest, DiscardModeSupportsLevelTwo) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     controller.setConfiguredLevel(2);
 
     EXPECT_TRUE(controller.discardWeights());
@@ -378,7 +618,7 @@ TEST(SleepLifecycleControllerTest, DiscardModeSupportsLevelTwo) {
 }
 
 TEST(SleepLifecycleControllerTest, DiscardModeRejectsLevelOne) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     controller.setConfiguredLevel(2);
 
     auto opt          = gracefulOptions();
@@ -392,7 +632,7 @@ TEST(SleepLifecycleControllerTest, DiscardModeRejectsLevelOne) {
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpFromSleepingReachesRunning) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
 
     const auto result = controller.wakeUp();
@@ -406,7 +646,7 @@ TEST(SleepLifecycleControllerTest, WakeUpFromSleepingReachesRunning) {
 }
 
 TEST(SleepLifecycleControllerTest, SleepIsIdempotent) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
     ASSERT_EQ(controller.state(), SleepState::SLEEPING);
 
@@ -418,13 +658,13 @@ TEST(SleepLifecycleControllerTest, SleepIsIdempotent) {
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpIsIdempotent) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     EXPECT_TRUE(controller.wakeUp().ok);  // RUNNING -> wake_up == no-op success
     EXPECT_EQ(controller.state(), SleepState::RUNNING);
 }
 
 TEST(SleepLifecycleControllerTest, EpochIsMonotonicAcrossCycles) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     for (int64_t i = 1; i <= 3; ++i) {
         ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
         EXPECT_EQ(controller.sleepEpoch(), i);
@@ -434,7 +674,7 @@ TEST(SleepLifecycleControllerTest, EpochIsMonotonicAcrossCycles) {
 }
 
 TEST(SleepLifecycleControllerTest, DrainTimeoutKeepsDraining) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [](const SleepOptions&) { return false; };  // simulate timeout
     controller.setHooks(hooks);
@@ -447,20 +687,21 @@ TEST(SleepLifecycleControllerTest, DrainTimeoutKeepsDraining) {
 }
 
 TEST(SleepLifecycleControllerTest, LeaseAcquiredBeforeDrainMustReleaseBeforeSleepProgresses) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [&controller](const SleepOptions&) { return controller.activeAdmissionCount() == 0; };
     controller.setHooks(hooks);
 
     SleepResult first_sleep;
     {
-        auto admission = controller.acquireAdmission();
-        ASSERT_TRUE(admission.admitted());
+        auto admission = controller.admission()->admit();
+        ASSERT_TRUE(admission.accepted);
         EXPECT_EQ(controller.activeAdmissionCount(), 1);
 
         first_sleep = controller.sleep(gracefulOptions());
         EXPECT_FALSE(first_sleep.ok);
         EXPECT_EQ(controller.state(), SleepState::DRAINING);
+        admission.complete();
     }
 
     EXPECT_EQ(controller.activeAdmissionCount(), 0);
@@ -470,7 +711,7 @@ TEST(SleepLifecycleControllerTest, LeaseAcquiredBeforeDrainMustReleaseBeforeSlee
 }
 
 TEST(SleepLifecycleControllerTest, SleepRetryFromDrainingCanComplete) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::atomic<bool>        busy{true};
     SleepHooks               hooks;
     hooks.drain = [&busy](const SleepOptions&) { return !busy.load(); };
@@ -488,7 +729,7 @@ TEST(SleepLifecycleControllerTest, SleepRetryFromDrainingCanComplete) {
 }
 
 TEST(SleepLifecycleControllerTest, PrepareOnlyStaysDrainingUntilCommit) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::atomic<int>         release_kv_called{0};
     std::atomic<int>         quiesce_called{0};
     std::atomic<int>         sync_dereg_called{0};
@@ -530,7 +771,7 @@ TEST(SleepLifecycleControllerTest, PrepareOnlyStaysDrainingUntilCommit) {
 }
 
 TEST(SleepLifecycleControllerTest, PrepareAndCommitCannotAcquireStragglerAdmission) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [&controller](const SleepOptions&) { return controller.activeAdmissionCount() == 0; };
     controller.setHooks(hooks);
@@ -540,9 +781,9 @@ TEST(SleepLifecycleControllerTest, PrepareAndCommitCannotAcquireStragglerAdmissi
     ASSERT_TRUE(controller.sleep(prepare).ok);
     ASSERT_EQ(controller.state(), SleepState::DRAINING);
 
-    auto straggler = controller.acquireAdmission();
-    EXPECT_FALSE(straggler.admitted());
-    EXPECT_EQ(straggler.state, SleepState::DRAINING);
+    auto straggler = controller.admission()->admit();
+    EXPECT_FALSE(straggler.accepted);
+    EXPECT_EQ(controller.state(), SleepState::DRAINING);
     EXPECT_EQ(controller.activeAdmissionCount(), 0);
 
     SleepOptions commit = gracefulOptions();
@@ -553,7 +794,7 @@ TEST(SleepLifecycleControllerTest, PrepareAndCommitCannotAcquireStragglerAdmissi
 }
 
 TEST(SleepLifecycleControllerTest, CommitOnlyRequiresPreparedQuiesce) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [](const SleepOptions&) { return false; };
     controller.setHooks(hooks);
@@ -570,7 +811,7 @@ TEST(SleepLifecycleControllerTest, CommitOnlyRequiresPreparedQuiesce) {
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpFromPreparedDrainingAbortsSleep) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::atomic<int>         cancel_called{0};
     SleepHooks               hooks;
     hooks.cancelQuiesceAndRestartEngine = [&cancel_called]() {
@@ -592,8 +833,207 @@ TEST(SleepLifecycleControllerTest, WakeUpFromPreparedDrainingAbortsSleep) {
     EXPECT_EQ(cancel_called.load(), 1);
 }
 
+TEST(SleepLifecycleControllerTest, WakeHealthCheckCompletesWhileExecutionIsStillParked) {
+    BoundSleepLifecycleController controller(true);
+    bool                          execution_running = false;
+    int                           health_checks     = 0;
+    SleepHooks                    hooks;
+    hooks.warmupAndHealthCheck = [&]() {
+        EXPECT_FALSE(execution_running);
+        ++health_checks;
+        return !execution_running;
+    };
+    hooks.restartEngine = [&]() {
+        execution_running = true;
+        return true;
+    };
+    controller.setHooks(hooks);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    WakeUpOptions prepare;
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller.wakeUp(prepare).ok);
+    EXPECT_EQ(health_checks, 1);
+    EXPECT_FALSE(execution_running);
+    WakeUpOptions commit;
+    commit.commit_only = true;
+    EXPECT_TRUE(controller.wakeUp(commit).ok);
+    EXPECT_EQ(health_checks, 1);
+    EXPECT_TRUE(execution_running);
+}
+
+TEST(SleepLifecycleControllerTest, WakePreparedIsACompletionFactNotTheWakingState) {
+    BoundSleepLifecycleController controller(true);
+    std::promise<void>            entered, release;
+    auto                          released = release.get_future().share();
+    std::atomic<int>              restores{0};
+    SleepHooks                    hooks;
+    hooks.restoreRestorableGpuMemory = [&]() {
+        ++restores;
+        entered.set_value();
+        released.wait();
+        return true;
+    };
+    controller.setHooks(hooks);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    WakeUpOptions prepare;
+    prepare.prepare_only         = true;
+    prepare.expected_incarnation = controller.status().worker_incarnation;
+    prepare.expected_sleep_epoch = controller.sleepEpoch();
+    auto preparing               = std::async(std::launch::async, [&] { return controller.wakeUp(prepare); });
+    entered.get_future().wait();
+    const auto during_restore = controller.status();
+    EXPECT_EQ(during_restore.state, SleepState::WAKING_UP);
+    EXPECT_FALSE(during_restore.wake_prepared);
+    release.set_value();
+    ASSERT_TRUE(preparing.get().ok);
+    EXPECT_TRUE(controller.status().wake_prepared);
+    ASSERT_TRUE(controller.wakeUp(prepare).ok);
+    EXPECT_EQ(restores.load(), 1);
+    WakeUpOptions commit = prepare;
+    commit.prepare_only  = false;
+    commit.commit_only   = true;
+    ASSERT_TRUE(controller.wakeUp(commit).ok);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    EXPECT_FALSE(controller.status().wake_prepared);
+    EXPECT_FALSE(controller.wakeUp(commit).ok);  // Previous epoch cannot resume.
+    EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+}
+
+TEST(SleepLifecycleControllerTest, StaleWakeAndTerminalIntentDoNotRunRestoreHooks) {
+    BoundSleepLifecycleController controller(true);
+    int                           restores = 0;
+    SleepHooks                    hooks;
+    hooks.restoreRestorableGpuMemory = [&]() {
+        ++restores;
+        return true;
+    };
+    controller.setHooks(hooks);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    WakeUpOptions prepare;
+    prepare.prepare_only         = true;
+    prepare.expected_incarnation = "old-worker";
+    prepare.expected_sleep_epoch = controller.sleepEpoch();
+    EXPECT_FALSE(controller.wakeUp(prepare).ok);
+    EXPECT_EQ(restores, 0);
+    prepare.expected_incarnation = controller.status().worker_incarnation;
+    controller.admission()->beginTermination();
+    EXPECT_FALSE(controller.wakeUp(prepare).ok);
+    EXPECT_EQ(restores, 0);
+    EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+}
+
+TEST(SleepLifecycleControllerTest, TerminalIntentDuringRealPrepareKeepsAdmissionClosedAndCommitRejected) {
+    for (bool restore_succeeds : {true, false}) {
+        SCOPED_TRACE(restore_succeeds);
+        BoundSleepLifecycleController controller(true);
+        std::promise<void>            entered, release;
+        auto                          entered_future = entered.get_future();
+        auto                          released       = release.get_future().share();
+        std::atomic<int>              restores{0}, kv_restores{0}, registrations{0}, checks{0}, restarts{0};
+        SleepHooks                    hooks;
+        hooks.restoreRestorableGpuMemory = [&]() {
+            ++restores;
+            entered.set_value();
+            released.wait();
+            return restore_succeeds;
+        };
+        hooks.restoreKvMemoryBackingAndResetMetadata = [&]() {
+            ++kv_restores;
+            return true;
+        };
+        hooks.registerMr = [&]() {
+            ++registrations;
+            return true;
+        };
+        hooks.warmupAndHealthCheck = [&]() {
+            ++checks;
+            return true;
+        };
+        hooks.restartEngine = [&]() {
+            ++restarts;
+            return true;
+        };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+        WakeUpOptions prepare;
+        prepare.prepare_only         = true;
+        prepare.expected_incarnation = controller.status().worker_incarnation;
+        prepare.expected_sleep_epoch = controller.sleepEpoch();
+        auto       preparing         = std::async(std::launch::async, [&] { return controller.wakeUp(prepare); });
+        const bool restore_entered   = entered_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        if (!restore_entered) {
+            // Always unblock a late hook before destroying its async future.
+            release.set_value();
+            preparing.wait();
+            FAIL() << "prepare never entered the controlled restore hook";
+        }
+        EXPECT_EQ(controller.state(), SleepState::WAKING_UP);
+        EXPECT_FALSE(controller.status().wake_prepared);
+        EXPECT_EQ(preparing.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+
+        // This is the real first step in RtpLLMOp::beginShutdown. It does not
+        // acquire the controller transition mutex held by the blocked restore.
+        controller.admission()->beginTermination();
+        EXPECT_TRUE(controller.admission()->terminating());
+        EXPECT_FALSE(controller.admission()->admit().accepted);
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
+        EXPECT_EQ(restarts.load(), 0);
+        EXPECT_FALSE(controller.status().wake_prepared);
+
+        release.set_value();
+        const auto prepare_result = preparing.get();
+        EXPECT_EQ(prepare_result.ok, restore_succeeds);
+        // Terminal intent does not cancel already-entered resource work. Its
+        // successful prepare may finish, but cannot authorize a later commit.
+        const auto expected_state = restore_succeeds ? SleepState::WAKING_UP : SleepState::ERROR;
+        EXPECT_EQ(controller.state(), expected_state);
+        EXPECT_EQ(controller.status().wake_prepared, restore_succeeds);
+        EXPECT_FALSE(controller.admit());
+        EXPECT_FALSE(controller.admission()->admit().accepted);
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
+
+        auto commit         = prepare;
+        commit.prepare_only = false;
+        commit.commit_only  = true;
+        for (const auto& retry : {commit, prepare}) {
+            const auto result = controller.wakeUp(retry);
+            EXPECT_FALSE(result.ok);
+            EXPECT_EQ(result.code, SleepResult::Code::FAILED_PRECONDITION);
+            EXPECT_NE(result.message.find("termination intent"), std::string::npos);
+        }
+        EXPECT_EQ(controller.state(), expected_state);
+        EXPECT_EQ(controller.sleepEpoch(), prepare.expected_sleep_epoch);
+        EXPECT_EQ(restores.load(), 1);
+        EXPECT_EQ(kv_restores.load(), restore_succeeds ? 1 : 0);
+        EXPECT_EQ(registrations.load(), restore_succeeds ? 1 : 0);
+        EXPECT_EQ(checks.load(), restore_succeeds ? 1 : 0);
+        EXPECT_EQ(restarts.load(), 0);
+        EXPECT_FALSE(controller.admission()->admit().accepted);
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
+    }
+}
+
+TEST(SleepLifecycleControllerTest, FailedWakeHealthCheckDoesNotPublishPreparedOrRestart) {
+    BoundSleepLifecycleController controller(true);
+    int                           restarts = 0;
+    SleepHooks                    hooks;
+    hooks.warmupAndHealthCheck = [] { return false; };
+    hooks.restartEngine        = [&] {
+        ++restarts;
+        return true;
+    };
+    controller.setHooks(hooks);
+    ASSERT_TRUE(controller.sleep(SleepOptions{}).ok);
+    WakeUpOptions prepare;
+    prepare.prepare_only = true;
+    EXPECT_FALSE(controller.wakeUp(prepare).ok);
+    EXPECT_FALSE(controller.status().wake_prepared);
+    EXPECT_EQ(restarts, 0);
+    EXPECT_EQ(controller.state(), SleepState::ERROR);
+}
+
 TEST(SleepLifecycleControllerTest, WakeUpPrepareOnlyStaysWakingUpUntilCommit) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::atomic<int>         restore_kv_called{0};
     std::atomic<int>         restore_weights_called{0};
     std::atomic<int>         register_mr_called{0};
@@ -642,7 +1082,7 @@ TEST(SleepLifecycleControllerTest, WakeUpPrepareOnlyStaysWakingUpUntilCommit) {
 }
 
 TEST(SleepLifecycleControllerTest, ControlPlaneSmokeFlowExposesExpectedIntermediateStates) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.quiesceEngine                          = [](const SleepOptions&) { return true; };
     hooks.synchronizeAndDeregisterMr             = [](const SleepOptions&) { return true; };
@@ -698,7 +1138,7 @@ TEST(SleepLifecycleControllerTest, ControlPlaneSmokeFlowExposesExpectedIntermedi
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpPrepareFailureDoesNotRestartEngine) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::atomic<int>         restart_called{0};
     SleepHooks               hooks;
     hooks.restoreRestorableGpuMemory = []() { return false; };
@@ -719,7 +1159,7 @@ TEST(SleepLifecycleControllerTest, WakeUpPrepareFailureDoesNotRestartEngine) {
 }
 
 TEST(SleepLifecycleControllerTest, SleepRetryFromDrainingCanEscalateToAbort) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::atomic<int>         abort_seen{0};
     std::vector<std::string> modes;
     SleepHooks               hooks;
@@ -744,11 +1184,11 @@ TEST(SleepLifecycleControllerTest, SleepRetryFromDrainingCanEscalateToAbort) {
     EXPECT_EQ(controller.state(), SleepState::SLEEPING);
     EXPECT_EQ(controller.sleepEpoch(), 1);
     EXPECT_EQ(abort_seen.load(), 1);
-    EXPECT_EQ(modes, std::vector<std::string>({"wait", "abort", "wait"}));
+    EXPECT_EQ(modes, std::vector<std::string>({"wait", "abort", "wait", "wait"}));
 }
 
 TEST(SleepLifecycleControllerTest, SleepHookFailureGoesToError) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.releaseKvMemoryBacking = [](const SleepOptions&) { return false; };
     controller.setHooks(hooks);
@@ -761,7 +1201,7 @@ TEST(SleepLifecycleControllerTest, SleepHookFailureGoesToError) {
 }
 
 TEST(SleepLifecycleControllerTest, SleepHalfReleasedFailureGoesToError) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::atomic<int>         release_kv_called{0};
     SleepHooks               hooks;
     hooks.releaseKvMemoryBacking = [&release_kv_called](const SleepOptions&) {
@@ -792,7 +1232,7 @@ TEST(SleepLifecycleControllerTest, SleepHalfReleasedFailureGoesToError) {
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpFailureGoesToError) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.warmupAndHealthCheck = []() { return false; };
     controller.setHooks(hooks);
@@ -805,7 +1245,7 @@ TEST(SleepLifecycleControllerTest, WakeUpFailureGoesToError) {
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpFailureDoesNotRunImplicitRollback) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
 
     std::atomic<int> release_kv_called{0};
@@ -842,7 +1282,7 @@ TEST(SleepLifecycleControllerTest, SleepHookFailureDetailFallbacks) {
     const std::string expected = "releaseRestorableGpuMemory failed";
 
     {  // No provider installed at all: the pre-existing message, unchanged.
-        SleepLifecycleController controller(true);
+        BoundSleepLifecycleController controller(true);
         SleepHooks               hooks;
         hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
         controller.setHooks(hooks);
@@ -854,7 +1294,7 @@ TEST(SleepLifecycleControllerTest, SleepHookFailureDetailFallbacks) {
     }
 
     {  // NCCL is not the cause: no separator, no trailing colon.
-        SleepLifecycleController controller(true);
+        BoundSleepLifecycleController controller(true);
         std::atomic<int>         detail_calls{0};
         SleepHooks               hooks;
         hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
@@ -871,7 +1311,7 @@ TEST(SleepLifecycleControllerTest, SleepHookFailureDetailFallbacks) {
     }
 
     {  // The provider throws std::exception: warn, fall back, verdict unchanged.
-        SleepLifecycleController controller(true);
+        BoundSleepLifecycleController controller(true);
         SleepHooks               hooks;
         hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
         hooks.hookFailureDetail          = [](const char*) -> std::string { throw std::runtime_error("gil deadlock"); };
@@ -886,7 +1326,7 @@ TEST(SleepLifecycleControllerTest, SleepHookFailureDetailFallbacks) {
 
     {  // A non-std throw (pybind11's error_already_set does not derive from
        // std::exception on every toolchain) must not escape either.
-        SleepLifecycleController controller(true);
+        BoundSleepLifecycleController controller(true);
         SleepHooks               hooks;
         hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
         hooks.hookFailureDetail          = [](const char*) -> std::string { throw 42; };
@@ -900,7 +1340,7 @@ TEST(SleepLifecycleControllerTest, SleepHookFailureDetailFallbacks) {
     }
 
     {  // Healthy sleep: a diagnostic must never be invoked when nothing failed.
-        SleepLifecycleController controller(true);
+        BoundSleepLifecycleController controller(true);
         std::atomic<int>         detail_calls{0};
         SleepHooks               hooks;
         hooks.hookFailureDetail = [&detail_calls](const char*) {
@@ -916,7 +1356,7 @@ TEST(SleepLifecycleControllerTest, SleepHookFailureDetailFallbacks) {
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpHookExceptionGoesToError) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
 
     SleepHooks hooks;
@@ -929,9 +1369,24 @@ TEST(SleepLifecycleControllerTest, WakeUpHookExceptionGoesToError) {
     EXPECT_FALSE(controller.admit());
 }
 
+TEST(SleepLifecycleControllerTest, SleepReleaseHookExceptionGoesToError) {
+    BoundSleepLifecycleController controller(true);
+    SleepHooks hooks;
+    hooks.releaseKvMemoryBacking = [](const SleepOptions&) -> bool {
+        throw std::runtime_error("live cache references after quiesce");
+    };
+    controller.setHooks(hooks);
+
+    const auto result = controller.sleep(gracefulOptions());
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(controller.state(), SleepState::ERROR);
+    EXPECT_FALSE(controller.admit());
+    EXPECT_FALSE(controller.wakeUp().ok);
+}
+
 TEST(SleepLifecycleControllerTest, ErrorIsTerminalAndRejectsWakeUp) {
-    SleepLifecycleController controller(true);
-    SleepHooks               hooks;
+    BoundSleepLifecycleController controller(true);
+    SleepHooks                    hooks;
     hooks.releaseKvMemoryBacking = [](const SleepOptions&) { return false; };
     controller.setHooks(hooks);
     ASSERT_FALSE(controller.sleep(gracefulOptions()).ok);
@@ -946,7 +1401,7 @@ TEST(SleepLifecycleControllerTest, ErrorIsTerminalAndRejectsWakeUp) {
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpWhileDrainingAbortsSleep) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [](const SleepOptions&) { return false; };
     controller.setHooks(hooks);
@@ -960,7 +1415,7 @@ TEST(SleepLifecycleControllerTest, WakeUpWhileDrainingAbortsSleep) {
 }
 
 TEST(SleepLifecycleControllerTest, StatusExposesLiveCounters) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.activeRequestCount       = []() { return 7; };
     hooks.activeCacheTransferCount = []() { return 3; };
@@ -972,7 +1427,7 @@ TEST(SleepLifecycleControllerTest, StatusExposesLiveCounters) {
 }
 
 TEST(SleepLifecycleControllerTest, ConcurrentSleepWakeUpIsSerializedAndConsistent) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::atomic<int>         ok_sleeps{0};
 
     std::vector<std::thread> threads;
@@ -996,39 +1451,39 @@ TEST(SleepLifecycleControllerTest, ConcurrentSleepWakeUpIsSerializedAndConsisten
 }
 
 TEST(SleepContinuationTest, EarlyDrainedPeerAcceptsBusyRanksLateKvLoadUntilFreeze) {
-    SleepLifecycleController root(true), peer(true);
+    BoundSleepLifecycleController root(true), peer(true);
     for (auto* controller : {&root, &peer}) {
         SleepHooks hooks;
         hooks.requiresCoordinatedQuiesce = true;
         hooks.drain = [controller](const SleepOptions&) { return controller->activeAdmissionCount() == 0; };
-        hooks.releaseKvMemoryBacking = [controller](const SleepOptions&) {
+        hooks.releaseKvMemoryBacking     = [controller](const SleepOptions&) {
             EXPECT_EQ(controller->activeAdmissionCount(), 0);
-            EXPECT_FALSE(controller->acquireCacheTransferAdmission().admitted());
-            EXPECT_FALSE(controller->acquireAdmission().admitted());
+            EXPECT_FALSE(controller->admission()->admit(true).accepted);
+            EXPECT_FALSE(controller->admission()->admit().accepted);
             return true;
         };
         controller->setHooks(hooks);
     }
-    auto parent     = root.acquireAdmission();
+    auto parent     = root.admission()->admit();
     auto root_drain = coordinatedDrain(root, "drain");
     auto peer_drain = coordinatedDrain(peer, "drain");
     ASSERT_TRUE(peer.sleep(peer_drain).ok);
     EXPECT_FALSE(root.sleep(root_drain).ok);  // admitted parent is still alive
-    EXPECT_FALSE(root.acquireAdmission().admitted());
-    EXPECT_FALSE(peer.acquireAdmission().admitted());
-    auto child = peer.acquireCacheTransferAdmission();
-    ASSERT_TRUE(child.admitted());
-    EXPECT_EQ(child.state, SleepState::DRAINING);
+    EXPECT_FALSE(root.admission()->admit().accepted);
+    EXPECT_FALSE(peer.admission()->admit().accepted);
+    auto child = peer.admission()->admit(true);
+    ASSERT_TRUE(child.accepted);
+    EXPECT_EQ(peer.state(), SleepState::DRAINING);
     EXPECT_EQ(peer.activeAdmissionCount(), 1);
     EXPECT_FALSE(root.sleep(root_drain).ok);
-    child.lease  = AdmissionLease{};
-    parent.lease = AdmissionLease{};
+    child.complete();
+    parent.complete();
     ASSERT_TRUE(root.sleep(root_drain).ok);
     uint64_t round = 0;
     // Model the coordinator's barriers: all freezes, all quiesces, all commits.
     for (auto* controller : {&root, &peer}) {
         ASSERT_TRUE(controller->quiesce({"drain", true, 0, 100}, round).ok);
-        EXPECT_FALSE(controller->acquireCacheTransferAdmission().admitted());
+        EXPECT_FALSE(controller->admission()->admit(true).accepted);
     }
     for (auto* controller : {&root, &peer}) {
         ASSERT_TRUE(controller->quiesce({"drain", false, round, 100}, round).ok);
@@ -1039,17 +1494,18 @@ TEST(SleepContinuationTest, EarlyDrainedPeerAcceptsBusyRanksLateKvLoadUntilFreez
         commit.commit_only                      = true;
         EXPECT_TRUE(controller->sleep(commit).ok);
         EXPECT_EQ(controller->state(), SleepState::SLEEPING);
-        EXPECT_FALSE(controller->acquireCacheTransferAdmission().admitted());
+        EXPECT_FALSE(controller->admission()->admit(true).accepted);
     }
     for (auto* controller : {&root, &peer}) {
         ASSERT_TRUE(controller->wakeUp().ok);
-        auto next = controller->acquireCacheTransferAdmission();
-        EXPECT_TRUE(next.admitted());
+        auto next = controller->admission()->admit(true);
+        EXPECT_TRUE(next.accepted);
+        next.complete();
     }
 }
 
 TEST(SleepContinuationTest, LateCleanupBlocksFreezeAndRetryDrainsBeforeAcknowledgement) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     int                      freezes = 0;
     SleepHooks               hooks;
     hooks.requiresCoordinatedQuiesce = true;
@@ -1057,20 +1513,20 @@ TEST(SleepContinuationTest, LateCleanupBlocksFreezeAndRetryDrainsBeforeAcknowled
     hooks.freezeEngineRounds         = [&] {
         ++freezes;
         EXPECT_EQ(controller.activeAdmissionCount(), 0);
-        EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
         return uint64_t{3};
     };
     controller.setHooks(hooks);
     ASSERT_TRUE(controller.sleep(coordinatedDrain(controller, "cleanup")).ok);
-    auto late = controller.acquireCacheTransferAdmission();
-    ASSERT_TRUE(late.admitted());
+    auto late = controller.admission()->admit(true);
+    ASSERT_TRUE(late.accepted);
     uint64_t round = 0;
     EXPECT_FALSE(controller.quiesce({"cleanup", true, 0, 1}, round).ok);
     EXPECT_EQ(freezes, 0);
     EXPECT_EQ(controller.state(), SleepState::DRAINING);
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
     EXPECT_EQ(controller.activeAdmissionCount(), 1);
-    late.lease = AdmissionLease{};
+    late.complete();
     ASSERT_TRUE(controller.quiesce({"cleanup", true, 0, 100}, round).ok);
     EXPECT_EQ(freezes, 1);
     EXPECT_EQ(round, 3);
@@ -1079,37 +1535,37 @@ TEST(SleepContinuationTest, LateCleanupBlocksFreezeAndRetryDrainsBeforeAcknowled
     WakeUpOptions cancel;
     cancel.cancel_quiesce_token = "cleanup";
     ASSERT_TRUE(controller.wakeUp(cancel).ok);
-    EXPECT_TRUE(controller.acquireAdmission().admitted());
-    EXPECT_TRUE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_TRUE(admitAndComplete(controller.admission()->admit()));
+    EXPECT_TRUE(admitAndComplete(controller.admission()->admit(true)));
     EXPECT_FALSE(controller.quiesce({"cleanup", true, 0, 100}, round).ok);
 }
 
 TEST(SleepContinuationTest, StaleTokenCannotCloseOrReopenContinuationGate) {
-    SleepLifecycleController controller(true);
-    SleepHooks               hooks;
+    BoundSleepLifecycleController controller(true);
+    SleepHooks                    hooks;
     hooks.drain = [](const SleepOptions&) { return true; };
     controller.setHooks(hooks);
     ASSERT_TRUE(controller.sleep(coordinatedDrain(controller, "current")).ok);
     uint64_t round = 0;
     EXPECT_FALSE(controller.quiesce({"old", true, 0, 100}, round).ok);
-    EXPECT_TRUE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_TRUE(admitAndComplete(controller.admission()->admit(true)));
     ASSERT_TRUE(controller.quiesce({"current", true, 0, 100}, round).ok);
     WakeUpOptions old;
     old.cancel_quiesce_token = "old";
     EXPECT_FALSE(controller.wakeUp(old).ok);
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
 }
 
 TEST(SleepContinuationTest, NoncoordinatedPrepareClosesAndRedrainsBeforeQuiesce) {
-    SleepLifecycleController controller(true);
-    AdmissionLease           racing_child;
+    BoundSleepLifecycleController controller(true);
+    std::function<void()> racing_child;
     int                      drains = 0;
     int                      pauses = 0;
     SleepHooks               hooks;
     hooks.drain = [&](const SleepOptions&) {
         if (++drains == 1) {
             // A child wins admission immediately after a local zero observation.
-            racing_child = std::move(controller.acquireCacheTransferAdmission().lease);
+            racing_child = std::move(controller.admission()->admit(true).complete);
             EXPECT_TRUE(static_cast<bool>(racing_child));
             return true;
         }
@@ -1124,16 +1580,16 @@ TEST(SleepContinuationTest, NoncoordinatedPrepareClosesAndRedrainsBeforeQuiesce)
     options.prepare_only = true;
     EXPECT_FALSE(controller.sleep(options).ok);
     EXPECT_EQ(pauses, 0);
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
     EXPECT_EQ(controller.activeAdmissionCount(), 1);
-    racing_child = AdmissionLease{};
+    racing_child();
     ASSERT_TRUE(controller.sleep(options).ok);
     EXPECT_EQ(pauses, 1);
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
 }
 
 TEST(SleepContinuationTest, DrainExceptionsKeepGateClosedAndResourcesIntact) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     int                      drains  = 0;
     int                      freezes = 0;
     SleepHooks               hooks;
@@ -1154,12 +1610,12 @@ TEST(SleepContinuationTest, DrainExceptionsKeepGateClosedAndResourcesIntact) {
     EXPECT_EQ(freezes, 0);
     EXPECT_EQ(controller.state(), SleepState::DRAINING);
     EXPECT_TRUE(controller.status().device_kv_cache_valid);
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
     EXPECT_NE(controller.status().last_error.find("continuation cleanup failed"), std::string::npos);
 }
 
 TEST(SleepContinuationTest, CancellationWaitsForFreezeDrainThenReopensWithoutReleasingResources) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     std::promise<void>       drain_entered;
     std::promise<void>       finish_drain;
     auto                     drain_entered_future = drain_entered.get_future();
@@ -1192,8 +1648,8 @@ TEST(SleepContinuationTest, CancellationWaitsForFreezeDrainThenReopensWithoutRel
     };
     controller.setHooks(hooks);
     ASSERT_TRUE(controller.sleep(coordinatedDrain(controller, "cancel-freeze")).ok);
-    auto child = controller.acquireCacheTransferAdmission();
-    ASSERT_TRUE(child.admitted());
+    auto child = controller.admission()->admit(true);
+    ASSERT_TRUE(child.accepted);
 
     auto freeze = std::async(std::launch::async, [&] {
         uint64_t round = 0;
@@ -1201,8 +1657,8 @@ TEST(SleepContinuationTest, CancellationWaitsForFreezeDrainThenReopensWithoutRel
     });
     EXPECT_EQ(drain_entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_EQ(controller.state(), SleepState::DRAINING);
-    EXPECT_FALSE(controller.acquireAdmission().admitted());
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller.admission()->admit().accepted);
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
 
     std::promise<void> cancel_started;
     auto               cancel_started_future = cancel_started.get_future();
@@ -1228,14 +1684,14 @@ TEST(SleepContinuationTest, CancellationWaitsForFreezeDrainThenReopensWithoutRel
     EXPECT_EQ(controller.state(), SleepState::RUNNING);
     EXPECT_TRUE(controller.status().device_kv_cache_valid);
     EXPECT_EQ(controller.activeAdmissionCount(), 1);
-    EXPECT_TRUE(controller.acquireAdmission().admitted());
-    EXPECT_TRUE(controller.acquireCacheTransferAdmission().admitted());
-    child.lease = AdmissionLease{};
+    EXPECT_TRUE(admitAndComplete(controller.admission()->admit()));
+    EXPECT_TRUE(admitAndComplete(controller.admission()->admit(true)));
+    child.complete();
     EXPECT_EQ(controller.activeAdmissionCount(), 0);
 }
 
 TEST(SleepContinuationTest, ConcurrentCloseCannotMissPrecloseLeaseOrAdmitPostcloseWork) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [&](const SleepOptions&) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -1255,10 +1711,11 @@ TEST(SleepContinuationTest, ConcurrentCloseCannotMissPrecloseLeaseOrAdmitPostclo
     for (int i = 0; i < 8; ++i) {
         threads.emplace_back([&] {
             while (!stop.load()) {
-                auto child = controller.acquireCacheTransferAdmission();
-                if (child.admitted()) {
+                auto child = controller.admission()->admit(true);
+                if (child.accepted) {
                     ++accepted;
                     std::this_thread::yield();
+                    child.complete();
                 }
             }
         });
@@ -1277,13 +1734,13 @@ TEST(SleepContinuationTest, ConcurrentCloseCannotMissPrecloseLeaseOrAdmitPostclo
     EXPECT_TRUE(result.ok) << result.message;
     EXPECT_EQ(controller.activeAdmissionCount(), 0);
     for (int i = 0; i < 100; ++i) {
-        EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
-        EXPECT_FALSE(controller.acquireAdmission().admitted());
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
+        EXPECT_FALSE(controller.admission()->admit().accepted);
     }
 }
 
 TEST(SleepContinuationTest, SuccessfulDrainHookCannotReleaseWithALiveLease) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     int                      releases = 0;
     // Deliberately incomplete provider: the controller must guard its own count.
@@ -1293,77 +1750,316 @@ TEST(SleepContinuationTest, SuccessfulDrainHookCannotReleaseWithALiveLease) {
         return true;
     };
     controller.setHooks(hooks);
-    auto live = controller.acquireAdmission();
+    auto live = controller.admission()->admit();
     EXPECT_FALSE(controller.sleep(gracefulOptions()).ok);
     EXPECT_EQ(controller.state(), SleepState::DRAINING);
     EXPECT_EQ(releases, 0);
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
-    live.lease = AdmissionLease{};
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
+    live.complete();
     ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
     EXPECT_EQ(releases, 1);
 }
 
 TEST(SleepContinuationTest, TwoPhaseWakeKeepsContinuationClosedUntilCommitAcrossCycles) {
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [&](const SleepOptions&) { return controller.activeAdmissionCount() == 0; };
     hooks.restoreKvMemoryBackingAndResetMetadata = [&] {
         EXPECT_EQ(controller.state(), SleepState::WAKING_UP);
-        EXPECT_FALSE(controller.acquireAdmission().admitted());
-        EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+        EXPECT_FALSE(controller.admission()->admit().accepted);
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
         return true;
     };
     controller.setHooks(hooks);
     for (int i = 0; i < 100; ++i) {
         ASSERT_TRUE(controller.sleep(gracefulOptions()).ok);
         EXPECT_EQ(controller.sleepEpoch(), i + 1);
-        EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
         WakeUpOptions prepare;
         prepare.prepare_only = true;
         ASSERT_TRUE(controller.wakeUp(prepare).ok);
-        EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
         WakeUpOptions commit;
         commit.commit_only = true;
         ASSERT_TRUE(controller.wakeUp(commit).ok);
-        EXPECT_TRUE(controller.acquireAdmission().admitted());
-        EXPECT_TRUE(controller.acquireCacheTransferAdmission().admitted());
+        EXPECT_TRUE(admitAndComplete(controller.admission()->admit()));
+        EXPECT_TRUE(admitAndComplete(controller.admission()->admit(true)));
         EXPECT_EQ(controller.activeAdmissionCount(), 0);
     }
 }
 
 TEST(SleepContinuationTest, ResourceFailureNeverReopensContinuationGate) {
-    SleepLifecycleController controller(true);
-    SleepHooks               hooks;
+    BoundSleepLifecycleController controller(true);
+    SleepHooks                    hooks;
     hooks.drain                  = [](const SleepOptions&) { return true; };
     hooks.releaseKvMemoryBacking = [](const SleepOptions&) { return false; };
     controller.setHooks(hooks);
     EXPECT_FALSE(controller.sleep(gracefulOptions()).ok);
     EXPECT_EQ(controller.state(), SleepState::ERROR);
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
     EXPECT_FALSE(controller.wakeUp().ok);
-    EXPECT_FALSE(controller.acquireCacheTransferAdmission().admitted());
+    EXPECT_FALSE(controller.admission()->admit(true).accepted);
 }
 
-TEST(SleepContinuationTest, DisabledContinuationHasNoTrackingAndMoveReleasesExactlyOnce) {
-    SleepLifecycleController disabled(false);
-    auto                     untracked = disabled.acquireCacheTransferAdmission();
-    EXPECT_TRUE(untracked.admitted());
-    EXPECT_FALSE(static_cast<bool>(untracked.lease));
+TEST(SleepContinuationTest, DisabledContinuationIsTrackedAndCompletesExactlyOnce) {
+    BoundSleepLifecycleController disabled(false);
+    auto                          tracked = disabled.admission()->admit(true);
+    EXPECT_TRUE(tracked.accepted);
+    EXPECT_TRUE(static_cast<bool>(tracked.complete));
+    EXPECT_EQ(disabled.activeAdmissionCount(), 1);
+    tracked.complete();
     EXPECT_EQ(disabled.activeAdmissionCount(), 0);
-    SleepLifecycleController controller(true);
+    BoundSleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [](const SleepOptions&) { return false; };
     controller.setHooks(hooks);
     EXPECT_FALSE(controller.sleep(gracefulOptions()).ok);
-    auto first  = controller.acquireCacheTransferAdmission();
-    auto second = controller.acquireCacheTransferAdmission();
+    auto first  = controller.admission()->admit(true);
+    auto second = controller.admission()->admit(true);
     EXPECT_EQ(controller.activeAdmissionCount(), 2);
-    first.lease = std::move(second.lease);
-    EXPECT_TRUE(second.admitted());  // Result does not change when its lease moves.
+    auto duplicate = first.complete;
+    first.complete();
     EXPECT_EQ(controller.activeAdmissionCount(), 1);
-    EXPECT_FALSE(static_cast<bool>(second.lease));
-    first.lease = AdmissionLease{};
+    duplicate();
+    EXPECT_EQ(controller.activeAdmissionCount(), 1);
+    second.complete();
     EXPECT_EQ(controller.activeAdmissionCount(), 0);
+}
+
+namespace {
+
+bool primePostQuiesceTest(BoundSleepLifecycleController& controller, bool coordinated) {
+    if (!coordinated) {
+        return true;
+    }
+    uint64_t round = 0;
+    return controller.sleep(coordinatedDrain(controller, "late-cleanup")).ok
+           && controller.quiesce({"late-cleanup", true, 0, 1000}, round).ok;
+}
+
+SleepResult preparePostQuiesceTest(BoundSleepLifecycleController& controller, bool coordinated, int64_t timeout_ms) {
+    if (coordinated) {
+        uint64_t round = 0;
+        return controller.quiesce({"late-cleanup", false, 0, timeout_ms}, round);
+    }
+    auto options         = gracefulOptions();
+    options.prepare_only = true;
+    options.timeout_ms   = timeout_ms;
+    return controller.sleep(options);
+}
+
+SleepResult commitPostQuiesceTest(BoundSleepLifecycleController& controller, bool coordinated) {
+    auto options         = coordinated ? coordinatedDrain(controller, "late-cleanup") : gracefulOptions();
+    options.prepare_only = options.drain_only = false;
+    options.commit_only                       = true;
+    return controller.sleep(options);
+}
+
+}  // namespace
+
+TEST(SleepPostQuiesceDrainTest, LateTransferBlocksAckAndResourcesUntilRetryDrains) {
+    for (bool coordinated : {false, true}) {
+        SCOPED_TRACE(coordinated);
+        BoundSleepLifecycleController controller(true);
+        bool                          late_transfer = false;
+        int                           pauses = 0, final_drains = 0, releases = 0;
+        SleepHooks                    hooks;
+        hooks.requiresCoordinatedQuiesce = coordinated;
+        hooks.drain                      = [&](const SleepOptions& options) {
+            if (pauses > 0) {
+                ++final_drains;
+                EXPECT_EQ(options.mode, "wait");
+            }
+            return !late_transfer;
+        };
+        auto pause = [&] {
+            // A final async runner cleanup creates a connector write only
+            // after the pre-freeze counters have already reached zero.
+            if (++pauses == 1) {
+                late_transfer = true;
+            }
+            return true;
+        };
+        hooks.quiesceEngine              = [&](const SleepOptions&) { return pause(); };
+        hooks.quiesceEngineAtRound       = [&](uint64_t, int64_t) { return pause(); };
+        hooks.synchronizeAndDeregisterMr = [&](const SleepOptions&) {
+            ++releases;
+            return true;
+        };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(primePostQuiesceTest(controller, coordinated));
+        EXPECT_FALSE(preparePostQuiesceTest(controller, coordinated, 1000).ok);
+        EXPECT_GT(final_drains, 0);
+        EXPECT_EQ(controller.state(), SleepState::DRAINING);
+        EXPECT_TRUE(controller.status().device_kv_cache_valid);
+        EXPECT_FALSE(commitPostQuiesceTest(controller, coordinated).ok);
+        EXPECT_EQ(releases, 0);
+        EXPECT_FALSE(controller.admission()->admit(true).accepted);
+
+        late_transfer              = false;
+        const int old_final_drains = final_drains;
+        ASSERT_TRUE(preparePostQuiesceTest(controller, coordinated, 1000).ok);
+        EXPECT_GT(final_drains, old_final_drains);
+        EXPECT_TRUE(commitPostQuiesceTest(controller, coordinated).ok);
+        EXPECT_EQ(releases, 1);
+    }
+}
+
+TEST(SleepPostQuiesceDrainTest, ThrowingLateDrainCannotPublishPreparedAck) {
+    for (bool coordinated : {false, true}) {
+        SCOPED_TRACE(coordinated);
+        BoundSleepLifecycleController controller(true);
+        bool                          paused   = false;
+        int                           releases = 0;
+        SleepHooks                    hooks;
+        hooks.requiresCoordinatedQuiesce = coordinated;
+        hooks.drain                      = [&](const SleepOptions&) {
+            if (paused) {
+                throw std::runtime_error("late connector cleanup failed");
+            }
+            return true;
+        };
+        hooks.quiesceEngine              = [&](const SleepOptions&) { return paused = true; };
+        hooks.quiesceEngineAtRound       = [&](uint64_t, int64_t) { return paused = true; };
+        hooks.synchronizeAndDeregisterMr = [&](const SleepOptions&) {
+            ++releases;
+            return true;
+        };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(primePostQuiesceTest(controller, coordinated));
+        EXPECT_FALSE(preparePostQuiesceTest(controller, coordinated, 1000).ok);
+        EXPECT_FALSE(commitPostQuiesceTest(controller, coordinated).ok);
+        EXPECT_EQ(controller.state(), SleepState::DRAINING);
+        EXPECT_EQ(releases, 0);
+        EXPECT_NE(controller.status().last_error.find("quiesced"), std::string::npos);
+    }
+}
+
+TEST(SleepPostQuiesceDrainTest, FinalDrainUsesRemainingQuiesceBudget) {
+    for (bool coordinated : {false, true}) {
+        SCOPED_TRACE(coordinated);
+        BoundSleepLifecycleController controller(true);
+        bool                          paused       = false;
+        int64_t                       final_budget = -1;
+        SleepHooks                    hooks;
+        hooks.requiresCoordinatedQuiesce = coordinated;
+        hooks.drain                      = [&](const SleepOptions& options) {
+            if (paused) {
+                final_budget = options.timeout_ms;
+                EXPECT_EQ(options.mode, "wait");
+            }
+            return true;
+        };
+        auto pause = [&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            return paused = true;
+        };
+        hooks.quiesceEngine        = [&](const SleepOptions&) { return pause(); };
+        hooks.quiesceEngineAtRound = [&](uint64_t, int64_t) { return pause(); };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(primePostQuiesceTest(controller, coordinated));
+        EXPECT_TRUE(preparePostQuiesceTest(controller, coordinated, 1000).ok);
+        EXPECT_GT(final_budget, 0);
+        EXPECT_LE(final_budget, 970);
+    }
+}
+
+TEST(SleepPostQuiesceDrainTest, ExhaustedQuiesceBudgetCannotRestartDrainTimeout) {
+    for (bool coordinated : {false, true}) {
+        SCOPED_TRACE(coordinated);
+        BoundSleepLifecycleController controller(true);
+        bool                          paused       = false;
+        int                           final_drains = 0, releases = 0;
+        SleepHooks                    hooks;
+        hooks.requiresCoordinatedQuiesce = coordinated;
+        hooks.drain                      = [&](const SleepOptions&) {
+            if (paused) {
+                ++final_drains;
+            }
+            return true;
+        };
+        auto pause = [&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            return paused = true;
+        };
+        hooks.quiesceEngine              = [&](const SleepOptions&) { return pause(); };
+        hooks.quiesceEngineAtRound       = [&](uint64_t, int64_t) { return pause(); };
+        hooks.synchronizeAndDeregisterMr = [&](const SleepOptions&) {
+            ++releases;
+            return true;
+        };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(primePostQuiesceTest(controller, coordinated));
+        EXPECT_FALSE(preparePostQuiesceTest(controller, coordinated, 1).ok);
+        EXPECT_EQ(final_drains, 0);
+        EXPECT_FALSE(commitPostQuiesceTest(controller, coordinated).ok);
+        EXPECT_EQ(releases, 0);
+    }
+}
+
+TEST(SleepPostQuiesceDrainTest, LateSuccessAfterDrainDeadlineCannotPublishPreparedAck) {
+    for (bool coordinated : {false, true}) {
+        SCOPED_TRACE(coordinated);
+        BoundSleepLifecycleController controller(true);
+        bool                          paused       = false;
+        int                           final_drains = 0, releases = 0;
+        SleepHooks                    hooks;
+        hooks.requiresCoordinatedQuiesce = coordinated;
+        hooks.drain                      = [&](const SleepOptions& options) {
+            if (paused) {
+                ++final_drains;
+                std::this_thread::sleep_for(std::chrono::milliseconds(options.timeout_ms + 3));
+            }
+            return true;
+        };
+        hooks.quiesceEngine              = [&](const SleepOptions&) { return paused = true; };
+        hooks.quiesceEngineAtRound       = [&](uint64_t, int64_t) { return paused = true; };
+        hooks.synchronizeAndDeregisterMr = [&](const SleepOptions&) {
+            ++releases;
+            return true;
+        };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(primePostQuiesceTest(controller, coordinated));
+        EXPECT_FALSE(preparePostQuiesceTest(controller, coordinated, 20).ok);
+        EXPECT_EQ(final_drains, 1);
+        EXPECT_FALSE(commitPostQuiesceTest(controller, coordinated).ok);
+        EXPECT_EQ(controller.state(), SleepState::DRAINING);
+        EXPECT_EQ(releases, 0);
+    }
+}
+
+TEST(SleepPostQuiesceDrainTest, ZeroTimeoutUsesEngineDefaultAndAbortIsNotRepeated) {
+    for (bool coordinated : {false, true}) {
+        SCOPED_TRACE(coordinated);
+        BoundSleepLifecycleController controller(true);
+        bool                          paused       = false;
+        int                           final_drains = 0;
+        SleepHooks                    hooks;
+        hooks.requiresCoordinatedQuiesce = coordinated;
+        hooks.drain                      = [&](const SleepOptions& options) {
+            if (paused) {
+                ++final_drains;
+                EXPECT_EQ(options.mode, "wait");
+                EXPECT_GT(options.timeout_ms, 0);
+                EXPECT_LE(options.timeout_ms, 60000);
+            }
+            return true;
+        };
+        hooks.quiesceEngine        = [&](const SleepOptions&) { return paused = true; };
+        hooks.quiesceEngineAtRound = [&](uint64_t, int64_t) { return paused = true; };
+        controller.setHooks(hooks);
+        ASSERT_TRUE(primePostQuiesceTest(controller, coordinated));
+        if (coordinated) {
+            EXPECT_TRUE(preparePostQuiesceTest(controller, coordinated, 0).ok);
+        } else {
+            auto options         = gracefulOptions();
+            options.mode         = "abort";
+            options.prepare_only = true;
+            options.timeout_ms   = 0;
+            EXPECT_TRUE(controller.sleep(options).ok);
+        }
+        EXPECT_EQ(final_drains, 1);
+    }
 }
 
 }  // namespace rtp_llm

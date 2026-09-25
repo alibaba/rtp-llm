@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/engine_base/sleep/test/BoundSleepLifecycleController.h"
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/engine_base/sleep/AdmissionGate.h"
@@ -21,7 +22,7 @@ SleepHooks successHooks() {
 
 class AdmissionGateTest: public ::testing::Test {
 protected:
-    SleepLifecycleController controller_{true};
+    BoundSleepLifecycleController controller_{true};
     AdmissionGate            gate_{&controller_, "test_instance_0"};
 };
 
@@ -35,18 +36,17 @@ TEST_F(AdmissionGateTest, RunningAdmits) {
     EXPECT_EQ(detail.instance_id, "test_instance_0");
 }
 
-TEST_F(AdmissionGateTest, LeaseMoveTransfersOwnershipAndReleasesOnce) {
+TEST_F(AdmissionGateTest, CompletionNotificationIsIdempotentAndDoesNotOwnLease) {
     auto acquired = gate_.acquire();
     ASSERT_TRUE(acquired.detail.admitted);
-    ASSERT_TRUE(static_cast<bool>(acquired.lease));
+    ASSERT_TRUE(static_cast<bool>(acquired.complete));
     EXPECT_EQ(controller_.activeAdmissionCount(), 1);
 
-    AdmissionLease moved(std::move(acquired.lease));
-    EXPECT_FALSE(static_cast<bool>(acquired.lease));
-    EXPECT_TRUE(static_cast<bool>(moved));
+    auto duplicate = acquired.complete;
     EXPECT_EQ(controller_.activeAdmissionCount(), 1);
 
-    moved = AdmissionLease{};
+    acquired.complete();
+    duplicate();
     EXPECT_EQ(controller_.activeAdmissionCount(), 0);
 }
 
@@ -57,24 +57,27 @@ TEST_F(AdmissionGateTest, SuccessfulAcquireDoesNotBuildStatusStrings) {
     EXPECT_TRUE(acquired.detail.state.empty());
     EXPECT_TRUE(acquired.detail.message.empty());
     EXPECT_TRUE(acquired.detail.error_code_str.empty());
-    EXPECT_TRUE(static_cast<bool>(acquired.lease));
+    EXPECT_TRUE(static_cast<bool>(acquired.complete));
+    acquired.complete();
 }
 
-TEST(AdmissionGateDisabledTest, DisabledAdmissionHasNoLeaseOrCounter) {
-    SleepLifecycleController controller(false);
+TEST(AdmissionGateDisabledTest, DisabledSleepStillTracksAdmission) {
+    BoundSleepLifecycleController controller(false);
     AdmissionGate gate(&controller, "long-instance-id-that-would-require-a-string-allocation");
     auto acquired = gate.acquire();
     EXPECT_TRUE(acquired.detail.admitted);
-    EXPECT_FALSE(static_cast<bool>(acquired.lease));
+    EXPECT_TRUE(static_cast<bool>(acquired.complete));
+    EXPECT_EQ(controller.activeAdmissionCount(), 1);
+    acquired.complete();
     EXPECT_EQ(controller.activeAdmissionCount(), 0);
     EXPECT_TRUE(acquired.detail.instance_id.empty());
-    EXPECT_TRUE(controller.acquireAdmission().admitted());
+    EXPECT_TRUE(admitAndComplete(controller.admission()->admit()));
 }
 
-TEST_F(AdmissionGateTest, NullControllerAdmits) {
+TEST_F(AdmissionGateTest, MissingAdmissionFailsClosed) {
     AdmissionGate null_gate(nullptr, "no_controller");
-    EXPECT_TRUE(null_gate.check().ok());
-    EXPECT_TRUE(null_gate.checkDetail().admitted);
+    EXPECT_FALSE(null_gate.check().ok());
+    EXPECT_FALSE(null_gate.checkDetail().admitted);
 }
 
 TEST_F(AdmissionGateTest, DrainingRejects) {
@@ -93,7 +96,7 @@ TEST_F(AdmissionGateTest, DrainingRejects) {
 
     auto acquired = gate_.acquire();
     EXPECT_FALSE(acquired.detail.admitted);
-    EXPECT_FALSE(static_cast<bool>(acquired.lease));
+    EXPECT_FALSE(static_cast<bool>(acquired.complete));
     EXPECT_EQ(acquired.detail.state, "DRAINING");
     EXPECT_EQ(controller_.activeAdmissionCount(), 0);
 }
@@ -159,7 +162,7 @@ TEST_F(AdmissionGateTest, ErrorBodyFieldsComplete) {
     ASSERT_TRUE(controller_.sleep(SleepOptions{}).ok);
     ASSERT_EQ(controller_.state(), SleepState::SLEEPING);
 
-    // Structured detail carries the full M4 error body.
+    // Structured detail carries the full RPC error body.
     const auto detail = gate_.checkDetail();
     EXPECT_EQ(detail.error_code, kEngineUnavailable);
     EXPECT_EQ(detail.error_code, static_cast<int64_t>(ErrorCode::ENGINE_UNAVAILABLE));
@@ -184,36 +187,6 @@ TEST_F(AdmissionGateTest, ErrorBodyFieldsComplete) {
     EXPECT_EQ(details.instance_id(), "test_instance_0");
     EXPECT_EQ(details.sleep_epoch(), detail.sleep_epoch);
     EXPECT_EQ(details.state(), "SLEEPING");
-
-    // JSON body for the HTTP layer contains the same fields.
-    const auto json = AdmissionGate::toJson(detail);
-    EXPECT_NE(json.find("\"error_code\":8600"), std::string::npos);
-    EXPECT_NE(json.find("\"error_code_str\":\"ENGINE_UNAVAILABLE\""), std::string::npos);
-    EXPECT_NE(json.find("\"instance_id\":\"test_instance_0\""), std::string::npos);
-    EXPECT_NE(json.find("\"sleep_epoch\":" + std::to_string(detail.sleep_epoch)), std::string::npos);
-    EXPECT_NE(json.find("\"state\":\"SLEEPING\""), std::string::npos);
-}
-
-TEST_F(AdmissionGateTest, JsonEscapesEveryControlByteAndPreservesUtf8) {
-    auto detail = gate_.checkDetail();
-    detail.message.clear();
-    for (int byte = 0; byte < 0x20; ++byte) {
-        detail.message.push_back(static_cast<char>(byte));
-    }
-    const std::string utf8 = u8"休眠";
-    detail.message += "\"\\" + utf8;
-    const std::string escaped = "\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007"
-                                "\\u0008\\t\\n\\u000b\\u000c\\r\\u000e\\u000f"
-                                "\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017"
-                                "\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f"
-                                "\\\"\\\\"
-                                + utf8;
-
-    const auto json = AdmissionGate::toJson(detail);
-    EXPECT_NE(json.find("\"message\":\"" + escaped + "\""), std::string::npos);
-    for (const unsigned char byte : json) {
-        EXPECT_GE(byte, 0x20);
-    }
 }
 
 TEST_F(AdmissionGateTest, AdmitsAgainAfterWakeUp) {
@@ -238,12 +211,12 @@ TEST_F(AdmissionGateTest, KvContinuationIsCountedDuringDrainButRootAdmissionStay
     ASSERT_FALSE(controller_.sleep(SleepOptions{}).ok);
     auto child = gate_.acquireCacheTransfer();
     EXPECT_TRUE(child.detail.admitted);
-    EXPECT_TRUE(static_cast<bool>(child.lease));
+    EXPECT_TRUE(static_cast<bool>(child.complete));
     EXPECT_EQ(controller_.activeAdmissionCount(), 1);
     EXPECT_FALSE(gate_.acquire().detail.admitted);
     EXPECT_EQ(gate_.check().error_code(), grpc::StatusCode::UNAVAILABLE);
     EXPECT_TRUE(child.detail.message.empty());
-    child.lease = AdmissionLease{};
+    child.complete();
     EXPECT_EQ(controller_.activeAdmissionCount(), 0);
 }
 
@@ -252,7 +225,7 @@ TEST_F(AdmissionGateTest, ClosedContinuationGateKeepsStructuredErrorAndReopensAf
     ASSERT_TRUE(controller_.sleep(SleepOptions{}).ok);
     auto child = gate_.acquireCacheTransfer();
     ASSERT_FALSE(child.detail.admitted);
-    EXPECT_FALSE(static_cast<bool>(child.lease));
+    EXPECT_FALSE(static_cast<bool>(child.complete));
     const auto status = AdmissionGate::toGrpcStatus(child.detail);
     EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
     ErrorDetailsPB details;
@@ -264,8 +237,12 @@ TEST_F(AdmissionGateTest, ClosedContinuationGateKeepsStructuredErrorAndReopensAf
     // Later lifecycle states retain their normal state-specific explanation.
     EXPECT_EQ(status.error_message(), gate_.acquire().detail.message);
     ASSERT_TRUE(controller_.wakeUp().ok);
-    EXPECT_TRUE(gate_.acquireCacheTransfer().detail.admitted);
-    EXPECT_TRUE(gate_.acquire().detail.admitted);
+    auto next_child = gate_.acquireCacheTransfer();
+    auto next_root  = gate_.acquire();
+    EXPECT_TRUE(next_child.detail.admitted);
+    EXPECT_TRUE(next_root.detail.admitted);
+    next_child.complete();
+    next_root.complete();
 }
 
 TEST_F(AdmissionGateTest, FrozenContinuationExplainsPhaseWithoutChangingErrorContract) {
@@ -279,7 +256,7 @@ TEST_F(AdmissionGateTest, FrozenContinuationExplainsPhaseWithoutChangingErrorCon
     const auto child = gate_.acquireCacheTransfer();
     ASSERT_FALSE(root.detail.admitted);
     ASSERT_FALSE(child.detail.admitted);
-    EXPECT_FALSE(static_cast<bool>(child.lease));
+    EXPECT_FALSE(static_cast<bool>(child.complete));
     EXPECT_EQ(controller_.activeAdmissionCount(), 0);
     const auto epoch = std::to_string(controller_.sleepEpoch());
     EXPECT_EQ(root.detail.message,
@@ -299,22 +276,20 @@ TEST_F(AdmissionGateTest, FrozenContinuationExplainsPhaseWithoutChangingErrorCon
     EXPECT_EQ(details.state(), "DRAINING");
     EXPECT_EQ(details.instance_id(), "test_instance_0");
     EXPECT_EQ(details.sleep_epoch(), controller_.sleepEpoch());
-    const auto json = AdmissionGate::toJson(child.detail);
-    EXPECT_NE(json.find("cache-transfer continuation admission is frozen"), std::string::npos);
-    EXPECT_NE(json.find("\"error_code\":8600"), std::string::npos);
-    EXPECT_NE(json.find("\"state\":\"DRAINING\""), std::string::npos);
 }
 
-TEST(AdmissionGateDisabledTest, NullAndDisabledContinuationGatesDoNotTrack) {
+TEST(AdmissionGateDisabledTest, MissingLedgerRejectsAndDisabledSleepStillTracksContinuations) {
     AdmissionGate null_gate(nullptr, "none");
     auto          null_child = null_gate.acquireCacheTransfer();
-    EXPECT_TRUE(null_child.detail.admitted);
-    EXPECT_FALSE(static_cast<bool>(null_child.lease));
-    SleepLifecycleController disabled(false);
+    EXPECT_FALSE(null_child.detail.admitted);
+    EXPECT_FALSE(static_cast<bool>(null_child.complete));
+    BoundSleepLifecycleController disabled(false);
     AdmissionGate            disabled_gate(&disabled, "disabled");
     auto                     child = disabled_gate.acquireCacheTransfer();
     EXPECT_TRUE(child.detail.admitted);
-    EXPECT_FALSE(static_cast<bool>(child.lease));
+    EXPECT_TRUE(static_cast<bool>(child.complete));
+    EXPECT_EQ(disabled.activeAdmissionCount(), 1);
+    child.complete();
     EXPECT_EQ(disabled.activeAdmissionCount(), 0);
 }
 
