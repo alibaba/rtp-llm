@@ -15,7 +15,7 @@ def setup_cutlass_import_path() -> None:
         expected = (packages / "cutlass").resolve(strict=True)
         loaded = sys.modules.get("cutlass")
         if loaded is not None:
-            actual = Path(loaded.__file__).resolve().parent
+            actual = Path(loaded.__file__).parent.resolve(strict=True)
             if actual != expected:
                 raise RuntimeError(
                     f"K3 CUTLASS was already imported from {actual}; "
@@ -28,7 +28,9 @@ def setup_cutlass_import_path() -> None:
         # FlashInfer may prepend its vendored CuTeDSL path later. Import the
         # selected package now so that later path changes cannot replace it.
         selected = importlib.import_module("cutlass")
-        actual = Path(selected.__file__).resolve().parent
+        # The import view links individual files to FlashInfer's bundled
+        # package. Resolve the package directory, not __init__.py's target.
+        actual = Path(selected.__file__).parent.resolve(strict=True)
         if actual != expected:
             raise RuntimeError(
                 f"K3 CUTLASS resolved to {actual}; expected {expected}"
