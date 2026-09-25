@@ -28,6 +28,12 @@ public:
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void pause();
     void restart();
+    py::dict shutdownStatus() const;
+    void     beginShutdown();
+    void     drainShutdown(int64_t timeout_ms, bool seal_continuations);
+    uint64_t freezeShutdown();
+    void     quiesceShutdown(uint64_t target_round, int64_t timeout_ms);
+    void     terminateShutdown();
 
 private:
     void             _init(int64_t                                       model_rpc_port,

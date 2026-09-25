@@ -739,20 +739,24 @@ class ProcessManager:
             self._monitor_processes_health()
             self._join_all_processes()
 
-            # All children may have exited before the monitor loop first ran
-            # (race at startup) or during it without tripping the in-loop
-            # dead-detection branch (e.g. simultaneous death between
-            # iterations). Inspect final exitcodes to surface silent crashes
-            # the monitor missed.
-            if not self.shutdown_requested and not self.failure_detected:
+            # Shutdown intent does not make a child's failed cleanup successful.
+            # Check after joining as well: the staged wait may observe every
+            # child exit without taking the unexpected-death branch. Preserve
+            # legacy SIGTERM/SIGINT exits, but never hide an explicit failure or
+            # a survivor after the bounded reap window.
+            if not self.failure_detected:
                 crashed = [
                     (p.name, p.exitcode)
                     for p in self.processes
-                    if p.exitcode is not None and p.exitcode != 0
+                    if p.is_alive()
+                    or (
+                        p.exitcode is not None
+                        and not self._is_clean_shutdown_exitcode(p.exitcode)
+                    )
                 ]
                 if crashed:
                     logging.error(
-                        f"Children exited non-zero without shutdown request: {crashed}"
+                        f"Children failed or remained alive after cleanup: {crashed}"
                     )
                     self.failure_detected = True
         else:

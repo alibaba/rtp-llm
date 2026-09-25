@@ -24,6 +24,16 @@ py_test(
 )
 
 py_test(
+    name = "rank_shutdown_exit_test",
+    srcs = ["rank_shutdown_exit_test.py"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
     name = "schedule_meta_test",
     srcs = ["schedule_meta_test.py"],
     deps = [
