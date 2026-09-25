@@ -1,0 +1,27 @@
+{
+  "upstream": "https://github.com/vllm-project/DeepGEMM",
+  "commit": "a6bbb8000161c0dc3a85a0300a905f76898a7913",
+  "vllm_commit": "c3b48446349569512749db7f6e2164aa8a33437d",
+  "cutlass_commit": "f3fde58372d33e9a5650ba7b80fc48b3b49d40c8",
+  "deep_jit_commit": "e5bdee2bc4ca519eba00cfc5f0c6e950e6a96a16",
+  "patch_sha256": "3685360daa68961c64db6ecce52564fde3cff9c40feafb82095096c64de0e9ef",
+  "change": "Use a persistent device epoch for SiTU combine readiness; CUDA Graph replay reuses gridid. No arithmetic changes.",
+  "archives": [
+    {
+      "file": "deepgemm-a6bbb800-source.tar.gz",
+      "sha256": "9bd012603afa175983523809cb5b22c1da6303a86db47669f1da9fa46f9779a9",
+      "url": "https://codeload.github.com/vllm-project/DeepGEMM/tar.gz/a6bbb8000161c0dc3a85a0300a905f76898a7913"
+    },
+    {
+      "file": "cutlass-f3fde583-source.tar.gz",
+      "sha256": "2e5890306557bd87136e1d6914e4ee42536050b9116433848175520fd15991f2",
+      "url": "https://codeload.github.com/NVIDIA/cutlass/tar.gz/f3fde58372d33e9a5650ba7b80fc48b3b49d40c8"
+    },
+    {
+      "file": "deepjit-e5bdee2b-source.tar.gz",
+      "sha256": "621bef0c728895dc0267bf8d5137c5174db862361e790b5591272a06ba139f0d",
+      "url": "https://codeload.github.com/deepseek-ai/DeepJIT/tar.gz/e5bdee2bc4ca519eba00cfc5f0c6e950e6a96a16"
+    }
+  ],
+  "build_helper_sha256": "7d3b51beda2a6f2b7d8c66b46245002ac4422ed4e3842e496ea77cec29c5f3ca"
+}

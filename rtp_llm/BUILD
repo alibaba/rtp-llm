@@ -471,6 +471,7 @@ py_library(
     name = "sdk",
     srcs = [
         '__init__.py',
+        'kimi_k3_runtime.py',
         'model_factory.py',
         'start_server.py',
         'start_frontend_server.py',
@@ -607,6 +608,26 @@ py_library(
     ]
 )
 
+py_binary(
+    name = "rtp_llm_server",
+    srcs = ["start_server.py"],
+    main = "start_server.py",
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":rtp_llm_lib",
+        ":sdk",
+    ] + select({
+        # database.py imports these lazily for LOAD_METHOD=fastsafetensors.
+        "@//:using_cuda13_x86": [":fastsafetensors", ":fast-safetensors"],
+        "@//:using_cuda12_9_x86": [":fastsafetensors", ":fast-safetensors"],
+        "//conditions:default": [],
+    }),
+)
+
 py_library(
     name = "rtp_llm_package_libs",
     deps = [
@@ -726,7 +747,7 @@ rename_wheel(
 # Run: python -m rtp_llm.dash_sc.server [--port 8000] or: rtp-llm-dash-sc-grpc [--port 8000]
 py_library(
     name = "dash_sc_grpc_standalone_lib",
-    srcs = ["__init__.py"],
+    srcs = ["__init__.py", "kimi_k3_runtime.py"],
     deps = [
         "//rtp_llm/dash_sc:dash_sc_grpc_server",
     ],

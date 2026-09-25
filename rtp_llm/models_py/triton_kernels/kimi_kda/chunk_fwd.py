@@ -38,6 +38,7 @@ def chunk_kda_fwd(
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
+    intermediate_states_in_fp32: bool = False,
 ):
     # Apply gate activation
     g_org = None
@@ -83,6 +84,7 @@ def chunk_kda_fwd(
         gk=g,
         initial_state=initial_state,
         output_final_state=output_final_state,
+        intermediate_states_in_fp32=intermediate_states_in_fp32,
         cu_seqlens=cu_seqlens,
         use_exp2=True,
         transpose_state_layout=False,

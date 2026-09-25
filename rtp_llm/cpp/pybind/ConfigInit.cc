@@ -2121,6 +2121,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("extra_data_path", &ModelConfig::extra_data_path)
         .def_readwrite("local_extra_data_path", &ModelConfig::local_extra_data_path)
         .def_readwrite("model_type", &ModelConfig::model_type)
+        .def_readwrite("reuse_single_mtp_module", &ModelConfig::reuse_single_mtp_module)
+        .def_readwrite("requires_token_position_ids", &ModelConfig::requires_token_position_ids)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)
         .def("getAttentionConfigs", &ModelConfig::getAttentionConfigs)

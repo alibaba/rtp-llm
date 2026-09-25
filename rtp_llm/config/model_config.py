@@ -159,6 +159,8 @@ class ModelConfig(CppModelConfig):
         "input_vocab_size",
         "type_vocab_size",
         "gen_num_per_cycle",
+        "reuse_single_mtp_module",
+        "requires_token_position_ids",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",

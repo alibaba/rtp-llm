@@ -101,6 +101,9 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    bool is_mtp_draft_update = false;
+    int64_t sp_logical_requests = 0;
+    int64_t sp_logical_tokens = 0;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;

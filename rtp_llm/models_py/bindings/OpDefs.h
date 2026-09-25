@@ -307,6 +307,12 @@ struct PyAttentionInputs {
     torch::Tensor decode_cu_seqlens_device;
 
     // CUDA Graph mode flags
+    bool is_mtp_draft_update = false;
+    int64_t logical_request_count = 0;
+    int64_t physical_request_count = 0;
+    int64_t logical_token_count = 0;
+    int64_t physical_token_count = 0;
+    torch::Tensor valid_token_mask;
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
     std::optional<PyContextParallelParams> context_parallel_info;

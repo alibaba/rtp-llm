@@ -94,6 +94,7 @@ class KimiLinearKDABase(nn.Module):
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__()
+        self.gate_lower_bound = None
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
@@ -195,6 +196,8 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
+            preserve_input_dtype=getattr(self, "preserve_conv_input_dtype", False),
+            reserved_cache_block_id=getattr(self, "conv_reserved_cache_block_id", -1),
         ).transpose(0, 1)
         return out
 
@@ -272,8 +275,10 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             return_intermediate_states=True,
+            intermediate_states_in_fp32=getattr(self, "intermediate_states_in_fp32", False),
             A_log=self.alog,
             dt_bias=self.dt_bias,
+            lower_bound=self.gate_lower_bound,
         )
         h_from_chunk = h
 
@@ -426,6 +431,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             initial_state=ssm_states,
             A_log=self.alog,
             dt_bias=self.dt_bias,
+            lower_bound=self.gate_lower_bound,
             inplace_final_state=True,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,

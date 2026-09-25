@@ -471,6 +471,27 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     [32, 64],
                 )
                 self.assertEqual(model.seen_kernel_tables["draft"], [[1, 2]])
+    def test_sp_padding_keeps_publication_rows_logical(self) -> None:
+        for baseline, padded in (
+            ("multi_tag", "sp_padded_multi_tag"),
+            ("mtp_sub_config", "sp_padded_single_tag"),
+        ):
+            with self.subTest(scenario=padded):
+                expected = run_scenario(CacheStoreForwardModel(), baseline)
+                model = CacheStoreForwardModel()
+                actual = run_scenario(model, padded)
+                self.assertEqual(model.seen_input_lengths, [[4, 4]])
+                self.assertEqual(len(actual["records"]), len(expected["records"]))
+                actual_blocks = _blocks_by_key(actual)
+                expected_blocks = _blocks_by_key(expected)
+                self.assertEqual(set(actual_blocks), set(expected_blocks))
+                for key, block in actual_blocks.items():
+                    tag = key.rsplit("_tag_", 1)[1]
+                    self.assertEqual(block["length"], expected_blocks[key]["length"])
+                    self.assertEqual(
+                        block["address"] - actual["base_addresses"][tag],
+                        expected_blocks[key]["address"] - expected["base_addresses"][tag],
+                    )
 
     def test_micro_batch_slices_request_metadata_with_block_rows(self) -> None:
         model = CacheStoreForwardModel()

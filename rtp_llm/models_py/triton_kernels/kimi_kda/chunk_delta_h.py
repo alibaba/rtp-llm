@@ -469,6 +469,7 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = True,
     transpose_state_layout: bool = False,
+    intermediate_states_in_fp32: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
@@ -486,15 +487,16 @@ def chunk_gated_delta_rule_fwd_h(
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
+    state_dtype = torch.float32 if intermediate_states_in_fp32 else k.dtype
     if transpose_state_layout:
-        h = k.new_empty(B, NT, HV, V, K)
+        h = k.new_empty(B, NT, HV, V, K, dtype=state_dtype)
         final_state = (
             k.new_zeros(N, HV, V, K, dtype=torch.float32)
             if output_final_state
             else None
         )
     else:
-        h = k.new_empty(B, NT, HV, K, V)
+        h = k.new_empty(B, NT, HV, K, V, dtype=state_dtype)
         final_state = (
             k.new_zeros(N, HV, K, V, dtype=torch.float32)
             if output_final_state

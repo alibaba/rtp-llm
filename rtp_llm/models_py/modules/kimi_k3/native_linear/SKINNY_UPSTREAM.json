@@ -1,0 +1,12 @@
+{
+  "revision": "c3b48446349569512749db7f6e2164aa8a33437d",
+  "files": {
+    "skinny_gemm.py": "b1d03d35226eabb55c202c6383a8239163e550c161c9b90386b9e06da90ed684",
+    "_skinny_gemm.py": "eb48e2f61dd9644a73de8258c21d9459c54742fd2ff430165429533aae5a73ca"
+  },
+  "adaptations": [
+    "torch stream/device capability",
+    "compile-only fake tensors",
+    "eager pre-capture compilation replaces vLLM warmup provider"
+  ]
+}

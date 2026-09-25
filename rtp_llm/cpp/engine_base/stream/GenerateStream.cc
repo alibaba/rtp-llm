@@ -1177,8 +1177,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // update normal output buffer
     updateOutput({new_tokens,
                   num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
+                  update_info.target_hidden_states,
+                  update_info.target_logits,
                   torch::Tensor(),
                   torch::Tensor(),
                   torch::Tensor(),

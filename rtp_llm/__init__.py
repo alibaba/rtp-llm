@@ -1,6 +1,10 @@
 import importlib
 from typing import Any
 
+from .kimi_k3_runtime import setup_flashinfer_runtime
+
+setup_flashinfer_runtime()
+
 
 def __getattr__(name: str) -> Any:
     """Preserve old top-level access without importing C++ ops eagerly."""

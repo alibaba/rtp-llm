@@ -45,6 +45,7 @@ private:
 
 private:
     std::vector<int64_t>                       output_vocab_ids_;
+    const bool                               async_debug_enabled_;
     std::unique_ptr<autil::LockFreeThreadPool> thread_pool_;
 };
 
