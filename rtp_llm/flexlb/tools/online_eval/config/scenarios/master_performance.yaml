@@ -94,6 +94,4 @@ test:
     full-Fetch success, optional batch/single observation
   collection: request
 reports:
-  default:
-    template: workload
-  custom: [master_performance.yaml]
+- workload.yaml

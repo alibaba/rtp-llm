@@ -352,6 +352,4 @@ test:
   description: Twelve paced windows with full request completion and continuous telemetry
   collection: request
 reports:
-  default:
-    template: workload
-    default_visible: [mean]
+- workload.yaml

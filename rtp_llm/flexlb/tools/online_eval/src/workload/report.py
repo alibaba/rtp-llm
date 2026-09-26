@@ -1,93 +1,131 @@
-"""Presentation of already analyzed workload evidence; no status mutation."""
+"""Build each case-selected monitoring view from archived analysis and validated evidence."""
 
 import copy
+import json
 import os
 from pathlib import Path
-from workload.report_panels import build_panels
-from reporting.view_config import custom_view
+
 from reporting import (
-    bundle_path,
-    details,
-    links,
-    table,
-    run_meta,
+    bundle_path, details, links, load_analysis, read_bundle, run_meta, table,
     write_bundle,
 )
+from reporting.view_config import DEFAULT_VIEW, view
+from workload.report_panels import build_panels
 
 
-def build_spec(payload, directory, reports=None):
-    series = payload["series"]
-    panels = build_panels(series, payload.get("statistic_sources", {}),
-                          reports["default"] if reports is not None else None)
-    target = bundle_path(directory, "run", payload["id"]).resolve()
-    items = []
-    for aggregate in payload["workload"].get("stress_aggregates", []):
-        if aggregate["status"] != "GENERATED":
-            continue
-        aggregate_links = [("Environment " + aggregate["env_epoch"], aggregate["report"])]
-        aggregate_links += [
-            (name + " metrics", entry["report"])
-            for name, entry in aggregate.get("master_aggregates", {}).items()
-        ]
-        items += [
-            dict(label=title, href=os.path.relpath(path, target))
-            for title, path in aggregate_links
-        ]
-    gates = payload.get("gate_reports")
-    if gates is None:
-        gates = [payload["gate_report"]] if payload.get("gate_report") else []
-    if reports is not None:
-        selected = {custom_view(name)["report"] for name in reports["custom"]}
-        gates = [gate for gate in gates if Path(gate).parent.name in selected]
-        missing = selected - {Path(gate).parent.name for gate in gates}
-        if missing:
-            raise ValueError("declared report was not produced: " + ", ".join(sorted(missing)))
-    for gate in gates:
-        items.append(
-            dict(
-                label="Gate · " + Path(gate).parent.name,
-                href=os.path.relpath(gate, target),
-            )
+def report_identity(run_id, view_name):
+    return run_id if view_name == DEFAULT_VIEW else run_id + "--" + Path(view_name).stem
+
+
+def _gate_sources(payload):
+    paths = payload.get("gate_reports")
+    if paths is None:
+        paths = [payload["gate_report"]] if payload.get("gate_report") else []
+    sources = {}
+    for entry in paths:
+        directory = read_bundle(entry)
+        sources[directory.name] = dict(
+            result=load_analysis(directory),
+            spec=json.loads((directory / "report-spec.json").read_text()),
         )
+    return sources
+
+
+def _metrics_panels(presentation, source):
+    original = source["spec"]
+    panels, missing = [], []
+    for index, selection in enumerate(presentation["panels"]):
+        curves = []
+        axes = {}
+        for name in selection["metrics"]:
+            found = [
+                (panel, curve)
+                for panel in original.get("panels", [])
+                for curve in panel.get("series", [])
+                if curve.get("name") == name or curve.get("name", "").startswith(name + " · ")
+            ]
+            if not found:
+                missing.append(name)
+            for panel, curve in found:
+                curves.append(copy.deepcopy(curve))
+                if curve.get("axis") in panel.get("axes", {}):
+                    axes[curve["axis"]] = copy.deepcopy(panel["axes"][curve["axis"]])
+        panels.append(dict(
+            id="view-" + str(index), title=selection["title"], overlay=True,
+            timeX=True, axes=axes, series=curves,
+            presets={"全部": [curve["name"] for curve in curves]},
+            caption="曲线取自已归档的专属分析；缺采保持空值。",
+        ))
+    return panels, missing
+
+
+def build_spec(payload, directory, view_name=DEFAULT_VIEW, view_links=None):
+    presentation = view(view_name)
+    sources = _gate_sources(payload)
+    if presentation["kind"] == "default":
+        panels = build_panels(payload["series"], payload.get("statistic_sources", {}), presentation)
+        time_axis = dict(min=0, max=max(
+            (point[0] for points in payload["series"].values() for point in points),
+            default=1,
+        ) or 1)
+        time_origin = "t=0 = workload 运行开始"
+        events = []
+        missing = []
+    else:
+        source_name = presentation["source_report"]
+        if source_name not in sources:
+            raise ValueError("view source report was not produced: " + source_name)
+        source = sources[source_name]
+        panels, missing = _metrics_panels(presentation, source)
+        time_axis = source["spec"].get("timeAxis")
+        time_origin = source["spec"].get("timeOriginLabel")
+        events = source["spec"].get("events", [])
+
+    sections = [
+        table("Independent checks", ["Stage / check", "Status", "Evidence"], [
+            [row["stage"] + "/" + row["id"], row["status"], row]
+            for row in payload["checks"]
+        ]),
+        details("门禁详细结果", {
+            "checks": payload["checks"],
+            "analyzers": {name: source["result"] for name, source in sources.items()},
+        }),
+        details("Playback iterations", payload["iterations"]),
+        details("Traffic semantics", payload["traffic_manifests"]),
+    ]
+    if missing:
+        sections.append(details("缺失的专属曲线", missing))
+    target = bundle_path(directory, "run", report_identity(payload["id"], view_name)).resolve()
+    items = []
+    for name, path in (view_links or {}).items():
+        if name != view_name:
+            items.append(dict(label=Path(name).stem, href=os.path.relpath(Path(path).resolve(), target)))
+    for aggregate in payload["workload"].get("stress_aggregates", []):
+        if aggregate["status"] == "GENERATED":
+            items.append(dict(label="Environment " + aggregate["env_epoch"],
+                              href=os.path.relpath(aggregate["report"], target)))
+    if items:
+        sections.append(links("其他报告视角", items))
     return dict(
-        run_id=payload["id"],
-        title=payload["id"],
-        timeOriginLabel="t=0 = workload 运行开始",
-        subtitle="Independent checks and continuous telemetry",
+        run_id=payload["id"], title=presentation["title"],
+        subtitle=presentation["subtitle"],
+        timeOriginLabel=time_origin, events=events,
         kpis=[
             dict(label="Execution", value=payload["status"]),
             dict(label="Validity", value=payload["workload"]["runtime_validity"]),
-            dict(label="Performance", value="NOT_EVALUATED"),
         ],
-        panels=panels,
-        timeAxis=dict(
-            min=0, max=max((p[0] for v in series.values() for p in v), default=1) or 1
-        ),
-        sections=[
-            table(
-                "Independent checks",
-                ["Stage / check", "Status", "Evidence"],
-                [
-                    [r["stage"] + "/" + r["id"], r["status"], r]
-                    for r in payload["checks"]
-                ],
-            ),
-            details("Playback iterations", payload["iterations"]),
-            details("Traffic semantics", payload["traffic_manifests"]),
-            links("Statistical reports", items),
-        ],
+        panels=panels, timeAxis=time_axis, sections=sections,
     )
 
 
-def write_report(directory, analysis, *, reports=None):
+def write_report(directory, analysis, *, view_name=DEFAULT_VIEW, view_links=None):
     payload = copy.deepcopy(analysis)
-    if reports is not None:
-        payload["report_views"] = copy.deepcopy(reports)
-    target = bundle_path(directory, "run", payload["id"]).resolve()
+    payload["report_view"] = view_name
+    target = bundle_path(directory, "run", report_identity(payload["id"], view_name)).resolve()
     for source in payload.get("request_sources", []):
         source["path"] = os.path.relpath(source["path"], target)
     meta = run_meta(
-        dict(id=payload["id"], kind="run"),
+        dict(id=payload["id"], kind="run", view=view_name),
         implementation=payload["implementation"],
         workload=payload["traffic_manifests"],
         configuration=dict(
@@ -99,11 +137,19 @@ def write_report(directory, analysis, *, reports=None):
         evidence=payload["request_sources"],
     )
     return write_bundle(
-        directory,
-        "run",
-        payload["id"],
-        payload,
-        build_spec(analysis, directory, reports=reports),
-        meta=meta,
-        producer="workload",
+        directory, "run", report_identity(payload["id"], view_name), payload,
+        build_spec(analysis, directory, view_name, view_links),
+        meta=meta, producer="workload",
     )
+
+
+def write_views(directory, analysis, names=None):
+    """Publish selected custom views, then the default report that links to them."""
+    names = names or [DEFAULT_VIEW]
+    paths = {
+        name: bundle_path(directory, "run", report_identity(analysis["id"], name)) / "report.html"
+        for name in names
+    }
+    for name in [name for name in names if name != DEFAULT_VIEW] + [DEFAULT_VIEW]:
+        write_report(directory, analysis, view_name=name, view_links=paths)
+    return paths

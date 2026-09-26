@@ -123,5 +123,4 @@ test:
     scale-out
   collection: request
 reports:
-  default:
-    template: workload
+- workload.yaml

@@ -8,9 +8,9 @@
 
 `kind` 表示制品关系：`run` 是单次运行，`comparison` 是两个或多个运行的对照（含时间线），`sweep` 是参数扫描。`discover_reports(root, kind=..., role=...)` 在所选 kind 下读取并校验 bundle；`role` 可选，由生产者声明，不从目录名猜测。默认 kind 为 `run`，兼容现有门禁发现调用。
 
-workload case 可在 YAML 的 `reports` 段引用 `config/report_views/workload.yaml` 中的公共模板，并按文件名声明附加视角；未声明时仍发布默认 run 视角。模板按 epoch、监控源和指标合图，均值与最大值仅作展示投影，逐引擎原线可在指标选择器中查找。HTML 为控制体积保留分桶极值和缺采点；`analysis.json` 保留原始序列全集，spec 中每条线标明来源、计算方式与采样方式。run 与专属报告是独立 bundle，各自保留时间原点，run 仅以相对路径链接专属报告。YAML 只选视角和可见性，不定义计算式或门禁判定。
+workload case 在 YAML 的 `reports` 中列出视图文件，例如 `reports: [workload.yaml, cache_scale_in.yaml]`。文件位于 `config/report_views/`，每个文件产出一份独立 HTML。`workload.yaml` 是默认视图：每个监控指标族一张图，按 `engine_name`、`pod` 展开的原始线放在同一图，可在图例和预设中切换均值、最大值及逐引擎明细。HTML 为控制体积保留分桶极值和缺采点；`analysis.json` 保留原始序列全集，派生线标明来源与计算方式。未声明的旧 workload case 仍产出默认视图；functional variant 不继承顶层报告配置。
 
-`cache_scale_in` 的 `custom: [cache_scale_in.yaml]` 直接引用同目录中的视图文件；该文件指向现有 cache gate 分析器产出的 `cache-scale-in` bundle。`master_performance` 同理引用 `master_performance.yaml`。`trace_scale_out` 目前只有默认 run 报告。专属视图文件只选择已产出的报告，不接管分析器的统计或图表计算。
+`cache_scale_in` 同时声明默认视图和 `cache_scale_in.yaml`，后者将已分析的 P 数量、命中率、队列与流量曲线组合展示。视图 YAML 只选择已有曲线及布局，不计算统计值或门禁判定；缺失曲线会在报告中列明。每个视图都由公共装配加入运行身份、独立检查和门禁详细结果。原有 gate bundle 继续作为内部分析证据，并非需要在 case 中单独声明的报告视图。默认视图与专属视图相互链接，各自保留自己的时间原点与事件标记。
 
 输入归档保持各自的历史格式。`reporting.core.load_analysis` 接受旧分析 JSON 与带 manifest 的新 bundle；cache 和性能证据仍由对应分析器按原格式读取。不得因为呈现格式统一，就把不同证据类型混作同一分析输入。
 

@@ -18,6 +18,7 @@ python3 rtp_llm/flexlb/tools/online_eval/scripts/commands/list_cases.py \
 `run_cases.py` 默认读取 `config/suites.yaml` 的 `default_suite`；当前 `core` 清单包含 5 个实例。
 `--suite functional` / `workload` 按实例自己的 `test.kind` 筛选，`--suite all` 选择全部实例。
 文件顶层 `test` 提供公共默认值；`variants[].test` 可以覆盖 kind、description、collection 和 monitoring。
+workload case 的 `reports` 列出 `config/report_views/` 下的视图文件；运行前查看这个列表即可知道会生成哪些报告。每个列表都包含 `workload.yaml` 默认全量视图，复杂场景可追加专属视图；functional variant 不生成报告。
 
 所有 YAML 直接放在本目录，文件名采用稳定的 case 名；目录不参与分类或 CI 选例。`perf_preset` 选择模型采集档案。与采集值不同的时延、内存树容量、KV 池容量、PD 规模或公式必须作为测试派生覆盖，使用 `environment.model_override: {baseline: <perf_preset>, reason: <原因>}` 标明基线与原因。合成基线上的参数属于测试输入，不得当成真实部署观测值。块数口径见 [数据规则](../../data/README.md)。
 

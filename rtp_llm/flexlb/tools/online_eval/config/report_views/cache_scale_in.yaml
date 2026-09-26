@@ -1,2 +1,11 @@
-kind: gate
-report: cache-scale-in
+kind: metrics
+title: P 缩容与缓存命中
+subtitle: 缩容规模、命中率、排队与完成流量
+source_report: cache-scale-in
+panels:
+- title: Prefill 数量与缓存命中率
+  metrics: [P engine count, P cache hit ratio]
+- title: Prefill 等待与运行
+  metrics: [P Waiting / engine, P Running / engine]
+- title: 客户端流量
+  metrics: [Client sent QPS, Client success QPS, Client error QPS]

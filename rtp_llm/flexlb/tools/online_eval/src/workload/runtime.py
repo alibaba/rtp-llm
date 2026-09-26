@@ -184,7 +184,8 @@ class WorkloadPolicy:
         )
 
     def finalize(self, ctx, result):
-        from workload.report import write_report
+        from reporting.view_config import DEFAULT_VIEW
+        from workload.report import write_views
         from workload.evidence_analysis import analyze_report
 
         evidence = ctx.artifact_dir / "workload-evidence.json"
@@ -290,9 +291,9 @@ class WorkloadPolicy:
         result["workload"]["collection_profile"] = self.profile
         result["workload"]["monitor_backend"] = "prometheus"
         analysis = analyze_report(ctx.artifact_dir, result, payload)
-        if self.reports is None or self.reports["default"]["enabled"]:
-            bundle = write_report(ctx.artifact_dir, analysis, reports=self.reports)
-            result["workload"]["report"] = str(bundle / "report.html")
+        view_links = write_views(ctx.artifact_dir, analysis, self.reports)
+        result["workload"]["report"] = str(view_links[DEFAULT_VIEW])
+        result["workload"]["reports"] = {name: str(path) for name, path in view_links.items()}
         # Dedicated gate is evaluated before teardown. Refresh only its presentation
         # once Prometheus export is complete; the original checks remain authoritative.
         gate_evidence = ctx.artifact_dir / "performance-gate-evidence.json"

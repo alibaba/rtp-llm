@@ -5,7 +5,7 @@ import json
 import math
 
 from reporting.catalog import PERFORMANCE_COLORS, performance_axes, performance_metric_style
-from reporting.view_config import template
+from reporting.view_config import DEFAULT_VIEW, view
 
 
 def _sample(points, limit):
@@ -31,6 +31,8 @@ def _identity(key):
     if len(parts) != 4:
         raise ValueError("invalid archived series key: " + key)
     epoch, source, metric, raw_labels = parts
+    if not raw_labels.startswith("{"):
+        return (epoch, source, metric + "/" + raw_labels), {}
     labels = json.loads(raw_labels)
     if not isinstance(labels, dict):
         raise ValueError("archived series labels must be a mapping")
@@ -50,15 +52,15 @@ def _summarize(members, method):
     return result
 
 
-def build_panels(series, sources, declaration=None):
-    view = template((declaration or {}).get("template", "workload"))
-    visible = (declaration or {}).get("default_visible", view["default_visible"])
-    presets = {**view["presets"], **(declaration or {}).get("presets", {})}
+def build_panels(series, sources, presentation=None):
+    presentation = presentation or view(DEFAULT_VIEW)
+    visible = presentation["default_visible"]
+    presets = presentation["presets"]
     grouped = {}
     for key, points in series.items():
         base, labels = _identity(key)
         residual = {name: value for name, value in labels.items()
-                    if name not in view["detail_labels"]}
+                    if name not in presentation["detail_labels"]}
         group = (*base, json.dumps(residual, sort_keys=True))
         grouped.setdefault(group, []).append((key, points, labels))
     panels = []
@@ -68,8 +70,8 @@ def build_panels(series, sources, declaration=None):
         title, category, axis, _ = performance_metric_style(source, metric, role)
         curves = []
         high_cardinality = len(members) > 1
-        limit = view["max_points_per_series"]
-        methods = view["summaries"] if high_cardinality else []
+        limit = presentation["max_points_per_series"]
+        methods = presentation["summaries"] if high_cardinality else []
         for index, method in enumerate(methods):
             keys = [key for key, _, _ in members]
             raw = _summarize(members, method)

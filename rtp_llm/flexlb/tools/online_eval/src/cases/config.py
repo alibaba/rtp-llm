@@ -270,7 +270,7 @@ def configure_program(config, source):
         variant["test"] = normalize_test(_merge_data(config.get("test", {}), row.get("test", {})))
         from reporting.view_config import declaration
 
-        reports = row.get("reports", config.get("reports"))
+        reports = row.get("reports", config.get("reports") if variant["test"]["kind"] == "workload" else None)
         if reports is not None:
             variant["test"]["reports"] = declaration(
                 reports, kind=variant["test"]["kind"], path=source + ".reports"
