@@ -10,8 +10,10 @@ from traffic.workload_profile import profile
 from workload.cache_gate import (
     align_send_counters,
     analyze,
+    build_spec,
     write_report,
 )
+from reporting.view_config import view
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 
@@ -19,6 +21,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CacheGateTest(unittest.TestCase):
+    def test_report_layout_follows_yaml_view(self):
+        template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
+        template["title"] = "YAML title"
+        template["panel"]["title"] = "YAML panel"
+        template["panel"]["presets"]["核心"] = {"names": ["P engine count"]}
+        prepared = dict(
+            curves=[dict(name="P engine count", group="规模", axis="count",
+                         points=[dict(x=0, y=2)])],
+            audit=[], sources={}, gaps={}, errors=[], monitoring_status="OK",
+            monitor_warnings=[],
+        )
+        with tempfile.TemporaryDirectory() as d, mock.patch(
+            "workload.cache_gate.view", return_value=template
+        ):
+            evidence = self.evidence()
+            spec = build_spec(d, evidence, analyze(evidence), prepared)
+        self.assertEqual(spec["title"], "YAML title")
+        self.assertEqual(spec["panels"][0]["title"], "YAML panel")
+        self.assertEqual(spec["panels"][0]["presets"]["核心"], ["P engine count"])
+
     def evidence(self, hit=0.8):
         rows = []
         for t in range(81):

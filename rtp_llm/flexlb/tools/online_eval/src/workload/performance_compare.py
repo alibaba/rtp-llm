@@ -8,6 +8,7 @@ from pathlib import Path
 
 from reporting import compare_controls, write_bundle, run_meta, details, table
 from reporting.pairing import paired_overlay
+from reporting.view_config import view
 from workload.performance_gate import analyze, report
 
 REQUIRED = (
@@ -39,6 +40,7 @@ def controls(e):
 
 
 def compare(left, right, output, allowed=(), left_directory=None, right_directory=None, json_only=False):
+    comparison_view = view("master_performance.yaml")["comparison"]
     # Explicit Master configuration fields only. Never exempt load, model or criteria.
     if any(
         not p.startswith("/actual_master_config/") or p.endswith("/") for p in allowed
@@ -103,14 +105,14 @@ def compare(left, right, output, allowed=(), left_directory=None, right_director
         chart.update(id=label, title=label + " · " + mode + " · " + r["verdict"])
         individual.append(chart)
         runs[label] = spec["run_meta"]
-        run_sections.append(details(label + " 曲线来源与门禁", spec["sections"]))
+        run_sections.append(details(label + " " + comparison_view["sections"]["run"], spec["sections"]))
     overlay = copy.deepcopy(individual[0])
     overlay.update(
         id="ab",
-        title="A/B 合图",
+        title=comparison_view["overlay_title"],
         series=[],
         presets={},
-        caption="A 虚线 / B 实线；同一指标同色，各自测量起点对齐。比较仅供观察，绝对门禁分别判定。",
+        caption=comparison_view["overlay_caption"],
     )
     overlay["series"], overlay["presets"] = paired_overlay(individual)
     panels = [overlay, *individual]
@@ -126,12 +128,15 @@ def compare(left, right, output, allowed=(), left_directory=None, right_director
         "master-performance",
         result,
         dict(
-            title="Master 性能 A/B 观察",
-            subtitle=f"A {a['verdict']} / B {b['verdict']} · controls {aligned['status']} · "
-            + f"{left.get('provenance', {}).get('topology')} · {left['criteria']['qps']} QPS · {left['criteria']['benchmark_id']}",
+            title=comparison_view["title"],
+            subtitle=comparison_view["subtitle"].format(
+                a_verdict=a["verdict"], b_verdict=b["verdict"],
+                controls=aligned["status"],
+                topology=left.get("provenance", {}).get("topology"),
+                qps=left["criteria"]["qps"], benchmark_id=left["criteria"]["benchmark_id"]),
             kpis=[
                 dict(
-                    label=label + " 整轮成功率（含预热/排空）",
+                    label=label + " " + comparison_view["kpi_label_suffix"],
                     value=(
                         f"{100 * (1 - r['metrics']['error_rate']):.6f}%"
                         if r["metrics"].get("error_rate") is not None
@@ -147,12 +152,12 @@ def compare(left, right, output, allowed=(), left_directory=None, right_director
             ),
             sections=[
                 table(
-                    "指标差异（不改变单 run 门禁）",
-                    ["指标", "left", "right", "差值"],
+                    comparison_view["sections"]["metrics"],
+                    comparison_view["metrics_columns"],
                     rows,
                 ),
-                details("控制变量核对", aligned),
-                details("声明配置变化", declared),
+                details(comparison_view["sections"]["controls"], aligned),
+                details(comparison_view["sections"]["declared"], declared),
                 *run_sections,
             ],
         ),

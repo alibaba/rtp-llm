@@ -1,0 +1,39 @@
+kind: produced
+report: master-performance
+producer: performance-gate
+title: Master 性能绝对门禁
+subtitle: '{verdict}'
+panel:
+  title: 性能与运行状态
+  presets:
+    核心: {visible: true}
+    Prefill TPS: {groups: [Prefill TPS]}
+    Prefill 逐引擎 TPS: {groups: [Prefill 逐引擎 TPS]}
+    Decode TPS: {groups: [Decode TPS]}
+    Decode 逐引擎 TPS: {groups: [Decode 逐引擎 TPS]}
+    缓存命中率: {groups: [缓存命中率]}
+    客户端吞吐: {groups: [客户端吞吐]}
+    延迟: {groups: [延迟]}
+    流量: {groups: [流量]}
+    队列: {groups: [队列]}
+    规模: {groups: [规模]}
+    KV: {groups: [KV]}
+    模拟执行: {groups: [模拟执行]}
+sections:
+  criteria: 绝对标准
+  monitoring: 监控曲线来源与缺采
+  validity: 有效性
+  metrics: 指标
+criteria_columns: [指标, 实际值, 标准, 结果]
+comparison:
+  title: Master 性能 A/B 观察
+  subtitle: 'A {a_verdict} / B {b_verdict} · controls {controls} · {topology} · {qps} QPS · {benchmark_id}'
+  overlay_title: A/B 合图
+  overlay_caption: A 虚线 / B 实线；同一指标同色，各自测量起点对齐。比较仅供观察，绝对门禁分别判定。
+  kpi_label_suffix: 整轮成功率（含预热/排空）
+  metrics_columns: [指标, left, right, 差值]
+  sections:
+    metrics: 指标差异（不改变单 run 门禁）
+    controls: 控制变量核对
+    declared: 声明配置变化
+    run: 曲线来源与门禁

@@ -118,17 +118,6 @@ CACHE_METRICS = {
         ("master", "flexlb_auto_tpm_decode_running_count"): ("Master decode running", "Master", "count", "requests", "#a0d911", True),
     }
 
-CACHE_AXES = {
-    key: dict(title=label, position=position)
-    for key, label, position in (
-        ("queue", "每引擎 streams", "left"), ("count", "数量", "right"),
-        ("p", "引擎数", "right"), ("qps", "请求 / 秒", "right"),
-        ("tokens", "tokens / 秒", "right"), ("ms", "毫秒", "right"),
-        ("blocks", "KV blocks", "right"), ("seconds", "秒", "right"),
-        ("ratio", "命中率", "right"),
-    )
-}
-
 CACHE_AB_COLORS = {
     "P cache hit ratio": ("#d4380d", PALETTE[0]),
     "P Waiting / engine": ("#cf1322", PALETTE[9]),

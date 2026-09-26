@@ -1,0 +1,54 @@
+kind: produced
+report: cache-scale-in
+producer: cache-gate
+title: P scale-in cache-collapse gate
+subtitle: '{verdict} · monitoring {monitoring_status}'
+time_origin: Seconds since observation began
+meta:
+  sampling: Prometheus queries only
+  aggregate: Prometheus queries.json
+  engine_dist: not used
+kpis:
+  verdict: Gate verdict
+  monitoring: Monitoring / load validity
+panel:
+  title: 监控聚合曲线
+  axes:
+    queue: {title: 每引擎 streams, position: left}
+    count: {title: 数量, position: right}
+    p: {title: 引擎数, position: right}
+    qps: {title: 请求 / 秒, position: right}
+    tokens: {title: tokens / 秒, position: right}
+    ms: {title: 毫秒, position: right}
+    blocks: {title: KV blocks, position: right}
+    seconds: {title: 秒, position: right}
+    ratio: {title: 命中率, position: right}
+  caption: 全部曲线来自 Prometheus；默认展示关键指标。单击勾选、双击隔离、悬停高亮。waiting/running 使用每引擎平均值。
+  empty_caption: 缺少监控数据；不从 snapshot、日志或请求文件补算曲线。
+  presets:
+    核心:
+      names: [P cache hit ratio, P Waiting / engine, P Running / engine, P engine count, Client sent QPS, Client success QPS, Client error QPS, Master inflight requests]
+    队列:
+      contains: [Waiting, Running, queue, inflight]
+    流量:
+      groups: [流量]
+    性能:
+      groups: [性能, 延迟]
+    KV:
+      groups: [KV]
+sections:
+  audit: 监控曲线审计
+  monitoring: 实验与监控有效性
+  verdict: 专用门禁判据（非监控曲线）
+  sources: 监控来源与缺采
+audit_columns: [曲线, 覆盖率, 状态, PromQL / 说明]
+comparison:
+  title: 缓存实验 · A/B
+  subtitle: 'A {a_verdict} / B {b_verdict} · controls {controls}'
+  overlay_title: A/B · 关键曲线同图
+  overlay_caption: 图例可选择和高亮。曲线仅来自归档监控。
+  core_metrics: [P Waiting / engine, P engine count, P cache hit ratio]
+  sections:
+    identity: 运行身份与制品证据
+    controls: 控制变量核对
+    alignment: 绘图时间对齐

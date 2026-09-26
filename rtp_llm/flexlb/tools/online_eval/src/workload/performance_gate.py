@@ -431,6 +431,9 @@ def write_evidence(path, evidence):
 
 
 def report(directory, evidence, result=None, telemetry_directory=None):
+    from reporting.view_config import select_presets, view
+
+    presentation = view("master_performance.yaml")
     result = analyze(evidence) if result is None else result
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -439,15 +442,17 @@ def report(directory, evidence, result=None, telemetry_directory=None):
     from workload.performance_views import panel
 
     chart, monitoring = panel(telemetry_directory or directory, evidence, result)
+    chart["title"] = presentation["panel"]["title"]
+    chart["presets"] = select_presets(chart["series"], presentation["panel"]["presets"])
     spec = dict(
-        title="Master 性能绝对门禁",
-        subtitle=result["verdict"],
+        title=presentation["title"],
+        subtitle=presentation["subtitle"].format(verdict=result["verdict"]),
         timeAxis=dict(min=0, max=evidence.get("criteria", {}).get("measure_s", 1)),
         panels=[chart],
         sections=[
             table(
-                "绝对标准",
-                ["指标", "实际值", "标准", "结果"],
+                presentation["sections"]["criteria"],
+                presentation["criteria_columns"],
                 [
                     [
                         x["metric"],
@@ -458,9 +463,9 @@ def report(directory, evidence, result=None, telemetry_directory=None):
                     for x in result["checks"]
                 ],
             ),
-            details("监控曲线来源与缺采", monitoring),
-            details("有效性", result["errors"]),
-            details("指标", result["metrics"]),
+            details(presentation["sections"]["monitoring"], monitoring),
+            details(presentation["sections"]["validity"], result["errors"]),
+            details(presentation["sections"]["metrics"], result["metrics"]),
         ],
     )
     return write_bundle(

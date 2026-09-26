@@ -8,6 +8,7 @@ from pathlib import Path
 from reporting import write_bundle, run_meta, compare_controls, details
 from reporting.catalog import cache_ab_color
 from reporting.pairing import event_anchor, paired_overlay, shifted_panel
+from reporting.view_config import view
 from traffic.playback_config import comparison_notice
 from workload.cache_gate import analyze, build_spec, prepare_report, write_report
 from workload.cache_comparison_config import validate_policy
@@ -17,7 +18,6 @@ REQUIRED = (
     "/topology", "/capacity", "/performance", "/master_config",
     "/actual_master_config", "/configuration_sha256", "/trace_sha256",
 )
-CORE_METRICS = {"P Waiting / engine", "P engine count", "P cache hit ratio"}
 
 
 def _load(path):
@@ -53,6 +53,7 @@ def _controls(e):
 
 
 def compare(a_path, b_path, output, *, alignment_event=None):
+    comparison_view = view("cache_scale_in_overview.yaml")["comparison"]
     validate_policy(dict(alignment_event=alignment_event))
     resolved = [_load(p) for p in (a_path, b_path)]
     paths, evidence = zip(*resolved)
@@ -108,12 +109,12 @@ def compare(a_path, b_path, output, *, alignment_event=None):
         panels.append(panel)
     combined, _ = paired_overlay(
         panels, color_for=cache_ab_color,
-        hidden_for=lambda name: name not in CORE_METRICS,
+        hidden_for=lambda name: name not in comparison_view["core_metrics"],
     )
     overlay = shifted_panel(panels[0], None)
     overlay.update(
-        id="ab-overlay", title="A/B · 关键曲线同图", series=combined,
-        caption=time_caption + "图例可选择和高亮。曲线仅来自归档监控。",
+        id="ab-overlay", title=comparison_view["overlay_title"], series=combined,
+        caption=time_caption + comparison_view["overlay_caption"],
     )
     overlay["presets"] = {
         "核心": [s["name"] for s in combined if not s["hidden"]],
@@ -137,16 +138,18 @@ def compare(a_path, b_path, output, *, alignment_event=None):
         identity=identity,
     )
     spec = dict(
-        run_id="cache-scale-in-ab", title="缓存实验 · A/B",
-        subtitle=f"A {results[0]['verdict']} / B {results[1]['verdict']} · controls {alignment['status']}",
+        run_id="cache-scale-in-ab", title=comparison_view["title"],
+        subtitle=comparison_view["subtitle"].format(
+            a_verdict=results[0]["verdict"], b_verdict=results[1]["verdict"],
+            controls=alignment["status"]),
         timeOriginLabel=time_caption,
         events=([dict(name=alignment_event, t=0)] if event_aligned else []),
         timeAxis=dict(min=start, max=end), kpis=[],
         panels=[overlay, *panels],
         sections=[
-            details("运行身份与制品证据", identity),
-            details("控制变量核对", alignment),
-            details("绘图时间对齐", time_alignment),
+            details(comparison_view["sections"]["identity"], identity),
+            details(comparison_view["sections"]["controls"], alignment),
+            details(comparison_view["sections"]["alignment"], time_alignment),
         ],
     )
     write_bundle(

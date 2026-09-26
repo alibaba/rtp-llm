@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from cases.config import configure_program
 from reporting import discover_reports, load_analysis, read_bundle, write_bundle
@@ -63,7 +64,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
                 self.assertTrue(all((ROOT / "config/report_views" / name).is_file()
                                     for name in names))
         cache = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
-        self.assertEqual(cache["reports"], ["workload.yaml", "cache_scale_in.yaml"])
+        self.assertEqual(cache["reports"], ["workload.yaml", "cache_scale_in_overview.yaml"])
         series = {
             f'1/mock/qps/{{"engine_name":"p-{i}"}}': [[0, i], [1, i + 1]]
             for i in range(2)
@@ -76,45 +77,63 @@ class WorkloadReportViewsTest(unittest.TestCase):
         self.assertEqual(len(panels), 1)
         self.assertEqual(panels[0]["series"][0]["provenance"]["source_series_key"], key)
 
-    def test_selected_views_include_common_gate_detail_and_link_each_other(self):
+    def test_selected_view_links_verified_analyzer_report(self):
         curves = [
             dict(name="P engine count", axis="count", points=[dict(x=0, y=2)]),
             dict(name="P cache hit ratio", axis="ratio", points=[dict(x=0, y=0.8)]),
             dict(name="P Waiting / engine", axis="queue", points=[dict(x=0, y=4)]),
         ]
         with tempfile.TemporaryDirectory() as d:
-            write_bundle(d, "run", "cache-scale-in", {"verdict": "PASS", "threshold": 0.5},
+            gate = write_bundle(d, "run", "cache-scale-in", {"verdict": "PASS", "threshold": 0.5},
                          dict(title="Gate evidence", timeAxis=dict(min=0, max=2),
                               timeOriginLabel="observation", panels=[dict(
                                   id="gate", title="All", overlay=True,
                                   axes={"count": {}, "ratio": {}, "queue": {}}, series=curves,
-                              )]), role="gate")
+                              )]), producer="cache-gate", role="gate")
             data = payload({'1/mock/running/{"engine_name":"p0"}': [[0, 1]]},
                            discover_reports(d, role="gate"))
-            links = write_views(d, data, ["workload.yaml", "cache_scale_in.yaml"])
-            custom = links["cache_scale_in.yaml"].parent
+            links = write_views(d, data, ["workload.yaml", "cache_scale_in_overview.yaml"])
             default = links["workload.yaml"].parent
-            selected = json.loads((custom / "report-spec.json").read_text())
-            self.assertEqual([row["name"] for row in selected["panels"][0]["series"]],
-                             ["P engine count", "P cache hit ratio"])
-            self.assertEqual(selected["timeOriginLabel"], "observation")
-            self.assertIn("../example/report.html", json.dumps(selected["sections"]))
-            for bundle in (default, custom):
-                read_bundle(bundle)
-                sections = json.dumps(json.loads((bundle / "report-spec.json").read_text())["sections"], ensure_ascii=False)
-                self.assertIn("门禁详细结果", sections)
-                self.assertIn('"threshold": 0.5', sections)
+            self.assertEqual(links["cache_scale_in_overview.yaml"].resolve(),
+                             (gate / "report.html").resolve())
+            read_bundle(default)
+            sections = json.dumps(json.loads((default / "report-spec.json").read_text())["sections"], ensure_ascii=False)
+            self.assertIn("门禁详细结果", sections)
+            self.assertIn('"threshold": 0.5', sections)
+            self.assertIn("../cache-scale-in/report.html", sections)
 
     def test_missing_view_source_and_invalid_declarations_fail_loud(self):
-        with tempfile.TemporaryDirectory() as d, self.assertRaisesRegex(ValueError, "cache-scale-in"):
-            write_report(d, payload(), view_name="cache_scale_in.yaml")
+        with tempfile.TemporaryDirectory() as d, self.assertRaises(OSError):
+            write_views(d, payload(), ["workload.yaml", "cache_scale_in_overview.yaml"])
         for names in ([], ["missing.yaml", "workload.yaml"], ["../workload.yaml"],
-                      ["cache_scale_in.yaml"], ["workload.yaml", "workload.yaml"],
+                      ["cache_scale_in_overview.yaml"], ["workload.yaml", "workload.yaml"],
                       ["workload.yaml", {"action": "render"}]):
             with self.subTest(names=names), self.assertRaises(ScenarioError):
                 declaration(names, kind="workload")
         with self.assertRaisesRegex(ScenarioError, "test.kind=workload"):
             declaration([DEFAULT_VIEW], kind="functional")
+
+    def test_performance_report_title_follows_yaml_view(self):
+        from workload.performance_gate import report
+
+        presentation = view("master_performance.yaml").copy()
+        presentation["title"] = "YAML performance title"
+        with tempfile.TemporaryDirectory() as d, mock.patch(
+            "reporting.view_config.view", return_value=presentation
+        ), mock.patch(
+            "workload.performance_views.panel",
+            return_value=(dict(id="performance", title="Python title", series=[
+                dict(name="P throughput", group="Prefill TPS", hidden=False),
+                dict(name="D detail", group="Decode 逐引擎 TPS", hidden=True),
+            ]), {}),
+        ):
+            bundle = report(d, {"criteria": {"measure_s": 1}},
+                            {"verdict": "PASS", "checks": [], "errors": [], "metrics": {}})
+            spec = json.loads((bundle / "report-spec.json").read_text())
+            self.assertEqual(spec["title"], "YAML performance title")
+            self.assertEqual(spec["panels"][0]["title"], presentation["panel"]["title"])
+            self.assertEqual(spec["panels"][0]["presets"]["核心"], ["P throughput"])
+            self.assertEqual(spec["panels"][0]["presets"]["Decode 逐引擎 TPS"], ["D detail"])
 
 
 if __name__ == "__main__":

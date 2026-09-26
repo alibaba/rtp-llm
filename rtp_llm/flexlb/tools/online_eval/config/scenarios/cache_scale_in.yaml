@@ -87,4 +87,4 @@ test:
   collection: request
 reports:
 - workload.yaml
-- cache_scale_in.yaml
+- cache_scale_in_overview.yaml

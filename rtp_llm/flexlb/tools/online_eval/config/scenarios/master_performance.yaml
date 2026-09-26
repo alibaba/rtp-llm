@@ -95,3 +95,4 @@ test:
   collection: request
 reports:
 - workload.yaml
+- master_performance.yaml

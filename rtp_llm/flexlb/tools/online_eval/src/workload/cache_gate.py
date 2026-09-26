@@ -11,7 +11,8 @@ import json
 import math
 from pathlib import Path
 
-from reporting.catalog import CACHE_AXES, CACHE_METRICS
+from reporting.catalog import CACHE_METRICS
+from reporting.view_config import select_presets, view
 from reporting import (
     details,
     table,
@@ -307,60 +308,52 @@ def prepare_report(directory, evidence):
 
 
 def build_spec(directory, evidence, result, prepared):
+    presentation = view("cache_scale_in_overview.yaml")
     rows = evidence["samples"]
     curves = prepared["curves"]
     audit = prepared["audit"]
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]
     monitor_warnings = prepared["monitor_warnings"]
-    axes = {key: dict(value) for key, value in CACHE_AXES.items()}
-    by_name = {curve["name"]: curve for curve in curves}
-    presets = {
-        "核心": ["P cache hit ratio", "P Waiting / engine", "P Running / engine", "P engine count", "Client sent QPS", "Client success QPS", "Client error QPS", "Master inflight requests"],
-        "队列": [name for name in by_name if "Waiting" in name or "Running" in name or "queue" in name or "inflight" in name],
-        "流量": [curve["name"] for curve in curves if curve["group"] == "流量"],
-        "性能": [curve["name"] for curve in curves if curve["group"] in {"性能", "延迟"}],
-        "KV": [curve["name"] for curve in curves if curve["group"] == "KV"],
-    }
+    panel = presentation["panel"]
+    presets = select_presets(curves, panel["presets"])
     return dict(
         run_id="cache-scale-in",
-        title="P scale-in cache-collapse gate",
-        subtitle=f'{result["verdict"]} · monitoring {monitoring_status}',
+        title=presentation["title"],
+        subtitle=presentation["subtitle"].format(
+            verdict=result["verdict"], monitoring_status=monitoring_status),
         meta=dict(
             params=evidence["criteria"],
-            sampling="Prometheus queries only",
+            sampling=presentation["meta"]["sampling"],
             sources=dict(
-                aggregate="Prometheus queries.json",
-                engineDist="not used",
+                aggregate=presentation["meta"]["aggregate"],
+                engineDist=presentation["meta"]["engine_dist"],
                 runDir=str(Path(directory).resolve()),
             ),
         ),
-        timeOriginLabel="Seconds since observation began",
+        timeOriginLabel=presentation["time_origin"],
         events=evidence.get("events", []),
         kpis=[
-            dict(label="Gate verdict", value=result["verdict"]),
-            dict(label="Monitoring / load validity", value=monitoring_status, tone="danger" if monitor_warnings else "success"),
+            dict(label=presentation["kpis"]["verdict"], value=result["verdict"]),
+            dict(label=presentation["kpis"]["monitoring"], value=monitoring_status,
+                 tone="danger" if monitor_warnings else "success"),
         ],
         panels=[
             dict(
                 id="cache-overlay",
-                title="监控聚合曲线",
+                title=panel["title"],
                 overlay=True,
-                axes=axes,
+                axes=panel["axes"],
                 series=curves,
                 presets=presets,
-                caption=(
-                    "全部曲线来自 Prometheus；默认展示关键指标。单击勾选，双击图例可隔离曲线，悬停图例可高亮。waiting/running 使用每引擎平均值。"
-                    if curves
-                    else "缺少监控数据；不从 snapshot、日志或请求文件补算曲线。"
-                ),
+                caption=panel["caption"] if curves else panel["empty_caption"],
             )
         ],
         sections=[
-            table("监控曲线审计", ["曲线", "覆盖率", "状态", "PromQL / 说明"], audit),
-            details("实验与监控有效性", dict(status=monitoring_status, warnings=monitor_warnings)),
-            details("专用门禁判据（非监控曲线）", result),
-            details("监控来源与缺采", dict(queries=sources, gaps=gaps, errors=errors)),
+            table(presentation["sections"]["audit"], presentation["audit_columns"], audit),
+            details(presentation["sections"]["monitoring"], dict(status=monitoring_status, warnings=monitor_warnings)),
+            details(presentation["sections"]["verdict"], result),
+            details(presentation["sections"]["sources"], dict(queries=sources, gaps=gaps, errors=errors)),
         ],
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
     )
