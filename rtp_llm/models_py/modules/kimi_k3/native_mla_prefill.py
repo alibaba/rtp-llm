@@ -1,4 +1,4 @@
-"""TokenSpeed's native BF16 ragged MLA kernel behind RTP's cache planning."""
+"""TokenSpeed's native ragged MLA kernel behind RTP's cache planning."""
 
 import logging
 from importlib.metadata import version
@@ -11,7 +11,9 @@ from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
 class KimiK3TokenspeedPrefill:
     """Eager prefill plan; paged decode/verification own their graph metadata."""
 
-    def __init__(self):
+    def __init__(self, fp8_compute: bool = False):
+        self.fp8_compute = fp8_compute
+        self.operand_dtype = torch.float8_e4m3fn if fp8_compute else torch.bfloat16
         setup_cutlass_import_path()
         try:
             from tokenspeed_mla.mla_prefill import tokenspeed_mla_prefill
@@ -21,8 +23,9 @@ class KimiK3TokenspeedPrefill:
             ) from error
         self._run = tokenspeed_mla_prefill
         logging.info(
-            "K3 MLA prefill backend=tokenspeed_mla version=%s Q/K/V=BF16 output=BF16",
+            "K3 MLA prefill backend=tokenspeed_mla version=%s Q/K/V=%s output=BF16",
             version("tokenspeed-mla"),
+            "E4M3" if fp8_compute else "BF16",
         )
 
     def plan(
@@ -39,8 +42,8 @@ class KimiK3TokenspeedPrefill:
         q_data_type,
         kv_data_type,
     ):
-        if q_data_type != torch.bfloat16 or kv_data_type != torch.bfloat16:
-            raise ValueError("K3 BF16 prefill requires BF16 Q, K and V")
+        if q_data_type != self.operand_dtype or kv_data_type != self.operand_dtype:
+            raise ValueError(f"K3 prefill requires {self.operand_dtype} Q, K and V")
         if not causal or num_qo_heads <= 0 or num_qo_heads != num_kv_heads:
             raise ValueError("K3 expanded MLA requires causal attention and equal Q/K heads")
         if (head_dim_qk, head_dim_vo) != (192, 128):
@@ -75,17 +78,17 @@ class KimiK3TokenspeedPrefill:
     def run(self, q, k, v):
         shapes = ((self.q_tokens,self.heads,192), (self.k_tokens,self.heads,192), (self.k_tokens,self.heads,128))
         for name, tensor, shape in zip(("q", "k", "v"), (q,k,v), shapes):
-            if tensor.dtype != torch.bfloat16 or tuple(tensor.shape) != shape:
+            if tensor.dtype != self.operand_dtype or tuple(tensor.shape) != shape:
                 raise ValueError(
                     f"K3 native prefill {name} does not match its plan: "
                     f"actual_shape={tuple(tensor.shape)} actual_dtype={tensor.dtype} "
-                    f"expected_shape={shape} expected_dtype=torch.bfloat16; "
+                    f"expected_shape={shape} expected_dtype={self.operand_dtype}; "
                     f"batch={self.batch} q_tokens={self.q_tokens} k_tokens={self.k_tokens}"
                 )
             if tensor.device != self.qo_indptr.device:
                 raise ValueError("K3 native prefill tensor and metadata devices must match")
         if self.q_tokens == 0:
-            return q.new_empty((0,self.heads,128))
+            return torch.empty((0,self.heads,128), dtype=torch.bfloat16, device=q.device)
         # TokenSpeed 0.1.8 assumes a contiguous V allocation, even though the
         # up-projection produces a strided split view. vLLM applies this copy too.
         return self._run(

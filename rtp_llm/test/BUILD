@@ -17,6 +17,55 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_fp8_precision_test",
+    srcs = ["kimi_k3_fp8_precision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "kimi_k3_fp8_weight_test",
+    srcs = ["kimi_k3_fp8_weight_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "kimi_k3_fp8_linear_test",
+    srcs = ["kimi_k3_fp8_linear_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'B300'},
+)
+
+py_test(
+    name = "kimi_k3_fp8_cache_write_test",
+    srcs = ["kimi_k3_fp8_cache_write_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'B300'},
+)
+
+py_test(
+    name = "kimi_k3_fp8_qkv_test",
+    srcs = ["kimi_k3_fp8_qkv_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'B300'},
+)
+
+py_test(
+    name = "kimi_k3_fp8_prefill_test",
+    srcs = ["kimi_k3_fp8_prefill_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'B300'},
+)
+
+py_test(
+    name = "kimi_k3_fp8_decode_test",
+    srcs = ["kimi_k3_fp8_decode_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'B300'},
+)
+
+py_test(
     name = "kimi_k3_cutlass_import_test",
     srcs = ["kimi_k3_cutlass_import_test.py"],
     deps = ["//rtp_llm:testlib"],

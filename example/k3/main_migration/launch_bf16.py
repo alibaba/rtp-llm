@@ -1,4 +1,4 @@
-"""Launch one BF16 PD endpoint; four-layer debugging requires an explicit flag.
+"""Launch one BF16-compute PD endpoint; FP8 operands are explicit options.
 
 Run as luohaocheng.lhc in a verified, same-image RDMA runtime container after
 a fresh same-cluster fleet selection. Compile independently inside lhc_GPU.
@@ -19,6 +19,11 @@ import sys
 
 
 def launch_config(args):
+    fp8_gemm = bool(getattr(args, "fp8_gemm", False))
+    fp8_mla = bool(getattr(args, "fp8_mla", False))
+    fp8_kv_cache = bool(getattr(args, "fp8_kv_cache", False))
+    if fp8_mla != fp8_kv_cache:
+        raise ValueError("FP8_MLA and FP8_KV_CACHE must match for this MLA backend")
     checkpoint = Path(args.checkpoint).resolve(strict=True)
     draft = Path(args.draft_checkpoint).resolve(strict=True)
     config = json.loads((checkpoint / "config.json").read_text())
@@ -53,9 +58,9 @@ def launch_config(args):
         "SP_ACT_TYPE": "BF16",
         "GEN_NUM_PER_CIRCLE": "3",
         "KIMI_K3_PREFILL_CHUNK_TOKENS": "65536",
-        "FP8_GEMM": "0",
-        "FP8_MLA": "0",
-        "FP8_KV_CACHE": "0",
+        "FP8_GEMM": str(int(fp8_gemm)),
+        "FP8_MLA": str(int(fp8_mla)),
+        "FP8_KV_CACHE": str(int(fp8_kv_cache)),
         "START_PORT": str(args.start_port),
         "LOCAL_WORLD_SIZE": "8",
         "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
@@ -86,10 +91,10 @@ def launch_config(args):
         "max_batch_tokens_size": 65536,
         "concurrency_limit": 16,
         "seq_size_per_block": 4096,
-        "kernel_seq_size_per_block": 64,
+        "kernel_seq_size_per_block": 128 if fp8_mla else 64,
         "linear_step": 1,
         "ssm_state_dtype": "fp32",
-        "fp8_kv_cache": 0,
+        "fp8_kv_cache": int(fp8_kv_cache),
         "reuse_cache": 1,
         "enable_device_cache": 1,
         "moe_strategy": "mega_moe",
@@ -243,6 +248,9 @@ def main():
         "--run-dir", required=True, help="New directory on a local data disk"
     )
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument("--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM")
+    parser.add_argument("--fp8-mla", action="store_true", help="Enable ordinary E4M3 MLA operands")
+    parser.add_argument("--fp8-kv-cache", action="store_true", help="Use the existing FP8 KV cache setting")
     parser.add_argument("--allow-shared-accuracy", action="store_true",
                         help="Allow correctness-only coexistence after host-side isolation checks; never for performance")
     parser.add_argument("--min-free-gib", type=float, default=250,
@@ -266,7 +274,7 @@ def main():
     forbidden = ("CP_ROTATE_METHOD", "QUANTIZATION", "SP_QUANTIZATION")
     for name in forbidden:
         if os.environ.get(name):
-            raise ValueError(f"Unset inherited {name} before BF16 validation")
+            raise ValueError(f"Unset inherited {name} before precision validation")
     inherited = os.environ.copy()
     inherited.update(environment)
     for key, subdir in {
@@ -315,8 +323,10 @@ def main():
     (run / "launch.json").write_text(
         json.dumps(
             {
-                "profile": ("bf16-debug4-tp8-ep8-sp-mtp3-rdma" if args.debug_four_layer
-                            else "bf16-full93-tp8-ep8-sp-mtp3-rdma"),
+                "profile": (
+                    f"{'fp8' if args.fp8_mla else 'bf16'}-"
+                    f"{'debug4' if args.debug_four_layer else 'full93'}-tp8-ep8-sp-mtp3-rdma"
+                ),
                 "full_model_acceptance_eligible": not args.debug_four_layer,
                 "environment": environment,
                 "command": command,

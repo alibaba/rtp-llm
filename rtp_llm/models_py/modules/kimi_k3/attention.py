@@ -29,6 +29,17 @@ def linear(weights, name, hardware=None):
     weight = weights[name]
     if weight.is_cuda and weight.dtype == torch.bfloat16:
         return KimiK3Bf16Linear(weight)
+    if weight.dtype == torch.float8_e4m3fn:
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+        from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight
+
+        scale_name = KimiK3LoadFp8Weight.w8a8_weight_list.get(name)
+        if scale_name is None or scale_name not in weights:
+            raise ValueError(f"K3 FP8 projection {name} requires its block scales")
+        return LinearFactory.create_linear_from_weights(
+            weights, name, scale_name, None,
+            quant_config=Fp8BlockWiseQuantConfig(), hw_kernel_config=hardware,
+        )
     return LinearFactory.create_linear_from_weights(
         weights, name, None, None, quant_config=None, hw_kernel_config=hardware
     )
@@ -48,7 +59,10 @@ class KimiK3KDA(nn.Module):
         self.input = linear(weights, K3W.KDA_INPUT, hardware)
         self.f_b = linear(weights, W.linear_attn_f_b_w, hardware)
         self.output = linear(weights, W.linear_attn_out_w, hardware)
-        self.fa_width = weights[W.linear_attn_f_b_w].shape[0]
+        forget_weight = weights[W.linear_attn_f_b_w]
+        self.fa_width = forget_weight.shape[
+            1 if forget_weight.dtype == torch.float8_e4m3fn else 0
+        ]
         self.norm = KimiK3GatedNorm(
             weights[W.linear_attn_norm_w],
             eps=config.layernorm_eps,
@@ -78,6 +92,13 @@ class KimiK3KDA(nn.Module):
     def forward(self, hidden, fmha, cache, attention_inputs, metadata):
         full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
         fused = self.input(full_hidden)
+        logical_width = 4 * self.width + self.fa_width + self.heads
+        if fused.shape[-1] < logical_width:
+            raise ValueError(
+                f"KDA input projection returned {fused.shape[-1]} columns, "
+                f"expected at least {logical_width}"
+            )
+        fused = fused[..., :logical_width]
         qkv, gate, fa, beta = fused.split(
             [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
         )

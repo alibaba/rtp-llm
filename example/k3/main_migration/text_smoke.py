@@ -897,12 +897,22 @@ class Runner:
             else:
                 self.request_cases(cases, concurrent)
             stage["passed"] = True
+        except SmokeDeadline as exc:
+            if self.args.case_deadline_s is None:
+                raise
+            stage["skipped"] = True
+            stage["skipped_case_names"] = [
+                row["name"] for row in self.skipped_cases
+                if row["name"] in stage["case_names"]
+            ]
+            stage["error"] = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             stage["error"] = f"{type(exc).__name__}: {exc}"
             raise
         finally:
             stage["elapsed_s"] = round(time.time() - started, 3)
-        print(f"stage={name} passed=true owners={stage['decode_owner_ranks']}")
+        print(f"stage={name} passed={str(stage['passed']).lower()} "
+              f"skipped={stage.get('skipped', False)} owners={stage['decode_owner_ranks']}")
 
     def tokenize(self, prompt: str) -> list[int]:
         request = urllib.request.Request(

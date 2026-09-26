@@ -11,6 +11,7 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight, KimiK3Weight
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.ops import (
     DataType,
     HybridAttentionType,
@@ -46,9 +47,9 @@ class KimiK3ModelConfig(ModelConfig):
 
     _python_fields = ModelConfig._python_fields | {
         "k3_runtime_config",
-        "k3_attention_quant_config",
+        "attention_projection_quant_config",
     }
-    k3_attention_quant_config = None
+    attention_projection_quant_config = None
     k3_runtime_config: KimiK3RuntimeConfig
 
     def init_precision_config(self, kv_cache_config, act_type):
@@ -61,26 +62,33 @@ class KimiK3ModelConfig(ModelConfig):
             raise ValueError("Kimi K3 requires BF16 compute")
         if self.quantization:
             raise ValueError("K3 uses checkpoint-native MXFP4, not global quantization")
-        if not is_draft:
-            if (
-                kv_cache_config is not None
-                and kv_cache_config.fp8_kv_cache
-                or self.attn_config.kv_cache_dtype != KvCacheDataType.BASE
-            ):
-                raise ValueError("K3 BF16 baseline requires BF16 KV cache")
-            if any(
-                os.environ.get(name, "0") != "0" for name in ("FP8_GEMM", "FP8_MLA")
-            ):
-                raise ValueError(
-                    "K3 target FP8 is unavailable until the BF16 validation gate passes"
-                )
+        def enabled(name):
+            value = os.environ.get(name, "0").strip()
+            if value not in ("0", "1"):
+                raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+            return value == "1"
+
+        fp8_gemm = enabled("FP8_GEMM") and not is_draft
+        fp8_mla = enabled("FP8_MLA") and not is_draft
+        fp8_cache = bool(kv_cache_config and kv_cache_config.fp8_kv_cache) and not is_draft
+        if not is_draft and fp8_cache != fp8_mla:
+            raise ValueError("K3 requires matching FP8_MLA and FP8_KV_CACHE settings")
         self.quant_algo = QuantAlgo()
         self.quant_config = None
+        self.attention_projection_quant_config = Fp8BlockWiseQuantConfig() if fp8_gemm else None
         self.data_type = WEIGHT_TYPE.BF16.to_str()
-        self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+        self.attn_config.kv_cache_dtype = (
+            KvCacheDataType.FP8 if fp8_cache else KvCacheDataType.BASE
+        )
+        self.attn_config.mla_fp8_compute = fp8_mla
+        self.attn_config.mla_fp8_q_scale = 1.0
+        self.attn_config.mla_fp8_kv_scale = 1.0
         logging.info(
-            "K3 precision: role=%s attention=BF16 linear=BF16 cache=BF16 experts=MXFP4xFP8",
+            "K3 precision: role=%s attention=%s linear=%s cache=%s experts=MXFP4xFP8",
             "draft" if is_draft else "target",
+            "FP8" if fp8_mla else "BF16",
+            "FP8" if fp8_gemm else "BF16",
+            "FP8" if fp8_cache else "BF16",
         )
 
 
@@ -96,6 +104,20 @@ class KimiK3(BaseModel):
                 model_config.hybrid_attention_config.hybrid_attention_types,
                 KVCacheSpecType.MLA,
             )
+        # ModelFactory runs this hook after init_precision_config(), so the
+        # hybrid cache descriptors first exist here in the production path.
+        if model_config.attn_config.mla_fp8_compute:
+            cache_descs = model_config.kv_cache_spec_descs
+            for layer_descs in cache_descs:
+                for desc in layer_descs:
+                    if desc.cache_type == KVCacheSpecType.MLA:
+                        desc.dtype = DataType.TYPE_FP8_E4M3
+                        desc.mla_fp8_e4m3 = True
+                    elif desc.cache_type == KVCacheSpecType.LINEAR:
+                        # The target's MLA cache is FP8, but its recurrent
+                        # state and convolution cache keep their BF16 layout.
+                        desc.dtype = DataType.TYPE_BF16
+            model_config.kv_cache_spec_descs = cache_descs
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> KimiK3ModelConfig:

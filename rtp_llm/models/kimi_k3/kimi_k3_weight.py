@@ -132,6 +132,8 @@ class KimiK3WeightNames:
     """Stable keys stored in :class:`ModelWeights` and consumed by the model."""
 
     KDA_INPUT = "kimi_k3.kda.in_proj_qkvgfab"
+    KDA_INPUT_S = "kimi_k3.kda.in_proj_qkvgfab.scale"
+    KDA_FORGET_S = "kimi_k3.kda.f_b_proj.scale"
 
     OUTPUT_ATTN_RES_NORM = "kimi_k3.output_attn_res.norm"
     OUTPUT_ATTN_RES_PROJ = "kimi_k3.output_attn_res.proj"
@@ -768,6 +770,22 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 if layer_type == HybridAttentionType.LINEAR
                 else self._mla_weights()
             )
+            if self.model_config.attention_projection_quant_config is not None:
+                from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight
+
+                converted = []
+                for source in attention:
+                    derive_mla = isinstance(source, _KimiK3MlaKVWeight)
+                    if derive_mla:
+                        source = source.sub_weights[W.mla_kv_b_w]
+                    if source.name in KimiK3LoadFp8Weight.w8a8_weight_list:
+                        converted.append(KimiK3LoadFp8Weight(
+                            source, self.model_config.attention_projection_quant_config,
+                            derive_mla=derive_mla, layer_id=layer_id,
+                        ))
+                    else:
+                        converted.append(source)
+                attention = converted
             weights.extend(attention)
             weights.extend(
                 self._moe_weights() if layer_id in moe_layers else self._dense_weights()
@@ -832,7 +850,7 @@ class KimiK3MtpWeight(KimiK3Weight):
         config = self.model_config
         if (
             config.compute_dtype != torch.bfloat16
-            or config.k3_attention_quant_config is not None
+            or config.attention_projection_quant_config is not None
             or config.quant_config is not None
             or config.quant_algo.isQuant()
             or config.attn_config.kv_cache_dtype != KvCacheDataType.BASE

@@ -62,6 +62,25 @@ def test_reject_four_layer_as_formal_profile(tmp_path):
         launcher.launch_config(arguments(tmp_path, layers=4))
 
 
+def test_existing_fp8_switches_control_both_roles_without_changing_compute_dtype(tmp_path):
+    args = arguments(tmp_path)
+    args.fp8_gemm = True
+    args.fp8_mla = True
+    args.fp8_kv_cache = True
+    environment, command = launcher.launch_config(args)
+    options = dict(zip(command[1::2], command[2::2]))
+    assert environment["FP8_GEMM"] == environment["FP8_MLA"] == environment["FP8_KV_CACHE"] == "1"
+    assert options["--fp8_kv_cache"] == "1"
+    assert environment["ACT_TYPE"] == environment["SP_ACT_TYPE"] == "BF16"
+
+
+def test_fp8_mla_rejects_mismatched_cache_switch(tmp_path):
+    args = arguments(tmp_path)
+    args.fp8_mla = True
+    with pytest.raises(ValueError, match="FP8_MLA.*FP8_KV_CACHE"):
+        launcher.launch_config(args)
+
+
 @pytest.mark.parametrize("field", ["start_port", "peer_port"])
 def test_reject_rank_port_overflow(tmp_path, field):
     args = arguments(tmp_path)

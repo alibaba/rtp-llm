@@ -49,6 +49,9 @@ struct AttentionConfigs {
     // softmax config
     float           softmax_extra_scale = 1.0f;
     KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;
+    bool            mla_fp8_compute     = false;
+    float           mla_fp8_q_scale     = 1.0f;
+    float           mla_fp8_kv_scale    = 1.0f;
     bool            need_rope_kv_cache  = true;
 
     // sparse attention config

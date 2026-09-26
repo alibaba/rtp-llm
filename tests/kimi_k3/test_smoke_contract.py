@@ -249,3 +249,25 @@ def test_capped_formal_request_has_hard_wall_clock_deadline(tmp_path, monkeypatc
     assert runner.skipped_cases[0]["name"] == "capped-case"
     audit = json.loads(next((args.output.parent / "requests").glob("*.json")).read_text())
     assert audit["skipped"] is True and audit["passed"] is False
+
+
+def test_capped_deadline_skips_stage_and_runs_following_cases(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=("--suite", "main-text-64k-capped"))
+    runner = smoke.Runner(args)
+    monkeypatch.setattr(runner, "health", lambda stage: None)
+    calls = []
+
+    def request_cases(cases, concurrent):
+        calls.append(cases[0].name)
+        if len(calls) == 1:
+            runner.skipped_cases.append({"name": cases[0].name, "reason": "five-minute request deadline", "sent": True})
+            raise smoke.SmokeDeadline("first case timed out")
+        return []
+
+    monkeypatch.setattr(runner, "request_cases", request_cases)
+    runner.run_stage("first", [smoke.Case("first", "prompt", "answer", "miss")])
+    runner.run_stage("second", [smoke.Case("second", "prompt", "answer", "miss")])
+    assert calls == ["first", "second"]
+    assert runner.stages[0]["skipped"] is True
+    assert runner.stages[0]["passed"] is False
+    assert runner.stages[1]["passed"] is True

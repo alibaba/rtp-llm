@@ -233,8 +233,8 @@ class MlaFlashInferPrefillOp(object):
             sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
             * self.softmax_extra_scale,
             causal=True,
-            q_data_type=torch.bfloat16,
-            kv_data_type=torch.bfloat16,
+            q_data_type=self._attention_dtype(),
+            kv_data_type=self._attention_dtype(),
         )
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
@@ -245,6 +245,9 @@ class MlaFlashInferPrefillOp(object):
             1, dtype=torch.int32, device=self.block_table.device
         )
         self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
+
+    def _attention_dtype(self):
+        return torch.bfloat16
 
     def _reuse_kv_cache_indexed_batched(
         self,

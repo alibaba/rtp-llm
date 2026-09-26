@@ -37,7 +37,10 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
             nope_dim=attention.nope_head_dim, pe_dim=attention.rope_head_dim,
             page_size=attention.kernel_tokens_per_block,
             softmax_extra_scale=attention.softmax_extra_scale,
-            workspace=_workspaces[device], max_batch=self.batch,
+            workspace=_workspaces[device], max_batch=self.batch, max_tokens=self.tokens,
+            fp8_compute=attention.mla_fp8_compute,
+            q_scale=attention.mla_fp8_q_scale,
+            kv_scale=attention.mla_fp8_kv_scale,
         )
         columns = (self.max_seq_len + self.native.page_size - 1) // self.native.page_size
         # RTP reserves additional logical blocks for speculative candidates.
