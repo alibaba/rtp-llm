@@ -1,7 +1,7 @@
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 def xgrammar_deps():
-    # XGrammar v0.2.8: keep native grammar and Python wheel on one release.
+    # Pin xgrammar with Kimi K3 XML tags and AnyText/AnyTokens budget enforcement.
     new_git_repository(
         name = "xgrammar",
         remote = "https://github.com/mlc-ai/xgrammar.git",

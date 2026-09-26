@@ -141,6 +141,17 @@ anyio==4.4.0 \
     #   httpx
     #   openai
     #   starlette
+apache-tvm-ffi==0.1.11 \
+    --hash=sha256:119849c342bd97a9d76ec58eb77dc8dff4ebfbe8b17ea72280c5e5b103277ebe \
+    --hash=sha256:153cd2c5a9717804cb0bcd9b2709f22a1e5f80ed05b5a490faf5949b136eedba \
+    --hash=sha256:3587eb393096832d356be94b2241c6f13b8f41ff729556ce0dc69a4fc7fed73a \
+    --hash=sha256:66d9a23689070d8c3d3c3a47b3f2624f7b160ab155b6b8283d9b16b1a94e50d1 \
+    --hash=sha256:a565f6bf25adf588576578d7e2a272b09afef4084c4b668807045bd9e1ee89a9 \
+    --hash=sha256:c5b2b6ae779008ab1586866dc04ab8d5798e5cf6c240df675b78501c6c6f8c95 \
+    --hash=sha256:e7527775369a32964e083fed04a3a1ce4134e3e8719a64660ad976be2d0ee58e
+    # via
+    #   -r deps/requirements_base.txt
+    #   xgrammar
 async-timeout==4.0.3 \
     --hash=sha256:4640d96be84d82d02ed59ea2b7105a0f7b33abe8703703cd0ab0bf87c427522f \
     --hash=sha256:7405140ff1230c310e51dc27b3145b9092d659ce68ff733fb0cefe3ee42be028
@@ -3179,6 +3190,15 @@ xfastertransformer-devel==1.8.1.1 ; platform_machine == "x86_64" \
 xfastertransformer-devel-icx==1.8.1.1 ; platform_machine == "x86_64" \
     --hash=sha256:dfd1714815d38dfea89532365fbe36d502f0bb3baf37c0b472c16743a8cbe352
     # via -r requirements_base.txt
+xgrammar==0.2.8 \
+    --hash=sha256:1a1dba06ff9f8436163ccc688ea0b24e790d99262f628ac4fc46c4fc09e18630 \
+    --hash=sha256:1fe8b3889a9079bc3fbe9187941c7d902da7b9cb2dd915b2a004fa5a5922bcc5 \
+    --hash=sha256:467533c9998566b9bda6889834a7e200cd75228e6b453d8a42abd3aa86158512 \
+    --hash=sha256:8305646fd2b319d6c3003f51a1665e54cbbe9cba1fb636bc41d0b46434ccbb80 \
+    --hash=sha256:9c04f0dafb88b7f55559463a40ad7147f7d62c0a547f7c807054627dc6ed992b \
+    --hash=sha256:ae437044b736797a3a0ad03a06ab5d156903b350f7f0809591f47e0571e27e51 \
+    --hash=sha256:d6576539ade4b2404c38f606f4d04a1d6d22023fa03f9cab98bf894877696024
+    # via -r deps/requirements_base.txt
 yarl==1.9.7 \
     --hash=sha256:03e917cc44a01e1be60a83ee1a17550b929490aaa5df2a109adc02137bddf06b \
     --hash=sha256:050f3e4d886be55728fef268587d061c5ce6f79a82baba71840801b63441c301 \

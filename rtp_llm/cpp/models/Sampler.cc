@@ -114,6 +114,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
     bool has_num_beams = std::any_of(num_beams_in, num_beams_in + inputs.batch_size, [](auto n) { return n > 1; })
                          || std::any_of(num_beams_out, num_beams_out + inputs.batch_size, [](auto n) { return n > 1; });
+    if (inputs.capture_original_probs) {
+        RTP_LLM_CHECK_WITH_INFO(!has_num_beams && inputs.all_probs.defined() && !inputs.return_original_all_probs,
+                                "capturing MTP original probabilities requires filtered greedy probabilities");
+    }
     const bool requires_independent_output = !std::equal(num_beams_in, num_beams_in + inputs.batch_size, num_beams_out);
 
     // allocate output tensors
@@ -248,7 +252,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 greedy_sampling_buffer_ptr});
+                 greedy_sampling_buffer_ptr,
+                 inputs.capture_original_probs});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
             } else {
@@ -318,12 +323,18 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_batch_idx_out = to_batch_idx_out;
     }
 
-    return SamplerOutput({std::move(all_token_ids_out),
+    // sampleGreedy writes the normalized pre-top-k/top-p distribution back to
+    // logits. Capture it only for ORIGINAL requests; all_probs stays filtered
+    // and is used by MTP rejection sampling.
+    auto original_all_probs = inputs.capture_original_probs ? inputs.logits.clone() : torch::Tensor();
+    SamplerOutput output{std::move(all_token_ids_out),
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),
                           std::move(all_beam_indices),
                           std::move(all_success),
-                          std::move(processor_errors)});
+                          std::move(processor_errors)};
+    output.original_all_probs = std::move(original_all_probs);
+    return output;
 }
 
 std::vector<std::optional<ErrorInfo>> Sampler::preprocessLogits(const SamplerInputs& inputs) {
