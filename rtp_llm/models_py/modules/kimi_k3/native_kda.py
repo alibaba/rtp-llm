@@ -12,6 +12,65 @@ from functools import partial
 import torch
 
 
+def _cula_paged_prefill(
+    chunk_kda, q, k, v, g, beta, a_log, dt_bias, lower_bound,
+    cache_states, sequences, block_size,
+):
+    """Publish cuLA's FP32 checkpoints into RTP's paged recurrent cache."""
+    if block_size % 64:
+        raise ValueError("cuLA KDA checkpoint span must be a multiple of 64")
+    heads = q.shape[1]
+    output = torch.zeros_like(v)
+    for sequence in sequences:
+        segments = sequence.segments
+        if not segments:
+            continue
+        state = (
+            torch.zeros((1, heads, 128, 128), dtype=torch.float32, device=q.device)
+            if sequence.initial_block is None
+            else cache_states[sequence.initial_block].unsqueeze(0).contiguous()
+        )
+        # A reused prefix can start inside a cache block. Finish that block
+        # first so subsequent cuLA checkpoints again coincide with RTP pages.
+        first_is_partial = segments[0].end - segments[0].start < block_size
+        groups = (
+            (segments[:1], segments[1:]) if first_is_partial and len(segments) > 1
+            else (segments,)
+        )
+        for group in groups:
+            if not group:
+                continue
+            start, end = group[0].start, group[-1].end
+            inputs = [x[start:end].unsqueeze(0).contiguous() for x in (q, k, v, g)]
+            raw_beta = beta[start:end].unsqueeze(0).contiguous()
+            if raw_beta.data_ptr() % 16:
+                raw_beta = raw_beta.clone()
+            checkpoints = torch.empty(
+                (1, len(group), heads, 128, 128),
+                dtype=torch.float32, device=q.device,
+            )
+            with torch.inference_mode():
+                values, final, published = chunk_kda(
+                    *inputs, raw_beta, scale=128**-0.5,
+                    initial_state=state, output_final_state=False,
+                    use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
+                    use_beta_sigmoid_in_kernel=True,
+                    cu_seqlens=None, cu_seqlens_cpu=None, safe_gate=True,
+                    lower_bound=float(lower_bound), disable_recompute=False,
+                    use_intracard_cp=False, A_log=a_log, dt_bias=dt_bias,
+                    checkpoint_interval=block_size, checkpoint_states=checkpoints,
+                    checkpoint_offsets=None,
+                )
+            if final is not None or published is None or published.data_ptr() != checkpoints.data_ptr():
+                raise RuntimeError("cuLA did not publish the requested FP32 KDA checkpoints")
+            output[start:end].copy_(values[0].to(q.dtype))
+            for index, segment in enumerate(group):
+                if segment.cache_block > 0:
+                    cache_states[segment.cache_block].copy_(checkpoints[0, index])
+            state = checkpoints[:, -1].contiguous()
+    return output
+
+
 @dataclass(frozen=True)
 class StateSegment:
     start: int
@@ -102,6 +161,8 @@ def native_kda_paged_prefill(
             raise RuntimeError("K3 native KDA requires FP32 recurrent accumulation")
     elif backend == "vllm_triton":
         from .vllm_kda.kda.chunk import chunk_kda_with_fused_gate
+    elif backend == "cula":
+        from cula.kda import chunk_kda
     else:
         raise ValueError(f"Unsupported native KDA prefill backend: {backend}")
     if q.dtype != torch.bfloat16 or any(x.dtype != q.dtype for x in (k, v, g, beta)):
@@ -133,6 +194,12 @@ def native_kda_paged_prefill(
     ]
     if used_blocks and max(used_blocks) >= cache_states.shape[0]:
         raise ValueError("KDA state block exceeds cache capacity")
+    a_log, dt_bias = a_log.contiguous(), dt_bias.reshape(q.shape[1], 128).contiguous()
+    if backend == "cula":
+        return _cula_paged_prefill(
+            chunk_kda, q, k, v, g, beta, a_log, dt_bias, lower_bound,
+            cache_states, sequences, block_size,
+        )
     out = torch.zeros_like(v)
     max_tokens = max(
         (s.end - s.start for seq in sequences for s in seq.segments), default=0
@@ -146,7 +213,6 @@ def native_kda_paged_prefill(
             dtype=torch.uint8,
             device=q.device,
         )
-    a_log, dt_bias = a_log.contiguous(), dt_bias.reshape(q.shape[1], 128).contiguous()
     for seq in sequences:
         if not seq.segments:
             continue
@@ -210,3 +276,4 @@ def native_kda_paged_prefill(
 # Keep existing callers and backend selection compatible.
 flash_kda_paged_prefill = partial(native_kda_paged_prefill, backend="flashkda")
 vllm_kda_paged_prefill = partial(native_kda_paged_prefill, backend="vllm_triton")
+cula_kda_paged_prefill = partial(native_kda_paged_prefill, backend="cula")

@@ -418,7 +418,7 @@ class KimiK3(BaseModel):
         if linear_beta is not None and float(linear_beta) <= 0:
             raise ValueError("SiTU linear beta must be positive or null")
         kda_backend = os.environ.get("KIMI_K3_KDA_PREFILL_BACKEND", "rtp")
-        if kda_backend not in {"rtp", "flashkda", "vllm_triton"}:
+        if kda_backend not in {"rtp", "flashkda", "vllm_triton", "cula"}:
             raise ValueError(f"Unsupported K3 KDA prefill backend: {kda_backend}")
         if kda_backend == "flashkda":
             try:
@@ -442,6 +442,12 @@ class KimiK3(BaseModel):
                 "K3 KDA prefill backend=vllm_triton "
                 "upstream=c3b48446349569512749db7f6e2164aa8a33437d recurrent=fp32"
             )
+        if kda_backend == "cula":
+            try:
+                from cula.kda import chunk_kda
+            except ImportError as exc:
+                raise RuntimeError("cuLA KDA backend must be installed before loading weights") from exc
+            logging.info("K3 KDA prefill backend=cula module=%s", chunk_kda.__module__)
         config.k3_runtime_config = KimiK3RuntimeConfig(
             kda_prefill_backend=kda_backend,
             dense_intermediate_size=int(

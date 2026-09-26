@@ -29,6 +29,10 @@ tilelang==0.1.9
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_sm120/8bcfcab8757e7df2fcb0e4f65796da5cd5bdd6b4/deep_gemm-2.6.1%2B8bcfcab.cu132-cp310-cp310-linux_x86_64.whl
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
 
+# FP32-checkpoint KDA prefill uses the pinned cuLA wheel and its patched FLA runtime.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl
+
 # rtp_kernel built from gitlab cuda_extension main@3bc0ca45
 # (sm_80/90a/100a/103a/120a)
 # against torch 2.11+cu130; flashinfer-dependent submodules (xqa,

@@ -556,6 +556,9 @@ cuda-bindings==13.0.3 \
     # via
     #   cuda-python
     #   torch
+cuda-linear-attention @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 cuda-pathfinder==1.3.2 \
     --hash=sha256:7bd2774bc6be93aea226d579f415a63803b2b2c062207ed06c1d6dfc9cfacc3c
     # via
@@ -642,6 +645,11 @@ filelock==3.20.0 \
     #   huggingface-hub
     #   torch
     #   transformers
+flash-linear-attention @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl \
+    --hash=sha256:20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de
+    # via
+    #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   cuda-linear-attention
 flash-mla @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt

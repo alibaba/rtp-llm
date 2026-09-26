@@ -6,6 +6,7 @@ from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearKDAPrefill
 from rtp_llm.models_py.modules.kimi_k3.native_kda import (
     flash_kda_paged_prefill,
     vllm_kda_paged_prefill,
+    cula_kda_paged_prefill,
 )
 
 
@@ -16,6 +17,8 @@ class KimiK3NativeKDAPrefill(KimiLinearKDAPrefill):
         super().__init__(config, parallelism, weights)
         if backend == "vllm_triton":
             self.core = vllm_kda_paged_prefill
+        elif backend == "cula":
+            self.core = cula_kda_paged_prefill
         elif backend != "flashkda":
             raise ValueError(f"Unsupported native KDA prefill backend: {backend}")
         # Native KDA consumes the gate parameters in FP32, independently of the

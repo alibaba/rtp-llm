@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.kimi_k3.native_kda import (
     vllm_kda_paged_prefill,
     plan_state_sequences,
 )
+from rtp_llm.models_py.modules.kimi_k3 import native_kda as kda_module
 
 
 def test_state_sequence_plans():
@@ -49,6 +50,67 @@ def test_state_sequence_plans():
             pass
         else:
             raise AssertionError("Invalid state plan accepted")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("retain_first_checkpoint", [True, False])
+@torch.inference_mode()
+def test_cula_paged_prefill_matches_independent_vllm_backend(retain_first_checkpoint):
+    pytest.importorskip("cula.kda")
+    assert hasattr(kda_module, "cula_kda_paged_prefill")
+    torch.manual_seed(923)
+    heads, dim = 2, 128
+    lengths = [4167, 193, 32]
+    cu_seqlens = [0, 4167, 4360, 4392]
+    projections = [
+        torch.randn(cu_seqlens[-1], heads, dim, device="cuda", dtype=torch.bfloat16)
+        for _ in range(4)
+    ]
+    beta = torch.randn(cu_seqlens[-1], heads, device="cuda", dtype=torch.bfloat16)
+    a_log = torch.randn(heads, device="cuda") * 0.1
+    dt_bias = torch.randn(heads, dim, device="cuda") * 0.01
+    storage = torch.randn(10, heads * dim * dim + 512, device="cuda")
+    reference_storage = storage.clone()
+    actual_cache = storage[:, : heads * dim * dim].view(10, heads, dim, dim)
+    reference_cache = reference_storage[:, : heads * dim * dim].view(10, heads, dim, dim)
+    tables = [[1, 2], [5, 6], [0, 0]]
+    if not retain_first_checkpoint:
+        tables[0][0] = -1
+    arguments = (*projections, beta, a_log, dt_bias, -5.0)
+    reference = vllm_kda_paged_prefill(
+        *arguments, reference_cache, cu_seqlens, [0, 4096, 0], tables, 4096
+    )
+    actual = kda_module.cula_kda_paged_prefill(
+        *arguments, actual_cache, cu_seqlens, [0, 4096, 0], tables, 4096
+    )
+    torch.testing.assert_close(actual, reference, rtol=2e-2, atol=5e-4)
+    torch.testing.assert_close(storage, reference_storage, rtol=1e-3, atol=5e-4)
+    assert torch.count_nonzero(actual[cu_seqlens[2] :]).item() == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@torch.inference_mode()
+def test_cula_paged_prefill_finishes_partial_prefix_block():
+    pytest.importorskip("cula.kda")
+    torch.manual_seed(924)
+    tokens, heads, dim = 4167, 2, 128
+    projections = [
+        torch.randn(tokens, heads, dim, device="cuda", dtype=torch.bfloat16)
+        for _ in range(4)
+    ]
+    beta = torch.randn(tokens, heads, device="cuda", dtype=torch.bfloat16)
+    a_log = torch.randn(heads, device="cuda") * 0.1
+    dt_bias = torch.randn(heads, dim, device="cuda") * 0.01
+    storage = torch.randn(3, heads * dim * dim + 512, device="cuda")
+    reference_storage = storage.clone()
+    actual_cache = storage[:, : heads * dim * dim].view(3, heads, dim, dim)
+    reference_cache = reference_storage[:, : heads * dim * dim].view(3, heads, dim, dim)
+    arguments = (*projections, beta, a_log, dt_bias, -5.0)
+    metadata = ([0, tokens], [128], [[1, 2]], 4096)
+    reference = vllm_kda_paged_prefill(*arguments, reference_cache, *metadata)
+    actual = kda_module.cula_kda_paged_prefill(*arguments, actual_cache, *metadata)
+    torch.testing.assert_close(actual, reference, rtol=2e-2, atol=5e-4)
+    torch.testing.assert_close(storage, reference_storage, rtol=1e-3, atol=5e-4)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

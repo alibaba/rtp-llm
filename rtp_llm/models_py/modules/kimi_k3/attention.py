@@ -68,7 +68,7 @@ class KimiK3KDA(nn.Module):
             eps=config.layernorm_eps,
         )
         backend = getattr(runtime, "kda_prefill_backend", "rtp")
-        if backend in {"flashkda", "vllm_triton"}:
+        if backend in {"flashkda", "vllm_triton", "cula"}:
             from rtp_llm.models_py.modules.kimi_k3.native_kda_prefill import (
                 KimiK3NativeKDAPrefill,
             )
