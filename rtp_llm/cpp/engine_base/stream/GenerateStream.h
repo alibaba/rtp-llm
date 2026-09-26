@@ -74,6 +74,9 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+    // Per-accepted-token target distributions [stream_batch, accepted, vocab].
+    // Never populated from draft_token_probs.
+    torch::Tensor all_probs;
 };
 
 struct SpeculativeExecutorStreamOutput {

@@ -350,6 +350,10 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {2}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    stream1->generateConfig()->return_all_probs = ReturnAllProbsMode::DEFAULT;
+    stream1->generateConfig()->is_streaming     = true;
+    stream2->generateConfig()->is_streaming     = true;
+    stream2->setReturnAllProbs(ReturnAllProbsMode::NONE);
 
     std::list<GenerateStreamPtr> streams;
     streams.emplace_back(stream1);
@@ -364,7 +368,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     target_output.model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 1.1f, 1.2f, 1.3f, 1.4f}, torch::kFloat32).reshape({3, 2});
     target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
-    target_output.sampler_output.all_probs = torch::tensor({0.1f, 0.9f, 0.2f, 0.8f}, torch::kFloat32).reshape({2, 2});
+    target_output.sampler_output.all_probs =
+        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.4f, 0.3f, 0.2f, 0.1f}, torch::kFloat32).reshape({2, 4});
 
     MergedOutput draft_output;
     draft_output.model_output.all_hidden_states =
@@ -378,6 +383,14 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});
+    auto first_output  = stream1->nextOutput(100);
+    auto second_output = stream2->nextOutput(100);
+    ASSERT_TRUE(first_output.ok());
+    ASSERT_TRUE(second_output.ok());
+    ASSERT_TRUE(first_output.value().generate_outputs[0].aux_info.all_probs.has_value());
+    EXPECT_EQ(toVec<float>(*first_output.value().generate_outputs[0].aux_info.all_probs),
+              (std::vector<float>{0.1f, 0.2f, 0.3f, 0.4f}));
+    EXPECT_FALSE(second_output.value().generate_outputs[0].aux_info.all_probs.has_value());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
@@ -405,6 +418,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
+    stream1->generateConfig()->return_all_probs = ReturnAllProbsMode::DEFAULT;
+    stream1->generateConfig()->is_streaming     = true;
+    stream2->generateConfig()->is_streaming     = true;
+    stream2->setReturnAllProbs(ReturnAllProbsMode::NONE);
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
@@ -413,6 +430,15 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
     spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
     spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
+    // Rows 0..4 are all accepted for stream 1; only row 0 is accepted for stream 2.
+    // Unused verify rows carry a sentinel so a faulty slice cannot pass unnoticed.
+    spec_decode_output.target_probs_cpu = torch::full({2, 5, 4}, -1.0f);
+    spec_decode_output.target_probs_cpu[0][0] = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f});
+    spec_decode_output.target_probs_cpu[0][1] = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f});
+    spec_decode_output.target_probs_cpu[0][2] = torch::tensor({0.0f, 0.0f, 1.0f, 0.0f});
+    spec_decode_output.target_probs_cpu[0][3] = torch::tensor({0.0f, 0.0f, 0.0f, 1.0f});
+    spec_decode_output.target_probs_cpu[0][4] = torch::tensor({0.25f, 0.25f, 0.25f, 0.25f});
+    spec_decode_output.target_probs_cpu[1][0] = torch::tensor({0.4f, 0.3f, 0.2f, 0.1f});
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -430,6 +456,16 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
+    auto first_output  = stream1->nextOutput(100);
+    auto second_output = stream2->nextOutput(100);
+    ASSERT_TRUE(first_output.ok());
+    ASSERT_TRUE(second_output.ok());
+    const auto& first_probs = first_output.value().generate_outputs[0].aux_info.all_probs;
+    ASSERT_TRUE(first_probs.has_value());
+    ASSERT_EQ(first_probs->sizes().vec(), (std::vector<int64_t>{1, 5, 4}));
+    EXPECT_EQ(toVec<float>(*first_probs),
+              (std::vector<float>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, .25f, .25f, .25f, .25f}));
+    EXPECT_FALSE(second_output.value().generate_outputs[0].aux_info.all_probs.has_value());
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.

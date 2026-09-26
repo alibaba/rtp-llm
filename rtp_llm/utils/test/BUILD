@@ -247,3 +247,8 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+py_test(
+    name = "kimi_k3_mtp_checkpoint_test",
+    srcs = ["kimi_k3_mtp_checkpoint_test.py", "//rtp_llm:utils/kimi_k3_mtp_checkpoint.py"],
+    timeout = "short",
+)

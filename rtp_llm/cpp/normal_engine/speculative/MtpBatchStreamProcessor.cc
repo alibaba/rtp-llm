@@ -1506,7 +1506,15 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        StreamSpecUpdateInfo spec_update_info{
+            new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        if (stream->generateConfig()->return_all_probs != ReturnAllProbsMode::NONE) {
+            RTP_LLM_CHECK_WITH_INFO(sampler_output.all_probs.defined() && sampler_output.all_probs.dim() == 2,
+                                    "MTP prefill target probabilities must be [batch, vocab]");
+            spec_update_info.all_probs =
+                sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).unsqueeze(1).cpu();
+        }
+        spec_update_infos.push_back(std::move(spec_update_info));
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1557,6 +1565,14 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
         StreamSpecUpdateInfo spec_update_info{
             accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        if (stream->generateConfig()->return_all_probs != ReturnAllProbsMode::NONE) {
+            RTP_LLM_CHECK_WITH_INFO(spec_decode_output.target_probs_cpu.defined()
+                                        && spec_decode_output.target_probs_cpu.dim() == 3
+                                        && spec_decode_output.target_probs_cpu.size(1) >= cur_accept_len,
+                                    "MTP decode target probabilities must cover every accepted token");
+            spec_update_info.all_probs = spec_decode_output.target_probs_cpu.narrow(0, batch_idx_out, next_batch_size)
+                                             .narrow(1, 0, cur_accept_len);
+        }
         spec_update_info.speculative_propose_step = propose_step_;
         spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
         // Per-stream verify errors from SpecLogitsVerifyRunner ride the update

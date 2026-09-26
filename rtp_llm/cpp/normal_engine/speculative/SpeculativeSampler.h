@@ -19,6 +19,9 @@ public:
 
     torch::Tensor accept_tokens_cpu;
     torch::Tensor accept_len_cpu;
+    // [stream, verify_row, vocab] target probabilities for client output.
+    // Draft probabilities remain private to rejection sampling.
+    torch::Tensor target_probs_cpu;
 
     std::shared_ptr<torch::Event> transfer_done_event;
 

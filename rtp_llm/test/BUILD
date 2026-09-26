@@ -100,6 +100,12 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_mtp_contract_test",
+    srcs = ["kimi_k3_mtp_contract_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "kimi_k3_renderer_test",
     srcs = ["kimi_k3_renderer_test.py"],
     data = ["//rtp_llm:sdk"],
