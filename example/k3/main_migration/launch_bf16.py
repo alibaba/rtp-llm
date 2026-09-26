@@ -56,6 +56,7 @@ def launch_config(args):
         "SP_MODEL_TYPE": "kimi_k3_mtp",
         "SP_CHECKPOINT_PATH": str(draft),
         "SP_ACT_TYPE": "BF16",
+        "FT_DISABLE_CUSTOM_AR": "1",
         "GEN_NUM_PER_CIRCLE": "3",
         "KIMI_K3_PREFILL_CHUNK_TOKENS": "65536",
         "FP8_GEMM": str(int(fp8_gemm)),

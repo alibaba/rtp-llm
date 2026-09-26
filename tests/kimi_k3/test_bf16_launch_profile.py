@@ -38,6 +38,7 @@ def test_fixed_full_profile(tmp_path, role):
     environment, command = launcher.launch_config(arguments(tmp_path, role))
     options = dict(zip(command[1::2], command[2::2]))
     assert environment["ACT_TYPE"] == environment["SP_ACT_TYPE"] == "BF16"
+    assert environment["FT_DISABLE_CUSTOM_AR"] == "1"
     assert environment["LOAD_METHOD"] == "fastsafetensors"
     assert "CUBLAS_WORKSPACE_CONFIG" not in environment
     assert "CUBLASLT_WORKSPACE_SIZE" not in environment
