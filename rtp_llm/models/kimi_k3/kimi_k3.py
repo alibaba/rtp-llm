@@ -112,6 +112,20 @@ class KimiK3(BaseModel):
             ) * max(local_shards, upstream_shards)
 
     @classmethod
+    def create_dash_sc_request_adapter(cls):
+        from rtp_llm.models.kimi_k3.kimi_k3_dash_sc_adapter import (
+            KimiK3DashScRequestAdapter,
+        )
+
+        return KimiK3DashScRequestAdapter()
+
+    @classmethod
+    def create_grammar_format(cls):
+        from rtp_llm.models.kimi_k3.kimi_k3_grammar import KimiK3GrammarFormat
+
+        return KimiK3GrammarFormat()
+
+    @classmethod
     def _post_build_model_config(cls, model_config):
         if model_config.local_kv_cache_sharded is not True:
             raise ValueError("K3 MLA requires compact local PageRR cache tables")

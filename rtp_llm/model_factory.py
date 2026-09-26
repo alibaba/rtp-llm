@@ -385,6 +385,9 @@ class ModelFactory:
             if generate_env_config is not None
             else GenerateEnvConfig()
         )
+        model_config.generate_env_config.grammar_format = (
+            model_cls.create_grammar_format()
+        )
         model_config.render_config = (
             render_config if render_config is not None else RenderConfig()
         )

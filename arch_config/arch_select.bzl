@@ -178,7 +178,7 @@ def ml_pin_reqs():
             "transformers==5.2.0",
             "sentence-transformers==5.2.0",
             "pyarrow==14.0.0",
-            "xgrammar==0.2.5",
+            "xgrammar==0.2.8",
         ],
     })
 
