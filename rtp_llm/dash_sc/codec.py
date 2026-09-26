@@ -17,11 +17,12 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import cache
 from itertools import chain
-from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
+from typing import TYPE_CHECKING, Any, Iterator, NamedTuple, cast
 
 import torch
 
 from rtp_llm.config.response_format import parse_response_format
+from rtp_llm.config.response_format_compiler import GrammarScope
 from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
@@ -559,7 +560,7 @@ def _decode_structural_tag_payload(
 def _parse_grammar_controls(
     request: predict_v2_pb2.ModelInferRequest,
     ds_attrs: dict[str, Any] | None = None,
-) -> tuple[str | None, bool, str | None]:
+) -> tuple[str | None, bool, str | None, GrammarScope | None]:
     response_format = _parse_optional_parameter_string(request, "response_format")
     guided_json = _parse_optional_parameter_string(request, "guided_json")
     json_format_value = _parse_optional_parameter_bool(request, "json_format")
@@ -584,6 +585,25 @@ def _parse_grammar_controls(
             _lookup_ds_request_control(ds_attrs, "json_format")
         )
 
+    unified_tag = _parse_optional_parameter_string(request, "unified_structural_tag")
+    if unified_tag is None:
+        unified_tag = _lookup_ds_request_control(ds_attrs, "unified_structural_tag")
+    scope = _parse_optional_parameter_string(request, "structural_tag_scope")
+    if scope is None:
+        scope = _lookup_ds_request_control(ds_attrs, "structural_tag_scope")
+    if scope is not None and scope not in (
+        "response_content",
+        "response_tail",
+        "full_turn",
+    ):
+        raise DashScParameterError("invalid structural_tag_scope")
+    if unified_tag is not None:
+        if scope not in (None, "full_turn"):
+            raise DashScParameterError(
+                "unified_structural_tag requires full_turn scope"
+            )
+        scope = "full_turn"
+
     raw_structural_tag = _parse_optional_parameter_string(
         request, "tool_call_structural_tag"
     )
@@ -595,11 +615,21 @@ def _parse_grammar_controls(
         )
     if raw_structural_tag is None:
         raw_structural_tag = _lookup_ds_request_control(ds_attrs, "structural_tag")
+    if unified_tag is not None:
+        raw_structural_tag = unified_tag
 
     structural_tag = _decode_structural_tag_payload(
-        raw_structural_tag, "tool_call_structural_tag"
+        raw_structural_tag,
+        (
+            "unified_structural_tag"
+            if unified_tag is not None
+            else "tool_call_structural_tag"
+        ),
     )
 
+    if unified_tag is not None:
+        response_format = None
+        json_format_value = False
     if isinstance(response_format, dict):
         if response_format.get("type") == "structural_tag":
             try:
@@ -615,10 +645,14 @@ def _parse_grammar_controls(
                 structural_tag = response_structural_tag
             response_format = None
 
+    if scope is not None and structural_tag is None:
+        raise DashScParameterError("structural_tag_scope requires a structural_tag")
+
     return (
         _jsonable_to_string(response_format),
         bool(json_format_value),
         _jsonable_to_string(structural_tag),
+        cast(GrammarScope | None, scope),
     )
 
 
@@ -749,6 +783,8 @@ class SamplingParams:
     response_format: str | None = None
     json_format: bool = False
     structural_tag: str | None = None
+    structural_tag_scope: GrammarScope | None = None
+    specified_fields: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def n(self) -> int:
@@ -890,6 +926,7 @@ def parse_sampling_params(
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    specified_fields: set[str] = set()
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
@@ -898,16 +935,24 @@ def parse_sampling_params(
         max_new_tokens_from_completion_alias,
         max_total_tokens,
     ) = _parse_max_token_limits(request, ds_attrs)
+    if any(
+        _parse_optional_scalar_int(request, name) is not None
+        or _parse_optional_parameter_int(request, name) is not None
+        for name in ("max_completion_tokens", "max_new_tokens", "max_tokens")
+    ):
+        specified_fields.add("max_new_tokens")
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
     if v is None:
         v = _parse_optional_scalar_int(request, "n")
     if v is not None:
         num_return_sequences = max(0, v)
+        specified_fields.add("n")
 
     vf = _parse_optional_scalar_float(request, "top_p")
     if vf is not None:
         top_p = vf
+        specified_fields.add("top_p")
 
     v = _parse_optional_scalar_int(request, "top_k")
     if v is not None:
@@ -920,6 +965,7 @@ def parse_sampling_params(
     vf = _parse_optional_scalar_float(request, "temperature")
     if vf is not None:
         temperature = vf
+        specified_fields.add("temperature")
 
     v = _parse_optional_scalar_int(request, "min_new_tokens")
     if v is None:
@@ -938,10 +984,12 @@ def parse_sampling_params(
     vf = _parse_optional_scalar_float(request, "frequency_penalty")
     if vf is not None:
         frequency_penalty = vf
+        specified_fields.add("frequency_penalty")
 
     vf = _parse_optional_scalar_float(request, "presence_penalty")
     if vf is not None:
         presence_penalty = vf
+        specified_fields.add("presence_penalty")
 
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
@@ -953,8 +1001,8 @@ def parse_sampling_params(
     if sw is not None:
         stop_words_list = sw
 
-    response_format, json_format, structural_tag = _parse_grammar_controls(
-        request, ds_attrs
+    response_format, json_format, structural_tag, structural_tag_scope = (
+        _parse_grammar_controls(request, ds_attrs)
     )
 
     return SamplingParams(
@@ -975,6 +1023,8 @@ def parse_sampling_params(
         response_format=response_format,
         json_format=json_format,
         structural_tag=structural_tag,
+        structural_tag_scope=structural_tag_scope,
+        specified_fields=frozenset(specified_fields),
     )
 
 
@@ -1256,15 +1306,16 @@ def _load_multimodal_payload(
 
 def parse_multimodal_parts_from_request(
     request: predict_v2_pb2.ModelInferRequest,
+    *,
+    messages: list[Any] | None = None,
 ) -> list[MultimodalPart]:
     """Extract image, video, and audio parts without changing text-only requests."""
-    payload = _load_multimodal_payload(request)
-    if payload is None:
-        return []
+    if messages is None:
+        messages = parse_messages_from_request(request) or []
 
     openai_part_types, _ = _multimodal_type_maps()
     result: list[MultimodalPart] = []
-    for message in _iter_messages_from_payload(payload):
+    for message in messages:
         if not isinstance(message, dict):
             continue
         content = message.get("content")
@@ -1278,6 +1329,16 @@ def parse_multimodal_parts_from_request(
             else:
                 result.extend(_parts_from_dashscope_native(part))
     return result
+
+
+def parse_messages_from_request(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> list[Any] | None:
+    """Return message history only when the DashSc payload supplies it."""
+    payload = _load_multimodal_payload(request)
+    if payload is None:
+        return None
+    return list(_iter_messages_from_payload(payload))
 
 
 # ----------------------------------------------------------------------------
@@ -1463,11 +1524,17 @@ def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: GenerateOutput,
     prompt_token_fallback: int = 0,
+    prompt_token_offset: int = 0,
 ) -> None:
     """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
     ax = out_py.aux_info
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
+    if prompt_token_offset:
+        if prompt_token_offset < 0 or input_len < prompt_token_offset:
+            raise ValueError("prompt usage is shorter than its token offset")
+        input_len -= prompt_token_offset
+        reuse_len = min(reuse_len, input_len)
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
@@ -1572,6 +1639,7 @@ class StreamResponseBuilder:
         "_generate_config",
         "_eos_token_id",
         "_max_token_id",
+        "_prompt_token_offset",
         "_template",
         "_generated_index",
         "_finish_index",
@@ -1599,6 +1667,7 @@ class StreamResponseBuilder:
         eos_token_id: int | None = None,
         max_token_id: int | None = None,
         log_input_output: bool = True,
+        prompt_token_offset: int = 0,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
@@ -1610,6 +1679,7 @@ class StreamResponseBuilder:
         self._eos_token_id = eos_token_id
         self._max_token_id = max_token_id
         self._log_input_output = log_input_output
+        self._prompt_token_offset = prompt_token_offset
         self._template: predict_v2_pb2.ModelStreamInferResponse | None = None
         self._generated_index = -1
         self._finish_index = -1
@@ -1652,6 +1722,11 @@ class StreamResponseBuilder:
             else len(self._request_input_ids or [])
         )
         cached_tokens = int(aux_info.reuse_len) if aux_info is not None else 0
+        if self._prompt_token_offset:
+            if prompt_tokens < self._prompt_token_offset:
+                raise ValueError("prompt usage is shorter than its token offset")
+            prompt_tokens -= self._prompt_token_offset
+            cached_tokens = min(cached_tokens, prompt_tokens)
 
         if self._template is None:
             response = predict_v2_pb2.ModelStreamInferResponse()
@@ -1667,6 +1742,7 @@ class StreamResponseBuilder:
                 infer,
                 out_py,
                 prompt_token_fallback=len(self._request_input_ids or []),
+                prompt_token_offset=self._prompt_token_offset,
             )
             infer.parameters["incremental_output"].int64_param = (
                 1 if self._is_streaming else 0

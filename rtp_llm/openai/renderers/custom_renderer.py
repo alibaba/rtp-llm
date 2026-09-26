@@ -17,7 +17,7 @@ from rtp_llm.config.generate_config import (
 )
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.config.response_format import normalize_think_tag
-from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.config.response_format_compiler import ReasoningFormat, ResponseFormatPlan
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
@@ -397,6 +397,14 @@ class CustomChatRenderer:
 
     def get_reasoning_format(self) -> ReasoningFormat:
         return ReasoningFormat.from_generate_env_config(self.generate_env_config)
+
+    def get_response_format_plan(
+        self,
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+        input_ids: Optional[List[int]] = None,
+    ) -> Optional[ResponseFormatPlan]:
+        return None
 
     def add_extra_stop_words(self, extra_stop_words: List[str]):
         self.extra_stop_words.extend(extra_stop_words)

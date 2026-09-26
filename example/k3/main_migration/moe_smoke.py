@@ -3,9 +3,7 @@
 import json
 import math
 
-def require(condition, message):
-    if not condition:
-        raise AssertionError(message)
+from request_smoke import require
 
 
 def check_situ(record):

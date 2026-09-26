@@ -36,7 +36,10 @@ from rtp_llm.utils.util import check_with_info
 
 if TYPE_CHECKING:
     from rtp_llm.config.grammar_constraint import GrammarConstraint
-    from rtp_llm.config.response_format_compiler import ReasoningFormat
+    from rtp_llm.config.response_format_compiler import (
+        ReasoningFormat,
+        ResponseFormatPlan,
+    )
 
 
 class RequestFormat:
@@ -121,6 +124,7 @@ class GenerateConfig(BaseModel):
     _ban_auto_downgraded: bool = PrivateAttr(default=False)
     _reasoning_envelope_applied: bool = PrivateAttr(default=False)
     _reasoning_final_constraint: Any = PrivateAttr(default=None)
+    _model_response_format_plan: Any = PrivateAttr(default=None)
 
     max_new_tokens: int = 32000
     # only for qwen agent fncall check max input tokens
@@ -592,6 +596,7 @@ class GenerateConfig(BaseModel):
     def finalize_response_format(
         self,
         reasoning_format: Optional["ReasoningFormat"] = None,
+        prepared_plan: Optional["ResponseFormatPlan"] = None,
     ) -> Optional["GrammarConstraint"]:
         """Validate and install the one grammar constraint used by the engine.
 
@@ -602,7 +607,9 @@ class GenerateConfig(BaseModel):
         from rtp_llm.config.response_format_compiler import prepare_response_format
 
         self.validate()
-        return prepare_response_format(self, reasoning_format=reasoning_format)
+        return prepare_response_format(
+            self, reasoning_format=reasoning_format, prepared_plan=prepared_plan
+        )
 
     def add_thinking_params(
         self,
@@ -610,6 +617,7 @@ class GenerateConfig(BaseModel):
         generate_env_config,
         enable_thinking: Optional[bool] = None,
         reasoning_format: Optional["ReasoningFormat"] = None,
+        prepared_plan: Optional["ResponseFormatPlan"] = None,
     ) -> Optional["GrammarConstraint"]:
         """Apply thinking fields and finalize structured-output grammar.
 
@@ -653,6 +661,12 @@ class GenerateConfig(BaseModel):
                         think_end_tag, add_special_tokens=False
                     )
 
+            if (
+                prepared_plan is not None
+                or self._model_response_format_plan is not None
+            ):
+                return self.finalize_response_format(prepared_plan=prepared_plan)
+
             from rtp_llm.config.response_format_compiler import ReasoningFormat
 
             if reasoning_format is None:
@@ -665,6 +679,10 @@ class GenerateConfig(BaseModel):
                     suffix=base_format.suffix,
                     no_think_excludes=base_format.no_think_excludes,
                 )
+            reasoning_format = reasoning_format.with_boundary_excludes(
+                tokenizer,
+                normalize_think_tag(generate_env_config.think_start_tag),
+            )
             return self.finalize_response_format(reasoning_format=reasoning_format)
 
         if enable_thinking is None:
@@ -680,25 +698,38 @@ class GenerateConfig(BaseModel):
 
         # Preserve the pre-adaptive fixed-mode behavior. In particular, fixed
         # ENABLED does not require the model to emit a begin tag.
-        end_think_token_id = generate_env_config.think_end_token_id
-        self.end_think_token_ids = (
-            [end_think_token_id] if end_think_token_id != -1 else []
-        )
-        if enable_thinking and tokenizer is not None and end_think_token_id == -1:
-            think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
-            self.end_think_token_ids = tokenizer.encode(
-                think_end_tag, add_special_tokens=False
+        if (
+            prepared_plan is None and self._model_response_format_plan is None
+        ) or not self.end_think_token_ids:
+            end_think_token_id = generate_env_config.think_end_token_id
+            self.end_think_token_ids = (
+                [end_think_token_id] if end_think_token_id != -1 else []
             )
+            if enable_thinking and tokenizer is not None and end_think_token_id == -1:
+                think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
+                self.end_think_token_ids = tokenizer.encode(
+                    think_end_tag, add_special_tokens=False
+                )
         self.in_think_mode = bool(enable_thinking)
         self.thinking_mode = (
             ThinkingMode.ENABLED if self.in_think_mode else ThinkingMode.DISABLED
         )
+
+        if prepared_plan is not None or self._model_response_format_plan is not None:
+            return self.finalize_response_format(prepared_plan=prepared_plan)
 
         from rtp_llm.config.response_format_compiler import ReasoningFormat
 
         if self.in_think_mode and reasoning_format is None:
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
+            )
+        if self.in_think_mode and reasoning_format is not None:
+            reasoning_format = reasoning_format.with_boundary_excludes(
+                tokenizer,
+                normalize_think_tag(
+                    getattr(generate_env_config, "think_start_tag", "") or ""
+                ),
             )
         return self.finalize_response_format(
             reasoning_format=reasoning_format if self.in_think_mode else None

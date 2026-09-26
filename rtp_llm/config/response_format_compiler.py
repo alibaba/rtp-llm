@@ -1,6 +1,6 @@
 import copy
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES, GrammarConstraint
@@ -8,6 +8,8 @@ from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import ThinkingMode
+
+GrammarScope = Literal["response_content", "response_tail", "full_turn"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,7 @@ class ReasoningFormat:
     tag_end: Union[str, List[str], Dict[str, Any]]
     suffix: str = ""
     no_think_excludes: Tuple[str, ...] = ()
+    content_excludes: Tuple[str, ...] = ()
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
@@ -41,6 +44,27 @@ class ReasoningFormat:
             )
         return cls(tag_begin="", tag_end=normalized_end_tag)
 
+    def with_boundary_excludes(
+        self, tokenizer: Any, think_start_tag: str = ""
+    ) -> "ReasoningFormat":
+        """Reserve boundary prefixes for the tag, rather than thinking text.
+
+        K3's first boundary tokens are <|open|> and <|close|>. Excluding
+        those from AnyText leaves the enclosing tag as the only path after
+        <|close|>, so the matcher must finish the complete configured end tag.
+        Derive the prefixes from the tokenizer to also cover other models.
+        """
+        if tokenizer is None:
+            return self
+        excludes = list(self.content_excludes)
+        for boundary in (think_start_tag, self.tag_begin, self.tag_end):
+            boundaries = boundary if isinstance(boundary, list) else [boundary]
+            for value in boundaries:
+                prefix = _boundary_token_prefix(tokenizer, value)
+                if prefix and prefix not in excludes:
+                    excludes.append(prefix)
+        return replace(self, content_excludes=tuple(excludes))
+
     def prefix_format(self, max_thinking_tokens: int) -> Dict[str, Any]:
         think_tag = {
             "type": "tag",
@@ -51,6 +75,8 @@ class ReasoningFormat:
             },
             "end": self.tag_end,
         }
+        if self.content_excludes:
+            think_tag["content"]["excludes"] = list(self.content_excludes)
         if not self.suffix:
             return think_tag
         return {
@@ -60,6 +86,31 @@ class ReasoningFormat:
                 {"type": "const_string", "value": self.suffix},
             ],
         }
+
+
+def _boundary_token_prefix(tokenizer: Any, boundary: Any) -> str:
+    if not boundary:
+        return ""
+    if isinstance(boundary, dict):
+        if boundary.get("type") != "token":
+            return ""
+        token = boundary["token"]
+        if isinstance(token, str):
+            return token
+        token_ids = [token]
+    else:
+        token_ids = tokenizer.encode(boundary, add_special_tokens=False)
+    if not token_ids:
+        return ""
+    decode = getattr(tokenizer, "decode", None)
+    if not callable(decode):
+        return boundary if isinstance(boundary, str) else ""
+    prefix = decode(token_ids[:1], skip_special_tokens=False)
+    if isinstance(boundary, str) and (not prefix or not boundary.startswith(prefix)):
+        # SentencePiece/byte decoders may not round-trip an isolated token.
+        # In that case retain the literal boundary instead of excluding other text.
+        return boundary
+    return prefix
 
 
 @dataclass(frozen=True)
@@ -77,7 +128,7 @@ class ResponseFormatPlan:
     ) -> "ResponseFormatPlan":
         from rtp_llm.config.generate_config import ThinkingMode
 
-        final_constraint = _resolve_final_constraint(config)
+        final_constraint = resolve_final_constraint(config)
         thinking_mode = _resolved_thinking_mode(config)
 
         if thinking_mode in (ThinkingMode.ENABLED, ThinkingMode.ADAPTIVE):
@@ -128,6 +179,14 @@ class ResponseFormatPlan:
         return cls(final_constraint, engine_constraint)
 
     def apply_to_config(self, config: Any) -> None:
+        if self.engine_constraint is not None and (
+            config.has_num_beams() or config.num_return_sequences > 1
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "grammar-constrained decoding does not support beam search or "
+                "num_return_sequences > 1",
+            )
         config.response_format = None
         if self.engine_constraint is None:
             GrammarConstraint.clear_from_config(config)
@@ -155,7 +214,7 @@ def _uses_reasoning_envelope(config: Any) -> bool:
     )
 
 
-def _resolve_final_constraint(config: Any) -> Optional[GrammarConstraint]:
+def resolve_final_constraint(config: Any) -> Optional[GrammarConstraint]:
     response_format = config.response_format
     direct_constraints = GrammarConstraint.collect_from_config(config)
 
@@ -262,8 +321,19 @@ def _adaptive_reasoning_envelope(
 def prepare_response_format(
     config: Any,
     reasoning_format: Optional[ReasoningFormat] = None,
+    prepared_plan: Optional[ResponseFormatPlan] = None,
 ) -> Optional[GrammarConstraint]:
     """Compile and install the engine constraint at request entry."""
+
+    if prepared_plan is not None:
+        prepared_plan.apply_to_config(config)
+        config._model_response_format_plan = prepared_plan
+        config._reasoning_envelope_applied = False
+        config._reasoning_final_constraint = None
+        return prepared_plan.final_constraint
+    if config._model_response_format_plan is not None:
+        validate_engine_ready(config)
+        return config._model_response_format_plan.final_constraint
 
     if config._reasoning_envelope_applied:
         final_constraint = config._reasoning_final_constraint
@@ -307,6 +377,7 @@ def restore_final_constraint(
     config.response_format = None
     config._reasoning_envelope_applied = False
     config._reasoning_final_constraint = None
+    config._model_response_format_plan = None
     if constraint is None:
         GrammarConstraint.clear_from_config(config)
     else:

@@ -342,6 +342,16 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
+        # Model-specific request constraints must be installed before the
+        # common thinking/response-format compiler consumes grammar fields.
+        # This path is shared by single, batch, and chat_render requests.
+        self._apply_renderer_chat_constraints(renderer, request, config)
+        plan_builder = getattr(renderer, "get_response_format_plan", None)
+        prepared_plan = (
+            plan_builder(request, config, input_ids)
+            if plan_builder is not None
+            else None
+        )
         config.add_thinking_params(
             self.tokenizer,
             self.generate_env_config,
@@ -350,9 +360,12 @@ class OpenaiEndpoint(object):
                 if config.thinking_mode == ThinkingMode.ADAPTIVE
                 else config.thinking_mode == ThinkingMode.ENABLED
             ),
-            reasoning_format=self._reasoning_format_for_prompt(
-                config, renderer, input_ids
+            reasoning_format=(
+                None
+                if prepared_plan is not None
+                else self._reasoning_format_for_prompt(config, renderer, input_ids)
             ),
+            prepared_plan=prepared_plan,
         )
         if request.debug_info:
             config.return_output_ids = True
@@ -452,7 +465,10 @@ class OpenaiEndpoint(object):
         aux_info = None
         extra_outputs = None
         async for response in choice_generator:
-            if len(response.choices) != len(all_choices):
+            if not response.choices and response.usage is not None:
+                # The final usage-only stream frame does not replace choices.
+                pass
+            elif len(response.choices) != len(all_choices):
                 if all_choices == []:
                     all_choices = [
                         ChatCompletionResponseChoice(
@@ -660,7 +676,6 @@ class OpenaiEndpoint(object):
         parse_and_fill_banned_combo(
             rendered_input.rendered_prompt, generate_config, self.tokenizer
         )
-        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         mm_inputs = rendered_input.multimodal_inputs
 
@@ -805,6 +820,5 @@ class OpenaiEndpoint(object):
         generate_config = self._extract_generation_config(
             chat_request, rendered_input.input_ids, renderer
         )
-        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info

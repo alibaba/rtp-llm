@@ -94,6 +94,14 @@ class KimiK3(BaseModel):
     WEIGHT_PREFIX = "language_model."
 
     @classmethod
+    def create_dash_sc_request_adapter(cls):
+        from rtp_llm.models.kimi_k3.kimi_k3_dash_sc_adapter import (
+            KimiK3DashScRequestAdapter,
+        )
+
+        return KimiK3DashScRequestAdapter()
+
+    @classmethod
     def _post_build_model_config(cls, model_config):
         if not model_config.kv_cache_spec_descs:
             model_config.kv_cache_spec_descs = build_hybrid_kv_cache_spec_descs(

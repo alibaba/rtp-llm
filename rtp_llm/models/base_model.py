@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from typing import (
+    TYPE_CHECKING,
     Any,
     List,
     Optional,
@@ -44,6 +45,9 @@ from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
 
+if TYPE_CHECKING:
+    from rtp_llm.dash_sc.inference.request_adapter import DashScRequestAdapter
+
 
 @runtime_checkable
 class _MultiModalModel(Protocol):
@@ -73,6 +77,12 @@ class BaseModel(object):
     kv_cache_config: KVCacheConfig
     fmha_config: FMHAConfig
     moe_config: MoeConfig
+
+    @classmethod
+    def create_dash_sc_request_adapter(cls) -> "DashScRequestAdapter":
+        from rtp_llm.dash_sc.inference.request_adapter import DashScRequestAdapter
+
+        return DashScRequestAdapter()
 
     def __init__(
         self,

@@ -35,6 +35,7 @@ cc_library(
     # matcher/compiled_grammar operator<<.
     srcs = glob([
         "cpp/*.cc",
+        "cpp/converter_ext/*.cc",
         "cpp/support/*.cc",
     ]),
     defines = [
