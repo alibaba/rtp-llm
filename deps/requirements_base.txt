@@ -59,4 +59,4 @@ zstandard==0.25.0
 pybind11_stubgen
 # Platform locks select the FFI version shared by their operator wheels.
 apache-tvm-ffi>=0.1.11,<0.2
-xgrammar==0.2.5
+xgrammar==0.2.8

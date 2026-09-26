@@ -9,7 +9,8 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleAddr, RoleType
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -82,6 +83,46 @@ class _FakeInput:
         self.headers = None
         self.enqueued_by_master = enqueued_by_master
         self.prompt_length = prompt_length
+
+
+class BackendRPCServerVisitorSpeculativeTest(unittest.TestCase):
+    def _check_request(self, sp_type, **request_options):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.sp_config = SimpleNamespace(model_type="draft", type=sp_type)
+        generate_config = SimpleNamespace(
+            force_disable_sp_run=False,
+            num_return_sequences=1,
+            num_beams=1,
+            return_all_probs=ReturnAllProbsMode.DEFAULT,
+        )
+        for key, value in request_options.items():
+            setattr(generate_config, key, value)
+        visitor.check_sp_supported(_FakeInput(generate_config=generate_config))
+
+    def test_mtp_executor_accepts_token_probabilities(self):
+        for sp_type in (
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.EAGLE3,
+            SpeculativeType.DSPARK,
+        ):
+            with self.subTest(sp_type=sp_type):
+                self._check_request(sp_type)
+
+    def test_other_speculative_executor_rejects_token_probabilities(self):
+        for sp_type in (SpeculativeType.VANILLA, SpeculativeType.DETERMINISTIC):
+            with self.subTest(sp_type=sp_type):
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    self._check_request(sp_type)
+                self.assertEqual(
+                    ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+                )
+                self.assertIn("return_all_probs", str(ctx.exception))
+
+    def test_mtp_still_rejects_multiple_sequences(self):
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._check_request(SpeculativeType.MTP, num_return_sequences=2)
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION)
 
 
 class _FakeRouteTokenIds:

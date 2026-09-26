@@ -15,6 +15,39 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
+    def test_each_pd_role_publishes_http_endpoints_for_frontend_routing(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            target, draft = root / "target", root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text('{"num_hidden_layers":93}')
+            for role in ("PREFILL", "DECODE"):
+                args = SimpleNamespace(
+                    checkpoint=str(target),
+                    draft_checkpoint=str(draft),
+                    start_port=28000,
+                    peer_port=29000,
+                    peer_ip="127.0.0.2",
+                    role=role,
+                    server="/bin/true",
+                    moe_strategy="mega_moe",
+                    orthogonal_smoke=False,
+                )
+                environment, _ = launch.launch_config(args)
+                route = json.loads(environment["MODEL_SERVICE_CONFIG"])
+                self.assertTrue(route["use_local"])
+                endpoints = route["role_endpoints"][0]
+                own = role.lower()
+                peer = "decode" if role == "PREFILL" else "prefill"
+                self.assertEqual(
+                    endpoints[own + "_endpoint"]["address"], "127.0.0.1:28000"
+                )
+                self.assertEqual(
+                    endpoints[peer + "_endpoint"]["address"], "127.0.0.2:29000"
+                )
+                self.assertEqual(endpoints["decode_endpoint"]["protocol"], "http")
+
     def test_legacy_bf16_decode_reuse_setting_is_unchanged(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp)

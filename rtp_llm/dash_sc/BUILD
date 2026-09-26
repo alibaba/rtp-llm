@@ -35,6 +35,7 @@ py_library(
         "inference/__init__.py",
         "inference/__main__.py",
         "inference/grammar_validator.py",
+        "inference/request_adapter.py",
         "inference/servicer.py",
         "proxy/__init__.py",
         "proxy/__main__.py",

@@ -71,7 +71,7 @@ from rtp_llm.dash_sc.codec import (
     build_dash_error_response,
     parse_dash_sc_grpc_request,
     parse_ds_header_attributes,
-    parse_multimodal_parts_from_request,
+    parse_messages_from_request,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -85,6 +85,11 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
+)
+from rtp_llm.dash_sc.inference.request_adapter import (
+    DashScRequestAdapter,
+    DashScRequestContext,
+    _build_mm_inputs_from_request,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
@@ -135,33 +140,6 @@ _DASH_SERVER_ATTRIBUTES = {
     "rpc.system": "grpc",
     "rpc.method": _DASH_RPC_METHOD,
 }
-
-
-def _build_mm_inputs_from_request(
-    request: predict_v2_pb2.ModelInferRequest,
-) -> list:
-    """Convert DashSc message parts to the engine's generic multimodal inputs."""
-    parts = parse_multimodal_parts_from_request(request)
-    if not parts:
-        return []
-
-    from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
-
-    return [
-        MultimodalInput(
-            part.url,
-            part.mm_type,
-            torch.empty(0),
-            MMPreprocessConfig(
-                min_pixels=part.min_pixels,
-                max_pixels=part.max_pixels,
-                fps=part.fps,
-                min_frames=part.min_frames,
-                max_frames=part.max_frames,
-            ),
-        )
-        for part in parts
-    ]
 
 
 def _request_parameter_string(request, name: str) -> str:
@@ -840,6 +818,8 @@ async def iter_real_model_stream_infer(
     yield_access_stats: bool = False,
     mm_inputs: Optional[list] = None,
     input_ids_tensor: Optional[torch.Tensor] = None,
+    request_adapter: DashScRequestAdapter | None = None,
+    messages: Optional[list] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -910,6 +890,23 @@ async def iter_real_model_stream_infer(
             runtime,
             default_thinking_mode,
         )
+        prepared = (request_adapter or DashScRequestAdapter()).prepare(
+            DashScRequestContext(
+                request=request,
+                input_ids=input_ids_list,
+                sampling=sampling,
+                controls=request_controls,
+                generate_config=generate_config,
+                tokenizer=_hf_tokenizer(tokenizer),
+                mm_inputs=mm_inputs,
+                messages=messages,
+            )
+        )
+        if prepared.input_ids is not input_ids_list:
+            input_ids_tensor = None
+        input_ids_list = prepared.input_ids
+        mm_inputs = prepared.mm_inputs
+        prompt_token_offset = prepared.prompt_token_offset
         configured_thinking_mode = generate_config.thinking_mode
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, begin_think_tokens
@@ -920,7 +917,7 @@ async def iter_real_model_stream_infer(
             configured_thinking_mode = ThinkingMode.ENABLED
         # Boundary IDs are request metadata as well as processor inputs. Keep
         # them available even when this request disables thinking.
-        if begin_think_tokens:
+        if begin_think_tokens and not generate_config.begin_think_token_ids:
             generate_config.begin_think_token_ids = begin_think_tokens
         reasoning_format = None
         if generate_env_config is not None and configured_thinking_mode in (
@@ -958,6 +955,7 @@ async def iter_real_model_stream_infer(
                     else generate_config.in_think_mode
                 ),
                 reasoning_format=reasoning_format,
+                input_ids=input_ids_list,
             )
         if runtime.eos_tokens and not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
@@ -971,11 +969,15 @@ async def iter_real_model_stream_infer(
         # ``runtime.phase2_enabled`` is the init-time gate (model_type + empty_tokens
         # availability). ``in_think_mode`` is per-request — ``add_thinking_params``
         # sets it from generate_config and a request can override it.
-        phase2_enabled = runtime.phase2_enabled and (
-            configured_thinking_mode == ThinkingMode.ENABLED
+        phase2_enabled = (
+            not sampling.has_unified_structural_tag
+            and runtime.phase2_enabled
+            and (configured_thinking_mode == ThinkingMode.ENABLED)
         )
-        adaptive_phase2_pending = runtime.phase2_enabled and (
-            configured_thinking_mode == ThinkingMode.ADAPTIVE
+        adaptive_phase2_pending = (
+            not sampling.has_unified_structural_tag
+            and runtime.phase2_enabled
+            and (configured_thinking_mode == ThinkingMode.ADAPTIVE)
         )
         cumulative_sent_ids: list[int] = []
         generate_think_token_num: Optional[int] = None
@@ -1008,6 +1010,8 @@ async def iter_real_model_stream_infer(
             generate_config=generate_config,
             eos_token_id=eos_id,
             max_token_id=max_id,
+            prompt_token_offset=prompt_token_offset,
+            top_logprobs=sampling.top_logprobs,
         )
         chunk_idx = 0
         phase2_needed = False
@@ -1144,6 +1148,7 @@ async def iter_real_model_stream_infer(
                         ),
                         stream_finished=not will_do_phase2,
                         token_ids=list(runtime.eos_tokens),
+                        emit_logprobs=False,
                     )
                     eos_finished = not will_do_phase2
                     eos_finish_reason = (
@@ -1304,6 +1309,7 @@ async def iter_real_model_stream_infer(
                 generate_config=phase2_config,
                 eos_token_id=eos_id,
                 max_token_id=max_id,
+                top_logprobs=sampling.top_logprobs,
             )
             phase2_cumulative_sent_ids: list[int] = []
 
@@ -1459,6 +1465,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         grammar_validator: Optional[GrammarValidator] = None,
+        request_adapter: DashScRequestAdapter | None = None,
     ):
         if backend_visitor is None:
             raise ValueError("backend_visitor is required for DashScInferenceServicer")
@@ -1499,6 +1506,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # Optional admission-time grammar check. ``None`` keeps the legacy behaviour
         # (invalid grammars surface as an engine-side error mid-stream).
         self._grammar_validator = grammar_validator
+        self._request_adapter = request_adapter or DashScRequestAdapter()
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
@@ -1702,7 +1710,10 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                             request, invocation_metadata=invocation_metadata or ()
                         )
                     )
-                    mm_inputs = _build_mm_inputs_from_request(request)
+                    messages = parse_messages_from_request(request)
+                    mm_inputs = _build_mm_inputs_from_request(
+                        request, messages=messages
+                    )
                     traceparent_new = _lookup_ds_request_control(
                         parse_ds_header_attributes(request), "traceparent_new"
                     )
@@ -1852,6 +1863,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     input_ids_tensor=parsed_input_ids.tensor,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,
+                    request_adapter=self._request_adapter,
+                    messages=messages,
                 )
                 try:
                     async for resp, stats in response_iter:
