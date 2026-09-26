@@ -455,7 +455,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // TODO: Support output_all_probs and cum_log_probs in this fast path.
     auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()
+        && !params.capture_original_probs) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;
@@ -697,6 +698,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto       top_k_ptr     = params.top_k.data_ptr<int32_t>();
     const bool all_top_k_one = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
     if (all_top_k_one && !params.cum_log_probs.has_value() && !params.return_original_all_probs
+        && !params.capture_original_probs
         && (!params.output_all_probs.has_value() || params.output_all_probs->size(1) == vocab_size_padded)) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
@@ -1113,7 +1115,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     // TODO: Support output_all_probs and cum_log_probs in this top-k=1 fast path.
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto top_k) { return top_k == 1; })
-        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()
+        && !params.capture_original_probs) {
         auto samples = transposed_tokens.select(0, transposed_tokens.size(0) - 1);
         samples.copy_(torch::argmax(params.logits, -1, /*keepdim=*/false));
         params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
