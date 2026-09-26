@@ -1250,6 +1250,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 CHECK_AND_RETURN_REF(
                     sampler_input,
                     batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+                const auto prefill_streams = stream_groups.allStreams();
+                sampler_input.capture_original_probs =
+                    std::any_of(prefill_streams.begin(), prefill_streams.end(), [](const auto& stream) {
+                        return stream->generateConfig()->return_all_probs == ReturnAllProbsMode::ORIGINAL;
+                    });
                 holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
                 sampler_output     = std::move(sampler_->forward(sampler_input));
                 update_draft_input = !is_dspark_;
@@ -1677,6 +1682,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    GptModelOutputs target_diagnostics;
+    if (isTpRank0() && !warm_up_ && !model_input.is_fake_stream) {
+        bool need_logits = false;
+        bool need_hidden = false;
+        for (const auto& stream : streams) {
+            need_logits |= stream->returnLogits();
+            need_hidden |= stream->generateConfig()->return_hidden_states;
+        }
+        if (need_logits) {
+            TORCH_CHECK(model_output.logits.defined(), "Target verify did not return requested logits");
+            // Sampling processors may mutate logits; capture the model output first.
+            target_diagnostics.logits = model_output.logits.clone();
+        }
+        if (need_hidden) {
+            TORCH_CHECK(model_output.hidden_states.defined(), "Target verify did not return requested hidden states");
+            target_diagnostics.hidden_states = model_output.hidden_states;
+        }
+    }
+
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
@@ -1762,11 +1786,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = sampler_output.all_probs.reshape(
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
+            if (sampler_output.original_all_probs.defined()) {
+                sampler_output.original_all_probs = sampler_output.original_all_probs.reshape(
+                    {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
+            }
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 *spec_logits_result, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            if (target_diagnostics.logits.defined() || target_diagnostics.hidden_states.defined()) {
+                auto selected = MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+                    target_diagnostics, speculative_sampler_output.accept_len, propose_step_ + 1);
+                speculative_sampler_output.target_logits        = std::move(selected.logits);
+                speculative_sampler_output.target_hidden_states = std::move(selected.hidden_states);
+            }
         }
         if (is_dspark_) {
             // Target verify wrote its aux features into the shared MTP hidden

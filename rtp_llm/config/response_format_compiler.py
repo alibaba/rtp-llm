@@ -1,10 +1,11 @@
 import copy
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES, GrammarConstraint
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
+from rtp_llm.config.thinking_mode import INT32_MAX
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import ThinkingMode
@@ -18,6 +19,7 @@ class ReasoningFormat:
     tag_end: Union[str, List[str], Dict[str, Any]]
     suffix: str = ""
     no_think_excludes: Tuple[str, ...] = ()
+    content_excludes: Tuple[str, ...] = ()
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
@@ -41,6 +43,27 @@ class ReasoningFormat:
             )
         return cls(tag_begin="", tag_end=normalized_end_tag)
 
+    def with_boundary_excludes(
+        self, tokenizer: Any, think_start_tag: str = ""
+    ) -> "ReasoningFormat":
+        """Reserve boundary prefixes for the tag, rather than thinking text.
+
+        K3's first boundary tokens are <|open|> and <|close|>. Excluding
+        those from AnyText leaves the enclosing tag as the only path after
+        <|close|>, so the matcher must finish the complete configured end tag.
+        Derive the prefixes from the tokenizer to also cover other models.
+        """
+        if tokenizer is None:
+            return self
+        excludes = list(self.content_excludes)
+        for boundary in (think_start_tag, self.tag_begin, self.tag_end):
+            boundaries = boundary if isinstance(boundary, list) else [boundary]
+            for value in boundaries:
+                prefix = _boundary_token_prefix(tokenizer, value)
+                if prefix and prefix not in excludes:
+                    excludes.append(prefix)
+        return replace(self, content_excludes=tuple(excludes))
+
     def prefix_format(self, max_thinking_tokens: int) -> Dict[str, Any]:
         think_tag = {
             "type": "tag",
@@ -51,6 +74,8 @@ class ReasoningFormat:
             },
             "end": self.tag_end,
         }
+        if self.content_excludes:
+            think_tag["content"]["excludes"] = list(self.content_excludes)
         if not self.suffix:
             return think_tag
         return {
@@ -60,6 +85,84 @@ class ReasoningFormat:
                 {"type": "const_string", "value": self.suffix},
             ],
         }
+
+
+class GrammarFormat(Protocol):
+    """Model syntax supplied to the common response-format compiler."""
+
+    @property
+    def reasoning_format(self) -> ReasoningFormat: ...
+
+    def prepare(
+        self, config: Any, tokenizer: Any, input_ids: Optional[List[int]]
+    ) -> "GrammarFormat": ...
+
+    def build_format(
+        self, config: Any, constraint: Optional[GrammarConstraint]
+    ) -> Dict[str, Any]: ...
+
+
+def _apply_thinking_constraints(
+    node: Dict[str, Any], reasoning_format: ReasoningFormat, budget: int
+) -> None:
+    """Apply the same thinking budget and exclusions to local and upstream tags."""
+    if node.get("type") == "json_schema":
+        return
+    end = node.get("end")
+    ends = reasoning_format.tag_end
+    ends = ends if isinstance(ends, list) else [ends]
+    if node.get("type") == "tag" and any(
+        end == boundary
+        or isinstance(end, str)
+        and isinstance(boundary, str)
+        and boundary
+        and end.startswith(boundary)
+        for boundary in ends
+    ):
+        content = node["content"]
+        if content.get("type") == "any_text":
+            limit = content.get("max_tokens")
+            content["max_tokens"] = min(limit, budget) if limit is not None else budget
+            if reasoning_format.content_excludes:
+                content["excludes"] = list(
+                    dict.fromkeys(
+                        content.get("excludes", [])
+                        + list(reasoning_format.content_excludes)
+                    )
+                )
+        return
+    for child in node.values():
+        if isinstance(child, dict):
+            _apply_thinking_constraints(child, reasoning_format, budget)
+        elif isinstance(child, list):
+            for element in child:
+                if isinstance(element, dict):
+                    _apply_thinking_constraints(element, reasoning_format, budget)
+
+
+def _boundary_token_prefix(tokenizer: Any, boundary: Any) -> str:
+    if not boundary:
+        return ""
+    if isinstance(boundary, dict):
+        if boundary.get("type") != "token":
+            return ""
+        token = boundary["token"]
+        if isinstance(token, str):
+            return token
+        token_ids = [token]
+    else:
+        token_ids = tokenizer.encode(boundary, add_special_tokens=False)
+    if not token_ids:
+        return ""
+    decode = getattr(tokenizer, "decode", None)
+    if not callable(decode):
+        return boundary if isinstance(boundary, str) else ""
+    prefix = decode(token_ids[:1], skip_special_tokens=False)
+    if isinstance(boundary, str) and (not prefix or not boundary.startswith(prefix)):
+        # SentencePiece/byte decoders may not round-trip an isolated token.
+        # In that case retain the literal boundary instead of excluding other text.
+        return boundary
+    return prefix
 
 
 @dataclass(frozen=True)
@@ -79,15 +182,24 @@ class ResponseFormatPlan:
 
         final_constraint = _resolve_final_constraint(config)
         thinking_mode = _resolved_thinking_mode(config)
+        budget = (
+            config.max_thinking_tokens if config.max_thinking_tokens >= 0 else INT32_MAX
+        )
 
-        if thinking_mode in (ThinkingMode.ENABLED, ThinkingMode.ADAPTIVE):
-            if config.has_num_beams() or config.num_return_sequences > 1:
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    "thinking mode does not support beam search or "
-                    "num_return_sequences > 1 because it uses "
-                    "grammar-constrained decoding",
-                )
+        if config._grammar_format is not None:
+            reasoning_format = config._grammar_format.reasoning_format
+            envelope = {
+                "type": "structural_tag",
+                "format": config._grammar_format.build_format(config, final_constraint),
+            }
+            engine_constraint = GrammarConstraint(
+                "structural_tag", envelope
+            ).normalized()
+        elif config._structural_tag_is_complete and final_constraint is not None:
+            engine_constraint = GrammarConstraint(
+                final_constraint.name, copy.deepcopy(final_constraint.value)
+            )
+        elif thinking_mode in (ThinkingMode.ENABLED, ThinkingMode.ADAPTIVE):
             if reasoning_format is None:
                 raise FtRuntimeException(
                     ExceptionType.ERROR_INPUT_FORMAT_ERROR,
@@ -101,13 +213,13 @@ class ResponseFormatPlan:
             if thinking_mode == ThinkingMode.ADAPTIVE:
                 envelope = _adaptive_reasoning_envelope(
                     reasoning_format,
-                    config.max_thinking_tokens,
+                    budget,
                     final_format,
                 )
             else:
                 envelope = _reasoning_envelope(
                     reasoning_format,
-                    config.max_thinking_tokens,
+                    budget,
                     final_format,
                 )
             engine_constraint = GrammarConstraint(
@@ -115,19 +227,29 @@ class ResponseFormatPlan:
                 envelope,
             ).normalized()
         else:
-            if final_constraint is not None and (
-                config.has_num_beams() or config.num_return_sequences > 1
-            ):
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    "grammar-constrained decoding does not support beam search or "
-                    "num_return_sequences > 1",
-                )
             engine_constraint = final_constraint
 
+        if (
+            engine_constraint is not None
+            and engine_constraint.name == "structural_tag"
+            and reasoning_format is not None
+        ):
+            _apply_thinking_constraints(
+                engine_constraint.value["format"],
+                reasoning_format,
+                budget if thinking_mode != ThinkingMode.DISABLED else 0,
+            )
         return cls(final_constraint, engine_constraint)
 
     def apply_to_config(self, config: Any) -> None:
+        if self.engine_constraint is not None and (
+            config.has_num_beams() or config.num_return_sequences > 1
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "grammar-constrained decoding does not support beam search or "
+                "num_return_sequences > 1",
+            )
         config.response_format = None
         if self.engine_constraint is None:
             GrammarConstraint.clear_from_config(config)
@@ -265,9 +387,14 @@ def prepare_response_format(
 ) -> Optional[GrammarConstraint]:
     """Compile and install the engine constraint at request entry."""
 
+    cache_plan = (
+        _uses_reasoning_envelope(config)
+        or config._grammar_format is not None
+        or config._structural_tag_is_complete
+    )
     if config._reasoning_envelope_applied:
         final_constraint = config._reasoning_final_constraint
-        if _uses_reasoning_envelope(config):
+        if cache_plan:
             validate_engine_ready(config)
             return final_constraint
         restore_final_constraint(config, final_constraint)
@@ -275,7 +402,7 @@ def prepare_response_format(
 
     plan = ResponseFormatPlan.compile(config, reasoning_format=reasoning_format)
     plan.apply_to_config(config)
-    if _uses_reasoning_envelope(config):
+    if cache_plan:
         config._reasoning_envelope_applied = True
         config._reasoning_final_constraint = plan.final_constraint
     return plan.final_constraint
