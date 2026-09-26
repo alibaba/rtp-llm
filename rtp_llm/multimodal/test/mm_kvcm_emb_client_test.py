@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import unittest
+from enum import IntEnum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -12,6 +13,21 @@ import rtp_llm.multimodal.kvcm as kvcm_package
 from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient, RtpKvMetaObjectConfigError
 from rtp_llm.multimodal.kvcm import client as kvcm_client
 from rtp_llm.multimodal.kvcm._config import RtpKvMetaObjectClientConfig
+
+
+class _ClientCode(IntEnum):
+    NOT_FOUND = 60
+    SIZE_MISMATCH = 62
+
+
+class _ClientError(RuntimeError):
+    def __init__(self, code):
+        super().__init__(str(code))
+        self.code = code
+
+
+def _loaded_client_types(client_type, config_type):
+    return client_type, config_type, _ClientError, _ClientCode.NOT_FOUND
 
 
 def _client_config(**overrides):
@@ -61,7 +77,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
         with patch.object(
             kvcm_client,
             "_load_kvcm_client_types",
-            return_value=(client_type, config_type),
+            return_value=_loaded_client_types(client_type, config_type),
         ):
             result = RtpKvMetaObjectClient._from_config(
                 _client_config() if config is None else config
@@ -131,6 +147,52 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             ("one",), (tensor,), trace_id="load-one"
         )
         generic_client.remove.assert_called_once_with(("one",), trace_id="remove-one")
+
+    def test_try_load_one_turns_only_exact_not_found_into_a_cache_miss(self):
+        client, generic_client, _, _ = self._create()
+        destination = object()
+
+        self.assertTrue(client.try_load_one("hit", destination, trace_id="hit"))
+        generic_client.load.assert_called_once_with(
+            ("hit",), (destination,), trace_id="hit"
+        )
+
+        generic_client.reset_mock()
+        generic_client.load.side_effect = _ClientError(_ClientCode.NOT_FOUND)
+        self.assertFalse(client.try_load_one("miss", destination, trace_id="miss"))
+        generic_client.load.assert_called_once_with(
+            ("miss",), (destination,), trace_id="miss"
+        )
+
+        for error in (
+            _ClientError(_ClientCode.SIZE_MISMATCH),
+            _ClientError(60),  # A raw/foreign value must not spoof the native enum.
+            RuntimeError("transport failure"),
+        ):
+            with self.subTest(error=error):
+                generic_client.reset_mock()
+                generic_client.load.side_effect = error
+                with self.assertRaises(type(error)) as caught:
+                    client.try_load_one("failure", destination)
+                self.assertIs(caught.exception, error)
+                generic_client.load.assert_called_once()
+
+    def test_try_load_supports_the_same_cache_miss_contract_for_batches(self):
+        client, generic_client, _, _ = self._create()
+        keys = ["one", "two"]
+        destinations = [object(), object()]
+
+        self.assertTrue(client.try_load(keys, destinations, trace_id="batch-hit"))
+        generic_client.load.assert_called_once_with(
+            keys, destinations, trace_id="batch-hit"
+        )
+
+        generic_client.reset_mock()
+        generic_client.load.side_effect = _ClientError(_ClientCode.NOT_FOUND)
+        self.assertFalse(client.try_load(keys, destinations, trace_id="batch-miss"))
+        generic_client.load.assert_called_once_with(
+            keys, destinations, trace_id="batch-miss"
+        )
 
     def test_structured_operation_errors_are_preserved_for_every_operation(self):
         class StructuredOperationError(RuntimeError):
@@ -342,7 +404,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
                 patch.object(
                     kvcm_client,
                     "_load_kvcm_client_types",
-                    return_value=(client_type, config_type),
+                    return_value=_loaded_client_types(client_type, config_type),
                 ),
                 self.assertRaises(ImportError) as caught,
             ):
@@ -356,7 +418,9 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             patch.object(
                 kvcm_client,
                 "_load_kvcm_client_types",
-                return_value=(MagicMock(), MagicMock(side_effect=config_error)),
+                return_value=_loaded_client_types(
+                    MagicMock(), MagicMock(side_effect=config_error)
+                ),
             ),
             self.assertRaises(ValueError) as invalid,
         ):
@@ -369,7 +433,9 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             patch.object(
                 kvcm_client,
                 "_load_kvcm_client_types",
-                return_value=(MagicMock(side_effect=registration_error), config_type),
+                return_value=_loaded_client_types(
+                    MagicMock(side_effect=registration_error), config_type
+                ),
             ),
             self.assertRaises(RuntimeError) as rejected,
         ):
@@ -389,7 +455,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             patch.object(
                 kvcm_client,
                 "_load_kvcm_client_types",
-                return_value=(client_type, config_type),
+                return_value=_loaded_client_types(client_type, config_type),
             ),
         ):
             client = RtpKvMetaObjectClient.from_env(
@@ -415,7 +481,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
         with patch.object(
             kvcm_client,
             "_load_kvcm_client_types",
-            return_value=(client_type, config_type),
+            return_value=_loaded_client_types(client_type, config_type),
         ):
             client = RtpKvMetaObjectClient.from_env(
                 environ=environment,
@@ -464,7 +530,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             patch.object(
                 kvcm_client,
                 "_load_kvcm_client_types",
-                return_value=(client_type, config_type),
+                return_value=_loaded_client_types(client_type, config_type),
             ),
             patch.dict(os.environ, environment, clear=True),
             patch.dict(sys.modules, {"rtp_llm.vipserver": fake_vipserver}),
@@ -485,7 +551,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
         with patch.object(
             kvcm_client,
             "_load_kvcm_client_types",
-            return_value=(client_type, config_type),
+            return_value=_loaded_client_types(client_type, config_type),
         ):
             client = RtpKvMetaObjectClient.from_kv_cache_config(source)
 

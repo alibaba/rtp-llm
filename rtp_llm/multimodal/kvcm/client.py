@@ -16,7 +16,7 @@ _REQUIRED_KVCM_OBJECT_API_VERSION = 2
 _TensorT = TypeVar("_TensorT")
 
 
-def _load_kvcm_client_types() -> tuple[type[Any], type[Any]]:
+def _load_kvcm_client_types() -> tuple[type[Any], type[Any], type[BaseException], Any]:
     """Import the optional KVCM package only when a client is constructed."""
 
     try:
@@ -35,7 +35,25 @@ def _load_kvcm_client_types() -> tuple[type[Any], type[Any]]:
         or KV_META_OBJECT_API_VERSION != _REQUIRED_KVCM_OBJECT_API_VERSION
     ):
         raise RuntimeError(_INCOMPATIBLE_WHEEL_MESSAGE)
-    return KvMetaObjectClient, KvMetaObjectClientConfig
+    try:
+        from kv_cache_manager.client import KvMetaObjectClientError
+        from kv_cache_manager.client.pybind import kvcm_py_client
+    except ImportError as error:
+        raise RuntimeError(_INCOMPATIBLE_WHEEL_MESSAGE) from error
+    try:
+        not_found_code = kvcm_py_client.ClientErrorCode.ER_SERVICE_NOT_FOUND
+    except (AttributeError, TypeError):
+        raise RuntimeError(_INCOMPATIBLE_WHEEL_MESSAGE) from None
+    if not isinstance(KvMetaObjectClientError, type) or not issubclass(
+        KvMetaObjectClientError, BaseException
+    ):
+        raise RuntimeError(_INCOMPATIBLE_WHEEL_MESSAGE)
+    return (
+        KvMetaObjectClient,
+        KvMetaObjectClientConfig,
+        KvMetaObjectClientError,
+        not_found_code,
+    )
 
 
 class RtpKvMetaObjectClient:
@@ -60,7 +78,12 @@ class RtpKvMetaObjectClient:
     def _initialize(self, config: RtpKvMetaObjectClientConfig) -> None:
         if not isinstance(config, RtpKvMetaObjectClientConfig):
             raise TypeError("config must be a RtpKvMetaObjectClientConfig")
-        client_type, config_type = _load_kvcm_client_types()
+        (
+            client_type,
+            config_type,
+            client_error_type,
+            not_found_code,
+        ) = _load_kvcm_client_types()
         generic_config = config_type(
             addresses=config.addresses,
             instance_id=config.instance_id,
@@ -75,6 +98,8 @@ class RtpKvMetaObjectClient:
 
         self._config = config
         self._client = client
+        self._client_error_type = client_error_type
+        self._not_found_code = not_found_code
 
     @classmethod
     def from_env(
@@ -149,17 +174,57 @@ class RtpKvMetaObjectClient:
         *,
         trace_id: str | None = None,
     ) -> None:
-        """Load objects into caller-allocated contiguous CPU/CUDA tensors."""
+        """Load objects into caller-allocated contiguous CPU/CUDA tensors.
+
+        A successful return is generation-fenced by the generic KVCM client.
+        On any exception, every destination may already have been written and
+        must be discarded rather than consumed by inference.
+        """
 
         self._client.load(keys, tensors, trace_id=trace_id)
 
     def load_one(
         self, key: str, tensor: _TensorT, *, trace_id: str | None = None
     ) -> _TensorT:
-        """Fill and return one caller-allocated tensor of the exact size."""
+        """Fill and return one exact-size tensor; discard it on any exception."""
 
         self.load((key,), (tensor,), trace_id=trace_id)
         return tensor
+
+    def try_load(
+        self,
+        keys: Sequence[str],
+        tensors: Sequence[Any],
+        *,
+        trace_id: str | None = None,
+    ) -> bool:
+        """Load objects and return ``False`` for a normal cache miss.
+
+        Only KVCM's exact ``NOT_FOUND`` result is converted to ``False``.
+        Timeouts, size mismatches, service failures, and malformed client
+        errors remain exceptions.  A ``False`` result does not make the
+        destination contents valid: overwrite or discard every tensor before
+        use.
+        """
+
+        try:
+            self.load(keys, tensors, trace_id=trace_id)
+        except self._client_error_type as error:
+            code = getattr(error, "code", None)
+            if (
+                type(code) is type(self._not_found_code)
+                and code == self._not_found_code
+            ):
+                return False
+            raise
+        return True
+
+    def try_load_one(
+        self, key: str, tensor: Any, *, trace_id: str | None = None
+    ) -> bool:
+        """Load one object and return ``False`` for a normal cache miss."""
+
+        return self.try_load((key,), (tensor,), trace_id=trace_id)
 
     def remove(self, keys: Sequence[str], *, trace_id: str | None = None) -> None:
         """Remove exact object keys."""

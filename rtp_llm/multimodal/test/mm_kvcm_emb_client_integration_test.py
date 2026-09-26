@@ -141,7 +141,13 @@ class _KvcmStartupFailure(RuntimeError):
         self.retryable = retryable
 
 
-def _write_startup_config(tmp_path: Path):
+def _write_startup_config(
+    tmp_path: Path,
+    *,
+    capacity_bytes: int = 64 * 1024 * 1024,
+    used_percentage: float = 0.8,
+    delay_before_delete_ms: int = 1000,
+):
     with _KVCM_STARTUP_TEMPLATE.open("r", encoding="utf-8") as stream:
         startup = json.load(stream)
 
@@ -165,9 +171,12 @@ def _write_startup_config(tmp_path: Path):
     group["global_quota_group_name"] = f"rtp_emb_client_it_quota_{suffix}"
     group["max_instance_count"] = max(int(group.get("max_instance_count", 0)), 8)
     group["quota"] = {
-        "capacity": 64 * 1024 * 1024,
-        "quota_config": [{"storage_type": "file", "capacity": 64 * 1024 * 1024}],
+        "capacity": capacity_bytes,
+        "quota_config": [{"storage_type": "file", "capacity": capacity_bytes}],
     }
+    reclaim_strategy = group["cache_config"]["reclaim_strategy"]
+    reclaim_strategy["trigger_strategy"]["used_percentage"] = used_percentage
+    reclaim_strategy["delay_before_delete_ms"] = delay_before_delete_ms
     metadata_backend = group["cache_config"]["meta_indexer_config"][
         "meta_storage_backend_config"
     ]
@@ -412,6 +421,64 @@ def _call_kvcm_admin(admin_url: str, endpoint: str, payload: dict) -> dict:
     if status != "OK":
         raise RuntimeError(f"KVCM rejected an admin integration request: {status}")
     return parsed
+
+
+def _read_prometheus_metrics(admin_url: str) -> dict[str, float]:
+    try:
+        with urllib_request.urlopen(admin_url + "/metrics", timeout=5) as response:
+            if response.status != 200:
+                raise RuntimeError()
+            body = response.read(1024 * 1024 + 1)
+    except Exception:  # noqa: BLE001 - redact transport/provider response details.
+        raise RuntimeError("KVCM metrics integration request failed") from None
+    if len(body) > 1024 * 1024:
+        raise RuntimeError("KVCM metrics response exceeded the integration limit")
+
+    metrics = {}
+    try:
+        text = body.decode("utf-8")
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            sample, value = line.rsplit(None, 1)
+            # KVMeta Reclaimer metrics are process-global and have no labels.
+            # Ignore labels on unrelated families instead of building a
+            # permissive Prometheus parser inside this integration test.
+            if "{" in sample:
+                continue
+            metrics[sample] = float(value)
+    except (UnicodeDecodeError, ValueError):
+        raise RuntimeError("KVCM metrics response was malformed") from None
+    return metrics
+
+
+def _wait_for_reclaimer(
+    admin_url: str, *, reclaimed_objects: int, reclaimed_bytes: int
+) -> dict[str, float]:
+    object_metric = "kvcm_kv_meta_reclaimer_reclaimed_object_count"
+    byte_metric = "kvcm_kv_meta_reclaimer_reclaimed_bytes"
+    pending_metric = "kvcm_kv_meta_reclaimer_pending_object_count"
+    deadline = time.monotonic() + 10
+    last_metrics = {}
+    while time.monotonic() < deadline:
+        last_metrics = _read_prometheus_metrics(admin_url)
+        if (
+            last_metrics.get(object_metric, 0) >= reclaimed_objects
+            and last_metrics.get(byte_metric, 0) >= reclaimed_bytes
+            and last_metrics.get(pending_metric, 0) == 0
+        ):
+            return last_metrics
+        time.sleep(0.05)
+    observed = {
+        name: last_metrics.get(name)
+        for name in (object_metric, byte_metric, pending_metric)
+    }
+    raise AssertionError(f"KVCM Reclaimer did not converge: {observed}")
+
+
+def _object_files(storage_root: Path) -> tuple[Path, ...]:
+    return tuple(sorted(path for path in storage_root.rglob("*") if path.is_file()))
 
 
 def _assert_fixed_block_meta_route(endpoint: str) -> None:
@@ -768,7 +835,7 @@ class RtpKvMetaObjectClientIntegrationTest(TestCase):
                     wrong_size = torch.full((2,), -123.0, dtype=torch.float32)
                     wrong_size_snapshot = wrong_size.clone()
                     with self.assertRaises(KvMetaObjectClientError) as mismatch:
-                        consumer.load_one(
+                        consumer.try_load_one(
                             keys[0],
                             wrong_size,
                             trace_id="rtp-emb-it-size-mismatch",
@@ -844,6 +911,186 @@ class RtpKvMetaObjectClientIntegrationTest(TestCase):
                     if cleanup_errors:
                         phases = ", ".join(phase for phase, _ in cleanup_errors)
                         message = f"KVCM integration cleanup failed during: {phases}"
+                        if active_exception is not None:
+                            warnings.warn(message, RuntimeWarning, stacklevel=2)
+                        else:
+                            raise RuntimeError(message) from cleanup_errors[0][1]
+
+    def test_reusable_cache_lru_gc_physically_reclaims_and_reuses_quota(self):
+        """Drive the real Reclaimer through the public RTP cache API."""
+
+        _require_kvcm_dependencies()
+
+        with tempfile.TemporaryDirectory(prefix="rtp-emb-gc-it-") as directory:
+            tmp_path = Path(directory)
+            storage_root = tmp_path / "kvcm-objects"
+            process = None
+            server_log = None
+            producer = None
+            consumer = None
+            cleanup_keys = []
+            cleanup_errors = []
+            with _working_directory(tmp_path):
+                try:
+                    # Two 400-byte objects cross the 75% watermark of this
+                    # 1024-byte logical quota. One eviction is sufficient to
+                    # return below it, which makes the expected LRU victim
+                    # deterministic and leaves room to prove quota reuse.
+                    startup_path, base_group = _write_startup_config(
+                        tmp_path,
+                        capacity_bytes=1024,
+                        used_percentage=0.75,
+                        delay_before_delete_ms=100,
+                    )
+                    process, endpoint, admin_url, server_log = _start_kvmeta(
+                        tmp_path, startup_path
+                    )
+                    _create_kvmeta_instance_group(admin_url, base_group)
+                    environment = _reco_environment(endpoint, base_group)
+
+                    with patch.dict(os.environ, environment):
+                        producer = RtpKvMetaObjectClient()
+                    consumer = RtpKvMetaObjectClient.from_kv_cache_config(
+                        _parsed_kv_cache_config(environment),
+                        max_object_bytes=1024,
+                    )
+
+                    cold_key = f"rtp-emb-gc-cold-{uuid.uuid4().hex}"
+                    hot_key = f"rtp-emb-gc-hot-{uuid.uuid4().hex}"
+                    fresh_key = f"rtp-emb-gc-fresh-{uuid.uuid4().hex}"
+                    cleanup_keys.extend((cold_key, hot_key, fresh_key))
+                    cold = torch.full((400,), 11, dtype=torch.uint8)
+                    hot = torch.full((400,), 22, dtype=torch.uint8)
+                    fresh = torch.full((400,), 33, dtype=torch.uint8)
+
+                    producer.save_one(cold_key, cold, trace_id="rtp-emb-gc-cold")
+                    cold_files = _object_files(storage_root)
+                    self.assertEqual(len(cold_files), 1)
+                    cold_path = cold_files[0]
+
+                    # Separate timestamps ensure the first object is the LRU
+                    # candidate once the second write crosses the watermark.
+                    time.sleep(0.02)
+                    producer.save_one(hot_key, hot, trace_id="rtp-emb-gc-hot")
+                    first_metrics = _wait_for_reclaimer(
+                        admin_url, reclaimed_objects=1, reclaimed_bytes=400
+                    )
+
+                    self.assertFalse(cold_path.exists())
+                    remaining_files = _object_files(storage_root)
+                    self.assertEqual(len(remaining_files), 1)
+                    hot_path = remaining_files[0]
+                    self.assertFalse(
+                        consumer.try_load_one(
+                            cold_key,
+                            torch.empty_like(cold),
+                            trace_id="rtp-emb-gc-cold-miss",
+                        )
+                    )
+                    hot_destination = torch.empty_like(hot)
+                    self.assertTrue(
+                        consumer.try_load_one(
+                            hot_key,
+                            hot_destination,
+                            trace_id="rtp-emb-gc-hot-hit",
+                        )
+                    )
+                    self.assertTrue(torch.equal(hot, hot_destination))
+
+                    for name, minimum in (
+                        ("kvcm_kv_meta_reclaimer_retired_object_count", 1),
+                        (
+                            "kvcm_kv_meta_reclaimer_physical_delete_attempted_object_count",
+                            1,
+                        ),
+                    ):
+                        self.assertGreaterEqual(first_metrics.get(name, 0), minimum)
+                    for name in (
+                        "kvcm_kv_meta_reclaimer_error_count",
+                        "kvcm_kv_meta_reclaimer_physical_delete_uncertain_object_count",
+                        "kvcm_kv_meta_reclaimer_physical_delete_uncertain_bytes",
+                        "kvcm_kv_meta_reclaimer_pending_object_count",
+                        "kvcm_kv_meta_reclaimer_pending_bytes",
+                        "kvcm_kv_meta_reclaimer_blocked_group_count",
+                    ):
+                        self.assertEqual(first_metrics.get(name, 0), 0, name)
+
+                    # This write could not fit if the first object's 400-byte
+                    # logical charge had not been released. Crossing the same
+                    # watermark again must now evict the older hot object and
+                    # keep the newly written one.
+                    time.sleep(0.02)
+                    producer.save_one(
+                        fresh_key, fresh, trace_id="rtp-emb-gc-reuse-quota"
+                    )
+                    second_metrics = _wait_for_reclaimer(
+                        admin_url, reclaimed_objects=2, reclaimed_bytes=800
+                    )
+
+                    self.assertFalse(hot_path.exists())
+                    self.assertEqual(len(_object_files(storage_root)), 1)
+                    self.assertFalse(
+                        consumer.try_load_one(
+                            hot_key,
+                            torch.empty_like(hot),
+                            trace_id="rtp-emb-gc-hot-miss",
+                        )
+                    )
+                    fresh_destination = torch.empty_like(fresh)
+                    self.assertTrue(
+                        consumer.try_load_one(
+                            fresh_key,
+                            fresh_destination,
+                            trace_id="rtp-emb-gc-fresh-hit",
+                        )
+                    )
+                    self.assertTrue(torch.equal(fresh, fresh_destination))
+                    self.assertGreaterEqual(
+                        second_metrics.get(
+                            "kvcm_kv_meta_reclaimer_physical_delete_attempted_object_count",
+                            0,
+                        ),
+                        2,
+                    )
+
+                    producer.remove_one(fresh_key, trace_id="rtp-emb-gc-final-remove")
+                    cleanup_keys.clear()
+                    self.assertEqual(_object_files(storage_root), ())
+                    self.assertFalse(
+                        consumer.try_load_one(
+                            fresh_key,
+                            torch.empty_like(fresh),
+                            trace_id="rtp-emb-gc-after-remove",
+                        )
+                    )
+                    _assert_fixed_block_meta_route(endpoint)
+                finally:
+                    active_exception = sys.exc_info()[1]
+                    if producer is not None and cleanup_keys:
+                        try:
+                            producer.remove(
+                                cleanup_keys, trace_id="rtp-emb-gc-final-cleanup"
+                            )
+                        except Exception as error:  # noqa: BLE001 - test teardown.
+                            cleanup_errors.append(("remove GC objects", error))
+                    for label, client in (
+                        ("close GC consumer", consumer),
+                        ("close GC producer", producer),
+                    ):
+                        if client is None:
+                            continue
+                        try:
+                            client.close()
+                        except Exception as error:  # noqa: BLE001 - test teardown.
+                            cleanup_errors.append((label, error))
+                    try:
+                        _stop_kvmeta(process, server_log)
+                    except Exception as error:  # noqa: BLE001 - test teardown.
+                        cleanup_errors.append(("stop GC KVCM", error))
+
+                    if cleanup_errors:
+                        phases = ", ".join(phase for phase, _ in cleanup_errors)
+                        message = f"KVCM GC integration cleanup failed during: {phases}"
                         if active_exception is not None:
                             warnings.warn(message, RuntimeWarning, stacklevel=2)
                         else:

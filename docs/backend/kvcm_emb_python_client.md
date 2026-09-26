@@ -20,31 +20,37 @@ Before starting RTP, make sure that:
   `RECO_INSTANCE_GROUP=pace_group_m3` requires `kve_pace_group_m3`.
 - The derived group uses a KVMeta exact-object backend (details below).
 
-Then use the client directly:
+Create one client when the RTP worker starts. A reusable embedding-cache lookup
+is one boolean branch; a miss is not an exception and the Reclaimer owns
+capacity eviction:
 
 ```python
-import uuid
-
 import torch
 
 from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient
 
 
-key = f"rtp-mm-{uuid.uuid4().hex}"
-embedding = torch.arange(24, dtype=torch.float32).reshape(3, 8).contiguous()
-output = torch.empty_like(embedding)
+emb_cache = RtpKvMetaObjectClient()
 
-with RtpKvMetaObjectClient() as client:
-    client.save_one(key, embedding)
-    client.load_one(key, output)
-    client.remove_one(key)
 
-torch.testing.assert_close(output, embedding)
+def get_embedding(stable_semantic_key, expected_shape, encode):
+    output = torch.empty(expected_shape, dtype=torch.float32)
+    if emb_cache.try_load_one(stable_semantic_key, output):
+        return output
+
+    embedding = encode()
+    emb_cache.save_one(stable_semantic_key, embedding)
+    return embedding
+
+
+# During worker shutdown: emb_cache.close()
 ```
 
-This is an API/lifecycle smoke test and also models a one-request E→P handoff.
-Its fresh UUID plus immediate `remove_one()` deliberately provides no
-cross-request cache reuse.
+The key must digest all inputs that can change the bytes: tenant isolation,
+encoder/preprocess versions, media content, tensor role/shape/dtype/layout and
+cache schema. Do not call `remove_one()` after a reusable-cache hit; that races
+other readers and disables reuse. The production fallback/error pattern is in
+the detailed section below.
 
 For production use:
 
@@ -57,7 +63,9 @@ For production use:
 - For request-scoped E→P handoff, use a fresh unguessable key and remove it
   only after the final consumer has finished loading.
 - `load_one()` writes into the supplied tensor; allocate it with the expected
-  shape, dtype, device, and byte size before loading.
+  shape, dtype, device, and byte size before loading. If it raises, discard
+  that destination tensor even if it looks complete; it may contain partial or
+  concurrently retired data.
 
 ## Detailed reference
 
@@ -210,8 +218,14 @@ the complete configuration, resolves VIPServer once, and constructs the
 generic KVCM client. KVCM instance registration happens during construction.
 
 `load_one()` fills and returns the supplied tensor; it never allocates a
-replacement. Shape, dtype and device come from RTP's receipt layer, which owns
-that protocol. A request-handoff caller uses a fresh object key; a reusable
+replacement. `try_load_one()` and its batch form `try_load()` provide the
+normal reusable-cache lookup: they return `True` on a complete
+generation-fenced load and `False` only for KVCM's exact `NOT_FOUND` result.
+They do not flatten timeout, size, service, or malformed-client failures.
+Shape, dtype and device come from RTP's receipt layer, which owns that
+protocol. If a load API raises, or if a `try_load*` API returns `False`, every
+supplied destination may already be partially or fully overwritten and is
+invalid. A request-handoff caller uses a fresh object key; a reusable
 cache caller uses a stable semantic key whose complete inputs always produce
 the same bytes. If `save_one()` reports an unknown mutation outcome, retain
 that key for controlled reconciliation after the write session has converged.
@@ -239,7 +253,8 @@ with RtpKvMetaObjectClient() as client:
 | Operation | One object | Batch |
 |---|---|---|
 | Save | `save_one(key, tensor)` | `save(keys, tensors)` |
-| Load into caller-owned tensors | `load_one(key, tensor)` | `load(keys, tensors)` |
+| Strict load into caller-owned tensors | `load_one(key, tensor)` | `load(keys, tensors)` |
+| Cache lookup (`False` only for `NOT_FOUND`) | `try_load_one(key, tensor)` | `try_load(keys, tensors)` |
 | Remove | `remove_one(key)` | `remove(keys)` |
 
 In a separated deployment, E and P construct their own client using the same
@@ -288,12 +303,15 @@ def get_or_compute_embedding(
     on_cache_error,
 ):
     try:
-        return client.load_one(semantic_key, empty_output, trace_id=request_id)
+        if client.try_load_one(semantic_key, empty_output, trace_id=request_id):
+            return empty_output
     except KvMetaObjectClientError as error:
-        # Miss, timeout, reclaim race, or backend failure: recomputation is
-        # authoritative. This hook must be non-throwing.
+        # Timeout or backend failure: recomputation is authoritative. This
+        # hook must be non-throwing.
         on_cache_error("load", semantic_key, error)
 
+    # A normal miss and every failed load invalidate empty_output: a
+    # post-transfer generation race can report NOT_FOUND after writing bytes.
     embedding = encode()
 
     try:
@@ -371,9 +389,19 @@ safety net.
 
 A load into a destination with the wrong byte size fails with
 `ER_SERVICE_SIZE_MISMATCH`; a missing or already released object fails with
-`ER_SERVICE_NOT_FOUND`. Load failures are non-mutating, but the caller must
-still decide whether retrying is useful. Always attach a request-correlated
-`trace_id` when one is available.
+`ER_SERVICE_NOT_FOUND`. Load failures do not mutate KVCM metadata, but they can
+partially or fully overwrite caller-owned destination tensors before a data
+error or the post-transfer generation check fails. Discard every destination
+from the failed logical load and recompute; never publish it to inference.
+`try_load_one()`/`try_load()` convert only the exact
+`ER_SERVICE_NOT_FOUND` result to `False`; all other failures retain their
+original exception. Every destination from a `False` call is still invalid
+and must be overwritten or discarded.
+The high-level client performs that second metadata `Get` and accepts the load
+only when every key remains committed with the same canonical generation URI.
+Code that directly splits `KvMetaClient.Get` and `KvMetaTransferClient.Load`
+must implement the same fence. Always attach a request-correlated `trace_id`
+when one is available.
 
 For example, preserve structured progress instead of converting every failure
 to a boolean cache miss:
@@ -422,12 +450,15 @@ client = RtpKvMetaObjectClient.from_env(environ=test_reco_environment)
 
 ### Object contract
 
-- `save_one`, `load_one` and `remove_one` are the concise one-embedding API;
-  `save`, `load` and `remove` are their batch counterparts.
+- `save_one`, `load_one`, `try_load_one` and `remove_one` are the concise
+  one-embedding API; `save`, `load`, `try_load` and `remove` are the batch
+  operations.
 - `save(keys, tensors)` and `load(keys, tensors)` require equal-length,
   non-empty sequences with unique UTF-8 keys.
 - Tensors must be non-empty, contiguous CPU or CUDA tensors. Load destinations
-  must have exactly the stored byte size.
+  must have exactly the stored byte size. Any failed logical load invalidates
+  all of its caller-owned destinations, which may already contain transferred
+  bytes.
 - The generic client splits operations at KVCM's limits of 64 objects and
   4 GiB per service request.
 - CUDA producers must synchronize their producing stream before `save`; the
@@ -449,7 +480,7 @@ client = RtpKvMetaObjectClient.from_env(environ=test_reco_environment)
 
 ### Tests
 
-The 57 fast tests do not require the KVCM wheel. They cover configuration and
+The 59 fast tests do not require the KVCM wheel. They cover configuration and
 provider failures, lazy dependency loading, exception identity and structured
 progress preservation, no implicit mutation retry/cleanup, and lifecycle
 errors in addition to the successful paths:
@@ -460,11 +491,14 @@ python -m unittest -v \
   rtp_llm.multimodal.test.mm_kvcm_emb_client_test
 ```
 
-The manual cross-repository test starts a real KVCM service, constructs
-independent E/P clients, registers the derived instance, and verifies 67
-objects (five dtypes and more than 30 exact byte sizes, including odd sizes)
-across the 64-object batch boundary. It also verifies the legacy MetaService
-route on the shared port, exact-size mismatch, release, and post-release miss:
+The five manual cross-repository tests start real KVCM services, construct
+independent E/P clients, register the derived instance, and verify 67 objects
+(five dtypes and more than 30 exact byte sizes, including odd sizes) across the
+64-object batch boundary. They also verify the legacy MetaService route on the
+shared port, exact-size mismatch, release, and post-release miss. A dedicated
+small-quota test drives the real Reclaimer through two LRU cycles and checks
+its metrics, logical usage release, physical object deletion, surviving-object
+readability, and successful writes after capacity is reclaimed:
 
 ```bash
 RTP_KVCM_RUN_INTEGRATION=1 \
