@@ -29,7 +29,7 @@ def observe_fp8_input(x: torch.Tensor, scale: float, name: str) -> None:
     counts = torch.stack((maximum, (~finite).sum().float(),
                           (finite & (values.abs() > 448.0 * scale)).sum().float()))
     absmax, nonfinite, saturated = counts.cpu().tolist()
-    logging.info("K3_MLA_FP8_RANGE %s", json.dumps(dict(
+    logging.info("MLA_FP8_RANGE %s", json.dumps(dict(
         operand=name, shape=list(x.shape), device=str(x.device), scale=scale,
         finite_absmax=absmax, elements=x.numel(), nonfinite=int(nonfinite),
         clipped=int(saturated), clipped_fraction=saturated / x.numel(),

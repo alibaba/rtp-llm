@@ -149,6 +149,16 @@ class KimiK3MLA(nn.Module):
         self.output = linear(weights, W.attn_o_w, hardware)
         self.q_norm = RMSNorm(weights[W.mla_q_a_ln_gamma], config.layernorm_eps)
         self.kv_norm = RMSNorm(weights[W.mla_kv_a_ln_gamma], config.layernorm_eps)
+        self._fp8_output_gate = False
+        if weights[W.attn_o_w].is_cuda and weights[W.attn_o_w].dtype == torch.float8_e4m3fn:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+                CudaFp8GEMMLinear,
+            )
+
+            self._fp8_output_gate = (
+                isinstance(self.output, CudaFp8GEMMLinear)
+                and self.output.scale_ue8m0
+            )
         self._gate_stream = None
         weight = weights[W.mla_fusedqkrope_w]
         if (
@@ -210,7 +220,15 @@ class KimiK3MLA(nn.Module):
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:
             output = torch.where(valid_mask[:, None], output, 0)
-        output = self.output(
-            gate_sigmoid_mul(output, gate) if output.is_cuda else output * gate.sigmoid()
-        )
+        if self._fp8_output_gate:
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel.fused_activation import (
+                sigmoid_mul_per_token_group_quant_fp8,
+            )
+
+            values, scales = sigmoid_mul_per_token_group_quant_fp8(output, gate)
+            output = self.output.forward_quantized(values, scales)
+        else:
+            output = self.output(
+                gate_sigmoid_mul(output, gate) if output.is_cuda else output * gate.sigmoid()
+            )
         return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
