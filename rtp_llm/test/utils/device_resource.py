@@ -239,6 +239,13 @@ class DeviceResource:
         # device belongs to a co-tenant and must be left alone.
         self.own_test_process_group: Optional[int] = None
 
+        # Busy shared hosts can take longer than ten seconds to answer an NVML
+        # process query. Keep the default while allowing a test run to wait for
+        # a slow but healthy response instead of treating the GPU as unusable.
+        self.gpu_query_timeout = int(os.environ.get("RTP_GPU_QUERY_TIMEOUT", 10))
+        if self.gpu_query_timeout <= 0:
+            raise ValueError("RTP_GPU_QUERY_TIMEOUT must be positive")
+
     def _query_compute_apps(
         self, gpu_id: str, columns: str
     ) -> Optional[List[List[str]]]:
@@ -259,7 +266,7 @@ class DeviceResource:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=self.gpu_query_timeout,
             )
             if result.returncode != 0:
                 logging.warning(

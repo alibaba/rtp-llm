@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -164,7 +165,87 @@ public:
         auto last_hidden_states_h = last_hidden_states.is_cuda() ? last_hidden_states.cpu() : last_hidden_states;
         EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
     }
+
+    void checkTargetProbabilityModes(bool verify, const vector<ReturnAllProbsMode>& requested_modes) {
+        ModelConfig                 model_config;
+        RuntimeConfig               runtime_config;
+        SpeculativeExecutionConfig  sp_config;
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        model_config.max_seq_len    = 32;
+        model_config.vocab_size     = 4;
+        model_config.num_layers     = 1;
+        sp_config.gen_num_per_cycle = 3;
+        ResourceContext         resource_context;
+        list<GenerateStreamPtr> streams;
+        bool                    capture_original = false;
+        for (auto mode : requested_modes) {
+            auto stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+            stream->generateConfig()->return_all_probs = mode;
+            stream->generateConfig()->temperature      = 1.0f;
+            stream->generateConfig()->top_k            = 1;
+            stream->generateConfig()->top_p            = 1.0f;
+            stream->generateConfig()->do_sample        = true;
+            stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+            // MtpExecutor::prepareStreams keeps internal probabilities filtered
+            // even when the request asks for ORIGINAL response probabilities.
+            stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
+            capture_original |= mode == ReturnAllProbsMode::ORIGINAL;
+            streams.push_back(stream);
+        }
+        StreamGroups            stream_groups(streams);
+        MtpBatchStreamProcessor processor(
+            model_config, pd_sep_config, profiling_debug_logging_config, makeProcessorCacheConfig(), sp_config, false);
+        const int64_t   rows = requested_modes.size() * (verify ? sp_config.gen_num_per_cycle + 1 : 1);
+        GptModelOutputs model_output;
+        // An independent numerical oracle: softmax(log(p)) == p. Rejection
+        // sampling needs a point mass at token 3 after the top-k=1 filter.
+        model_output.logits = torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}}).log().repeat({rows, 1}).to(torch::kCUDA);
+        absl::StatusOr<SamplerInputs> result =
+            verify ? processor.gatherSpecSamplerInput(stream_groups,
+                                                      model_output,
+                                                      SpecLogitsVerifyRunner::LaunchResult{},
+                                                      torch::full({static_cast<int64_t>(streams.size()),
+                                                                   static_cast<int64_t>(sp_config.gen_num_per_cycle)},
+                                                                  3,
+                                                                  torch::kInt32)) :
+                     processor.gatherSamplerInput(stream_groups, GptModelInputs{}, model_output);
+        ASSERT_TRUE(result.ok()) << result.status();
+        auto inputs = std::move(result).value();
+        if (!verify) {
+            // This is the prefill sampling contract in MtpExecutor::prefillStep.
+            inputs.capture_original_probs = capture_original;
+        }
+        ASSERT_FALSE(inputs.return_original_all_probs);
+        ASSERT_EQ(inputs.capture_original_probs, capture_original);
+        Sampler sampler(SamplerInitParams{});
+        auto    output = sampler.forward(inputs);
+        EXPECT_TRUE(torch::allclose(
+            output.all_probs.cpu(), torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}}).repeat({rows, 1}), 1e-6, 1e-6));
+        EXPECT_TRUE(output.token_ids.cpu().select(1, inputs.step).eq(3).all().item<bool>());
+        ASSERT_EQ(output.original_all_probs.defined(), capture_original);
+        if (capture_original) {
+            EXPECT_TRUE(torch::allclose(output.original_all_probs.cpu(),
+                                        torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}}).repeat({rows, 1}),
+                                        1e-6,
+                                        1e-6));
+        }
+    }
 };
+
+TEST_F(MtpBatchStreamProcessorTest, testPrefillKeepsResponseAndRejectionProbabilitiesSeparate) {
+    checkTargetProbabilityModes(false, {ReturnAllProbsMode::DEFAULT});
+    checkTargetProbabilityModes(false, {ReturnAllProbsMode::ORIGINAL});
+    checkTargetProbabilityModes(false,
+                                {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL, ReturnAllProbsMode::NONE});
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testVerifyKeepsResponseAndRejectionProbabilitiesSeparate) {
+    checkTargetProbabilityModes(true, {ReturnAllProbsMode::DEFAULT});
+    checkTargetProbabilityModes(true, {ReturnAllProbsMode::ORIGINAL});
+    checkTargetProbabilityModes(true,
+                                {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL, ReturnAllProbsMode::NONE});
+}
 
 class TestableMtpBatchStreamProcessor: public MtpBatchStreamProcessor {
 public:
@@ -420,6 +501,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
 
+    stream1->generateConfig()->is_streaming         = true;
+    stream2->generateConfig()->is_streaming         = true;
+    stream1->generateConfig()->return_logits        = true;
+    stream1->generateConfig()->return_hidden_states = true;
+    stream1->generateConfig()->return_all_probs     = ReturnAllProbsMode::DEFAULT;
+    stream1->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
+    stream2->setReturnAllProbs(ReturnAllProbsMode::NONE);
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
@@ -427,6 +515,21 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
     spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
     spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
+
+    spec_decode_output.target_logits =
+        torch::tensor({8.0f, 7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f}).reshape({2, 4}).to(torch::kCUDA);
+    spec_decode_output.target_hidden_states =
+        torch::tensor({90.0f, 91.0f, 80.0f, 81.0f}).reshape({2, 2}).to(torch::kCUDA);
+    // The sampler publishes one target distribution per verify row. The first
+    // four rows select the accepted draft tokens; the final bonus row is flat.
+    spec_decode_output.target_probs_cpu =
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 0.0f, 1.0f, 0.25f, 0.25f, 0.25f, 0.25f,
+                       0.0f, 0.0f, 1.0f, 0.0f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f,
+                       0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f},
+                      torch::kFloat32)
+            .reshape({2, 5, 4});
+    spec_decode_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -444,6 +547,25 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
+    auto output1 = stream1->nextOutput(100);
+    ASSERT_TRUE(output1.ok());
+    ASSERT_EQ(output1.value().generate_outputs.size(), 1u);
+    const auto& first = output1.value().generate_outputs[0];
+    ASSERT_TRUE(first.logits.has_value());
+    ASSERT_TRUE(first.hidden_states.has_value());
+    EXPECT_EQ(toVec<float>(*first.logits), (std::vector<float>{8, 7, 6, 5}));
+    EXPECT_EQ(toVec<float>(*first.hidden_states), (std::vector<float>{90, 91}));
+    const auto& first_probs = first.aux_info.all_probs;
+    ASSERT_TRUE(first_probs.has_value());
+    ASSERT_EQ(first_probs->sizes().vec(), (std::vector<int64_t>{1, 5, 4}));
+    EXPECT_EQ(toVec<float>(*first_probs),
+              (std::vector<float>{0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, .25f, .25f, .25f, .25f}));
+    auto output2 = stream2->nextOutput(100);
+    ASSERT_TRUE(output2.ok());
+    ASSERT_EQ(output2.value().generate_outputs.size(), 1u);
+    EXPECT_FALSE(output2.value().generate_outputs[0].logits.has_value());
+    EXPECT_FALSE(output2.value().generate_outputs[0].hidden_states.has_value());
+    EXPECT_FALSE(output2.value().generate_outputs[0].aux_info.all_probs.has_value());
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.
