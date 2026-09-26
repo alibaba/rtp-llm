@@ -53,6 +53,10 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckUnavailable,
     GrammarCompilationError,
 )
+from rtp_llm.dash_sc.inference.request_adapter import (
+    DashScRequestAdapter,
+    PreparedDashScRequest,
+)
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _build_mm_inputs_from_request,
@@ -552,6 +556,43 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(visitor.last_generate_input.token_ids, input_ids_tensor)
+
+    async def test_model_adapter_normalizes_ids_before_enqueue(self) -> None:
+        class ReplacePromptAdapter(DashScRequestAdapter):
+            def prepare(self, context):
+                context.generate_config.top_k = 7
+                return PreparedDashScRequest([5, 6, 7], context.mm_inputs)
+
+        req = self._minimal_request()
+        old_tensor = torch.tensor([1, 2], dtype=torch.int32)
+        output = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=3, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[output])])
+        )
+        media = object()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                input_ids_tensor=old_tensor,
+                mm_inputs=[media],
+                request_adapter=ReplacePromptAdapter(),
+            )
+        )
+        self.assertFalse(chunks[0].error_message)
+        submitted = visitor.last_generate_input
+        self.assertIsNot(submitted.token_ids, old_tensor)
+        self.assertEqual(submitted.token_ids.reshape(-1).tolist(), [5, 6, 7])
+        self.assertEqual(submitted.mm_inputs, [media])
+        self.assertEqual(submitted.generate_config.top_k, 7)
 
     async def test_reasoning_effort_override_reaches_generate_config(self) -> None:
         req = self._minimal_request()

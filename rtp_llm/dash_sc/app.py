@@ -734,6 +734,9 @@ class DashScApp:
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
+                    request_adapter=ModelFactory.get_model_cls(
+                        model_config.model_type
+                    ).create_dash_sc_request_adapter(),
                 )
 
             loop = self._start_enqueue_loop()
