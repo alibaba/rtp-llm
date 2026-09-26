@@ -192,7 +192,8 @@ PyWrappedModel::~PyWrappedModel() {
 }
 
 // Helper function to build PyAttentionInputs from GptModelInputs
-torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
+torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs,
+                                                                  bool allow_deferred_device_metadata) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
@@ -291,11 +292,19 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         // non-monotonic whenever prefix reuse / target verify is active.
         // prefix_lengths here is a source tensor (never a deferred H2D copy),
         // so summing it is safe; item() adds one stream sync on this path.
-        int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
-            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+        const auto* metadata_runner = selectGraphRunner(py_attn_inputs);
+        if (allow_deferred_device_metadata && enable_cuda_graph_ && metadata_runner != nullptr
+            && metadata_runner->supportsDeviceOnlyPreparation()) {
+            // The graph fill kernel reads the exact cumulative tail on device.
+            // Defer the host scalar until an eager fallback actually needs it.
+            py_attn_inputs.context_total_kv_length = -1;
+        } else {
+            int64_t prefix_sum = 0;
+            if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+                prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+            }
+            py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         }
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
         py_attn_inputs.cu_seqlens_device       = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
@@ -791,7 +800,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     torch_ext::PyAttentionInputs attention_inputs;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
-        attention_inputs = buildPyAttentionInputs(inputs);
+        attention_inputs = buildPyAttentionInputs(inputs, /*allow_deferred_device_metadata=*/true);
     }
     if (!inputs.warmup && inputs.pd_separation) {
         attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
@@ -844,6 +853,14 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
+    } else if (attention_inputs_.context_total_kv_length < 0) {
+        // Never leak the device-only sentinel into an eager/backend fallback.
+        const int prefix_sum = attention_inputs_.prefix_lengths.sum().item<int>();
+        attention_inputs_.context_total_kv_length = attention_inputs_.total_tokens + prefix_sum;
+        for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
+            (void)tag;
+            tagged_inputs.context_total_kv_length = attention_inputs_.context_total_kv_length;
+        }
     }
     prepared_guard.commit();
 }
@@ -1006,6 +1023,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
+            if (py_model_inputs.attention_inputs.context_total_kv_length < 0) {
+                // FORWARD eligibility can be stricter than PREPARE (tokens /
+                // hidden geometry). Restore the eager scalar on this path too.
+                auto& attn = py_model_inputs.attention_inputs;
+                attn.context_total_kv_length = attn.total_tokens + attn.prefix_lengths.sum().item<int>();
+                for (auto& [tag, tagged_inputs] : py_model_inputs.attention_inputs_by_tag) {
+                    (void)tag;
+                    tagged_inputs.context_total_kv_length = attn.context_total_kv_length;
+                }
+            }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);

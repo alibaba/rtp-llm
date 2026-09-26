@@ -13,7 +13,7 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
 
     if (top_k == 1) {
         output.token_ids = torch::argmax(logits, -1, true);
-        output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
+        output.token_ids_are_point_mass = true;
     } else {
         auto draft_probs = torch::softmax(logits, -1);
         output.token_ids = std::get<1>(torch::topk(draft_probs, top_k, -1));
@@ -127,19 +127,30 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     torch::Tensor do_sample =
         torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
     int stream_idx = 0;
+    bool any_stochastic = false;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = stream->generateConfig()->stochastic();
+        const bool stochastic = stream->generateConfig()->stochastic();
+        do_sample[stream_idx] = stochastic;
+        any_stochastic = any_stochastic || stochastic;
         stream_idx++;
     }
     buffer_holder_.hold_host(do_sample);
     auto do_sample_d = do_sample.to(target_device, true);
 
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
-    torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    // Greedy verification uses token equality and directly takes the target
+    // token on rejection. Keep a valid initialized buffer for the common
+    // kernel, but do not generate or consume randomness that cannot affect it.
+    // Mixed batches retain the entire legacy RNG sequence, including seeded
+    // rows belonging to greedy streams.
+    const bool elide_rng = skip_greedy_rng_ && !any_stochastic;
+    torch::Tensor uniform_samples_d = elide_rng ?
+        torch::zeros({(long)batch_size, (long)propose_step_ + 1}, rand_options) :
+        torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
 
     // Override per-stream uniform samples with seeded generator when random_seed is set,
     // ensuring deterministic acceptance for reproducible iter_count.
-    {
+    if (!elide_rng) {
         int idx = 0;
         for (const auto& stream : streams) {
             auto gen = stream->getGenerator();

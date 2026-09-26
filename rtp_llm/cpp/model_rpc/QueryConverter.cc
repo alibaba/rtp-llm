@@ -12,6 +12,38 @@
 
 namespace rtp_llm {
 
+torch::Tensor QueryConverter::transMtpProposalProbs(const GenerateRequestPB& request) {
+    if (request.proposal_is_point_mass()) {
+        return {};
+    }
+    RTP_LLM_CHECK_WITH_INFO(request.has_propose_probs(), "dense MTP handoff lacks probabilities");
+    return transTensor(request.propose_probs());
+}
+
+void QueryConverter::transMtpProposal(GenerateRequestPB* request,
+                                      const SpeculativeExecutorStreamOutput& output,
+                                      int64_t target_vocab_size,
+                                      bool legacy_dense) {
+    request->clear_propose_probs();
+    request->set_proposal_is_point_mass(output.token_ids_are_point_mass && !legacy_dense);
+    if (request->proposal_is_point_mass()) {
+        return;
+    }
+    torch::Tensor probs;
+    if (output.token_ids_are_point_mass) {
+        probs = SpeculativeExecutorStreamOutput::pointMassProbs(output.draftTokens().cpu().reshape({-1}),
+                                                               target_vocab_size);
+        if (output.draft_to_target_map.defined()) {
+            // Legacy readers concatenate in draft vocabulary before mapping q.
+            probs = probs.index_select(1, output.draft_to_target_map.to(torch::kCPU, torch::kInt64));
+        }
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(output.all_probs.defined(), "dense MTP handoff requires probabilities");
+        probs = output.all_probs.cpu();
+    }
+    transTensorPB(request->mutable_propose_probs(), probs);
+}
+
 #define TRANS_OPTIONAL(name)                                                                                           \
     if (config_proto->has_##name()) {                                                                                  \
         generate_config->name = config_proto->name().value();                                                          \

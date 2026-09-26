@@ -176,6 +176,9 @@ public:
     bool captureSessionMayBeDirty() const override {
         return capture_session_may_be_dirty_.load(std::memory_order_acquire);
     }
+    bool supportsDeviceOnlyPreparation() const override {
+        return device_only_preparation_;
+    }
 
     // Complete capture with one ownership/error path for every graph role. A
     // failed dirty capture intentionally retains the runner until process exit;
@@ -249,6 +252,7 @@ private:
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};
     std::vector<int>        capture_range_;
+    bool                   device_only_preparation_ = false;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)

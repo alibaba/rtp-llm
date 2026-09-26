@@ -432,7 +432,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // 2.2.3 draft model do auto-agressive forward
     // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in prefill cuda graph.
 
-    if (isGenerationPrefillCudaGraph()) {
+    if (device_only_preparation_) {
+        // All replay mutations below are device operations for this backend.
+        // Order them after the previous replay without blocking the host.
+        forward_event_.block(cuda_graph::graphGetCurrentStream());
+    } else if (isGenerationPrefillCudaGraph()) {
         // Generation-prefill owns its host metadata lifetime: wait for both
         // staging copies and the preceding replay before CPU mutation. This
         // role does not use the legacy asynchronous replay-preparation opt-out.
@@ -817,7 +821,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
+            if (!device_only_preparation_ && dst_inputs.kv_cache_kernel_block_id.defined()
+                && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
                 dst_inputs.kv_cache_kernel_block_id.zero_();
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
@@ -835,7 +840,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
     // so that the GPU can start the kernel launch as soon as possible.
 
-    {
+    if (!device_only_preparation_) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(host_mirror_copy)");
 
         // H2H copies (common to both modes)
@@ -1007,7 +1012,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     // Keep the host mirrors consistent with the device-side replay contract.
     // CUDA/HIP device tails were already prepared by the single fused launch above.
-    if (has_padded_rows && is_target_verify_) {
+    if (!device_only_preparation_ && has_padded_rows && is_target_verify_) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
@@ -1038,7 +1043,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(num_tokens_per_bs_);
 #endif
-    } else if (has_padded_rows && is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
+    } else if (!device_only_preparation_ && has_padded_rows && is_prefill_cuda_graph_mode_
+               && !isGenerationPrefillCudaGraph()) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
@@ -1816,6 +1822,7 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 
 void CudaGraphRunner::initCapture() {
     c10::InferenceMode inference_guard(true);
+    device_only_preparation_ = false;
 
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
@@ -1940,6 +1947,40 @@ void CudaGraphRunner::initCapture() {
         } else {
             captureDecode();
         }
+        // Capability is opt-in per captured backend and per device-input
+        // runtime. Legacy/embedding/generation-prefill graphs keep host prep.
+#if USING_CUDA
+        const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
+        if (device_input != nullptr && std::string(device_input) == "1"
+            && !isGenerationPrefillCudaGraph() && !isEmbeddingStylePrefillCudaGraph()) {
+            py::gil_scoped_acquire gil;
+            bool supported = !graph_instances_.empty();
+            for (const auto& [key, instance] : graph_instances_) {
+                (void)key;
+                const auto& impl = instance.mem_hold_.attn_pyobj_;
+                if (!impl || impl.is_none() || !py::hasattr(impl, "supports_device_only_replay_prepare")
+                    || !impl.attr("supports_device_only_replay_prepare")().cast<bool>()) {
+                    supported = false;
+                    break;
+                }
+            }
+            if (supported) {
+                // Prepare every bucket before serving requests. A backend may
+                // lazily capture its metadata graph on the first preparation;
+                // doing that on an async worker while other threads allocate
+                // or synchronize CUDA tensors invalidates global capture.
+                // Model capture is complete here and inputs already own the
+                // final tagged device buffers used by replay.
+                for (auto& [key, instance] : graph_instances_) {
+                    (void)key;
+                    callPrepareCudaGraph(instance.mem_hold_.attn_pyobj_, instance.mem_hold_.py_model_inputs_);
+                }
+                cuda_graph::graphGetCurrentStream().synchronize();
+            }
+            device_only_preparation_ = supported;
+            RTP_LLM_LOG_INFO("CUDA graph device-only attention preparation: %d", supported);
+        }
+#endif
         logCudaGraphPoolMemory("after_capture");
     } else {
         initKernelInternalMemory();

@@ -284,6 +284,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 norm_name,
                 [CkptWeightInfo(self._key(f"{ckpt_prefix}.norm.weight"), identity)],
                 identity,
+                data_type=torch.float32 if inner else None,
             ),
             AtomicWeight(
                 ape_name,
@@ -425,6 +426,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     stack_,
                     config=moe_cfg,
                     data_type=torch.int8,
+                    enable_pure_tp_preshard=True,
                 )
             )
             out.append(
@@ -439,6 +441,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     stack_,
                     config=moe_cfg,
                     data_type=torch.float8_e8m0fnu,
+                    enable_pure_tp_preshard=True,
                 )
             )
         return out
@@ -582,24 +585,53 @@ class DeepSeekV4(DeepSeekV2):
 
     @classmethod
     def _apply_kv_cache_config(
-        cls, model_config: ModelConfig, kv_cache_config: KVCacheConfig
+        cls,
+        model_config: ModelConfig,
+        kv_cache_config: KVCacheConfig,
+        *,
+        indexer_cache_mode=None,
     ) -> None:
-        cls._build_dsv4_kv_cache_config(model_config, kv_cache_config)
+        cls._build_dsv4_kv_cache_config(
+            model_config, kv_cache_config, indexer_cache_mode=indexer_cache_mode
+        )
 
     @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+    def _post_build_model_config(
+        cls, model_config: ModelConfig, *, indexer_cache_mode=None
+    ) -> None:
         """Preserve direct callers that configure DSV4 through environment variables."""
-        cls._build_dsv4_kv_cache_config(model_config, None)
+        cls._build_dsv4_kv_cache_config(
+            model_config, None, indexer_cache_mode=indexer_cache_mode
+        )
 
     @classmethod
     def _build_dsv4_kv_cache_config(
         cls,
         model_config: ModelConfig,
         kv_cache_config: KVCacheConfig | None,
+        *,
+        indexer_cache_mode=None,
     ) -> None:
         """Declare the seven-pool DSV4 cache topology after runtime config parsing."""
         if model_config.kv_cache_spec_descs:
             return
+
+        from rtp_llm.models.dsv4_kv_cache import Dsv4IndexerCacheMode
+
+        if indexer_cache_mode is None:
+            from rtp_llm.models_py.modules.dsv4.platform_provider import (
+                resolve_dsv4_platform_provider,
+            )
+            from rtp_llm.utils.backend_registry import run_backend_registrations
+
+            run_backend_registrations("dsv4")
+            provider = resolve_dsv4_platform_provider(())
+            indexer_mode = getattr(provider, "indexer_mode", None)
+            indexer_cache_mode = (
+                Dsv4IndexerCacheMode(indexer_mode.lower())
+                if indexer_mode is not None
+                else Dsv4IndexerCacheMode.FOLLOW_KV
+            )
 
         attn_config = model_config.attn_config
         layer_num = int(model_config.num_layers)
@@ -632,6 +664,7 @@ class DeepSeekV4(DeepSeekV2):
             fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(
                 kv_cache_config
             ),
+            indexer_cache_mode=indexer_cache_mode,
         )
 
         fixed_pool_blocks = _dsv4_pool_blocks(
@@ -663,6 +696,12 @@ class DeepSeekV4(DeepSeekV2):
             )
 
         model_config.kv_cache_spec_descs = descs
+
+    @classmethod
+    def get_module_adapter(cls):
+        from rtp_llm.models.dsv4.adapter import Dsv4ModelAdapter
+
+        return Dsv4ModelAdapter()
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -942,21 +981,14 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
                 identity,
             ),
             AtomicWeight(
-                W.v4_mtp_e_proj_s,
-                [CkptWeightInfo("mtp.0.e_proj.scale", identity)],
-                identity,
-            ),
-            AtomicWeight(
                 W.v4_mtp_h_proj_w,
                 [CkptWeightInfo("mtp.0.h_proj.weight", identity)],
                 identity,
             ),
-            AtomicWeight(
-                W.v4_mtp_h_proj_s,
-                [CkptWeightInfo("mtp.0.h_proj.scale", identity)],
-                identity,
-            ),
         ]
+        # V4PerBlockFp8Weight loads each projection with its UE8M0 scale.
+        # A separate AtomicWeight for that scale would load it again in the
+        # compute dtype and overwrite the quantized pair's original bytes.
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 

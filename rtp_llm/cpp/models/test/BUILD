@@ -96,6 +96,8 @@ cc_binary(
 )
 
 pywrapped_model_test_deps = [
+    "//rtp_llm/models_py:model_lifecycle",
+    "//rtp_llm/models_py:pluggable",
     "//rtp_llm:config",
     "//rtp_llm:torch",
 ]

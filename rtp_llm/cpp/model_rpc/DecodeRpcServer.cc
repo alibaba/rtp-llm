@@ -683,11 +683,16 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             memcpy(
                 sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-            auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+            sp_output_buffer->token_ids_are_point_mass = generate_request.proposal_is_point_mass();
+            // Dense q may accompany the marker for older peers; new peers use the marker.
+            auto propose_probs_t = QueryConverter::transMtpProposalProbs(generate_request);
+            if (propose_probs_t.defined()) {
+                propose_probs_t = pinGrpcTensor(propose_probs_t);
+            }
             auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
             const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
+            sp_output_buffer->all_probs = propose_probs_t.defined() ? propose_probs_t.to(torch::kCUDA) : torch::Tensor();
             sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
 
             auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
@@ -720,6 +725,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                     .draft_all_probs_gpu          = sp_output_buffer->all_probs,
                     .previous_seq_len_upper_bound = generate_stream->seqLength(),
                     .next_seq_len_upper_bound     = generate_stream->seqLength(),
+                    .draft_token_ids_are_point_mass = sp_output_buffer->token_ids_are_point_mass,
                 });
             }
         }

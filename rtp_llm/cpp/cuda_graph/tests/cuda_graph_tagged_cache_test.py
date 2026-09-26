@@ -3,6 +3,7 @@ import gc
 import os
 import unittest
 import weakref
+from unittest.mock import patch
 from typing import Optional
 
 import torch
@@ -88,6 +89,27 @@ class TaggedDecodePaddingModel:
             )
         ).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class DeviceOnlyPrepare:
+    prepare_calls = 0
+
+    def __init__(self, inputs):
+        self.host_prefix = inputs.attention_inputs["full"].prefix_lengths.clone()
+
+    def supports_device_only_replay_prepare(self):
+        return True
+
+    def prepare_cuda_graph(self, inputs):
+        type(self).prepare_calls += 1
+        # This backend reads only device metadata. CPU mirrors must remain
+        # untouched rather than forcing a D2H before each replay.
+        assert torch.equal(inputs["full"].prefix_lengths, self.host_prefix)
+
+
+class DeviceOnlySequenceLengthModel(TaggedSequenceLengthModel):
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return DeviceOnlyPrepare(inputs)
 
 
 class StaticInputTailModel:
@@ -616,6 +638,46 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     torch.cuda.synchronize()
                     expected = torch.full_like(output.hidden_states, bpk + 16)
                     torch.testing.assert_close(output.hidden_states, expected)
+
+    def test_device_only_metadata_replay_preserves_padding_without_host_mirrors(self):
+        if os.environ.get("TEST_USING_DEVICE") != "CUDA":
+            self.skipTest("device-only replay preparation is CUDA-only")
+        DeviceOnlyPrepare.prepare_calls = 0
+        with patch.dict(os.environ, {"RTP_LLM_DEVICE_INPUT": "1"}):
+            runner = CudaGraphRunner()
+            runner.init_decode(
+                DeviceOnlySequenceLengthModel(), HIDDEN_SIZE,
+                64, KERNEL_BLOCK_TABLE_WIDTH, [4], GROUP_TAGS, True, 2,
+            )
+        self.assertEqual(DeviceOnlyPrepare.prepare_calls, 1)
+        prepare_stream = torch.cuda.Stream()
+        for batch, prefix in ((4, 5), (1, 9), (3, 17), (4, 3)):
+            inputs = _build_target_verify_inputs(
+                GROUP_TAGS, {"full": 2, "aux": 1},
+                batch_size=batch, query_len=2, prefix_len=prefix,
+            )
+            tagged = inputs.attention_inputs
+            for value in tagged.values():
+                value.input_lengths = value.input_lengths.cuda()
+                value.prefix_lengths = value.prefix_lengths.cuda()
+                value.context_total_kv_length = -1
+            inputs.attention_inputs = tagged
+            # The optimized graph contract gets the cumulative tail from its
+            # source tensor, never from a materialized host sum.
+            prepare_stream.wait_stream(torch.cuda.current_stream())
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
+                with torch.cuda.stream(prepare_stream):
+                    self.assertTrue(runner.prepare(inputs, False))
+                torch.cuda.current_stream().wait_stream(prepare_stream)
+                output = runner.forward(inputs).hidden_states.clone()
+            scopes = {event.name for event in prof.events()}
+            self.assertNotIn("cuda_graph.prepareAttentionInputs(host_mirror_copy)", scopes)
+            self.assertNotIn("cuda_graph.prepareAttentionInputs(wait_forward_event)", scopes)
+            expected = torch.tensor(
+                [8, batch * (prefix + 2) + (4 - batch) * 2, 8, prefix + 1 if batch == 4 else 2],
+                device="cuda", dtype=output.dtype,
+            )
+            torch.testing.assert_close(output, expected.unsqueeze(0).expand_as(output))
 
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int

@@ -124,7 +124,7 @@ class DeepSeekV4DSparkCommitOnlyConstructionTest(TestCase):
             block_module,
             "CommitOnlyAttentionFP8",
             return_value=nn.Identity(),
-        ) as attention, mock.patch.object(block_module, "ChunkedFp8Fp4MoeLayer") as moe:
+        ) as attention, mock.patch.object(block_module, "build_baseline_moe") as moe:
             block = transformer_module._build_block(
                 0, args, layer_weights={}, commit_only=True
             )

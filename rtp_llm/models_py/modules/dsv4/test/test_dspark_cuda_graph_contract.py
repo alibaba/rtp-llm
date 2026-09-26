@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -18,6 +18,7 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model.kv_cache = None
     model.tp_size = 2
     model.tp_rank = 0
+    model.kv_cache = None
     model._v4_args = type(
         "Args", (), {"window_size": 128, "dim": 8, "vocab_size": 17}
     )()
@@ -25,6 +26,44 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    def test_forward_and_head_use_tp_aware_transformer_wrappers(self) -> None:
+        model = _dspark_harness(gamma=2)
+        query_ids = torch.tensor([[1, 2], [3, 4]])
+        embedded = torch.arange(32, dtype=torch.float32).view(2, 2, 8)
+        normalized = torch.full((4, 8), 7.0)
+        head_hidden = torch.arange(32, dtype=torch.float32).view(2, 2, 8)
+        model.v4 = SimpleNamespace(
+            _embed=Mock(return_value=embedded),
+            _norm=Mock(return_value=normalized),
+            _hc_head_reduce=Mock(return_value=head_hidden),
+            hc_mult=2,
+            layers=[],
+        )
+
+        hidden = model._forward_layers(
+            query_ids,
+            torch.zeros((2, 2), dtype=torch.int64),
+            torch.zeros(2, dtype=torch.int32),
+            torch.ones(2, dtype=torch.bool),
+            None,
+            1,
+            SimpleNamespace(),
+        )
+        self.assertEqual(tuple(hidden.shape), (2, 2, 2, 8))
+        torch.testing.assert_close(hidden[:, :, 0], embedded)
+        torch.testing.assert_close(hidden[:, :, 1], embedded)
+        model.v4._embed.assert_called_once()
+        self.assertIs(model.v4._embed.call_args.args[0], query_ids)
+
+        actual = model.compute_draft_hidden_states(hidden)
+        self.assertIs(actual, normalized)
+        model.v4._hc_head_reduce.assert_called_once()
+        self.assertIs(model.v4._hc_head_reduce.call_args.args[0], hidden)
+        model.v4._norm.assert_called_once()
+        torch.testing.assert_close(
+            model.v4._norm.call_args.args[0], head_hidden.reshape(4, 8)
+        )
+
     def test_forward_uses_fixed_role_entrypoints(self) -> None:
         model = _dspark_harness(gamma=3)
         model.v4 = SimpleNamespace(

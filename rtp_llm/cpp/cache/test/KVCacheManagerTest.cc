@@ -1204,6 +1204,37 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     }
 }
 
+TEST_F(KVCacheManagerTest, ChunkPreparationPreservesPartialPromptKeyForPD) {
+    auto config = makeCompactDSV4ManagerConfig(/*block_num=*/32);
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+    const int spb = static_cast<int>(config.seq_size_per_block);
+    const int length = 8 * spb + 17;
+    auto resource = makeDSV4BatchResource(config);
+    auto tokens = makeDSV4CompleteTokenIds(length, length, spb);
+    MallocInfo info{resource, tokens};
+    info.reuse_cache = false;
+    info.enable_cache_lookup = false;
+    ASSERT_TRUE(manager->malloc(info).success);
+    const auto keys = resource->cacheKeys(0);
+    ASSERT_EQ(keys.size(), 9);
+    ASSERT_FALSE(resource->lastBlockAligned());
+    for (int start = 0; start < length; start += 2 * spb) {
+        info.prefill_chunk_start = start;
+        info.incr_seq_len_override = std::min(start + 2 * spb, length);
+        ASSERT_TRUE(manager->malloc(info).success);
+        EXPECT_EQ(resource->cacheKeys(0), keys);
+        EXPECT_FALSE(resource->lastBlockAligned());
+    }
+    // Ordinary decode allocation still drops partial keys as before.
+    info.prefill_chunk_start = -1;
+    info.incr_seq_len_override = -1;
+    ASSERT_TRUE(manager->malloc(info).success);
+    EXPECT_EQ(resource->cacheKeys(0).size(), 8);
+    EXPECT_TRUE(resource->lastBlockAligned());
+    manager->free(FreeInfo{resource, tokens});
+}
+
 TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);

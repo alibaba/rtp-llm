@@ -401,6 +401,9 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    // Explicit distribution contract; empty probabilities never imply a point mass.
+    // Send marker-only for capable peers; explicit legacy mode sends dense-only q.
+    bool proposal_is_point_mass = 12;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.

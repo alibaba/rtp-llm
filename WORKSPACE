@@ -35,6 +35,12 @@ local_repository(
     path = "deps",
 )
 
+# Keep public SDK inputs addressable when internal builds override rtp_deps.
+local_repository(
+    name = "rtp_public_deps",
+    path = "deps",
+)
+
 local_repository(
     name = "arch_config",
     path = "arch_config",
@@ -47,6 +53,10 @@ http_deps()
 load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
+
+load("//3rdparty/ppu:repositories.bzl", "ppu_sdk_repositories")
+
+ppu_sdk_repositories()
 
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 

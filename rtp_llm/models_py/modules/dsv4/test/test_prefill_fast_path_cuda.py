@@ -251,7 +251,7 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
                         for offset in range(length)
                     ]
                     expected = (
-                        v4.embed(input_ids)
+                        v4._embed(input_ids)
                         + 100
                         + torch.tensor(expected_offsets, device=device).unsqueeze(1)
                     )

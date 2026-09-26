@@ -157,23 +157,47 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         self._W2_s = stacked_routed["w2_s"]
         self._W3_w = stacked_routed["w3_w"]
         self._W3_s = stacked_routed["w3_s"]
-        self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
-        )
-        self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
-        )
-        self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
-        )
+        # Preserve CUDA's pre-quantization router weighting, including V4.
+        # Platform-specific numerical ordering belongs to its own executor.
+        self._router_weight_after_w2 = False
+        inter_local = int(self._W1_w.shape[1])
+        stored_k = int(self._W1_w.shape[-1])
+        if stored_k == cfg.dim:
+            # FP8 checkpoints store one byte per element and retain floating
+            # block scales.  Route these through the platform FP8-linear seam
+            # (e.g. PpuFp8Linear) instead of the CUDA packed-FP4 path.
+            self._routed_storage = "fp8"
+        elif stored_k * 2 == cfg.dim:
+            # Packed FP4 stores two values per int8 byte.
+            self._routed_storage = "fp4"
+        else:
+            raise ValueError(
+                "unsupported DSV4 routed-expert weight geometry: "
+                f"w1.shape={tuple(self._W1_w.shape)}, dim={cfg.dim}"
+            )
+
+        if self._routed_storage == "fp4":
+            self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W1_s, inter_local, cfg.dim, self._W1_s.shape[0]
+            )
+            self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W2_s, cfg.dim, inter_local, self._W2_s.shape[0]
+            )
+            self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W3_s, inter_local, cfg.dim, self._W3_s.shape[0]
+            )
+        else:
+            self._W1_s_gemm = self._W2_s_gemm = self._W3_s_gemm = None
+        self.routed_tp_size = cfg.tp_size if inter_local != cfg.moe_inter_dim else 1
         # Per-expert DeepGEMM scales are MN-major: a direct
         # self._W*_s_gemm[i] view has stride (1, mn).  torch.index_select on
         # the grouped tensor returns a row-major copy, which fails
         # DeepGEMM's layout check during CUDA graph top-k dispatch.  Select
         # from the transposed view and transpose the selected copy back.
-        self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
-        self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
-        self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        if self._routed_storage == "fp4":
+            self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
+            self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
+            self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not (cfg.local_expert_start <= global_idx < cfg.local_expert_end):
@@ -182,20 +206,24 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
             ew = {
                 "w1_w": stacked_routed["w1_w"][local_idx],
                 "w1_s": stacked_routed["w1_s"][local_idx],
-                "w1_s_gemm": self._W1_s_gemm[local_idx],
                 "w2_w": stacked_routed["w2_w"][local_idx],
                 "w2_s": stacked_routed["w2_s"][local_idx],
-                "w2_s_gemm": self._W2_s_gemm[local_idx],
                 "w3_w": stacked_routed["w3_w"][local_idx],
                 "w3_s": stacked_routed["w3_s"][local_idx],
-                "w3_s_gemm": self._W3_s_gemm[local_idx],
             }
+            if self._routed_storage == "fp4":
+                ew.update(
+                    w1_s_gemm=self._W1_s_gemm[local_idx],
+                    w2_s_gemm=self._W2_s_gemm[local_idx],
+                    w3_s_gemm=self._W3_s_gemm[local_idx],
+                )
             return Expert(
                 cfg.dim,
-                cfg.moe_inter_dim,
+                inter_local,
                 swiglu_limit=cfg.swiglu_limit,
-                storage="fp4",
+                storage=self._routed_storage,
                 expert_weights=ew,
+                router_weight_after_w2=self._router_weight_after_w2,
             )
 
         self.experts = nn.ModuleList(
@@ -254,6 +282,8 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
             topk_max_n = _topk_dispatch_max_n()
             if (
                 _bs1_fast_enabled()
+                and self._routed_storage == "fp4"
+                and self._W1_s_gemm.dtype == torch.int32
                 and self.cfg.ep_size == 1
                 and topk_max_n > 0
                 and T <= topk_max_n
@@ -312,9 +342,9 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
           * ``mask[N]``      = True iff any topk slot of token routes to i
           * ``per_token_w[N, 1]`` = sum of router weights on slots == i
             (zero for tokens not routed to i)
-          * ``Expert.forward(x, per_token_w)`` applies ``per_token_w *
-            (silu(gate)*up)`` BEFORE the down projection — so unrouted
-            tokens contribute exactly zero without explicit masking.
+          * ``Expert.forward(x, per_token_w)`` applies ``per_token_w`` before
+            W2 input quantization, preserving the CUDA numerical ordering.
+            Unrouted tokens receive zero-weight activations.
 
         Inefficiency: every expert sees every token (vs. only routed
         tokens in the eager path). For decode (N ≤ max_bs ~32) the
@@ -439,8 +469,8 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
                 clamp_limit=swiglu_limit,
             )
 
-            # Apply router weight BEFORE w2 (matches Expert.forward semantics).
-            sm_fp32 = sm_fp32 * router_w  # [1, inter]
+            if not getattr(self, "_router_weight_after_w2", True):
+                sm_fp32 = sm_fp32 * router_w
             sm_bf16 = sm_fp32.to(torch.bfloat16)
 
             # Quant for w2 input
@@ -461,7 +491,9 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
                 recipe_a=(1, _FP8_BLOCK),
                 recipe_b=(1, _FP4_BLOCK),
             )
-            # Accumulate (router_w already folded into sm above).
+            if getattr(self, "_router_weight_after_w2", True):
+                # Optional post-W2 mode leaves the quantization input unweighted.
+                delta = delta.float() * router_w
             y.add_(delta.float())
 
         return y
@@ -580,7 +612,8 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
                     clamp_limit=swiglu_limit,
                 )
 
-                sm_fp32 = sm_fp32 * router_w
+                if not getattr(self, "_router_weight_after_w2", True):
+                    sm_fp32 = sm_fp32 * router_w
                 sm_bf16 = sm_fp32.to(torch.bfloat16)
 
                 sm_fp8, sm_scale = sgl_per_token_group_quant_fp8(
@@ -599,7 +632,8 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
                     recipe_a=(1, _FP8_BLOCK),
                     recipe_b=(1, _FP4_BLOCK),
                 )
-                # Accumulate into y[n]
+                if getattr(self, "_router_weight_after_w2", True):
+                    delta = delta.float() * router_w
                 y[n : n + 1].add_(delta.float())
 
         return y
