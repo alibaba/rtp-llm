@@ -90,6 +90,22 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
 }
 }  // anonymous namespace
 
+int NormalEngine::calculateReserveStep(const EngineInitParams& params) {
+    if (params.sp_config.type == SP_TYPE_NONE) {
+        return 0;
+    }
+
+    const int propose_step = params.sp_config.gen_num_per_cycle;
+    int       reserve_step = propose_step + 1;
+
+    if (params.parallelism_config.pp_size > 1 && params.pd_sep_config.role_type != RoleType::PREFILL) {
+        /** Current MtpExecutor will reserve K + 1. The last stage of PP (not PD seperate) will draft K tokens , so we
+         * will reverve additional K. */
+        reserve_step += propose_step;
+    }
+    return reserve_step;
+}
+
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params):
     EngineBase(params),
@@ -134,11 +150,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_CHECK_WITH_INFO(model_config_.output_vocab_padded_size >= static_cast<int64_t>(output_vocab_ids.size()),
                                 "output_vocab_padded_size must be >= output_vocab_ids.size()");
     }
-    if (sp_config.type != SP_TYPE_NONE) {
-        reserve_step_ = sp_config.gen_num_per_cycle + 1;
-    } else {
-        reserve_step_ = 0;
-    }
+    reserve_step_ = calculateReserveStep(params);
     RTP_LLM_LOG_INFO("normal engine speculative reserve_step is %d", reserve_step_);
 #if !USING_CUDA
     // On ROCm, this constructor runs on a gRPC handler thread that defaults to
@@ -753,6 +765,8 @@ absl::Status NormalEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    /** Decode RPC can write the prefill token before enqueue, so its finish check already needs the reserve. */
+    stream->setReserveStep(reserve_step_);
     return stream;
 }
 

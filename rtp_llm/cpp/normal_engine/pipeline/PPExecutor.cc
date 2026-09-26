@@ -84,9 +84,10 @@ GenerateStreamPtr PPExecutor::createMinFakeDecodeStream(const ModelConfig&      
 }
 
 void PPExecutor::InflightBatch::reset() {
-    skip_run         = true;
-    stream_groups    = StreamGroups();
-    schedule_time_us = 0;
+    skip_run           = true;
+    stream_groups      = StreamGroups();
+    schedule_time_us   = 0;
+    executor_collector = RtpLLMExecutorMetricsCollector();
 }
 
 void PPExecutor::sendObject(const torch::Tensor& object, PPTickets& tickets) {
@@ -107,10 +108,12 @@ torch::Tensor PPExecutor::receiveObject() {
 }
 
 void PPExecutor::asyncSendPlan(const PPExecutionPlan& plan, bool empty_plan, PPTickets& tickets) {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.send_plan");
     sendObject(pp_serialization::serializePlan(plan, empty_plan), tickets);
 }
 
 PPExecutionPlan PPExecutor::receivePlan() {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.recv_plan");
     auto plan = pp_serialization::deserializePlan(receiveObject());
     if (plan.model_input.shutdown) {
         RTP_LLM_LOG_INFO("received pipeline shutdown sentinel from previous stage");
@@ -119,10 +122,12 @@ PPExecutionPlan PPExecutor::receivePlan() {
 }
 
 void PPExecutor::asyncSendExecutionResult(const PPExecutionResult& result, PPTickets& tickets) {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.send_result");
     sendObject(pp_serialization::serializeExecutionResult(result), tickets);
 }
 
 void PPExecutor::asyncSendTensors(const PPIntermediateTensors& tensors, PPTickets& tickets) {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.send_activations");
     sendObject(pp_serialization::serializeTensorsMetadata(tensors), tickets);
     for (const auto& tensor_entry : tensors.tensors) {
         if (tensor_entry.second.numel() != 0) {
@@ -132,6 +137,7 @@ void PPExecutor::asyncSendTensors(const PPIntermediateTensors& tensors, PPTicket
 }
 
 PPIntermediateTensors PPExecutor::receiveTensors(PPTickets& tickets) {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.recv_activations");
     auto tensors = pp_serialization::deserializeTensorsMetadata(receiveObject());
     for (auto& tensor_entry : tensors.tensors) {
         if (tensor_entry.second.numel() != 0) {
@@ -177,12 +183,30 @@ void PPExecutor::waitAll(PPTickets& tickets, const char* what, bool throw_on_tim
 
 absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
     /** Fake batches still complete the PP round trip before their result is discarded. */
-    auto result = pp_serialization::deserializeExecutionResult(receiveObject());
+    PPExecutionResult result;
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.pp.recv_result");
+        result = pp_serialization::deserializeExecutionResult(receiveObject());
+    }
     if (batch.stream_groups.isFakeStream()) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return absl::OkStatus();
     }
-    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result);
+
+    /** Count input work and returned tokens before dispatch changes stream state. */
+    StreamGroups::TokenCountsByPriority     token_counts_by_priority;
+    RtpLLMSpeculativeEngineMetricsCollector sp_collector;
+    collectTokenCounts(batch.stream_groups, result, token_counts_by_priority, sp_collector);
+
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.pp.dispatch_result");
+        const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        RETURN_IF_STATUS_ERROR(batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result));
+        batch.executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    reportResultMetrics(batch, token_counts_by_priority, sp_collector);
+    return absl::OkStatus();
 }
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
@@ -475,6 +499,7 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
 }
 
 void PPExecutor::prepareStreams(std::list<GenerateStreamPtr>& streams) {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.prepare_streams");
     if (!sp_enabled_) {
         return;
     }
@@ -517,6 +542,7 @@ void PPExecutor::prepareStreams(std::list<GenerateStreamPtr>& streams) {
 
 absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&         stream_groups,
                                                       const std::vector<int64_t>& finished_request_ids) {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.build_plan");
     RTP_LLM_CHECK_WITH_INFO(isFirstStage(), "only the first PP stage can build an execution plan from streams");
 
     PPExecutionPlan plan;
@@ -545,11 +571,13 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
 }
 
 void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.update_sampling_states");
     const auto stream_count = sampling_plan.request_ids.size(0);
 
     const auto* request_ids      = sampling_plan.request_ids.data_ptr<int64_t>();
     const auto* input_lengths    = sampling_plan.input_lengths.data_ptr<int32_t>();
     const auto* sequence_lengths = sampling_plan.sequence_lengths.data_ptr<int32_t>();
+    const auto* max_tokens       = sampling_plan.max_tokens.data_ptr<int32_t>();
     const auto& cum_log_probs    = result.cum_log_probs;
     int64_t     batch_idx        = 0;
     for (int64_t stream_idx = 0; stream_idx < stream_count; ++stream_idx) {
@@ -564,15 +592,18 @@ void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPEx
         std::optional<ErrorInfo> error;
         const auto num_new_tokens =
             result.new_token_lengths.defined() ? result.new_token_lengths.data_ptr<int32_t>()[batch_idx] : 1;
+        /** Match the first stage's eventual write length without changing the returned acceptance count. */
+        const auto num_committed_tokens =
+            sp_enabled_ ? std::min(num_new_tokens, max_tokens[batch_idx] - sequence_lengths[batch_idx]) : num_new_tokens;
         const auto new_tokens =
-            result.new_token_ids.narrow(0, batch_idx, stream_batch_size).narrow(1, 0, num_new_tokens);
+            result.new_token_ids.narrow(0, batch_idx, stream_batch_size).narrow(1, 0, num_committed_tokens);
         for (const auto& processor : state.logits_processors) {
-            error = processor->updateStatus(new_tokens, num_new_tokens);
+            error = processor->updateStatus(new_tokens, num_committed_tokens);
             if (error.has_value()) {
                 break;
             }
         }
-        const int64_t expected_output_len = sequence_lengths[batch_idx] - input_lengths[batch_idx] + num_new_tokens;
+        const int64_t expected_output_len = sequence_lengths[batch_idx] - input_lengths[batch_idx] + num_committed_tokens;
         if (!error.has_value()) {
             for (size_t processor_index = 0; processor_index < state.logits_processors.size(); ++processor_index) {
                 const auto processor_output_len = state.logits_processors[processor_index]->committedOutputLen();
@@ -592,16 +623,6 @@ void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPEx
             state.cum_log_probs.copy_(cum_log_probs.narrow(0, batch_idx, stream_batch_size));
         }
         batch_idx += stream_batch_size;
-    }
-}
-
-void PPExecutor::clipNewTokenLengths(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) const {
-    const auto  count            = sampling_plan.request_ids.numel();
-    auto*       lengths          = result.new_token_lengths.data_ptr<int32_t>();
-    const auto* max_tokens       = sampling_plan.max_tokens.data_ptr<int32_t>();
-    const auto* sequence_lengths = sampling_plan.sequence_lengths.data_ptr<int32_t>();
-    for (int64_t row = 0; row < count; ++row) {
-        lengths[row] = std::min(lengths[row], max_tokens[row] - sequence_lengths[row]);
     }
 }
 
@@ -666,9 +687,6 @@ void PPExecutor::verifyDraftTokens(const PPExecutionPlan& plan,
     auto host_accepted           = mtp::getHostAcceptedTokens(accepted);
     result.new_token_ids         = std::move(host_accepted.token_ids);
     result.new_token_lengths     = std::move(host_accepted.lengths);
-    const auto  verify_success   = target_sampler_output.success.to(torch::kCPU).contiguous();
-    const auto* max_tokens       = plan.sampling_plan.max_tokens.data_ptr<int32_t>();
-    const auto* sequence_lengths = plan.sampling_plan.sequence_lengths.data_ptr<int32_t>();
     for (int64_t row = 0; row < batch_size; ++row) {
         auto& error = result.request_errors[row];
         if (error.hasError()) {
@@ -676,18 +694,6 @@ void PPExecutor::verifyDraftTokens(const PPExecutionPlan& plan,
         }
         if (static_cast<size_t>(row) < accepted.processor_errors.size() && accepted.processor_errors[row].has_value()) {
             error = std::move(accepted.processor_errors[row].value());
-            continue;
-        }
-        // Suffix rows beyond the accepted prefix (or length cap) are not consumed.
-        // A sampler failure there must not turn an earlier valid rejection into a request error.
-        const auto used_rows =
-            std::min(result.new_token_lengths.data_ptr<int32_t>()[row], max_tokens[row] - sequence_lengths[row]);
-        for (int64_t step = 0; step < used_rows; ++step) {
-            const auto index = row * verify_token_count + step;
-            if (!verify_success.data_ptr<bool>()[index]) {
-                error = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
-                break;
-            }
         }
     }
 }
@@ -718,7 +724,7 @@ void PPExecutor::prepareDraftPrefillAfterVerify(GptModelInputs&      draft_prefi
 }
 
 void PPExecutor::broadcastPostRejectionInputs(GptModelInputs& draft_input) {
-    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
+    RTP_LLM_PROFILE_SCOPE("executor.pp.tp_sync_post_rejection");
 
     if (parallelism_config_.tp_size > 1) {
         mtp::syncDraftPrefillAfterVerify(draft_input, draft_input_layout_, parallelism_config_);
@@ -755,6 +761,7 @@ void PPExecutor::prepareDSparkCommitInput(GptModelInputs& commit_input, const to
 void PPExecutor::sampleTokens(const PPExecutionPlan& plan,
                               const GptModelOutputs& model_output,
                               PPExecutionResult&     result) {
+    RTP_LLM_PROFILE_SCOPE("executor.pp.target_sample");
     const auto stream_count = plan.sampling_plan.request_ids.size(0);
     result.request_ids      = plan.sampling_plan.request_ids.to(torch::kCPU).contiguous();
     result.request_errors.assign(stream_count, ErrorInfo::OkStatus());
@@ -846,63 +853,70 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
     GptModelInputs draft_input = target_input;
     torch::Tensor  proposed_token_ids;
 
-    /** 1. Prefill draft KV and prepare the first decode input when needed. */
-    RTP_LLM_PROFILE_SCOPE("executor.pp.draft_prefill");
-    if (is_dspark_) {
-        prepareDSparkCommitInput(draft_input, target_hidden_states);
-    } else if (isStageRoot()) {
-        if (is_decode) {
-            prepareDraftPrefillAfterVerify(draft_input, target_hidden_states, new_token_ids, new_token_lengths);
-        } else {
-            prepareDraftPrefillAfterTargetPrefill(
-                draft_input, target_hidden_states, new_token_ids, draft_next_position_ids);
-        }
-    }
-
-    if (!is_decode) {
-        /** CP and DSpARK hidden is rank-local; rebind it after syncing the global inputs. */
-        if (cp_enabled || is_dspark_) {
-            draft_input.last_hidden_states = torch::Tensor();
-        }
-        tpSyncModelInputs(draft_input, parallelism_config_);
-        if (cp_enabled || is_dspark_) {
-            draft_input.last_hidden_states = target_hidden_states;
-        }
-    } else if (!is_dspark_) {
-        broadcastPostRejectionInputs(draft_input);
-    }
-
-    /** 2. Draft Prefill. */
-    auto draft_prefill_output = forwardDraftModel(draft_input);
-    if (!is_dspark_) {
-        if (cp_enabled) {
-            /** CP returns per-request final hidden; P has no following draft decode. */
-            (void)draft_model_->getMtpLastHiddenStates(target_input.input_lengths.numel());
-        } else {
-            mtp::maybeOverrideLastHiddenWithMtpBuffer(
-                draft_prefill_output, *draft_model_, draft_input.combo_tokens.numel());
-        }
-
-        if (isStageRoot()) {
-            /** The PP verifier consumes deterministic proposals without a probability tensor. */
-            auto draft_tokens = fast_topk_sampler_->forward(draft_prefill_output.logits, 1).token_ids.to(torch::kInt32);
-
-            if (role_type_ == RoleType::PREFILL) {
-                /** No decode follows, so the sampled tensor already holds the complete proposal. */
-                proposed_token_ids = draft_tokens;
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.pp.draft_prepare");
+        /** 1. Prefill draft KV and prepare the first decode input when needed. */
+        if (is_dspark_) {
+            prepareDSparkCommitInput(draft_input, target_hidden_states);
+        } else if (isStageRoot()) {
+            if (is_decode) {
+                prepareDraftPrefillAfterVerify(draft_input, target_hidden_states, new_token_ids, new_token_lengths);
             } else {
-                const auto batch_size = new_token_ids.size(0);
-                proposed_token_ids    = torch::empty({batch_size, static_cast<int64_t>(propose_step_)},
-                                                  torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-                proposed_token_ids.select(1, 0).copy_(draft_tokens.flatten());
-                mtp::prepareDraftDecodeAfterPrefill(
-                    draft_input, draft_prefill_output.all_hidden_states, draft_tokens, position_id_len_factor_);
+                prepareDraftPrefillAfterTargetPrefill(
+                    draft_input, target_hidden_states, new_token_ids, draft_next_position_ids);
+            }
+        }
+
+        if (!is_decode) {
+            /** CP and DSpARK hidden is rank-local; rebind it after syncing the global inputs. */
+            if (cp_enabled || is_dspark_) {
+                draft_input.last_hidden_states = torch::Tensor();
+            }
+            tpSyncModelInputs(draft_input, parallelism_config_);
+            if (cp_enabled || is_dspark_) {
+                draft_input.last_hidden_states = target_hidden_states;
+            }
+        } else if (!is_dspark_) {
+            broadcastPostRejectionInputs(draft_input);
+        }
+    }
+
+    {
+        RTP_LLM_PROFILE_SCOPE(is_dspark_ ? "executor.pp.dspark_commit" : "executor.pp.draft_prefill");
+        /** 2. Draft Prefill. */
+        auto draft_prefill_output = forwardDraftModel(draft_input);
+        if (!is_dspark_) {
+            if (cp_enabled) {
+                /** CP returns per-request final hidden; P has no following draft decode. */
+                (void)draft_model_->getMtpLastHiddenStates(target_input.input_lengths.numel());
+            } else {
+                mtp::maybeOverrideLastHiddenWithMtpBuffer(
+                    draft_prefill_output, *draft_model_, draft_input.combo_tokens.numel());
+            }
+
+            if (isStageRoot()) {
+                /** The PP verifier consumes deterministic proposals without a probability tensor. */
+                auto draft_tokens =
+                    fast_topk_sampler_->forward(draft_prefill_output.logits, 1).token_ids.to(torch::kInt32);
+
+                if (role_type_ == RoleType::PREFILL) {
+                    /** No decode follows, so the sampled tensor already holds the complete proposal. */
+                    proposed_token_ids = draft_tokens;
+                } else {
+                    const auto batch_size = new_token_ids.size(0);
+                    proposed_token_ids    = torch::empty({batch_size, static_cast<int64_t>(propose_step_)},
+                                                      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                    proposed_token_ids.select(1, 0).copy_(draft_tokens.flatten());
+                    mtp::prepareDraftDecodeAfterPrefill(
+                        draft_input, draft_prefill_output.all_hidden_states, draft_tokens, position_id_len_factor_);
+                }
             }
         }
     }
 
     /** 3. Return earlier if we are prefill instances. */
     if (role_type_ == RoleType::PREFILL) {
+        RTP_LLM_PROFILE_SCOPE("executor.pp.draft_output_sync");
         if (isStageRoot() && !is_dspark_) {
             proposed_token_ids = proposed_token_ids.to(torch::kCPU);
         }
@@ -912,55 +926,61 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
     }
 
     /** 4. Generate proposals with DSpARK PROPOSE or incremental MTP decode. */
-    RTP_LLM_PROFILE_SCOPE("executor.pp.draft_decode");
-    if (is_dspark_) {
-        if (isStageRoot()) {
-            draft_input = prepareDSparkProposeInput(target_input, is_decode, new_token_ids, new_token_lengths);
-        }
-        tpSyncModelInputs(draft_input, parallelism_config_);
-        draft_input.dspark_call_phase = DSparkCallPhase::PROPOSE;
-        auto draft_output             = forwardDraftModel(draft_input);
-        if (isStageRoot()) {
-            const auto batch_size = draft_input.input_lengths.numel();
-            /** Reject malformed proposals before publishing them to the next PP round. */
-            RTP_LLM_CHECK_WITH_INFO(
-                draft_output.draft_tokens.defined() && draft_output.draft_tokens.scalar_type() == torch::kInt32
-                    && draft_output.draft_tokens.dim() == 2 && draft_output.draft_tokens.size(0) == batch_size
-                    && draft_output.draft_tokens.size(1) == static_cast<int64_t>(propose_step_),
-                "PP DSpARK proposal must be int32 [%ld, %zu]",
-                batch_size,
-                propose_step_);
-            proposed_token_ids = draft_output.draft_tokens.contiguous();
-        }
-    } else {
-        for (size_t step = 1; step < propose_step_; ++step) {
-            tpSyncModelInputs(draft_input, parallelism_config_);
-            auto draft_output = forwardDraftModel(draft_input);
-            mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_output, *draft_model_, draft_input.combo_tokens.numel());
-
+    {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.pp.draft_decode(is_dspark=%d)", static_cast<int>(is_dspark_));
+        if (is_dspark_) {
             if (isStageRoot()) {
-                const bool has_next_step = step + 1 < propose_step_;
-                auto       draft_tokens  = fast_topk_sampler_->forward(draft_output.logits, 1).token_ids;
-                /** Keep int32 input for the next forward; copy_ casts the final proposal directly. */
-                if (has_next_step) {
-                    draft_tokens = draft_tokens.to(torch::kInt32);
-                }
-                proposed_token_ids.select(1, step).copy_(draft_tokens.flatten());
-                if (has_next_step) {
-                    mtp::advanceDraftInput(draft_input,
-                                           draft_output.all_hidden_states,
-                                           draft_tokens,
-                                           position_id_len_factor_,
-                                           buffer_holder_);
+                draft_input = prepareDSparkProposeInput(target_input, is_decode, new_token_ids, new_token_lengths);
+            }
+            tpSyncModelInputs(draft_input, parallelism_config_);
+            draft_input.dspark_call_phase = DSparkCallPhase::PROPOSE;
+            auto draft_output             = forwardDraftModel(draft_input);
+            if (isStageRoot()) {
+                const auto batch_size = draft_input.input_lengths.numel();
+                /** Reject malformed proposals before publishing them to the next PP round. */
+                RTP_LLM_CHECK_WITH_INFO(
+                    draft_output.draft_tokens.defined() && draft_output.draft_tokens.scalar_type() == torch::kInt32
+                        && draft_output.draft_tokens.dim() == 2 && draft_output.draft_tokens.size(0) == batch_size
+                        && draft_output.draft_tokens.size(1) == static_cast<int64_t>(propose_step_),
+                    "PP DSpARK proposal must be int32 [%ld, %zu]",
+                    batch_size,
+                    propose_step_);
+                proposed_token_ids = draft_output.draft_tokens.contiguous();
+            }
+        } else {
+            for (size_t step = 1; step < propose_step_; ++step) {
+                tpSyncModelInputs(draft_input, parallelism_config_);
+                auto draft_output = forwardDraftModel(draft_input);
+                mtp::maybeOverrideLastHiddenWithMtpBuffer(
+                    draft_output, *draft_model_, draft_input.combo_tokens.numel());
+
+                if (isStageRoot()) {
+                    const bool has_next_step = step + 1 < propose_step_;
+                    auto       draft_tokens  = fast_topk_sampler_->forward(draft_output.logits, 1).token_ids;
+                    /** Keep int32 input for the next forward; copy_ casts the final proposal directly. */
+                    if (has_next_step) {
+                        draft_tokens = draft_tokens.to(torch::kInt32);
+                    }
+                    proposed_token_ids.select(1, step).copy_(draft_tokens.flatten());
+                    if (has_next_step) {
+                        mtp::advanceDraftInput(draft_input,
+                                               draft_output.all_hidden_states,
+                                               draft_tokens,
+                                               position_id_len_factor_,
+                                               buffer_holder_);
+                    }
                 }
             }
         }
     }
 
-    if (isStageRoot()) {
-        proposed_token_ids = proposed_token_ids.to(torch::kCPU);
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.pp.draft_output_sync");
+        if (isStageRoot()) {
+            proposed_token_ids = proposed_token_ids.to(torch::kCPU);
+        }
+        cudaSyncAndCheck();
     }
-    cudaSyncAndCheck();
     return proposed_token_ids;
 }
 
@@ -977,7 +997,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                               [](const auto& stream) { return !stream->isFakeStream(); });
     auto tps_active_guard      = tps_reporter_.makeActiveGuard(report_active);
     auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(report_active);
-    RTP_LLM_PROFILE_FUNCTION();
+    RtpLLMExecutorMetricsCollector executor_collector;
 
     /** 0. Admit compatible streams and prepare SP buffers. */
     auto streams = schedule_output.streams;
@@ -990,9 +1010,12 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     StreamGroups    scheduled_stream_groups;
     if (isFirstStage()) {
         scheduled_stream_groups = StreamGroups(streams);
-        auto plan_status        = buildPlan(scheduled_stream_groups, schedule_output.finished_request_ids);
+        /** PP input preparation covers the complete execution plan. */
+        const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto       plan_status   = buildPlan(scheduled_stream_groups, schedule_output.finished_request_ids);
         RETURN_IF_STATUS_OR_ERROR(plan_status);
-        plan = std::move(plan_status.value());
+        plan                                    = std::move(plan_status.value());
+        executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         if (isStageRoot() && stopping_ && idle_streak_ >= parallelism_config_.pp_size + 1) {
             plan.model_input.shutdown = true;
             RTP_LLM_LOG_INFO("pipeline drained, emitting shutdown sentinel to next stage");
@@ -1008,16 +1031,24 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     }
 
     /** 2. do the sync across the all ranks in the same stage. */
-    tpSyncModelInputs(plan.model_input, parallelism_config_);
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.pp.tp_sync_input");
+        const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        tpSyncModelInputs(plan.model_input, parallelism_config_);
+        executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
 
     releaseAllModelBuffers();
 
     /** 3. Wait on this slot's previous sends before resetting it. CUDA waits order subsequent operations on the current
      * stream after communication. */
     auto& inflight = slots_[current_slot_];
-    waitAll(inflight.plan_sends, "plan send completion");
-    waitAll(inflight.activation_sends, "activation send completion");
-    waitAll(inflight.execution_result_sends, "execution result send completion");
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.pp.wait_slot_reuse");
+        waitAll(inflight.plan_sends, "plan send completion");
+        waitAll(inflight.activation_sends, "activation send completion");
+        waitAll(inflight.execution_result_sends, "execution result send completion");
+    }
     inflight.reset();
     inflight.skip_run = plan.model_input.skip_run;
     if (isFirstStage() && isStageRoot()) {
@@ -1032,6 +1063,12 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
     /** 5. run the batch. */
     if (!plan.model_input.skip_run) {
+        if (profile_step_start_) {
+            profile_step_start_();
+        }
+
+        collectExecutorMetrics(plan.model_input, plan.sampling_plan.sequence_lengths, executor_collector);
+
         PPTickets             tensor_receives;
         PPIntermediateTensors input_tensors;
         PPIntermediateTensors output_tensors;
@@ -1041,12 +1078,9 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             waitAll(tensor_receives, "intermediate tensors from previous stage");
         }
 
-        if (profile_step_start_) {
-            profile_step_start_();
-        }
-
         GptModelInputs& local_model_input = plan.model_input;
         if (cache_manager_) {
+            RTP_LLM_PROFILE_SCOPE("executor.pp.kv_cache_update");
             cache_manager_->zeroBlocks(local_model_input.kv_cache_blocks_to_zero);
             local_model_input.kv_cache_blocks_to_zero = torch::Tensor();
             if (local_model_input.kv_cache_update_mapping.defined()) {
@@ -1072,20 +1106,35 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                torch::TensorOptions(torch::kInt32).pinned_memory(true));
             saved_input_lengths.copy_(local_model_input.input_lengths);
         }
-        auto model_output = model_->forwardPP(
-            local_model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
+        GptModelOutputs model_output;
+        {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.pp.target_forward(verify=%d,batch=%zu,tokens=%zu)",
+                                          static_cast<int>(local_model_input.is_target_verify),
+                                          static_cast<size_t>(local_model_input.input_lengths.numel()),
+                                          static_cast<size_t>(local_model_input.combo_tokens.numel()));
+            const auto start_time_us            = autil::TimeUtility::currentTimeInMicroSeconds();
+            model_output                        = model_->forwardPP(local_model_input,
+                                             isFirstStage() ? nullptr : &input_tensors,
+                                             isLastStage() ? nullptr : &output_tensors);
+            executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
         if (saved_input_lengths.defined()) {
             local_model_input.input_lengths = std::move(saved_input_lengths);
         }
 
         if (expert_balancer_) {
-            RtpLLMExecutorMetricsCollector collector;
-            expert_balancer_->stepForward(*model_, collector, !local_model_input.is_fake_stream);
+            RTP_LLM_PROFILE_SCOPE("executor.pp.eplb_step");
+            const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            expert_balancer_->stepForward(*model_, executor_collector, !local_model_input.is_fake_stream);
+            executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
 
-        auto forward_done = cuda_graph::makeGraphEvent();
-        forward_done.record(cuda_graph::graphGetCurrentStream());
-        forward_done.synchronize();
+        {
+            RTP_LLM_PROFILE_SCOPE("executor.pp.wait_forward_done");
+            auto forward_done = cuda_graph::makeGraphEvent();
+            forward_done.record(cuda_graph::graphGetCurrentStream());
+            forward_done.synchronize();
+        }
 
         if (!isLastStage()) {
             asyncSendTensors(output_tensors, inflight.activation_sends);
@@ -1094,9 +1143,6 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             if (isStageRoot()) {
                 sampleTokens(plan, model_output, execution_result);
                 if (sp_enabled_) {
-                    if (!plan.model_input.is_fake_stream) {
-                        clipNewTokenLengths(plan.sampling_plan, execution_result);
-                    }
                     fillFailedDraftRows(execution_result);
                 }
             }
@@ -1121,7 +1167,9 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 asyncSendExecutionResult(execution_result, inflight.execution_result_sends);
             }
         }
-
+        if (isFirstStage() && isStageRoot()) {
+            inflight.executor_collector = executor_collector;
+        }
         if (profile_step_finish_) {
             profile_step_finish_();
         }
@@ -1133,31 +1181,13 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     auto& next_batch                = slots_[current_slot_];
     bool  received_result_this_step = false;
     if (isFirstStage() && isStageRoot() && !next_batch.skip_run) {
-        // A fake batch's result is not real progress; it must not reset the drain counter.
+        /** A fake batch's result is not real progress; it must not reset the drain counter. */
         received_result_this_step = !next_batch.stream_groups.isFakeStream();
-
-        const auto& stream_groups            = next_batch.stream_groups;
-        auto        token_counts_by_priority = stream_groups.tokenCountsByPriority();
         RETURN_IF_STATUS_ERROR(processExecutionResult(next_batch));
-
-        const int64_t tps_execute_time_us =
-            autil::TimeUtility::currentTimeInMicroSeconds() - next_batch.schedule_time_us;
-        if (metrics_reporter_ && !stream_groups.isFakeStream() && tps_execute_time_us > 0) {
-            RtpLLMTokenPSMetricsCollector tps_collector;
-            tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
-                                       stream_groups.contextExecuteTokenSizeWithCache(),
-                                       stream_groups.totalDecodeBatchSize(),
-                                       stream_groups.modelExecuteTokenSize(),
-                                       tps_execute_time_us);
-            tps_collector.addTokenSizeByPriority(token_counts_by_priority, tps_execute_time_us);
-            tps_reporter_.report(&tps_collector);
-            wall_tps_reporter_.report(&tps_collector);
-        }
     }
 
     if (isFirstStage() && isStageRoot() && !plan.model_input.shutdown) {
-        // Idle = no real request (skip_run or fake-stream placeholder) and no real result;
-        // fake batches must not reset the counter, or DP+PP never emits the sentinel.
+        /** Empty/fake batches must not reset the drain counter, or DP+PP never emits the sentinel. */
         const bool no_work   = plan.model_input.skip_run || plan.model_input.is_fake_stream;
         const bool no_result = !received_result_this_step;
         idle_streak_         = (no_work && no_result) ? idle_streak_ + 1 : 0;
@@ -1173,6 +1203,106 @@ bool PPExecutor::updateEplbConfig(const EPLBConfig& config) {
         return expert_balancer_->updateEplbConfig(config);
     }
     return true;
+}
+
+void PPExecutor::collectExecutorMetrics(const GptModelInputs&           model_input,
+                                       const torch::Tensor&            sequence_lengths,
+                                       RtpLLMExecutorMetricsCollector& collector) const {
+    if (!metrics_reporter_ || !isFirstStage() || !isStageRoot() || model_input.is_fake_stream) {
+        return;
+    }
+
+    collector.generate_batch_size =
+        model_input.is_target_verify ? model_input.input_lengths.numel() : model_input.sequence_lengths.numel();
+    collector.context_batch_size = model_input.input_lengths.numel() - collector.generate_batch_size;
+    collector.execute_token_size = model_input.combo_tokens.numel();
+    /** Capture global batch dimensions before CP mutates model inputs. */
+    const auto* length_data = sequence_lengths.data_ptr<int32_t>();
+    collector.max_seq_len   = *std::max_element(length_data, length_data + sequence_lengths.numel());
+    if (collector.context_batch_size != 0) {
+        collector.context_batch_size_when_has_context  = collector.context_batch_size;
+        collector.generate_batch_size_when_has_context = collector.generate_batch_size;
+        collector.execute_token_size_when_has_context  = collector.execute_token_size;
+        collector.max_seq_len_when_has_context         = collector.max_seq_len;
+    }
+}
+
+void PPExecutor::collectTokenCounts(const StreamGroups&                      stream_groups,
+                                    const PPExecutionResult&                 result,
+                                    StreamGroups::TokenCountsByPriority&     token_counts_by_priority,
+                                    RtpLLMSpeculativeEngineMetricsCollector& sp_collector) const {
+    if (!metrics_reporter_) {
+        return;
+    }
+
+    sp_collector.spec_steps = propose_step_;
+    /** Result rows follow allStreams order; checked indexing precedes dispatch's result validation. */
+    int64_t row = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        if (stream->isContextStream()) {
+            /** Sampling errors do not undo the prefill input work already executed. */
+            auto&      counts         = token_counts_by_priority[stream->priority()];
+            const auto execute_tokens = stream->currentExecuteTokenSize();
+            counts.context += execute_tokens;
+            counts.context_with_cache += execute_tokens;
+            counts.total += execute_tokens;
+            if (stream->reuseLength() > 0) {
+                counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
+            }
+        } else if (!result.request_errors.at(row).hasError()) {
+            auto&         counts = token_counts_by_priority[stream->priority()];
+            const int64_t generate_tokens =
+                sp_enabled_ ? result.new_token_lengths[row].item<int32_t>() : stream->currentBatchSize();
+            counts.generate += generate_tokens;
+            counts.total += generate_tokens;
+            if (sp_enabled_) {
+                /** Preserve verification acceptance before request-length clipping at dispatch. */
+                ++sp_collector.total_stream_num;
+                sp_collector.total_propose_token_num += propose_step_;
+                sp_collector.total_accepted_token_num += generate_tokens;
+            }
+        }
+        ++row;
+    }
+}
+
+void PPExecutor::reportResultMetrics(InflightBatch&                             batch,
+                                     const StreamGroups::TokenCountsByPriority& token_counts_by_priority,
+                                     RtpLLMSpeculativeEngineMetricsCollector&   sp_collector) {
+    if (!metrics_reporter_ || warm_up_ || !isFirstStage() || !isStageRoot()) {
+        return;
+    }
+    const int64_t batch_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - batch.schedule_time_us;
+    if (batch_latency_us <= 0) {
+        return;
+    }
+
+    /** Executor timings cover only first-stage local work and result dispatch; last-stage sampling is omitted.
+     * TODO: Aggregate costs for the same batch across PP stages, including target and draft forward work. */
+    metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &batch.executor_collector);
+
+    int64_t generate_tokens = 0;
+    int64_t total_tokens    = 0;
+    for (const auto& entry : token_counts_by_priority) {
+        generate_tokens += entry.second.generate;
+        total_tokens += entry.second.total;
+    }
+    RtpLLMTokenPSMetricsCollector tps_collector;
+    tps_collector.addTokenSize(batch.stream_groups.contextExecuteTokenSize(),
+                               batch.stream_groups.contextExecuteTokenSizeWithCache(),
+                               generate_tokens,
+                               total_tokens,
+                               batch_latency_us);
+    tps_collector.addTokenSizeByPriority(token_counts_by_priority, batch_latency_us);
+    tps_reporter_.report(&tps_collector);
+    wall_tps_reporter_.report(&tps_collector);
+
+    if (sp_enabled_) {
+        sp_collector.step_latency_us = batch_latency_us;
+        /** PP does not collect SP phase timings here; retain their zero placeholders, as in MtpExecutor. */
+        metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(nullptr,
+                                                                                                       &sp_collector);
+    }
 }
 
 }  // namespace rtp_llm

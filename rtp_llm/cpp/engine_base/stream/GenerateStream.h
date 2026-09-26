@@ -216,6 +216,7 @@ public:
     int     reuseLength() const;
     int     initialReuseLength() const;
     size_t  maxTokenNum() const;
+    size_t  nextStepSeqLengthLimit() const;
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
     void    setDeviceReuseLength(int length);

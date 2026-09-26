@@ -877,20 +877,25 @@ size_t GenerateStream::curBlocksNum() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
+    return std::min(max_seq_len_, generate_input_->generate_config->max_new_tokens + inputLength());
+}
+
+size_t GenerateStream::nextStepSeqLengthLimit() const {
+
     int reserve_tokens = 0;
-    if (sp_output_buffer_) {
-        reserve_tokens = sp_output_buffer_->propose_step;
+
+    if (reserve_step_ > 0) {
+        reserve_tokens = reserve_step_ - 1;
         if (useStreamAsyncReserveTokens()) {
             reserve_tokens = reserve_tokens * 2 + 1;
         }
     }
-
     return std::min(max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0,
                     generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
 bool GenerateStream::needFinish() {
-    return seqLength() >= maxTokenNum() || needFinishBySPTokens();
+    return seqLength() >= nextStepSeqLengthLimit() || needFinishBySPTokens();
 }
 
 bool GenerateStream::needFinishBySPTokens() {

@@ -1635,7 +1635,7 @@ TEST_F(MtpBatchStreamProcessorTest, SharedDecodeInputCompactsDifferentAcceptLeng
     }
 }
 
-TEST_F(MtpBatchStreamProcessorTest, SharedAcceptedViewsPreserveAuthoritativeMirrors) {
+TEST_F(MtpBatchStreamProcessorTest, SharedAcceptedHostViewsPreserveFailedRowPlaceholders) {
     speculative::SpeculativeSamplerOutput output;
     output.accept_tokens = torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt32).cuda();
     output.accept_len    = torch::tensor({3, 2}, torch::kInt32).cuda();
@@ -1651,24 +1651,47 @@ TEST_F(MtpBatchStreamProcessorTest, SharedAcceptedViewsPreserveAuthoritativeMirr
     EXPECT_EQ(host.lengths.unsafeGetTensorImpl(), output.accept_len_cpu.unsafeGetTensorImpl());
     EXPECT_EQ(toVec<int32_t>(host.lengths), (std::vector<int32_t>{3, 2}));
 
-    /** PP clips budgets and fills failed rows on the host before preparing its next draft input. */
-    host.lengths[0] = 1;
+    /** Failed-row placeholders mutate the host mirror; successful rows retain their accepted prefix. */
+    host.lengths[1] = 1;
     host.token_ids[1].zero_();
     auto modified_host = mtp::getHostAcceptedTokens(output, false);
-    EXPECT_EQ(toVec<int32_t>(modified_host.lengths), (std::vector<int32_t>{1, 2}));
+    EXPECT_EQ(toVec<int32_t>(modified_host.lengths), (std::vector<int32_t>{3, 1}));
     EXPECT_EQ(toVec<int32_t>(modified_host.token_ids), (std::vector<int32_t>{10, 11, 12, 0, 0, 0}));
     EXPECT_EQ(toVec<int32_t>(device.lengths), (std::vector<int32_t>{3, 2}));
     EXPECT_EQ(toVec<int32_t>(device.token_ids), (std::vector<int32_t>{10, 11, 12, 20, 21, 22}));
+}
 
-    output.accept_tokens_cpu = torch::Tensor();
-    auto partial = mtp::getHostAcceptedTokens(output);
-    EXPECT_TRUE(partial.token_ids.device().is_cpu());
-    EXPECT_EQ(toVec<int32_t>(partial.token_ids), (std::vector<int32_t>{10, 11, 12, 20, 21, 22}));
-    EXPECT_EQ(partial.lengths.unsafeGetTensorImpl(), host.lengths.unsafeGetTensorImpl());
-    output.accept_len_cpu = torch::Tensor();
-    auto without_mirrors = mtp::getHostAcceptedTokens(output, false);
-    EXPECT_EQ(toVec<int32_t>(without_mirrors.lengths), (std::vector<int32_t>{3, 2}));
-    EXPECT_TRUE(without_mirrors.lengths.device().is_cpu());
+TEST_F(MtpBatchStreamProcessorTest, SharedAcceptedHostViewsCopyOnlyMissingMirrors) {
+    for (bool has_token_mirror : {false, true}) {
+        for (bool has_length_mirror : {false, true}) {
+            SCOPED_TRACE(has_token_mirror);
+            SCOPED_TRACE(has_length_mirror);
+            speculative::SpeculativeSamplerOutput output;
+            output.accept_tokens = torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt32).cuda();
+            output.accept_len    = torch::tensor({3, 2}, torch::kInt32).cuda();
+            if (has_token_mirror) {
+                output.accept_tokens_cpu = torch::tensor({{10, 11, 12}, {0, 0, 0}}, torch::kInt32);
+            }
+            if (has_length_mirror) {
+                output.accept_len_cpu = torch::tensor({3, 1}, torch::kInt32);
+            }
+
+            const auto host = mtp::getHostAcceptedTokens(output, false);
+            EXPECT_TRUE(host.token_ids.device().is_cpu());
+            EXPECT_TRUE(host.lengths.device().is_cpu());
+            EXPECT_EQ(toVec<int32_t>(host.token_ids),
+                      has_token_mirror ? (std::vector<int32_t>{10, 11, 12, 0, 0, 0}) :
+                                         (std::vector<int32_t>{10, 11, 12, 20, 21, 22}));
+            EXPECT_EQ(toVec<int32_t>(host.lengths),
+                      has_length_mirror ? (std::vector<int32_t>{3, 1}) : (std::vector<int32_t>{3, 2}));
+            if (has_token_mirror) {
+                EXPECT_EQ(host.token_ids.unsafeGetTensorImpl(), output.accept_tokens_cpu.unsafeGetTensorImpl());
+            }
+            if (has_length_mirror) {
+                EXPECT_EQ(host.lengths.unsafeGetTensorImpl(), output.accept_len_cpu.unsafeGetTensorImpl());
+            }
+        }
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, SharedDraftContinuationUsesValidLengthsForBothLayouts) {

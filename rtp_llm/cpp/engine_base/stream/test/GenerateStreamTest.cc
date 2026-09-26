@@ -1,5 +1,6 @@
 
 #include "gtest/gtest.h"
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -95,7 +96,6 @@ private:
 };
 
 class GenerateStreamTest: public DeviceTestBase {
-protected:
 };
 
 template<typename T>
@@ -508,19 +508,30 @@ TEST_F(GenerateStreamTest, publicReadinessReaderIsSafeDuringPublication) {
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
-TEST_F(GenerateStreamTest, testSyncSpeculativeMaxLengthDoesNotCountAnchorAsNewToken) {
-    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
-    auto            builder = GenerateStreamBuilder();
-    auto            stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+TEST_F(GenerateStreamTest, testMaxTokenNum) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    stream->generate_input_->generate_config->max_new_tokens = 3000;
+    EXPECT_EQ(stream->maxTokenNum(), 2048u);
 
-    auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
-    sp_output_buffer->propose_step = 3;
-    stream->setSPOutputBuffer(sp_output_buffer);
-    // Scheduler/cache reservation includes the target-verify anchor, but the
-    // output-length limit must reserve only the three newly proposed tokens.
     stream->setReserveStep(4);
+    EXPECT_EQ(stream->maxTokenNum(), 2048u);
 
-    EXPECT_EQ(stream->maxTokenNum(), 2045);
+    stream->generate_input_->generate_config->max_new_tokens = 2;
+    EXPECT_EQ(stream->maxTokenNum(), 8u);
+}
+
+TEST_F(GenerateStreamTest, testNextStepSeqLengthLimit) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    stream->generate_input_->generate_config->max_new_tokens = 3000;
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 2048u);
+
+    stream->setReserveStep(4);
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 2045u);
+
+    stream->generate_input_->generate_config->max_new_tokens = 2;
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 8u);
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that

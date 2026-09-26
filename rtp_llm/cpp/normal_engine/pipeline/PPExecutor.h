@@ -89,9 +89,10 @@ public:
 
 private:
     struct InflightBatch {
-        bool         skip_run = true;
-        StreamGroups stream_groups;
-        int64_t      schedule_time_us = 0;
+        bool                          skip_run = true;
+        StreamGroups                  stream_groups;
+        int64_t                       schedule_time_us = 0;
+        RtpLLMExecutorMetricsCollector executor_collector;
 
         PPTickets plan_sends;
         PPTickets activation_sends;
@@ -112,8 +113,6 @@ private:
     void sampleTokens(const PPExecutionPlan& plan, const GptModelOutputs& model_output, PPExecutionResult& result);
 
     void advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result);
-
-    void clipNewTokenLengths(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) const;
 
     absl::Status processExecutionResult(InflightBatch& batch);
 
@@ -178,6 +177,19 @@ private:
     bool isStageRoot() const {
         return parallelism_config_.tp_rank == 0;
     }
+
+    void collectExecutorMetrics(const GptModelInputs&           model_input,
+                                const torch::Tensor&            sequence_lengths,
+                                RtpLLMExecutorMetricsCollector& collector) const;
+
+    void collectTokenCounts(const StreamGroups&                      stream_groups,
+                            const PPExecutionResult&                 result,
+                            StreamGroups::TokenCountsByPriority&     token_counts_by_priority,
+                            RtpLLMSpeculativeEngineMetricsCollector& sp_collector) const;
+
+    void reportResultMetrics(InflightBatch&                             batch,
+                             const StreamGroups::TokenCountsByPriority& token_counts_by_priority,
+                             RtpLLMSpeculativeEngineMetricsCollector&   sp_collector);
 
 private:
     const bool                              warm_up_;

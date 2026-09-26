@@ -97,8 +97,8 @@ struct PPExecutionResult {
     torch::Tensor request_ids;  // [stream_count]
     /** New tokens to append: CPU int32 [B, 1], or [B, K+1] for verify. */
     torch::Tensor new_token_ids;
-    /** Budget-capped valid counts, including retained correction/bonus: CPU int32 [B].
-     * Undefined for ordinary output (one token per row). */
+    /** Accepted prefix length per row in new_token_ids, before applying the request length limit: CPU int32 [B].
+     * Undefined means one token per row. */
     torch::Tensor new_token_lengths;
 
     torch::Tensor logits;         // optional [total_batch_size, vocab_size]
