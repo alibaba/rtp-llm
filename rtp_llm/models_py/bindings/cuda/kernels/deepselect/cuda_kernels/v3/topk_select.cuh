@@ -10,7 +10,11 @@ Usage caveats:
 
 #include "topk_select.h"
 
-#include <cutlass/kernel_launch.h>
+// The upstream DeepSelect subset includes <cutlass/kernel_launch.h> here but
+// never uses it. Drop it: the CUDA 12.9 cutlass pin (80243e0b) ships a
+// kernel_launch.h/device_kernel.h pair that does not compile standalone
+// (device_kernel.h relies on CUTLASS_GLOBAL/synclog prerequisites it never
+// includes), while the CUDA 13 cutlass_cu13 pin does.
 #include <cute/arch/copy_sm90_tma.hpp>
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect/kerutils/include/kerutils/kerutils.cuh"
 

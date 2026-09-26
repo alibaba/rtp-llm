@@ -381,13 +381,17 @@ bool DSV4CacheConfigHelper::swaBoundedReplayEnabled(const ModelConfig&       mod
     const auto& cp      = parallelism_config.prefill_cp_config;
     const bool  cp4     = cp.prefill_cp_size == 4;
     const bool  prefill = parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size == 4
-                         && parallelism_config.dp_size == 1 && cp.is_enabled();
+                         && parallelism_config.dp_size == 1 && parallelism_config.ep_size == 4 && cp.is_enabled();
+    // Decode keeps the full per-request cache on every rank, so the bounded
+    // replay layout never depends on the data-parallel width. Admit only the
+    // validated replica counts with matching EP grouping (server config setup
+    // auto-derives EP == TP * DP, i.e. EP == DP for TP1 decode ranks).
     const bool decode = parallelism_config.role_type == RoleType::DECODE && parallelism_config.tp_size == 1
-                        && parallelism_config.dp_size == 4 && cp.is_prefill_enabled();
-    RTP_LLM_CHECK_WITH_INFO(cp4 && parallelism_config.ep_size == 4
-                                && parallelism_config.prefill_cp_config.kv_cache_sharded && (prefill || decode),
-                            "DSV41_SWA_BOUNDED_REPLAY requires EP4, sharded CP4, "
-                            "P TP4/DP1 with CP communication or D TP1/DP4 with PREFILL_CP");
+                        && (parallelism_config.dp_size == 4 || parallelism_config.dp_size == 16)
+                        && parallelism_config.ep_size == parallelism_config.dp_size && cp.is_prefill_enabled();
+    RTP_LLM_CHECK_WITH_INFO(cp4 && parallelism_config.prefill_cp_config.kv_cache_sharded && (prefill || decode),
+                            "DSV41_SWA_BOUNDED_REPLAY requires sharded CP4, P TP4/DP1/EP4 with CP communication "
+                            "or D TP1/DP4|DP16 with EP==DP and PREFILL_CP");
     RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8,
                             "DSV41_SWA_BOUNDED_REPLAY requires FP8 KV cache");
     return true;

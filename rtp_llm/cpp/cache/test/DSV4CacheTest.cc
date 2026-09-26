@@ -942,12 +942,12 @@ protected:
             }
         }
     }
-    ParallelismConfig parallel(RoleType role = RoleType::PREFILL) {
+    ParallelismConfig parallel(RoleType role = RoleType::PREFILL, int64_t decode_dp_size = 4) {
         ParallelismConfig pc;
         pc.role_type = role;
         pc.tp_size   = role == RoleType::PREFILL ? 4 : 1;
-        pc.dp_size   = role == RoleType::DECODE ? 4 : 1;
-        pc.ep_size   = 4;
+        pc.dp_size   = role == RoleType::DECODE ? decode_dp_size : 1;
+        pc.ep_size   = role == RoleType::DECODE ? decode_dp_size : 4;
         pc.prefill_cp_config.method =
             role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP;
         pc.prefill_cp_config.prefill_cp_size  = 4;
@@ -1154,6 +1154,240 @@ TEST_F(V41BoundedReplayPolicyTest, StartupEligibilityAndDefaultOff) {
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(config.cacheKeySeed(), 0);
     EXPECT_EQ(config.maxPrefixReuseTokens(32769), 32768);
+}
+
+TEST_F(V41BoundedReplayPolicyTest, StartupAdmitsOnlineDp16DecodeWithMatchingEp) {
+    auto mc = makeV41ModelConfig();
+    // Online decode topology: TP1/DP16 with auto-derived EP16 (EP == TP * DP).
+    EXPECT_TRUE(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, parallel(RoleType::DECODE, 16)));
+    // The validated development topology stays admitted.
+    EXPECT_TRUE(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, parallel(RoleType::DECODE, 4)));
+    // EP grouping must match the DP width on decode ranks.
+    auto pc    = parallel(RoleType::DECODE, 16);
+    pc.ep_size = 4;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    pc         = parallel(RoleType::DECODE, 4);
+    pc.ep_size = 16;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    // Replica counts outside the validated set stay rejected.
+    for (int64_t dp : {2, 8, 32}) {
+        SCOPED_TRACE(dp);
+        EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, parallel(RoleType::DECODE, dp)));
+    }
+    // Decode ranks keep a full per-rank cache; TP>1 decode is not supported.
+    pc         = parallel(RoleType::DECODE, 16);
+    pc.tp_size = 2;
+    pc.ep_size = 32;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    // Prefill admission is unchanged: TP4/DP1/EP4 with CP communication.
+    EXPECT_TRUE(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, parallel()));
+    pc         = parallel();
+    pc.ep_size = 16;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    pc         = parallel();
+    pc.dp_size = 16;
+    pc.ep_size = 64;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    // CP4 sharding and the decode-side PREFILL_CP mode guards still apply.
+    pc                          = parallel(RoleType::DECODE, 16);
+    pc.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    pc                                    = parallel(RoleType::DECODE, 16);
+    pc.prefill_cp_config.kv_cache_sharded = false;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+    pc                                   = parallel(RoleType::DECODE, 16);
+    pc.prefill_cp_config.prefill_cp_size = 2;
+    EXPECT_ANY_THROW(DSV4CacheConfigHelper::swaBoundedReplayEnabled(mc, pc));
+}
+
+TEST_F(V41BoundedReplayPolicyTest, Dp16DecodePerRankLayoutMatchesDp4) {
+    auto target                             = makeV41ModelConfig();
+    auto draft                              = target;
+    draft.model_type                        = "deepseek_v41_dspark";
+    draft.num_layers                        = 3;
+    draft.attn_config.layer_compress_ratios = {0, 0, 0};
+    draft.attn_config.v41_kv_source_layer_ids.clear();
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                      = 1;
+    runtime.fifo_scheduler_config.max_context_batch_size = 1;
+    auto kv                                              = makeDsv4KvCacheConfig(16);
+    kv.kernel_seq_size_per_block                         = 128;
+    kv.test_block_num                                    = 512;
+    kv.linear_step                                       = 32;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 5;
+
+    const auto expect_same_layout = [](const CacheConfig& a, const CacheConfig& b) {
+        EXPECT_EQ(a.groupNums(), b.groupNums());
+        EXPECT_EQ(a.swaBoundedReplay(), b.swaBoundedReplay());
+        EXPECT_EQ(a.layer_num, b.layer_num);
+        EXPECT_EQ(a.layer_all_num, b.layer_all_num);
+        EXPECT_EQ(a.seq_size_per_block, b.seq_size_per_block);
+        EXPECT_EQ(a.kernel_seq_size_per_block, b.kernel_seq_size_per_block);
+        EXPECT_EQ(a.cacheKeySeed(), b.cacheKeySeed());
+        EXPECT_EQ(a.maxPrefixReuseTokens(32769), b.maxPrefixReuseTokens(32769));
+        EXPECT_EQ(a.group_types, b.group_types);
+        EXPECT_EQ(a.group_region_names, b.group_region_names);
+        EXPECT_EQ(a.group_seq_size_per_block, b.group_seq_size_per_block);
+        EXPECT_EQ(a.global_layer_ids, b.global_layer_ids);
+        EXPECT_EQ(a.layer_ids, b.layer_ids);
+        EXPECT_EQ(a.group_kv_block_stride_bytes, b.group_kv_block_stride_bytes);
+        EXPECT_EQ(a.group_kv_scale_stride_bytes, b.group_kv_scale_stride_bytes);
+        EXPECT_EQ(a.layer_region_to_group_id, b.layer_region_to_group_id);
+        ASSERT_EQ(a.cache_specs.size(), b.cache_specs.size());
+        for (size_t gid = 0; gid < a.cache_specs.size(); ++gid) {
+            SCOPED_TRACE(gid);
+            EXPECT_EQ(a.cache_specs[gid]->block_size(), b.cache_specs[gid]->block_size());
+            EXPECT_EQ(a.cache_specs[gid]->block_size_bytes(), b.cache_specs[gid]->block_size_bytes());
+            EXPECT_EQ(a.cache_specs[gid]->layer_num, b.cache_specs[gid]->layer_num);
+            EXPECT_EQ(a.cache_specs[gid]->seq_size_per_block, b.cache_specs[gid]->seq_size_per_block);
+        }
+    };
+    const auto make_resource = [](const CacheConfig& cfg, const CompleteTokenIdsPtr& ids) {
+        auto result = std::make_shared<BatchKVCacheResource>();
+        result->resetBatchSize(1);
+        result->initGroups(cfg.groupNums(),
+                           cfg.layer_all_num,
+                           cfg.layer_to_group_id,
+                           cfg.kernelBlocksPerKvBlock(),
+                           cfg.group_types,
+                           cfg.layer_region_to_group_id);
+        initCacheKeys(result, ids, 128, cfg.cacheKeySeed());
+        return result;
+    };
+
+    // Target-only decode configs: DP16 keeps the DP4 per-rank geometry, i.e.
+    // the full per-request cache including the unsharded CP4-sized SWA rings.
+    auto d4  = HybridPoolConfigCreator::createConfig(target, parallel(RoleType::DECODE, 4), kv, false, 5);
+    auto d16 = HybridPoolConfigCreator::createConfig(target, parallel(RoleType::DECODE, 16), kv, false, 5);
+    ASSERT_EQ(d4.groupNums(), 8);
+    EXPECT_TRUE(d4.swaBoundedReplay());
+    EXPECT_TRUE(d16.swaBoundedReplay());
+    expect_same_layout(d4, d16);
+    auto* d16_decoder_swa = dynamic_cast<DSV4StateSpec*>(d16.cache_specs[7].get());
+    ASSERT_NE(d16_decoder_swa, nullptr);
+    EXPECT_EQ(d16_decoder_swa->entries_per_block, 136u);
+    EXPECT_EQ(d16_decoder_swa->block_size_bytes(), 72192u);  // full ring = 4 CP slices
+
+    // Merged target+draft (DSpARK) configs must also agree rank-for-rank.
+    auto sp4 = CacheConfigCreator::createSpConfig(
+        target, draft, parallel(RoleType::DECODE, 4), runtime, kv, sp, std::nullopt, true, false);
+    auto sp16 = CacheConfigCreator::createSpConfig(
+        target, draft, parallel(RoleType::DECODE, 16), runtime, kv, sp, std::nullopt, true, false);
+    ASSERT_EQ(sp16.groupNums(), 8);
+    ASSERT_EQ(sp16.global_layer_ids[7].size(), 22u);  // L21..39 + three draft layers
+    expect_same_layout(sp4, sp16);
+    for (int layer : {21, 39, 40, 41, 42}) {
+        EXPECT_EQ(sp16.layer_region_to_group_id[layer][8], 7);
+    }
+    // Transfer metadata is per-rank: identical cache keys and CP4 handoff
+    // plans on a DP4 and a DP16 decode rank for the same request tokens.
+    auto ids = tokens(32768 + 513);
+    auto r4  = make_resource(sp4, ids);
+    auto r16 = make_resource(sp16, ids);
+    EXPECT_EQ(r4->cacheKeys(0), r16->cacheKeys(0));
+    ASSERT_FALSE(r16->cacheKeys(0).empty());
+    const auto plan4  = buildCacheStoreBlockPlan(r4->cacheKeys(0).size(), 256, true, CacheGroupType::SWA, 0, 4);
+    const auto plan16 = buildCacheStoreBlockPlan(r16->cacheKeys(0).size(), 256, true, CacheGroupType::SWA, 0, 4);
+    ASSERT_EQ(plan4.size(), plan16.size());
+    EXPECT_FALSE(plan16.empty());
+    for (size_t i = 0; i < plan16.size(); ++i) {
+        EXPECT_EQ(plan4[i].key_index, plan16[i].key_index);
+        EXPECT_EQ(plan4[i].offset_index, plan16[i].offset_index);
+    }
+    const auto loads = blockPositionsForCacheTransfer(plan16.size(), 0, true, CacheGroupType::SWA, false);
+    EXPECT_EQ(plan16.size(), loads.size());
+}
+
+TEST_F(V41BoundedReplayPolicyTest, Dp16MultiRankGpuHitPublishesBothDecoderAndDraftLiveTails) {
+    auto target                             = makeV41ModelConfig();
+    auto draft                              = target;
+    draft.model_type                        = "deepseek_v41_dspark";
+    draft.num_layers                        = 3;
+    draft.attn_config.layer_compress_ratios = {0, 0, 0};
+    draft.attn_config.v41_kv_source_layer_ids.clear();
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                      = 1;
+    runtime.fifo_scheduler_config.max_context_batch_size = 1;
+    auto kv                                              = makeDsv4KvCacheConfig(16);
+    kv.kernel_seq_size_per_block                         = 128;
+    kv.test_block_num                                    = 512;
+    kv.linear_step                                       = 32;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 5;
+    auto pconfig =
+        CacheConfigCreator::createSpConfig(target, draft, parallel(), runtime, kv, sp, std::nullopt, true, false);
+    auto dconfig = CacheConfigCreator::createSpConfig(
+        target, draft, parallel(RoleType::DECODE, 16), runtime, kv, sp, std::nullopt, true, false);
+    ASSERT_EQ(pconfig.groupNums(), 8);
+    auto p      = std::make_shared<HybridPoolKVCacheAllocator>(pconfig, AllocationType::HOST);
+    auto shared = std::make_shared<SharedBlockCache>();
+    p->setSharedBlockCache(shared);
+    auto mapper = std::make_shared<CPSlotMapper>(0, 4, 128);
+    p->setCPSlotMapper(mapper);
+    ASSERT_TRUE(p->init());
+    const auto make_resource = [&](const CacheConfig& cfg, const CompleteTokenIdsPtr& ids) {
+        auto result = std::make_shared<BatchKVCacheResource>();
+        result->resetBatchSize(1);
+        result->initGroups(cfg.groupNums(),
+                           cfg.layer_all_num,
+                           cfg.layer_to_group_id,
+                           cfg.kernelBlocksPerKvBlock(),
+                           cfg.group_types,
+                           cfg.layer_region_to_group_id);
+        initCacheKeys(result, ids, 128, cfg.cacheKeySeed());
+        return result;
+    };
+    auto       seed_ids = tokens(32769);
+    auto       seed     = make_resource(pconfig, seed_ids);
+    MallocInfo seed_info{seed, seed_ids};
+    seed_info.enable_device_cache = false;
+    seed_info.cp_slot_mapper      = mapper;
+    ASSERT_TRUE(p->malloc(seed_info).success);
+    p->insertIntoCache(InsertInfo{seed, seed_ids, false, mapper});
+    p->free(FreeInfo{seed});
+    // Two independent decode DP ranks (e.g. rank 0 and rank 15 of DP16) each
+    // load the same published CP4 prefix; per-rank allocators are identical.
+    for (int dp_rank : {0, 15}) {
+        SCOPED_TRACE(dp_rank);
+        auto d = std::make_shared<HybridPoolKVCacheAllocator>(dconfig, AllocationType::HOST);
+        ASSERT_TRUE(d->init());
+        auto held_d = d->getBlockPools()[7]->malloc(8);
+        ASSERT_EQ(held_d.size(), 8u);
+        auto       ids = tokens(32768 + 513);
+        auto       pr  = make_resource(pconfig, ids);
+        auto       dr  = make_resource(dconfig, ids);
+        MallocInfo pi{pr, ids};
+        pi.cp_slot_mapper = mapper;
+        auto pm           = p->malloc(pi);
+        ASSERT_TRUE(pm.success);
+        ASSERT_EQ(pm.reuse_len, 32768);
+        MallocInfo di{dr, ids};
+        di.enable_device_cache = false;
+        ASSERT_TRUE(d->malloc(di).success);
+        const auto& pblocks = pr->blocks(0, 7);
+        const auto& dblocks = dr->blocks(0, 7);
+        ASSERT_EQ(pblocks.size(), dblocks.size());
+        const auto plan  = buildCacheStoreBlockPlan(pr->cacheKeys(0).size(), 256, true, CacheGroupType::SWA, 0, 4);
+        const auto loads = blockPositionsForCacheTransfer(dblocks.size(), 0, true, CacheGroupType::SWA, false);
+        ASSERT_EQ(plan.size(), loads.size());
+        EXPECT_FALSE(plan.empty());
+        for (size_t i = 0; i < plan.size(); ++i) {
+            EXPECT_EQ(plan[i].offset_index, loads[i]);
+            EXPECT_FALSE(isNullBlockIdx(pblocks[plan[i].offset_index]));
+            EXPECT_FALSE(isNullBlockIdx(dblocks[loads[i]]));
+            EXPECT_NE(pblocks[plan[i].offset_index], dblocks[loads[i]]);
+            EXPECT_EQ(pr->cacheKeys(0)[plan[i].key_index], dr->cacheKeys(0)[plan[i].key_index]);
+        }
+        for (int layer : {21, 39, 40, 41, 42}) {
+            EXPECT_EQ(dconfig.layer_region_to_group_id[layer][8], 7);
+        }
+        p->free(FreeInfo{pr});
+        d->free(FreeInfo{dr});
+        d->getBlockPools()[7]->requestFree(held_d);
+    }
 }
 
 TEST_F(V41BoundedReplayPolicyTest, StartupRequiresRoleSpecificCpMode) {
