@@ -18,6 +18,13 @@ py_test (
 )
 
 py_test (
+    name = "flashinfer_norm_silu_test",
+    srcs = ["flashinfer_norm_silu_test.py"],
+    deps = py_test_deps,
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test (
     name = "fusedqkrmsnorm_test",
     srcs = ["fusedqkrmsnorm_test.py"],
     deps = py_test_deps,
