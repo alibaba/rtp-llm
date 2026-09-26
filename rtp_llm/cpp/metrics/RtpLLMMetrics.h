@@ -399,6 +399,13 @@ public:
                       int64_t generate_token_num,
                       int64_t total_token_num,
                       int64_t execute_time_us) {
+        // Token deltas count completed work even when execution timing is unavailable.
+        if (context_token_num > 0) {
+            context_tokens_delta_ += context_token_num;
+        }
+        if (context_token_num_with_cache > 0) {
+            context_tokens_with_cache_delta_ += context_token_num_with_cache;
+        }
         if (context_token_num > 0 && execute_time_us > 0) {
             context_token_num_ += context_token_num;
             context_time_us_ += execute_time_us;
@@ -422,6 +429,12 @@ public:
                               int64_t total_token_num,
                               int64_t execute_time_us) {
         auto& collector = priority_collectors_[priority];
+        if (context_token_num > 0) {
+            collector.context_tokens_delta_ += context_token_num;
+        }
+        if (context_token_num_with_cache > 0) {
+            collector.context_tokens_with_cache_delta_ += context_token_num_with_cache;
+        }
         if (context_token_num > 0 && execute_time_us > 0) {
             collector.context_token_num_ += context_token_num;
         }
@@ -446,6 +459,8 @@ public:
 
     void merge(const RtpLLMTokenPSMetricsCollector* collector) {
         if (collector) {
+            context_tokens_delta_ += collector->context_tokens_delta_;
+            context_tokens_with_cache_delta_ += collector->context_tokens_with_cache_delta_;
             context_token_num_ += collector->context_token_num_;
             context_time_us_ += collector->context_time_us_;
             context_token_num_with_cache_ += collector->context_token_num_with_cache_;
@@ -461,6 +476,14 @@ public:
                 report_zero_tps_ = true;
             }
         }
+    }
+
+    int64_t contextTokensDelta() const {
+        return context_tokens_delta_;
+    }
+
+    int64_t contextTokensWithCacheDelta() const {
+        return context_tokens_with_cache_delta_;
     }
 
     double contextTPS() const {
@@ -495,6 +518,14 @@ public:
         return total_token_num_;
     }
 
+    bool hasContextTokensDelta() const {
+        return context_tokens_delta_ > 0;
+    }
+
+    bool hasContextTokensWithCacheDelta() const {
+        return context_tokens_with_cache_delta_ > 0;
+    }
+
     bool hasContextTPS() const {
         return context_time_us_ > 0;
     }
@@ -512,7 +543,8 @@ public:
     }
 
     bool hasMetrics() const {
-        return hasContextTPS() || hasContextTPSWithCache() || hasGenerateTPS() || hasTotalTPS();
+        return hasContextTokensDelta() || hasContextTokensWithCacheDelta() || hasContextTPS() || hasContextTPSWithCache()
+               || hasGenerateTPS() || hasTotalTPS();
     }
 
     void markIdleWindow() {
@@ -548,14 +580,17 @@ private:
     }
 
 private:
-    int64_t                                          context_token_num_            = 0;
-    int64_t                                          context_time_us_              = 0;
-    int64_t                                          context_token_num_with_cache_ = 0;
-    int64_t                                          context_time_us_with_cache_   = 0;
-    int64_t                                          generate_token_num_           = 0;
-    int64_t                                          total_token_num_              = 0;
-    int64_t                                          report_window_us_             = 0;
-    bool                                             report_zero_tps_              = false;
+    // Reset with the collector after each report; separate from the time-validated TPS numerators below.
+    int64_t                                       context_tokens_delta_            = 0;
+    int64_t                                       context_tokens_with_cache_delta_ = 0;
+    int64_t                                       context_token_num_               = 0;
+    int64_t                                       context_time_us_                 = 0;
+    int64_t                                       context_token_num_with_cache_    = 0;
+    int64_t                                       context_time_us_with_cache_      = 0;
+    int64_t                                       generate_token_num_              = 0;
+    int64_t                                       total_token_num_                 = 0;
+    int64_t                                       report_window_us_                = 0;
+    bool                                          report_zero_tps_                 = false;
     std::map<int32_t, RtpLLMTokenPSMetricsCollector> priority_collectors_;
 };
 
@@ -565,10 +600,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* context_tps_metric            = nullptr;
-    kmonitor::MutableMetric* context_tps_with_cache_metric = nullptr;
-    kmonitor::MutableMetric* generate_tps_metric           = nullptr;
-    kmonitor::MutableMetric* total_tps_metric              = nullptr;
+    kmonitor::MutableMetric* context_tokens_delta_metric            = nullptr;
+    kmonitor::MutableMetric* context_tokens_with_cache_delta_metric = nullptr;
+    kmonitor::MutableMetric* context_tps_metric                     = nullptr;
+    kmonitor::MutableMetric* context_tps_with_cache_metric          = nullptr;
+    kmonitor::MutableMetric* generate_tps_metric                    = nullptr;
+    kmonitor::MutableMetric* total_tps_metric                       = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
