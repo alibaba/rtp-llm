@@ -1,5 +1,5 @@
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -18,6 +18,7 @@ class ReasoningFormat:
     tag_end: Union[str, List[str], Dict[str, Any]]
     suffix: str = ""
     no_think_excludes: Tuple[str, ...] = ()
+    content_excludes: Tuple[str, ...] = ()
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
@@ -41,6 +42,27 @@ class ReasoningFormat:
             )
         return cls(tag_begin="", tag_end=normalized_end_tag)
 
+    def with_boundary_excludes(
+        self, tokenizer: Any, think_start_tag: str = ""
+    ) -> "ReasoningFormat":
+        """Reserve boundary prefixes for the tag, rather than thinking text.
+
+        K3's first boundary tokens are <|open|> and <|close|>. Excluding
+        those from AnyText leaves the enclosing tag as the only path after
+        <|close|>, so the matcher must finish the complete configured end tag.
+        Derive the prefixes from the tokenizer to also cover other models.
+        """
+        if tokenizer is None:
+            return self
+        excludes = list(self.content_excludes)
+        for boundary in (think_start_tag, self.tag_begin, self.tag_end):
+            boundaries = boundary if isinstance(boundary, list) else [boundary]
+            for value in boundaries:
+                prefix = _boundary_token_prefix(tokenizer, value)
+                if prefix and prefix not in excludes:
+                    excludes.append(prefix)
+        return replace(self, content_excludes=tuple(excludes))
+
     def prefix_format(self, max_thinking_tokens: int) -> Dict[str, Any]:
         think_tag = {
             "type": "tag",
@@ -51,6 +73,8 @@ class ReasoningFormat:
             },
             "end": self.tag_end,
         }
+        if self.content_excludes:
+            think_tag["content"]["excludes"] = list(self.content_excludes)
         if not self.suffix:
             return think_tag
         return {
@@ -60,6 +84,31 @@ class ReasoningFormat:
                 {"type": "const_string", "value": self.suffix},
             ],
         }
+
+
+def _boundary_token_prefix(tokenizer: Any, boundary: Any) -> str:
+    if not boundary:
+        return ""
+    if isinstance(boundary, dict):
+        if boundary.get("type") != "token":
+            return ""
+        token = boundary["token"]
+        if isinstance(token, str):
+            return token
+        token_ids = [token]
+    else:
+        token_ids = tokenizer.encode(boundary, add_special_tokens=False)
+    if not token_ids:
+        return ""
+    decode = getattr(tokenizer, "decode", None)
+    if not callable(decode):
+        return boundary if isinstance(boundary, str) else ""
+    prefix = decode(token_ids[:1], skip_special_tokens=False)
+    if isinstance(boundary, str) and (not prefix or not boundary.startswith(prefix)):
+        # SentencePiece/byte decoders may not round-trip an isolated token.
+        # In that case retain the literal boundary instead of excluding other text.
+        return boundary
+    return prefix
 
 
 @dataclass(frozen=True)

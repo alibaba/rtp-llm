@@ -94,6 +94,12 @@ py_test(
 )
 
 py_test(
+    name = "reasoning_grammar_test",
+    srcs = ["reasoning_grammar_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "slice_stop_word_list_test",
     srcs = [
         "slice_stop_word_list_test.py",
@@ -176,6 +182,13 @@ py_test(
     srcs = ["kimi_k3_renderer_test.py"],
     data = ["//rtp_llm:sdk"],
     deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_native_tokenizer_smoke_test",
+    srcs = ["kimi_k3_native_tokenizer_smoke_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
 )
 
 py_test(

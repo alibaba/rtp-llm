@@ -665,6 +665,10 @@ class GenerateConfig(BaseModel):
                     suffix=base_format.suffix,
                     no_think_excludes=base_format.no_think_excludes,
                 )
+            reasoning_format = reasoning_format.with_boundary_excludes(
+                tokenizer,
+                normalize_think_tag(generate_env_config.think_start_tag),
+            )
             return self.finalize_response_format(reasoning_format=reasoning_format)
 
         if enable_thinking is None:
@@ -699,6 +703,13 @@ class GenerateConfig(BaseModel):
         if self.in_think_mode and reasoning_format is None:
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
+            )
+        if self.in_think_mode and reasoning_format is not None:
+            reasoning_format = reasoning_format.with_boundary_excludes(
+                tokenizer,
+                normalize_think_tag(
+                    getattr(generate_env_config, "think_start_tag", "") or ""
+                ),
             )
         return self.finalize_response_format(
             reasoning_format=reasoning_format if self.in_think_mode else None
