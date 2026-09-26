@@ -54,15 +54,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "That's correct! 2 + 2 = 4. \n\nIs"
+                            "content": "That equals 4."
                         },
-                        "finish_reason": "length"
+                        "finish_reason": "stop"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 8,
-                    "total_tokens": 23,
-                    "completion_tokens": 15
+                    "total_tokens": 14,
+                    "completion_tokens": 6
                 }
             }
         }

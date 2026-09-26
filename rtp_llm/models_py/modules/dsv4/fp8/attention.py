@@ -26,6 +26,7 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 # API, same recipe).  Validated by ``test/test_wo_a_batched_vs_loop.py``
 # — bit-identical output + 3.5-4.4× speedup at decode B∈{1..256}.
 import deep_gemm  # noqa: E402
+import flashinfer  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,8 +44,8 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
 
 # Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
 # Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
-# (no-RoPE) RMSNorm sites (``_rmsnorm_weighted``) use the framework C++
-# ``rtp_llm_ops.rmsnorm`` (matches vLLM — bf16 weight).
+# (no-RoPE) RMSNorm sites (``_rmsnorm_weighted``) use
+# ``flashinfer.norm.rmsnorm`` (matches vLLM — bf16 weight).
 # Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
@@ -79,7 +80,6 @@ from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 # Phase E1 (dsv4_kvcache_native_refactor_plan.md §9): route prefill
@@ -1000,7 +1000,7 @@ class AttentionFP8(nn.Module):
 
         # Non-quantized norm weights — plain BF16 tensors (loader cast
         # via compute_dtype).  BF16 dtype is required by
-        # ``rtp_llm_ops.rmsnorm`` (silent NaN with fp32).  attn_sink loads
+        # ``flashinfer.norm.rmsnorm`` (silent NaN with fp32).  attn_sink loads
         # as fp32 via descriptor data_type.
         self.q_norm = layer_weights[W.v4_attn_q_norm]
         self.kv_norm = layer_weights[W.v4_attn_kv_norm]
@@ -1909,14 +1909,12 @@ class AttentionFP8(nn.Module):
         return self._fp8_decode_op
 
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        # Framework C++ ``rtp_llm_ops.rmsnorm`` (single launch, bf16 weight).
+        # ``flashinfer.norm.rmsnorm`` (bf16 weight).
         # Requires 2D input — reshape/restore keeps this a drop-in.
         orig_shape = x.shape
         x_2d = x.reshape(-1, orig_shape[-1])
         out = torch.empty_like(x_2d)
-        rtp_llm_ops.rmsnorm(
-            out, x_2d, weight, self.eps, torch.cuda.current_stream().cuda_stream
-        )
+        flashinfer.norm.rmsnorm(x_2d, weight, eps=self.eps, out=out)
         return out.view(orig_shape)
 
     def _lin(

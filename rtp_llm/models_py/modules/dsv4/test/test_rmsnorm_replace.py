@@ -1,15 +1,15 @@
 """UT for replacing ``block._RMSNorm.forward`` (torch 6-launch chain) with
-the framework C++ ``rtp_llm_ops.rmsnorm`` single-launch op.
+``flashinfer.norm.rmsnorm``.
 
 Audit doc §7.3.4 / row #4, #22, #31, #33: dsv4's ``_RMSNorm`` (block.py) is
 used at attn_norm / ffn_norm / MTP enorm / hnorm / norm / transformer final
 norm.  Pre-integration each forward was the classic 6-launch
 ``x.float().square().mean().rsqrt()...`` pattern — ~1032 launches / step
 across 43 layers per the trace.  Live ``_RMSNorm.forward`` now delegates to
-``rtp_llm_ops.rmsnorm`` (matching vLLM's bf16-weight convention).
+``flashinfer.norm.rmsnorm`` (matching vLLM's bf16-weight convention).
 
 This UT verifies:
-  1) Numerical agreement of the live C++ path vs the pinned pre-integration
+  1) Numerical agreement of the live flashinfer path vs the pinned pre-integration
      torch baseline, across decode + prefill shapes.
   2) Wall-clock improvement vs the torch baseline.
 
@@ -45,7 +45,7 @@ class _TorchFallbackRMSNorm(nn.Module):
 
 
 def _build_pair(dim: int, seed: int = 0):
-    """Build a torch-baseline + live C++ ``_RMSNorm`` pair with matched weights
+    """Build a torch-baseline + live flashinfer ``_RMSNorm`` pair with matched weights
     (bf16 for the live path, fp32 (upcast of the same bf16 bytes) for the
     baseline so the RMS math is numerically aligned)."""
     torch.manual_seed(seed)
@@ -72,7 +72,7 @@ def _bench(fn, *args, warmup: int = 25, iters: int = 200) -> float:
 
 
 def test_live_matches_pinned_baseline():
-    """``block._RMSNorm`` now owns a bf16 weight and calls C++ ``rtp_llm_ops.rmsnorm``.
+    """``block._RMSNorm`` now owns a bf16 weight and calls ``flashinfer.norm.rmsnorm``.
     Compare against the pinned torch baseline, **both fed identical bf16
     weight** — verifies the algorithm matches, independent of the fp32→bf16
     weight downgrade. vLLM's DeepSeek V4 uses the same bf16-weight convention.
@@ -126,7 +126,7 @@ def bench_token_sweep():
     print(f"  [dim={dim}]")
     print(
         "    {:>6}  {:>10}  {:>10}  {:>10}".format(
-            "T", "torch (6-launch)", "C++ rmsnorm", "speedup"
+            "T", "torch (6-launch)", "flashinfer rmsnorm", "speedup"
         )
     )
     Tlist = [1, 8, 16, 64, 128, 256, 4096, 65536]
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     for T, t_base, t_live in results:
         if not (t_live < t_base):
             print(
-                f"  [FAIL] T={T}: live C++={t_live*1e3:.2f}us "
+                f"  [FAIL] T={T}: live flashinfer={t_live*1e3:.2f}us "
                 f"not < torch={t_base*1e3:.2f}us"
             )
             fail = True

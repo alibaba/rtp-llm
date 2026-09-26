@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+import flashinfer
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
     rmsnorm_fp8_quant_ue8m0,
 )
-from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
-def _cpp_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+def _flashinfer_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     out = torch.empty_like(x)
-    rtp_llm_ops.rmsnorm(out, x, weight, eps, torch.cuda.current_stream().cuda_stream)
+    flashinfer.norm.rmsnorm(x, weight, eps=eps, out=out)
     return out
 
 
@@ -43,7 +43,7 @@ def _assert_matches(m: int, n: int) -> None:
         .contiguous()
     )
 
-    ref_norm = _cpp_rmsnorm(x, weight, eps)
+    ref_norm = _flashinfer_rmsnorm(x, weight, eps)
     ref_q, ref_s = sgl_per_token_group_quant_fp8(
         ref_norm,
         group_size=group_size,
