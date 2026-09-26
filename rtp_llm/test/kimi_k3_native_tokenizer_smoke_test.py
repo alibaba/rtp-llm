@@ -17,6 +17,8 @@ from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     kimi_k3_pending_prompt_token_count,
 )
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.openai.renderers.kimi_k3_renderer import KimiK3Renderer
 
 
 class KimiK3NativeTokenizerSmokeTest(unittest.TestCase):
@@ -132,6 +134,60 @@ class KimiK3NativeTokenizerSmokeTest(unittest.TestCase):
         self.assertFalse(allows(think_ids[0]))
         self.assertFalse(allows(eos_id))
         self.assertTrue(matcher.accept_token(final_ids[0]))
+        self.assertTrue(matcher.is_terminated())
+
+    def test_native_xgrammar_accepts_four_parallel_tool_calls(self) -> None:
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Four cities"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Return weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+                "parallel_tool_calls": True,
+                "thinking": {"type": "disabled"},
+            }
+        )
+        config = GenerateConfig()
+        KimiK3Renderer.__new__(KimiK3Renderer).apply_chat_completion_constraints(
+            request, config
+        )
+        with open(os.path.join(os.environ["K3_CKPT_PATH"], "config.json")) as f:
+            model_vocab_size = json.load(f)["text_config"]["vocab_size"]
+        tokenizer_info = xgr.TokenizerInfo.deserialize_json(
+            build_grammar_tokenizer_info_json(
+                self.tokenizer,
+                model_vocab_size=model_vocab_size,
+                stop_token_ids=[self.tokenizer.eos_token_id],
+            )
+        )
+        grammar = xgr.GrammarCompiler(tokenizer_info, max_threads=2).compile_structural_tag(
+            config.structural_tag
+        )
+        matcher = xgr.GrammarMatcher(grammar, terminate_without_stop_token=True)
+        output = "<|close|>response<|sep|><|open|>tools<|sep|>"
+        for index, city in enumerate(("A", "B", "C", "D"), 1):
+            output += (
+                f'<|open|>call tool="get_weather" index="{index}"<|sep|>'
+                '<|open|>json type="object"<|sep|>'
+                f'{{"city":"{city}"}}'
+                "<|close|>json<|sep|><|close|>call<|sep|>"
+            )
+        output += "<|close|>tools<|sep|>"
+        for token_id in self.tokenizer.encode(output):
+            self.assertTrue(matcher.accept_token(token_id), f"masked token {token_id}")
         self.assertTrue(matcher.is_terminated())
 
 
