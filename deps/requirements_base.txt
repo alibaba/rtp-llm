@@ -57,4 +57,5 @@ xfastertransformer_devel==1.8.1.1 ; platform_machine == "x86_64"
 xfastertransformer_devel_icx==1.8.1.1 ; platform_machine == "x86_64"
 zstandard==0.25.0
 pybind11_stubgen
-xgrammar==0.2.5
+apache-tvm-ffi==0.1.12
+xgrammar==0.2.8

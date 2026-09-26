@@ -61,6 +61,13 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_xgrammar_test",
+    srcs = ["inference/kimi_k3_xgrammar_test.py"],
+    main = "inference/kimi_k3_xgrammar_test.py",
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "mrcr_smoke_test",
     srcs = ["inference/mrcr_smoke_test.py"],
     data = ["data/mrcr_deepseek_v4_think_leak_cases.json"],
