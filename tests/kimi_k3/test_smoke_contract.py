@@ -72,10 +72,22 @@ def test_ordinary_layout_is_not_tp_times_block(tmp_path, monkeypatch):
     )
 
 
+def test_cp_virtual_reuse_unit_is_recorded(tmp_path, monkeypatch):
+    args = cli(tmp_path, monkeypatch, extra=(
+        "--suite", "main-text-64k-capped", "--reuse-unit-tokens", "8192",
+    ))
+    assert args.block_size == 4096
+    assert smoke.Runner(args).reuse_unit_tokens == 8192
+    assert smoke.cache_block_boundaries(4096, 8192, 65536) == (
+        4096, 8192, 16384, 65536, 131072,
+    )
+
+
 @pytest.mark.parametrize(
     "extra",
     [
         ["--reuse-unit-tokens", "32768"],
+        ["--reuse-unit-tokens", "6000"],
         ["--long-prefix-target-tokens", "70000"],
         ["--chunk-tokens", "32768"],
         ["--decode-dp-size", "2"],

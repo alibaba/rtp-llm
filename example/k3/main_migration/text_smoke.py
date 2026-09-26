@@ -140,7 +140,7 @@ def parse_args() -> argparse.Namespace:
         "--reuse-unit-tokens",
         type=int,
         default=0,
-        help="ordinary main checkpoint granularity; 0 means one configured cache block (never TP times block).",
+        help="cache reuse key span; 0 means one configured cache block, or use two blocks for a CP virtual key.",
     )
     parser.add_argument("--chunk-tokens", type=int, default=65536)
     parser.add_argument("--max-tokens", type=int, default=256)
@@ -236,9 +236,9 @@ def parse_args() -> argparse.Namespace:
         if args.suite == "main-text-64k-capped" and args.block_size != 4096:
             parser.error("the capped PD427 subset requires 4096-token cache blocks")
     args.case_deadline_s = 300 if args.suite == "main-text-64k-capped" else None
-    if args.reuse_unit_tokens not in (0, args.block_size):
+    if args.reuse_unit_tokens not in (0, args.block_size, 2 * args.block_size):
         parser.error(
-            "main ordinary layout requires reuse-unit-tokens equal to block-size"
+            "reuse-unit-tokens must be 0, one cache block, or two cache blocks"
         )
     if args.chunk_tokens % args.block_size:
         parser.error("chunk budget must be a multiple of the configured cache block")
