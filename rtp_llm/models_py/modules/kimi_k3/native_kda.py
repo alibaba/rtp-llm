@@ -12,6 +12,21 @@ from functools import partial
 import torch
 
 
+def plan_cula_checkpoint_groups(segments, block_size, max_pages=4):
+    """Bound cuLA scratch while keeping each call aligned to cache pages."""
+    if block_size <= 0 or max_pages <= 0:
+        raise ValueError("cuLA checkpoint group geometry must be positive")
+    if not segments:
+        return ()
+    groups = []
+    first_partial = segments[0].end - segments[0].start < block_size
+    if first_partial:
+        groups.append(segments[:1])
+    for index in range(int(first_partial), len(segments), max_pages):
+        groups.append(segments[index : index + max_pages])
+    return tuple(groups)
+
+
 def _cula_paged_prefill(
     chunk_kda, q, k, v, g, beta, a_log, dt_bias, lower_bound,
     cache_states, sequences, block_size,
@@ -32,12 +47,7 @@ def _cula_paged_prefill(
         )
         # A reused prefix can start inside a cache block. Finish that block
         # first so subsequent cuLA checkpoints again coincide with RTP pages.
-        first_is_partial = segments[0].end - segments[0].start < block_size
-        groups = (
-            (segments[:1], segments[1:]) if first_is_partial and len(segments) > 1
-            else (segments,)
-        )
-        for group in groups:
+        for group in plan_cula_checkpoint_groups(segments, block_size):
             if not group:
                 continue
             start, end = group[0].start, group[-1].end
