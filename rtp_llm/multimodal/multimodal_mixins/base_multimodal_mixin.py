@@ -110,7 +110,13 @@ class BaseMultiModalMixin:
             return
 
         self.mm_mixin_loader = self.create_mm_mixin_loader()
-        self.weights = self.mm_mixin_loader.load_weights(device=device)
+        weight_loading_dtype = self.get_mm_weight_loading_dtype()
+        if weight_loading_dtype is None:
+            self.weights = self.mm_mixin_loader.load_weights(device=device)
+        else:
+            self.weights = self.mm_mixin_loader.load_weights(
+                device=device, data_type=weight_loading_dtype
+            )
 
         self.load_mm_weight(
             ctype=compute_dtype,
@@ -118,6 +124,9 @@ class BaseMultiModalMixin:
         )
 
         self.mm_mixin_loader.force_clean_cuda_memory()
+
+    def get_mm_weight_loading_dtype(self) -> Optional[torch.dtype]:
+        return None
 
     def create_mm_mixin_loader(self) -> MultimodalMixinLoader:
         database = CkptDatabase(self.ckpt_path)

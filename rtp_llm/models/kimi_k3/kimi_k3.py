@@ -7,11 +7,11 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight, KimiK3Weight
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.ops import (
     CacheCpPolicyDesc,
     DataType,
@@ -135,7 +135,14 @@ class KimiK3(BaseModel):
 
         with open(config_path, encoding="utf-8") as reader:
             config_json = json.load(reader)
-        return cls._from_config_json(config_json, ckpt_path)
+        config = cls._from_config_json(config_json, ckpt_path)
+        if not config.is_mtp:
+            from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_config import (
+                configure_kimi_k3_multimodal,
+            )
+
+            configure_kimi_k3_multimodal(config, config_json)
+        return config
 
     @classmethod
     def _from_config_json(
