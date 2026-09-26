@@ -99,6 +99,44 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStr
     return sample_output;
 }
 
+torch::Tensor SpeculativeSampler::targetResponseProbabilities(const std::vector<ReturnAllProbsMode>& modes,
+                                                              const SamplerOutput&                    target_sampler_output) {
+    const bool need_response = std::any_of(modes.begin(), modes.end(), [](auto mode) {
+        return mode != ReturnAllProbsMode::NONE;
+    });
+    if (!need_response) {
+        return {};
+    }
+    const auto& filtered_probs = target_sampler_output.all_probs;
+    RTP_LLM_CHECK_WITH_INFO(filtered_probs.defined() && filtered_probs.dim() == 3
+                                && filtered_probs.size(0) == static_cast<int64_t>(modes.size()),
+                            "MTP filtered target probabilities must be [stream, verify_row, vocab]");
+    const bool has_original = std::any_of(modes.begin(), modes.end(), [](auto mode) {
+        return mode == ReturnAllProbsMode::ORIGINAL;
+    });
+    if (!has_original) {
+        return filtered_probs;
+    }
+
+    const auto& original_probs = target_sampler_output.original_all_probs;
+    RTP_LLM_CHECK_WITH_INFO(original_probs.defined() && original_probs.sizes() == filtered_probs.sizes(),
+                            "MTP original target probabilities must match filtered verify rows");
+    const bool has_default = std::any_of(modes.begin(), modes.end(), [](auto mode) {
+        return mode == ReturnAllProbsMode::DEFAULT;
+    });
+    if (!has_default) {
+        return original_probs;
+    }
+
+    auto response_probs = filtered_probs.clone();
+    for (int64_t row = 0; row < static_cast<int64_t>(modes.size()); ++row) {
+        if (modes[row] == ReturnAllProbsMode::ORIGINAL) {
+            response_probs.select(0, row).copy_(original_probs.select(0, row));
+        }
+    }
+    return response_probs;
+}
+
 void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_output,
                                      const std::list<GenerateStreamPtr>& streams,
                                      SamplerOutput&                      draft_sampler_output,
@@ -248,6 +286,15 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
     sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    std::vector<ReturnAllProbsMode> response_modes;
+    response_modes.reserve(streams.size());
+    for (const auto& stream : streams) {
+        response_modes.push_back(stream->generateConfig()->return_all_probs);
+    }
+    auto response_probs = targetResponseProbabilities(response_modes, target_sampler_output);
+    if (response_probs.defined()) {
+        sample_output.target_probs_cpu = response_probs.to(torch::kCPU, true);
+    }
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 

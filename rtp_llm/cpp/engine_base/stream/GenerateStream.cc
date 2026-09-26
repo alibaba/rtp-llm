@@ -1176,7 +1176,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   update_info.target_logits,
                   torch::Tensor(),
                   torch::Tensor(),
-                  torch::Tensor(),
+                  update_info.all_probs,
                   torch::Tensor(),
                   torch::Tensor(),
                   torch::Tensor(),

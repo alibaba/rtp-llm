@@ -60,6 +60,7 @@ py_test(
     name = "kimi_k3_checkpoint_request_smoke_test",
     srcs = ["inference/kimi_k3_checkpoint_request_smoke_test.py"],
     main = "inference/kimi_k3_checkpoint_request_smoke_test.py",
+    data = ["//rtp_llm/cpp/multimodal_processor/test:kimi_k3_feature_expand_check"],
     deps = ["//rtp_llm:testlib"],
     tags = ["manual"],
 )

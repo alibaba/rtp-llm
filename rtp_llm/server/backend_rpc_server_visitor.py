@@ -13,7 +13,12 @@ from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
+from rtp_llm.ops import (
+    SpeculativeExecutionConfig,
+    SpeculativeType,
+    VitSeparation,
+    get_block_cache_keys,
+)
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
@@ -513,8 +518,14 @@ class BackendRPCServerVisitor:
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",
             )
-        # speculative decoding does not support return_all_probs
-        if input.generate_config.return_all_probs:
+        # The MtpExecutor path preserves target probabilities for accepted tokens.
+        # Other speculative executors cannot provide complete token logprobs.
+        if input.generate_config.return_all_probs and self.sp_config.type not in (
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.EAGLE3,
+            SpeculativeType.DSPARK,
+        ):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support return_all_probs",

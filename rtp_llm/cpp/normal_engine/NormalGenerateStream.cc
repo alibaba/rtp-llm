@@ -181,7 +181,17 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 if (!update_info.all_probs.defined()) {
                     throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
                 }
-                generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
+                auto output_probs = all_probs_.narrow(0, i, 1);
+                if (output_probs.dim() == 3) {
+                    // An accepted speculative chunk can end early at EOS, a stop word, or max_new_tokens.
+                    // Only the committed output_ids have matching target-probability rows.
+                    RTP_LLM_CHECK_WITH_INFO(output_probs.size(1) >= output_len,
+                                            "target probabilities [%ld] do not cover output tokens [%ld]",
+                                            output_probs.size(1),
+                                            output_len);
+                    output_probs = output_probs.narrow(1, 0, output_len);
+                }
+                generate_output.aux_info.all_probs = output_probs.clone();
             }
         }
         // hidden_states post process

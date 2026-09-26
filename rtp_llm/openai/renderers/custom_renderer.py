@@ -114,6 +114,8 @@ class StreamStatus:
         self.request = request
         self.has_real_aux_info = True
         self._fallback_aux_info: Optional[AuxInfo] = None
+        self.pending_token_probs: List[Tuple[int, torch.Tensor]] = []
+        self.emitted_logprobs_count = 0
 
     def update_output(
         self,
@@ -124,6 +126,18 @@ class StreamStatus:
         self.index += 1
         self.output = output
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        if self.request.logprobs:
+            if output.all_probs is None:
+                raise ValueError("logprobs require target probabilities")
+            rows = output.all_probs.reshape(-1, output.all_probs.shape[-1])
+            if len(delta_output_ids) != rows.shape[0]:
+                raise ValueError(
+                    f"target probability rows must match output tokens: "
+                    f"rows={rows.shape[0]}, tokens={len(delta_output_ids)}, "
+                    f"prob_shape={tuple(output.all_probs.shape)}, "
+                    f"token_shape={tuple(output.output_ids.shape)}"
+                )
+            self.pending_token_probs.extend(zip(delta_output_ids, rows.unbind(0)))
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         if output.aux_info is None:
             self.has_real_aux_info = False
@@ -266,7 +280,9 @@ class RendererParams:
 @dataclass
 class OutputDelta:
     output_str: Union[str, DeltaMessage]
-    logprobs: Optional[ChatCompletionTokenLogprob]
+    logprobs: Optional[
+        Union[ChatCompletionTokenLogprob, List[ChatCompletionTokenLogprob]]
+    ]
     input_length: int
     output_length: int
     reuse_length: int
@@ -627,49 +643,49 @@ class CustomChatRenderer:
 
     async def _generate_log_probs(
         self, status: StreamStatus, output: Optional[GenerateOutput]
-    ) -> Optional[ChatCompletionTokenLogprob]:
+    ) -> Optional[List[ChatCompletionTokenLogprob]]:
         assert output is not None
         if not status.request.logprobs:
             return None
-        prob_return_num = status.request.top_logprobs or 1
-        all_probs = output.all_probs
-        output_id = output.output_ids
-        if output_id == None:
-            return None
-        selected_id = output_id[-1].item()
-        if all_probs == None:
-            raise Exception(
-                "all_probs is None when logprobs is true. There should be a internal bug."
+        count = len(status.output_ids) - status.emitted_logprobs_count
+        if count < 0 or count > len(status.pending_token_probs):
+            raise ValueError("target probabilities do not cover emitted tokens")
+        token_probs = status.pending_token_probs[:count]
+        del status.pending_token_probs[:count]
+        status.emitted_logprobs_count += count
+        result = []
+        for token_id, all_probs in token_probs:
+            if token_id < 0 or token_id >= all_probs.numel():
+                raise ValueError("output token is outside target vocabulary")
+            token = self.tokenizer.decode([token_id])
+            top_count = min(
+                (
+                    1
+                    if status.request.top_logprobs is None
+                    else status.request.top_logprobs
+                ),
+                int(all_probs.count_nonzero()),
             )
-        all_probs = all_probs.squeeze()
-        non_zero_size = all_probs.nonzero().shape[0]
-        prob_return_num = min(prob_return_num, non_zero_size)
-        # 使用 topk 提高计算效率，只计算需要的前 k 个值
-        probs, tokens = all_probs.topk(
-            prob_return_num, dim=-1, largest=True, sorted=True
-        )
-        log_values = probs.log()
-
-        selected_token = self.tokenizer.decode([selected_id])
-        chat_logprob = ChatCompletionTokenLogprob(
-            token=selected_token,
-            bytes=list(selected_token.encode("utf-8", errors="replace")),
-            logprob=all_probs[output_id].log().item(),
-            top_logprobs=[],
-        )
-        for i in range(prob_return_num):
-            token = self.tokenizer.decode(tokens[i].item())
-            chat_logprob.top_logprobs.append(
-                TopLogprob(
+            top_probs, top_ids = all_probs.topk(top_count)
+            top_logprobs = []
+            for top_prob, top_id in zip(top_probs, top_ids):
+                top_token = self.tokenizer.decode([int(top_id)])
+                top_logprobs.append(
+                    TopLogprob(
+                        token=top_token,
+                        logprob=top_prob.log().item(),
+                        bytes=list(top_token.encode("utf-8", errors="replace")),
+                    )
+                )
+            result.append(
+                ChatCompletionTokenLogprob(
                     token=token,
-                    logprob=log_values[i].item(),
                     bytes=list(token.encode("utf-8", errors="replace")),
+                    logprob=all_probs[token_id].log().item(),
+                    top_logprobs=top_logprobs,
                 )
             )
-
-        logging.debug("chat_logprob: %s", chat_logprob.model_dump_json(indent=4))
-
-        return chat_logprob
+        return result
 
     async def _generate_extra_outputs(
         self, output: GenerateOutput, generate_config: GenerateConfig
@@ -990,7 +1006,11 @@ class CustomChatRenderer:
                     delta=delta,
                     logprobs=(
                         ChoiceLogprobs(
-                            content=[item.logprobs] if item.logprobs != None else None,
+                            content=(
+                                item.logprobs
+                                if isinstance(item.logprobs, list)
+                                else [item.logprobs]
+                            ),
                             refusal=None,
                         )
                         if item.logprobs != None
@@ -1260,7 +1280,9 @@ class CustomChatRenderer:
     ) -> Optional[ChatCompletionTokenLogprob]:
         if not status.request.logprobs:
             return None
-        prob_return_num = status.request.top_logprobs or 1
+        prob_return_num = (
+            1 if status.request.top_logprobs is None else status.request.top_logprobs
+        )
         all_probs = all_probs
         output_id = output_ids
         if output_id == None:

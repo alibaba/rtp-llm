@@ -709,6 +709,9 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
+    sampler_inputs.capture_original_probs = std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+        return stream->generateConfig()->return_all_probs == ReturnAllProbsMode::ORIGINAL;
+    });
 
     int64_t batch_idx = 0;
     for (auto& stream : all_streams) {
@@ -1619,6 +1622,15 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         if (stream->returnLogits()) {
             update_info.target_logits = prefill_output.model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
         }
+        if (stream->generateConfig()->return_all_probs != ReturnAllProbsMode::NONE) {
+            const auto& response_probs = stream->generateConfig()->return_all_probs == ReturnAllProbsMode::ORIGINAL ?
+                                             sampler_output.original_all_probs :
+                                             sampler_output.all_probs;
+            RTP_LLM_CHECK_WITH_INFO(response_probs.defined() && response_probs.dim() == 2,
+                                    "MTP prefill target probabilities must be [batch, vocab]");
+            update_info.all_probs =
+                response_probs.narrow(0, batch_idx_out, next_batch_size).unsqueeze(1).cpu();
+        }
         spec_update_infos.push_back(std::move(update_info));
 
         batch_idx_in += cur_batch_size;
@@ -1670,6 +1682,14 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
         StreamSpecUpdateInfo spec_update_info{
             accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        if (stream->generateConfig()->return_all_probs != ReturnAllProbsMode::NONE) {
+            RTP_LLM_CHECK_WITH_INFO(spec_decode_output.target_probs_cpu.defined()
+                                        && spec_decode_output.target_probs_cpu.dim() == 3
+                                        && spec_decode_output.target_probs_cpu.size(1) >= cur_accept_len,
+                                    "MTP decode target probabilities must cover every accepted token");
+            spec_update_info.all_probs = spec_decode_output.target_probs_cpu.narrow(0, batch_idx_out, next_batch_size)
+                                             .narrow(1, 0, cur_accept_len);
+        }
         spec_update_info.speculative_propose_step = propose_step_;
         spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
         if (stream->generateConfig()->return_hidden_states && spec_decode_output.target_hidden_states.defined()) {

@@ -62,7 +62,12 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
     def test_four_layer_cache_pressure_can_fill_its_device_pool(self):
         smoke = runner()
         smoke._orthogonal_device_blocks = lambda: 69
-        smoke.fit_prompt = lambda head, tail, target: (head + tail, [1] * target)
+
+        def fit_prompt(head, tail, target, *, enable_thinking=None):
+            self.assertIs(enable_thinking, False)
+            return head + tail, [1] * target
+
+        smoke.fit_prompt = fit_prompt
         stages = []
         smoke._required_stage = lambda name, cases: stages.append((name, cases))
         smoke._orthogonal_bounded_cache_pressure()
@@ -272,7 +277,8 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         smoke.args.reuse_unit_tokens = 4096
         targets = []
 
-        def fit_prompt(prefix, suffix, target):
+        def fit_prompt(prefix, suffix, target, *, enable_thinking=None):
+            self.assertIs(enable_thinking, False)
             targets.append(target)
             return prefix + suffix, [0] * target
 
@@ -288,7 +294,8 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
         smoke = runner()
         targets = []
 
-        def fit_prompt(head, tail, target):
+        def fit_prompt(head, tail, target, *, enable_thinking=None):
+            self.assertIs(enable_thinking, False)
             targets.append(target)
             return head + tail, [0] * target
 
@@ -302,7 +309,12 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
 
     def test_cache_probe_rejects_missing_host_hit_without_extra_pressure(self):
         smoke = runner()
-        smoke.fit_prompt = lambda head, tail, target: (head + tail, [0] * target)
+
+        def fit_prompt(head, tail, target, *, enable_thinking=None):
+            self.assertIs(enable_thinking, False)
+            return head + tail, [0] * target
+
+        smoke.fit_prompt = fit_prompt
         names = []
 
         def stage(name, cases, concurrent=False):
@@ -336,15 +348,18 @@ class OrthogonalSmokeOfflineTest(unittest.TestCase):
             def __len__(self):
                 return self.count
 
-        smoke.tokenize = lambda prompt: Tokens(
-            27 + prompt.count(" x") + prompt.count(" z")
-        )
+        def tokenize(prompt, *, enable_thinking=None):
+            self.assertIs(enable_thinking, False)
+            return Tokens(27 + prompt.count(" x") + prompt.count(" z"))
+
+        smoke.tokenize = tokenize
         calls = []
 
         def stage(name, cases, concurrent=False):
             case = cases[0]
             calls.append(case)
-            length = len(smoke.tokenize(case.prompt))
+            self.assertTrue(case.preparation_only or case.thinking_disabled)
+            length = len(smoke.tokenize(case.prompt, enable_thinking=False))
             reuse = 0 if len(calls) == 1 else ((length - 32740) // 32768) * 32768
             if name == "orthogonal_kv_final":
                 reuse = 589_824

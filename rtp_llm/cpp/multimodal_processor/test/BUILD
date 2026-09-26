@@ -21,7 +21,10 @@ cc_binary(
     name = "kimi_k3_feature_expand_check",
     srcs = ["KimiK3FeatureExpandCheck.cc"],
     copts = test_copts,
-    visibility = ["//rtp_llm/test:__pkg__"],
+    visibility = [
+        "//rtp_llm/dash_sc/test:__pkg__",
+        "//rtp_llm/test:__pkg__",
+    ],
     deps = torch_deps() + [
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",

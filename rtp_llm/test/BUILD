@@ -170,6 +170,16 @@ py_test(
 )
 
 py_test(
+    name = "mtp_logprobs_renderer_test",
+    srcs = ["mtp_logprobs_renderer_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_test(
     name = "kimi_k3_renderer_test",
     srcs = ["kimi_k3_renderer_test.py"],
     data = ["//rtp_llm:sdk"],
@@ -179,6 +189,14 @@ py_test(
 py_test(
     name = "kimi_k3_native_tokenizer_smoke_test",
     srcs = ["kimi_k3_native_tokenizer_smoke_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "kimi_k3_http_checkpoint_smoke_test",
+    srcs = ["kimi_k3_http_checkpoint_smoke_test.py"],
+    data = ["//rtp_llm/cpp/multimodal_processor/test:kimi_k3_feature_expand_check"],
     deps = ["//rtp_llm:testlib"],
     tags = ["manual"],
 )

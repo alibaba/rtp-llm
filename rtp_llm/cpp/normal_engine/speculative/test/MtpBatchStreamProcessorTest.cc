@@ -412,7 +412,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     stream2->generateConfig()->is_streaming         = true;
     stream1->generateConfig()->return_logits        = true;
     stream1->generateConfig()->return_hidden_states = true;
-    auto stream_groups                              = StreamGroups({stream1, stream2});
+    stream1->generateConfig()->return_all_probs     = ReturnAllProbsMode::DEFAULT;
+    stream1->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
+    stream2->setReturnAllProbs(ReturnAllProbsMode::NONE);
+    auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
     spec_decode_output.accept_len_cpu    = torch::tensor({5, 1}, torch::kInt32);
@@ -424,6 +427,15 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
         torch::tensor({8.0f, 7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f}).reshape({2, 4}).to(torch::kCUDA);
     spec_decode_output.target_hidden_states =
         torch::tensor({90.0f, 91.0f, 80.0f, 81.0f}).reshape({2, 2}).to(torch::kCUDA);
+    // The sampler publishes one target distribution per verify row. The first
+    // four rows select the accepted draft tokens; the final bonus row is flat.
+    spec_decode_output.target_probs_cpu =
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 0.0f, 1.0f, 0.25f, 0.25f, 0.25f, 0.25f,
+                       0.0f, 0.0f, 1.0f, 0.0f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f,
+                       0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f},
+                      torch::kFloat32)
+            .reshape({2, 5, 4});
     spec_decode_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 
     MergedOutput draft_prefill_output;
@@ -450,11 +462,17 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     ASSERT_TRUE(first.hidden_states.has_value());
     EXPECT_EQ(toVec<float>(*first.logits), (std::vector<float>{8, 7, 6, 5}));
     EXPECT_EQ(toVec<float>(*first.hidden_states), (std::vector<float>{90, 91}));
+    const auto& first_probs = first.aux_info.all_probs;
+    ASSERT_TRUE(first_probs.has_value());
+    ASSERT_EQ(first_probs->sizes().vec(), (std::vector<int64_t>{1, 5, 4}));
+    EXPECT_EQ(toVec<float>(*first_probs),
+              (std::vector<float>{0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, .25f, .25f, .25f, .25f}));
     auto output2 = stream2->nextOutput(100);
     ASSERT_TRUE(output2.ok());
     ASSERT_EQ(output2.value().generate_outputs.size(), 1u);
     EXPECT_FALSE(output2.value().generate_outputs[0].logits.has_value());
     EXPECT_FALSE(output2.value().generate_outputs[0].hidden_states.has_value());
+    EXPECT_FALSE(output2.value().generate_outputs[0].aux_info.all_probs.has_value());
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.

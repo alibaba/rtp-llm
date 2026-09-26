@@ -304,7 +304,6 @@ class _KimiK3StreamStatus(StreamStatus):
     def __init__(self, request: ChatCompletionRequest, *, thinking: bool):
         super().__init__(request)
         self.xtml_decoder = K3XtmlDecoder(thinking, request)
-        self.pending_token_probs: List[tuple[int, torch.Tensor]] = []
 
 
 class KimiK3Renderer(CustomChatRenderer):
@@ -672,7 +671,17 @@ class KimiK3Renderer(CustomChatRenderer):
         async for response in super().render_response_stream(
             output_generator, request, generate_config
         ):
-            if not generate_config.is_streaming:
+            # logprobs can require incremental backend output for an HTTP
+            # request whose response is still non-streaming. Split only the
+            # externally streamed response; the collector needs its usage.
+            if not request.stream:
+                if isinstance(response, _K3StreamResponseObject):
+                    for choice in response.choices:
+                        content_logprobs = response.channel_logprobs.get(
+                            choice.index, {}
+                        ).get("content")
+                        if content_logprobs:
+                            choice.logprobs = ChoiceLogprobs(content=content_logprobs)
                 yield response
                 continue
             for split_response in self._format_stream_frames(
@@ -875,16 +884,6 @@ class KimiK3Renderer(CustomChatRenderer):
         stop_word_slice_list: List[str],
         is_streaming: bool,
     ) -> OutputDelta:
-        if isinstance(status, _KimiK3StreamStatus) and status.request.logprobs:
-            token_ids = output.output_ids
-            all_probs = output.all_probs
-            if token_ids is None or all_probs is None:
-                raise ValueError("K3 logprobs require token IDs and target probabilities")
-            rows = all_probs.reshape(-1, all_probs.shape[-1])
-            ids = token_ids.reshape(-1).tolist()
-            if rows.shape[0] != len(ids):
-                raise ValueError("K3 target probability rows must match output tokens")
-            status.pending_token_probs.extend(zip(ids, rows.unbind(0)))
         delta = await super()._update_single_status(
             status,
             output,
