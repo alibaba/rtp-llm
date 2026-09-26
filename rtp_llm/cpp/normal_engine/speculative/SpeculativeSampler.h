@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vector>
 #include "absl/status/statusor.h"
 #include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -19,6 +20,9 @@ public:
 
     torch::Tensor accept_tokens_cpu;
     torch::Tensor accept_len_cpu;
+    // [stream, verify_row, vocab] target probabilities for client output.
+    // Draft probabilities remain private to rejection sampling.
+    torch::Tensor target_probs_cpu;
 
     std::shared_ptr<torch::Event> transfer_done_event;
 
@@ -61,6 +65,11 @@ public:
                                     const torch::Tensor& markov_w1,
                                     const torch::Tensor& markov_w2,
                                     size_t               draft_vocab_size) const;
+
+    // Return one target distribution per verify row, selected by request mode.
+    // Rejection sampling continues to use SamplerOutput::all_probs unchanged.
+    static torch::Tensor targetResponseProbabilities(const std::vector<ReturnAllProbsMode>& modes,
+                                                     const SamplerOutput&                    target_sampler_output);
 
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,

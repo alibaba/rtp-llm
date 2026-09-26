@@ -191,6 +191,40 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
               "replayed");
 }
 
+TEST_F(GenerateStreamTest, speculativeProbabilitiesStopAtCommittedTokenBoundary) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createComplexContextStream({1});
+    stream->generateConfig()->num_return_sequences = 1;
+    stream->generateConfig()->max_new_tokens   = 1;
+    stream->generateConfig()->is_streaming     = true;
+    stream->generateConfig()->aux_info         = true;
+    stream->generateConfig()->return_all_probs = ReturnAllProbsMode::DEFAULT;
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+
+    // The target verified two tokens, but the request may commit only one.
+    auto tokens = torch::tensor({{7, 8}}, torch::kInt32);
+    auto probs  = torch::tensor({0.1f, 0.7f, 0.1f, 0.1f, 0.1f, 0.1f, 0.7f, 0.1f}).reshape({1, 2, 4});
+    stream->update({tokens,
+                    2,
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    probs,
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor()});
+
+    auto output_result = stream->nextOutput(100);
+    ASSERT_TRUE(output_result.ok());
+    const auto& output = output_result.value().generate_outputs[0];
+    ASSERT_EQ(output.output_ids.sizes().vec(), (std::vector<int64_t>{1, 1}));
+    ASSERT_TRUE(output.aux_info.all_probs.has_value());
+    EXPECT_EQ(output.aux_info.all_probs->sizes().vec(), (std::vector<int64_t>{1, 1, 4}));
+    EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, probs.narrow(1, 0, 1)));
+}
+
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
     auto builder                                             = GenerateStreamBuilder();
     auto stream                                              = builder.createContextStream({1, 2, 3});

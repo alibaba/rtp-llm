@@ -302,6 +302,9 @@ struct GreedyParams {
 
     std::vector<at::Generator> generator;
     GreedySamplingBuffers*     sampling_buffers = nullptr;
+    // Keep the normalized, unfiltered logits available for MTP responses.
+    // In particular, the top-k=1 fast path must run softmax when this is set.
+    bool capture_original_probs = false;
 };
 
 struct GreedyOutput {

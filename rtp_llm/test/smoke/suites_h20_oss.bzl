@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "REMOTE_CACHE_DEVICE_STORE_ARGS")
 
 def h20_oss_suites():
@@ -291,6 +291,35 @@ def h20_oss_suites():
     )
 
 
+    # Manual regression for a Qwen3.5 MTP true-prefix-reuse difference.
+    # Keep it runnable while the model/cache numerical boundary is investigated.
+    custom_smoke_test(
+        name="next_mtp_true_reuse",
+        main="qwen35_reuse_semantic_test.py",
+        smoke_args="--act_type BF16 --seq_size_per_block 128 --enable_device_cache 1 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --reuse_cache 1",
+        data=[
+            "//rtp_llm:sdk",
+            ":smoke_framework_srcs",
+            "data/model/qwen3_next/q_r_next_fp8_tp2_mtp_reuse_cache.json",
+        ],
+        deps=["//rtp_llm:transformers"],
+        gpu_type=["H20"],
+    )
+
+    # Run the same prompt and cache assertions without speculative decoding.
+    custom_smoke_test(
+        name="next_plain_true_reuse",
+        main="qwen35_reuse_semantic_test.py",
+        smoke_args="--act_type BF16 --seq_size_per_block 128 --enable_device_cache 1 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --reuse_cache 1",
+        data=[
+            "//rtp_llm:sdk",
+            ":smoke_framework_srcs",
+            "data/model/qwen3_next/q_r_next_fp8_tp2_mtp_reuse_cache.json",
+        ],
+        deps=["//rtp_llm:transformers"],
+        gpu_type=["H20"],
+    )
+
     # H20 Qwen3.5/Next
     native.test_suite(
         name = "smoke_h20_next",
@@ -314,12 +343,13 @@ def h20_oss_suites():
                 envs=["ACCL_LOW_LATENCY_OPTIMIZE=1"],
                 gpu_type=["H20"],
             ),
+            # Qwen3.5 FP8 MoE has no SM90 CUDA graph strategy; exercise PD reuse with pure TP.
             smoke_test(
                 name="next_mtp_pd_reuse",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp_pd.json",
                 smoke_args= {
-                    "prefill": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --reuse_cache 1",
-                    "decode": "--load_cache_timeout_ms 120000 --act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --concurrency_limit 4 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4' --use_deepep_moe 1 --use_deepep_low_latency 1 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1"
+                    "prefill": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ep_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --reuse_cache 1",
+                    "decode": "--load_cache_timeout_ms 120000 --act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ep_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --concurrency_limit 4 --enable_cuda_graph 0 --decode_capture_config '1,2,3,4' --use_deepep_moe 0 --use_deepep_low_latency 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1"
                 },
                 gpu_type=["H20"],
             ),
