@@ -121,6 +121,35 @@ def launch_config(args):
         "THINK_START_TAG": "<|open|>think<|sep|>",
         "THINK_END_TAG": "<|close|>think<|sep|><|open|>response<|sep|>",
         "REMOTE_RPC_SERVER_IP": f"{args.peer_ip}:{args.peer_port + 1}",
+        "MODEL_SERVICE_CONFIG": json.dumps(
+            {
+                "service_id": "kimi-k3-smoke",
+                "use_local": True,
+                "role_endpoints": [
+                    {
+                        "group": "smoke",
+                        **{
+                            f"{role}_endpoint": {
+                                "type": role,
+                                "address": address,
+                                "protocol": "http",
+                                "path": "",
+                            }
+                            for role, address in (
+                                (
+                                    args.role.lower(),
+                                    f"{local_ip}:{args.start_port}",
+                                ),
+                                (
+                                    "decode" if args.role == "PREFILL" else "prefill",
+                                    f"{args.peer_ip}:{args.peer_port}",
+                                ),
+                            )
+                        },
+                    }
+                ],
+            }
+        ),
         "NO_PROXY": no_proxy,
         "no_proxy": no_proxy,
     }
