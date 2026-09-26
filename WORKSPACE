@@ -35,6 +35,12 @@ local_repository(
     path = "deps",
 )
 
+# Keep Python locks independent of a reused external rtp_deps repository.
+local_repository(
+    name = "rtp_deps_k3",
+    path = "deps",
+)
+
 local_repository(
     name = "arch_config",
     path = "arch_config",
@@ -60,7 +66,7 @@ load("@rules_python//python:repositories.bzl", "py_repositories")
 
 py_repositories()
 
-load("@rtp_deps//:pip.bzl", "pip_deps")
+load("@rtp_deps_k3//:pip.bzl", "pip_deps")
 
 pip_deps()
 

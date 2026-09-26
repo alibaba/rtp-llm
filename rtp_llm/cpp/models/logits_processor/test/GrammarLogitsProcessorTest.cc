@@ -129,6 +129,15 @@ std::string makeReasoningStructuralTagWithTokenEnd(int budget, int end_token_id)
            + R"(}},{"type":"regex","pattern":"a"}]}})";
 }
 
+constexpr char kK3ThinkToResponse[] = "<|close|>think<|sep|><|open|>response<|sep|>";
+
+std::string makeK3ReasoningStructuralTag(int budget) {
+    return R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
+           R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":)"
+           + std::to_string(budget) + R"(},"end":")" + kK3ThinkToResponse
+           + R"("},{"type":"regex","pattern":"a"}]}})";
+}
+
 std::string makeUnboundedAnyTextStructuralTag() {
     return R"({"type":"structural_tag","format":{"type":"any_text"}})";
 }
@@ -789,6 +798,111 @@ TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesTokenEndAndFi
 
     EXPECT_EQ(proc->committedOutputLen().value(), 0);
     EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
+}
+
+TEST(GrammarLogitsProcessorTest, K3ThinkingBudgetForcesFullXtmlTransitionBeforeFinalGrammar) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    auto proc = makeProcessorFromKey(backend, {"structural_tag", makeK3ReasoningStructuralTag(/*budget=*/1)});
+    ASSERT_TRUE(proc.proc);
+
+    auto reasoning_logits = torch::zeros({1, 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    ASSERT_FALSE(proc->process(makeSamplerInputs(reasoning_logits), 0, 1).has_value());
+    EXPECT_FLOAT_EQ(logitsVec(reasoning_logits)[kX], 0.0f);
+    expectTokenMasked(logitsVec(reasoning_logits), kEos);
+
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({kX}, torch::kInt32).reshape({1, 1}), 1).has_value());
+
+    // Speculative verification must see each character of the boundary, but
+    // leave the committed matcher at the preceding reasoning token.
+    constexpr int propose_step = 2;
+    const size_t  words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    std::vector<int32_t> bitmask(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{'<', '|'};
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = propose_step;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = words;
+    request.vocab_size         = 128;
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), propose_step);
+    EXPECT_TRUE(rowAllows(bitmask, words, 0, '<'));
+    EXPECT_TRUE(rowAllows(bitmask, words, 1, '|'));
+    EXPECT_TRUE(rowAllows(bitmask, words, 2, 'c'));
+    EXPECT_FALSE(rowAllows(bitmask, words, 0, kEos));
+    EXPECT_FALSE(rowAllows(bitmask, words, 1, kEos));
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 1);
+
+    for (const char token : std::string(kK3ThinkToResponse)) {
+        auto logits = torch::zeros({1, 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+        const auto values = logitsVec(logits);
+        expectTokenAllowed(values, static_cast<unsigned char>(token));
+        expectTokenMasked(values, kX);
+        expectTokenMasked(values, kEos);
+        ASSERT_FALSE(proc->updateStatus(
+            torch::tensor({static_cast<int32_t>(token)}, torch::kInt32).reshape({1, 1}), 1).has_value());
+    }
+
+    auto final_logits = torch::zeros({1, 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    ASSERT_FALSE(proc->process(makeSamplerInputs(final_logits), 0, 1).has_value());
+    expectTokenAllowed(logitsVec(final_logits), kA);
+    expectTokenMasked(logitsVec(final_logits), kX);
+    expectTokenMasked(logitsVec(final_logits), kEos);
+}
+
+TEST(GrammarLogitsProcessorTest, K3SpeculativeFullXtmlTransitionMatchesSequentialCommit) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    auto speculative = makeProcessorFromKey(backend, {"structural_tag", makeK3ReasoningStructuralTag(/*budget=*/1)});
+    auto sequential  = makeProcessorFromKey(backend, {"structural_tag", makeK3ReasoningStructuralTag(/*budget=*/1)});
+    ASSERT_TRUE(speculative.proc);
+    ASSERT_TRUE(sequential.proc);
+
+    const auto think_token = torch::tensor({kX}, torch::kInt32).reshape({1, 1});
+    ASSERT_FALSE(speculative->updateStatus(think_token, 1).has_value());
+    ASSERT_FALSE(sequential->updateStatus(think_token, 1).has_value());
+
+    std::vector<int32_t> proposal;
+    for (const unsigned char token : std::string(kK3ThinkToResponse)) {
+        proposal.push_back(token);
+    }
+    proposal.push_back(kA);
+    const int    propose_step = static_cast<int>(proposal.size());
+    const size_t words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    std::vector<int32_t> bitmask(static_cast<size_t>(propose_step + 1) * words, 0);
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = proposal.data();
+    request.propose_step       = propose_step;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = words;
+    request.vocab_size         = 128;
+
+    EXPECT_EQ(expectCapOk(speculative->prepareSpeculative(request)), propose_step);
+    for (int row = 0; row < propose_step; ++row) {
+        EXPECT_TRUE(rowAllows(bitmask, words, row, proposal[row])) << "proposal row " << row;
+        EXPECT_FALSE(rowAllows(bitmask, words, row, kEos)) << "EOS before final grammar token at row " << row;
+    }
+    EXPECT_TRUE(rowAllows(bitmask, words, propose_step, kEos));
+    EXPECT_FALSE(rowAllows(bitmask, words, propose_step, kX));
+    EXPECT_EQ(speculative.matcher->numAcceptedTokens(), 1) << "proposal must not commit matcher state";
+
+    auto committed = torch::tensor(proposal, torch::kInt32).reshape({1, propose_step});
+    ASSERT_FALSE(speculative->updateStatus(committed, propose_step).has_value());
+    for (int32_t token : proposal) {
+        ASSERT_FALSE(sequential->updateStatus(torch::tensor({token}, torch::kInt32).reshape({1, 1}), 1).has_value());
+    }
+
+    EXPECT_EQ(speculative->committedOutputLen(), sequential->committedOutputLen());
+    EXPECT_EQ(speculative.matcher->numAcceptedTokens(), sequential.matcher->numAcceptedTokens());
+    auto speculative_logits =
+        torch::zeros({1, 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto sequential_logits  = torch::zeros_like(speculative_logits);
+    ASSERT_FALSE(speculative->process(makeSamplerInputs(speculative_logits), 0, 1).has_value());
+    ASSERT_FALSE(sequential->process(makeSamplerInputs(sequential_logits), 0, 1).has_value());
+    EXPECT_EQ(logitsVec(speculative_logits), logitsVec(sequential_logits));
+    expectTokenAllowed(logitsVec(speculative_logits), kEos);
+    expectTokenMasked(logitsVec(speculative_logits), kX);
 }
 
 }  // namespace rtp_llm
