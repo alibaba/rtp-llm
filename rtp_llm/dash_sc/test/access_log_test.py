@@ -745,6 +745,28 @@ class EmitLogTest(TestCase):
         self.assertIn("ts", parsed)
         self.assertIn("method", parsed)
 
+    def test_access_log_serializes_explicit_sampling_fields(self) -> None:
+        rec = _make_record()
+        rec.capture_structured_request(
+            _make_infer_request(
+                input_ids=[10],
+                sampling={"max_new_tokens": 32, "top_logprobs": 3},
+            )
+        )
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info:
+            emit_access_log(rec, rank_id=0, server_id=1)
+
+        self.assertEqual(info.call_count, 1)
+        parsed = json.loads(info.call_args.args[0])
+        self.assertEqual(
+            parsed["generate_config"]["specified_fields"],
+            ["max_new_tokens", "top_logprobs"],
+        )
+
     def test_invalid_aux_info_does_not_drop_access_log(self) -> None:
         rec = _make_record()
         rec.record_aux_info({"invalid": object()})

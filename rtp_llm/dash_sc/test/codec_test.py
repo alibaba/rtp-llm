@@ -596,6 +596,7 @@ class DashScGrpcRequestTest(TestCase):
         req.parameters["max_completion_tokens"].int64_param = 100
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, 100)
+        self.assertIn("max_new_tokens", sp.specified_fields)
         self.assertTrue(sp.max_new_tokens_from_completion_alias)
         self.assertEqual(sp.max_total_tokens, 200)
 
@@ -603,7 +604,13 @@ class DashScGrpcRequestTest(TestCase):
         req.parameters["max_tokens"].int64_param = 64
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, 64)
+        self.assertIn("max_new_tokens", sp.specified_fields)
         self.assertFalse(sp.max_new_tokens_from_completion_alias)
+
+        req = predict_v2_pb2.ModelInferRequest()
+        sp = parse_sampling_params(req)
+        self.assertEqual(sp.max_new_tokens, 32000)
+        self.assertNotIn("max_new_tokens", sp.specified_fields)
 
     def test_parse_sampling_top_p_as_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()

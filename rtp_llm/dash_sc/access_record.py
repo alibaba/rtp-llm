@@ -399,6 +399,7 @@ def _sampling_to_dict(sampling: SamplingParams) -> dict[str, Any]:
     swl = d.get("stop_words_list")
     if swl is not None:
         d["stop_words_list"] = [list(group) for group in swl]
+    d["specified_fields"] = sorted(sampling.specified_fields)
     return d
 
 

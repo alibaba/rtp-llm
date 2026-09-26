@@ -18,6 +18,7 @@ class ReasoningFormat:
     tag_end: Union[str, List[str], Dict[str, Any]]
     suffix: str = ""
     no_think_excludes: Tuple[str, ...] = ()
+    tag_end_native_encoding: bool = False
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":

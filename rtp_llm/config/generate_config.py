@@ -675,11 +675,35 @@ class GenerateConfig(BaseModel):
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
         )
-        if enable_thinking and tokenizer is not None and end_think_token_id == -1:
+        if (
+            enable_thinking
+            and tokenizer is not None
+            and end_think_token_id == -1
+            and not (
+                reasoning_format is not None
+                and reasoning_format.tag_end_native_encoding
+            )
+        ):
             think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
             self.end_think_token_ids = tokenizer.encode(
                 think_end_tag, add_special_tokens=False
             )
+        if enable_thinking and reasoning_format is not None:
+            # A renderer may use a model-specific transition instead of the
+            # deployment's generic </think> marker (for example K3 XTML).
+            if isinstance(reasoning_format.tag_end, str) and tokenizer is not None:
+                if reasoning_format.tag_end_native_encoding:
+                    self.end_think_token_ids = tokenizer.encode(
+                        reasoning_format.tag_end
+                    )
+                else:
+                    self.end_think_token_ids = tokenizer.encode(
+                        reasoning_format.tag_end, add_special_tokens=False
+                    )
+            elif isinstance(reasoning_format.tag_end, dict) and reasoning_format.tag_end.get(
+                "type"
+            ) == "token":
+                self.end_think_token_ids = [int(reasoning_format.tag_end["token"])]
         self.in_think_mode = bool(enable_thinking)
         self.thinking_mode = (
             ThinkingMode.ENABLED if self.in_think_mode else ThinkingMode.DISABLED
