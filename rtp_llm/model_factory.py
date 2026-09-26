@@ -49,6 +49,25 @@ class ModelFactory:
             return json.loads(text)
 
     @staticmethod
+    def _configure_kimi_k3_multimodal(model_config: ModelConfig) -> None:
+        if model_config.model_type != "kimi_k3":
+            return
+        # The text-model class may already have populated the vision fields.
+        # Keep that configuration; otherwise bind the checkpoint's image
+        # contract before the frontend and ViT process receive ModelConfig.
+        mm_config = model_config.mm_related_params.config or {}
+        if "media_proc_cfg" in mm_config:
+            return
+
+        from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_config import (
+            configure_kimi_k3_multimodal,
+        )
+
+        configure_kimi_k3_multimodal(
+            model_config, ModelFactory.get_config_json(model_config.ckpt_path)
+        )
+
+    @staticmethod
     def get_weight_cls(model_type: str):
         global _model_factory
         if not ensure_model_registered(model_type):
@@ -369,6 +388,7 @@ class ModelFactory:
             quantization_config=quantization_config,
             vit_config=vit_config,
         )
+        ModelFactory._configure_kimi_k3_multimodal(model_config)
         model_cls._apply_kv_cache_config(model_config, kv_cache_config)
         model_cls._post_build_model_config(model_config)
 
