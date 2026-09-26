@@ -259,8 +259,13 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
+            // A URL-only input has no inline bytes. Preserve an actual tensor
+            // when supplied by a direct RPC caller.
+            auto mm_tensor = mm_input->multimodal_tensor().shape_size() > 0
+                                 ? transTensor(mm_input->multimodal_tensor())
+                                 : torch::empty({0}, torch::kUInt8);
             mm_inputs.emplace_back(mm_input->multimodal_url(),
-                                   torch::empty(1),
+                                   std::move(mm_tensor),
                                    mm_input->multimodal_type(),
                                    mm_preprocess_config->width(),
                                    mm_preprocess_config->height(),

@@ -184,6 +184,41 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_multimodal_test",
+    srcs = ["kimi_k3_multimodal_test.py"],
+    data = ["testdata/kimi_k3/preprocessor_config.json"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_multimodal_checkpoint_smoke_test",
+    srcs = ["kimi_k3_multimodal_checkpoint_smoke_test.py"],
+    data = ["//rtp_llm/cpp/multimodal_processor/test:kimi_k3_feature_expand_check"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "kimi_k3_rope_test",
+    srcs = ["kimi_k3_rope_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_rope_microbenchmark",
+    srcs = ["kimi_k3_rope_microbenchmark.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "kimi_k3_batch_vit_microbenchmark",
+    srcs = ["kimi_k3_batch_vit_microbenchmark.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

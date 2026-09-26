@@ -35,6 +35,12 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
             element_size = sizeof(c10::BFloat16);
             break;
         }
+        case TensorPB::UINT8: {
+            payload      = &tensor_pb.uint8_data();
+            scalar_type  = torch::kUInt8;
+            element_size = sizeof(uint8_t);
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported data type.");
     }
@@ -80,6 +86,9 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
         case torch::kBFloat16:
             tensor_pb->set_data_type(TensorPB::BF16);
             break;
+        case torch::kUInt8:
+            tensor_pb->set_data_type(TensorPB::UINT8);
+            break;
         default:
             throw std::runtime_error("Unsupported tensor data type.");
     }
@@ -111,6 +120,12 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(c10::BFloat16);
             const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
             tensor_pb->set_bf16_data(data_ptr, num_bytes);
+            break;
+        }
+        case torch::kUInt8: {
+            size_t      num_bytes = contiguous_tensor.numel() * sizeof(uint8_t);
+            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
+            tensor_pb->set_uint8_data(data_ptr, num_bytes);
             break;
         }
         default:

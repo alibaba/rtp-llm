@@ -3,6 +3,7 @@ import json
 import struct
 import sys
 from enum import Enum
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -73,8 +74,10 @@ from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
+    MMUrlType,
     RequestInfo,
 )
+from rtp_llm.utils.grpc_util import trans_tensor
 
 
 class FakeStub:
@@ -208,6 +211,48 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_multimodal_rpc_preserves_url_only_and_inline_image_bytes(self):
+        def mm_input(url, tensor):
+            return SimpleNamespace(
+                url=url,
+                mm_type=MMUrlType.IMAGE,
+                tensor=tensor,
+                mm_preprocess_config=SimpleNamespace(
+                    width=-1,
+                    height=-1,
+                    min_pixels=-1,
+                    max_pixels=-1,
+                    fps=-1,
+                    min_frames=-1,
+                    max_frames=-1,
+                    crop_positions=[],
+                    mm_timeout_ms=-1,
+                ),
+            )
+
+        image_header = torch.tensor([137, 80, 78, 71], dtype=torch.uint8)
+        input_pb = trans_input(
+            GenerateInput(
+                request_id=123,
+                token_ids=torch.tensor([1, 2, 3]),
+                mm_inputs=[
+                    mm_input("data:image/png;base64,iVBORw0KGgo=", torch.empty(0)),
+                    mm_input("", image_header),
+                ],
+                generate_config=GenerateConfig(),
+            )
+        )
+
+        url_pb, inline_pb = input_pb.multimodal_inputs
+        self.assertFalse(url_pb.HasField("multimodal_tensor"))
+        self.assertEqual(
+            inline_pb.multimodal_tensor.data_type, TensorPB.DataType.UINT8
+        )
+        self.assertEqual(inline_pb.multimodal_tensor.uint8_data, b"\x89PNG")
+        torch.testing.assert_close(
+            trans_tensor(inline_pb.multimodal_tensor), image_header
+        )
 
     def test_trans_input_serializes_typed_request_info(self):
         input_py = GenerateInput(

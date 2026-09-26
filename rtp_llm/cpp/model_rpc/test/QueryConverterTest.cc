@@ -19,6 +19,29 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, MultimodalInputPreservesUrlOnlyAndInlineBytes) {
+    GenerateInputPB input;
+    input.add_token_ids(1);
+    auto* url_input = input.add_multimodal_inputs();
+    url_input->set_multimodal_url("data:image/png;base64,iVBORw0KGgo=");
+    url_input->set_multimodal_type(1);
+    auto* inline_input = input.add_multimodal_inputs();
+    inline_input->set_multimodal_type(1);
+    const auto image_header = torch::tensor({137, 80, 78, 71}, torch::TensorOptions().dtype(torch::kUInt8));
+    QueryConverter::transTensorPB(inline_input->mutable_multimodal_tensor(), image_header);
+
+    auto converted = QueryConverter::transQuery(&input);
+    ASSERT_TRUE(converted->multimodal_inputs.has_value());
+    ASSERT_EQ(converted->multimodal_inputs->size(), 2);
+    const auto& url_result = converted->multimodal_inputs->at(0);
+    EXPECT_EQ(url_result.url, url_input->multimodal_url());
+    EXPECT_EQ(url_result.tensor.numel(), 0);
+    const auto& inline_result = converted->multimodal_inputs->at(1);
+    ASSERT_EQ(inline_result.tensor.scalar_type(), torch::kUInt8);
+    ASSERT_EQ(inline_result.tensor.sizes(), image_header.sizes());
+    EXPECT_TRUE(torch::equal(inline_result.tensor, image_header));
+}
+
 TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_TRUE(GenerateConfig().enable_disk_cache);
 

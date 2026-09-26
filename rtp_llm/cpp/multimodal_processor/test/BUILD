@@ -17,6 +17,18 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_binary(
+    name = "kimi_k3_feature_expand_check",
+    srcs = ["KimiK3FeatureExpandCheck.cc"],
+    copts = test_copts,
+    visibility = ["//rtp_llm/test:__pkg__"],
+    deps = torch_deps() + [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+    ],
+)
+
+
 cc_test(
     name = "multimodal_processor_test",
     srcs = glob([
@@ -25,20 +37,20 @@ cc_test(
     ]),
     copts = test_copts,
     deps = torch_deps() + [
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/testing:device_test_utils",
+
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
+        "//rtp_llm/cpp/config:config_modules",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {'gpu':'A10'},
 )
 
 # Ingress ownership / processor-kind decision table. Depends on the lean mm_processor_config
@@ -71,16 +83,15 @@ cc_test(
         "//rtp_llm/cpp/multimodal_processor/transport:mm_remote_output_transport_core",
         "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_transport",
         "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
-        "//rtp_llm/cpp/rdma_transport",
+        "//rtp_llm/cpp/rdma_transport:rdma_transport",
         # Building inline receipts for the real terminal. Lean target, no engine behind it.
         "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
-    tags = ["A10_CU13"],
+    exec_properties = {'gpu':'A10'},
 )
 
 # ViT output RDMA slot planning + manifest reassembly, driven by a fake transport and CPU tensors.
@@ -92,16 +103,15 @@ cc_test(
     copts = test_copts,
     deps = torch_deps() + cuda13_torch_link_deps + [
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_exporter",
-        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
-        "//rtp_llm/cpp/rdma_transport",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
+        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_exporter",
+        "//rtp_llm/cpp/rdma_transport:rdma_transport",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
-    tags = ["A10_CU13"],
+    exec_properties = {'gpu':'A10'},
 )
