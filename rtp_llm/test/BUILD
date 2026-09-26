@@ -94,6 +94,26 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_request_contract_test",
+    srcs = ["kimi_k3_request_contract_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_renderer_test",
+    srcs = ["kimi_k3_renderer_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_native_tokenizer_smoke_test",
+    srcs = ["kimi_k3_native_tokenizer_smoke_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

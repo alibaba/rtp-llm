@@ -71,6 +71,7 @@ from rtp_llm.dash_sc.codec import (
     parse_dash_sc_grpc_request,
     parse_ds_header_attributes,
     parse_multimodal_parts_from_request,
+    parse_messages_from_request,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -88,6 +89,11 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
+    apply_kimi_k3_request_contract,
+    kimi_k3_pending_prompt_token_count,
+    validate_kimi_k3_tool_history,
+)
 from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
@@ -102,6 +108,7 @@ from rtp_llm.telemetry.tracing import (
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
+    MMUrlType,
     RequestInfo,
 )
 from rtp_llm.utils.util import AtomicCounter
@@ -135,6 +142,38 @@ _DASH_SERVER_ATTRIBUTES = {
     "rpc.system": "grpc",
     "rpc.method": _DASH_RPC_METHOD,
 }
+_K3_IMAGE_PLACEHOLDER = "<|kimi_image_placeholder|>"
+_K3_MEDIA_PAD = "<|media_pad|>"
+_K3_MEDIA_BEGIN = "<|media_begin|>"
+_K3_MEDIA_END = "<|media_end|>"
+_K3_THINK_TO_RESPONSE = "<|close|>think<|sep|><|open|>response<|sep|>"
+
+
+def _resolve_k3_dash_sc_thinking(
+    sampling: SamplingParams,
+    request_controls: DashScRequestControls,
+    generate_config: GenerateConfig,
+) -> bool:
+    """Apply K3's explicit thinking controls before its structured-output default."""
+    if (
+        request_controls.enable_thinking is False
+        or sampling.max_new_think_tokens == 0
+        or request_controls.max_new_think_tokens == 0
+    ):
+        return False
+    if (
+        request_controls.enable_thinking is True
+        or sampling.max_new_think_tokens is not None
+        or request_controls.max_new_think_tokens is not None
+        or request_controls.reasoning_effort is not None
+    ):
+        return True
+    response_format = generate_config.response_format
+    if response_format is not None and response_format.type != "text":
+        return False
+    if sampling.json_format or generate_config.structural_tag is not None:
+        return False
+    return True
 
 
 def _build_mm_inputs_from_request(
@@ -162,6 +201,99 @@ def _build_mm_inputs_from_request(
         )
         for part in parts
     ]
+
+
+def _k3_token_ids(tokenizer: BaseTokenizer | None, text: str) -> list[int]:
+    native = _hf_tokenizer(tokenizer)
+    if native is None:
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            "Kimi K3 tokenizer is required for image prompt normalization",
+        )
+    return list(native.encode(text))
+
+
+def _k3_marker_offsets(input_ids: list[int], marker: list[int]) -> list[int]:
+    if not marker:
+        return []
+    offsets = []
+    cursor = 0
+    while cursor <= len(input_ids) - len(marker):
+        if input_ids[cursor : cursor + len(marker)] == marker:
+            offsets.append(cursor)
+            cursor += len(marker)
+        else:
+            cursor += 1
+    return offsets
+
+
+def _normalize_k3_image_prompt(
+    request: predict_v2_pb2.ModelInferRequest,
+    input_ids: list[int],
+    tokenizer: BaseTokenizer | None,
+) -> tuple[list[int], list]:
+    """Reduce each upstream image span to one ViT-owned media-pad token."""
+    parts = parse_multimodal_parts_from_request(request)
+    if not parts:
+        return input_ids, []
+    if any(part.mm_type != MMUrlType.IMAGE for part in parts):
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            "Kimi K3 supports only image multimodal inputs",
+        )
+
+    placeholder = _k3_token_ids(tokenizer, _K3_IMAGE_PLACEHOLDER)
+    media_pad = _k3_token_ids(tokenizer, _K3_MEDIA_PAD)
+    if not placeholder or not media_pad:
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            "Kimi K3 image markers could not be tokenized",
+        )
+    placeholders = _k3_marker_offsets(input_ids, placeholder)
+    pads = _k3_marker_offsets(input_ids, media_pad)
+    if placeholders:
+        if pads or len(placeholders) != len(parts):
+            raise FtRuntimeException(
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+                "Kimi K3 image placeholder count does not match image count",
+            )
+        result = []
+        cursor = 0
+        for offset in placeholders:
+            result.extend(input_ids[cursor:offset])
+            result.extend(media_pad)
+            cursor = offset + len(placeholder)
+        result.extend(input_ids[cursor:])
+    else:
+        if len(pads) != len(parts):
+            raise FtRuntimeException(
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+                "Kimi K3 media prompt count does not match image count",
+            )
+        begin = _k3_marker_offsets(input_ids, _k3_token_ids(tokenizer, _K3_MEDIA_BEGIN))
+        end_ids = _k3_token_ids(tokenizer, _K3_MEDIA_END)
+        end = _k3_marker_offsets(input_ids, end_ids)
+        if begin or end:
+            if len(begin) != len(parts) or len(end) != len(parts):
+                raise FtRuntimeException(
+                    ExceptionType.MM_WRONG_FORMAT_ERROR,
+                    "Kimi K3 expanded image boundaries do not match image count",
+                )
+            result = []
+            cursor = 0
+            for start, pad, finish in zip(begin, pads, end):
+                if not cursor <= start < pad < finish:
+                    raise FtRuntimeException(
+                        ExceptionType.MM_WRONG_FORMAT_ERROR,
+                        "Kimi K3 image marker order is invalid",
+                    )
+                result.extend(input_ids[cursor:start])
+                result.extend(media_pad)
+                cursor = finish + len(end_ids)
+            result.extend(input_ids[cursor:])
+        else:
+            result = input_ids
+    return result, _build_mm_inputs_from_request(request)
 
 
 def _request_parameter_string(request, name: str) -> str:
@@ -833,6 +965,7 @@ async def iter_real_model_stream_infer(
     yield_access_stats: bool = False,
     mm_inputs: Optional[list] = None,
     input_ids_tensor: Optional[torch.Tensor] = None,
+    is_kimi_k3: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -893,6 +1026,40 @@ async def iter_real_model_stream_infer(
             runtime,
             default_thinking_mode,
         )
+        prompt_token_offset = 0
+        if is_kimi_k3:
+            messages = parse_messages_from_request(request)
+            if messages is not None:
+                validate_kimi_k3_tool_history(messages, allow_partial=True)
+            original_input_ids = input_ids_list
+            input_ids_list, mm_inputs = _normalize_k3_image_prompt(
+                request, input_ids_list, tokenizer
+            )
+            if input_ids_list is not original_input_ids:
+                input_ids_tensor = None
+            thinking = _resolve_k3_dash_sc_thinking(
+                sampling, request_controls, generate_config
+            )
+            generate_config.thinking_mode = (
+                ThinkingMode.ENABLED if thinking else ThinkingMode.DISABLED
+            )
+            generate_config.in_think_mode = thinking
+            if thinking:
+                request_budget = sampling.max_new_think_tokens
+                if request_budget is None:
+                    request_budget = request_controls.max_new_think_tokens
+                generate_config.max_thinking_tokens = (
+                    _INT32_MAX if request_budget is not None and request_budget < 0
+                    else request_budget if request_budget is not None else 32000
+                )
+            apply_kimi_k3_request_contract(
+                generate_config,
+                specified_fields=sampling.specified_fields,
+                thinking=thinking,
+            )
+            prompt_token_offset = kimi_k3_pending_prompt_token_count(
+                _hf_tokenizer(tokenizer), input_ids_list
+            )
         configured_thinking_mode = generate_config.thinking_mode
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, begin_think_tokens
@@ -913,6 +1080,12 @@ async def iter_real_model_stream_infer(
             reasoning_format = _dash_sc_reasoning_format(
                 generate_env_config,
                 prompt_end_with_think=bool(matched_think_bos_ids),
+            )
+        if is_kimi_k3 and configured_thinking_mode == ThinkingMode.ENABLED:
+            reasoning_format = ReasoningFormat(
+                tag_begin="",
+                tag_end=_K3_THINK_TO_RESPONSE,
+                tag_end_native_encoding=True,
             )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
@@ -986,6 +1159,7 @@ async def iter_real_model_stream_infer(
             generate_config=generate_config,
             eos_token_id=eos_id,
             max_token_id=max_id,
+            prompt_token_offset=prompt_token_offset,
         )
         chunk_idx = 0
         phase2_needed = False
@@ -1436,6 +1610,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         grammar_validator: Optional[GrammarValidator] = None,
+        model_type: str = "",
     ):
         if backend_visitor is None:
             raise ValueError("backend_visitor is required for DashScInferenceServicer")
@@ -1476,6 +1651,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # Optional admission-time grammar check. ``None`` keeps the legacy behaviour
         # (invalid grammars surface as an engine-side error mid-stream).
         self._grammar_validator = grammar_validator
+        self._is_kimi_k3 = model_type.replace("-", "_").lower() == "kimi_k3"
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
@@ -1826,6 +2002,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     input_ids_tensor=parsed_input_ids.tensor,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,
+                    is_kimi_k3=self._is_kimi_k3,
                 )
                 try:
                     async for resp, stats in response_iter:

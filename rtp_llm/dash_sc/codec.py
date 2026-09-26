@@ -732,6 +732,7 @@ class SamplingParams:
     response_format: str | None = None
     json_format: bool = False
     structural_tag: str | None = None
+    specified_fields: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def n(self) -> int:
@@ -873,6 +874,7 @@ def parse_sampling_params(
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    specified_fields: set[str] = set()
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
@@ -887,10 +889,12 @@ def parse_sampling_params(
         v = _parse_optional_scalar_int(request, "n")
     if v is not None:
         num_return_sequences = max(0, v)
+        specified_fields.add("n")
 
     vf = _parse_optional_scalar_float(request, "top_p")
     if vf is not None:
         top_p = vf
+        specified_fields.add("top_p")
 
     v = _parse_optional_scalar_int(request, "top_k")
     if v is not None:
@@ -903,6 +907,7 @@ def parse_sampling_params(
     vf = _parse_optional_scalar_float(request, "temperature")
     if vf is not None:
         temperature = vf
+        specified_fields.add("temperature")
 
     v = _parse_optional_scalar_int(request, "min_new_tokens")
     if v is None:
@@ -921,10 +926,12 @@ def parse_sampling_params(
     vf = _parse_optional_scalar_float(request, "frequency_penalty")
     if vf is not None:
         frequency_penalty = vf
+        specified_fields.add("frequency_penalty")
 
     vf = _parse_optional_scalar_float(request, "presence_penalty")
     if vf is not None:
         presence_penalty = vf
+        specified_fields.add("presence_penalty")
 
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
@@ -958,6 +965,7 @@ def parse_sampling_params(
         response_format=response_format,
         json_format=json_format,
         structural_tag=structural_tag,
+        specified_fields=frozenset(specified_fields),
     )
 
 
@@ -1250,6 +1258,16 @@ def parse_multimodal_parts_from_request(
     return result
 
 
+def parse_messages_from_request(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> list[Any] | None:
+    """Return message history only when the DashSc payload supplies it."""
+    payload = _load_multimodal_payload(request)
+    if payload is None:
+        return None
+    return list(_iter_messages_from_payload(payload))
+
+
 # ----------------------------------------------------------------------------
 # Response builders
 # ----------------------------------------------------------------------------
@@ -1433,11 +1451,17 @@ def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: GenerateOutput,
     prompt_token_fallback: int = 0,
+    prompt_token_offset: int = 0,
 ) -> None:
     """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
     ax = out_py.aux_info
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
+    if prompt_token_offset:
+        if prompt_token_offset < 0 or input_len < prompt_token_offset:
+            raise ValueError("prompt usage is shorter than its token offset")
+        input_len -= prompt_token_offset
+        reuse_len = min(reuse_len, input_len)
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
@@ -1537,6 +1561,7 @@ class StreamResponseBuilder:
         "_generate_config",
         "_eos_token_id",
         "_max_token_id",
+        "_prompt_token_offset",
         "_template",
         "_generated_index",
         "_finish_index",
@@ -1562,6 +1587,7 @@ class StreamResponseBuilder:
         generate_config: Any = None,
         eos_token_id: int | None = None,
         max_token_id: int | None = None,
+        prompt_token_offset: int = 0,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
@@ -1572,6 +1598,7 @@ class StreamResponseBuilder:
         self._generate_config = generate_config
         self._eos_token_id = eos_token_id
         self._max_token_id = max_token_id
+        self._prompt_token_offset = prompt_token_offset
         self._template: predict_v2_pb2.ModelStreamInferResponse | None = None
         self._generated_index = -1
         self._finish_index = -1
@@ -1614,6 +1641,11 @@ class StreamResponseBuilder:
             else len(self._request_input_ids or [])
         )
         cached_tokens = int(aux_info.reuse_len) if aux_info is not None else 0
+        if self._prompt_token_offset:
+            if prompt_tokens < self._prompt_token_offset:
+                raise ValueError("prompt usage is shorter than its token offset")
+            prompt_tokens -= self._prompt_token_offset
+            cached_tokens = min(cached_tokens, prompt_tokens)
 
         if self._template is None:
             response = predict_v2_pb2.ModelStreamInferResponse()
@@ -1629,6 +1661,7 @@ class StreamResponseBuilder:
                 infer,
                 out_py,
                 prompt_token_fallback=len(self._request_input_ids or []),
+                prompt_token_offset=self._prompt_token_offset,
             )
             infer.parameters["incremental_output"].int64_param = (
                 1 if self._is_streaming else 0
