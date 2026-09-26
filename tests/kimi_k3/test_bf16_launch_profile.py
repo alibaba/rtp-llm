@@ -43,8 +43,11 @@ def test_fixed_full_profile(tmp_path, role):
     assert "CUBLAS_WORKSPACE_CONFIG" not in environment
     assert "CUBLASLT_WORKSPACE_SIZE" not in environment
     assert environment["GEN_NUM_PER_CIRCLE"] == "3"
-    for key in ("FP8_GEMM", "FP8_MLA", "FP8_KV_CACHE"):
-        assert environment[key] == "0"
+    assert environment["QUANTIZATION"] == ""
+    assert environment["SP_QUANTIZATION"] == ""
+    assert environment["FP8_KV_CACHE"] == "0"
+    assert "FP8_GEMM" not in environment
+    assert "FP8_MLA" not in environment
     for key in ("tp_size", "ep_size", "ffn_sp_size"):
         assert options["--" + key] == "8"
     assert options["--dp_size"] == options["--prefill_cp_size"] == "1"
@@ -63,23 +66,29 @@ def test_reject_four_layer_as_formal_profile(tmp_path):
         launcher.launch_config(arguments(tmp_path, layers=4))
 
 
-def test_existing_fp8_switches_control_both_roles_without_changing_compute_dtype(tmp_path):
+def test_existing_generic_fp8_settings_control_both_roles_without_changing_compute_dtype(tmp_path):
     args = arguments(tmp_path)
     args.fp8_gemm = True
-    args.fp8_mla = True
     args.fp8_kv_cache = True
     environment, command = launcher.launch_config(args)
     options = dict(zip(command[1::2], command[2::2]))
-    assert environment["FP8_GEMM"] == environment["FP8_MLA"] == environment["FP8_KV_CACHE"] == "1"
+    assert environment["QUANTIZATION"] == "FP8_PER_BLOCK"
+    assert environment["SP_QUANTIZATION"] == ""
+    assert environment["FP8_KV_CACHE"] == "1"
+    assert "FP8_GEMM" not in environment
+    assert "FP8_MLA" not in environment
     assert options["--fp8_kv_cache"] == "1"
     assert environment["ACT_TYPE"] == environment["SP_ACT_TYPE"] == "BF16"
 
 
-def test_fp8_mla_rejects_mismatched_cache_switch(tmp_path):
+def test_projection_quantization_can_keep_bf16_mla_cache(tmp_path):
     args = arguments(tmp_path)
-    args.fp8_mla = True
-    with pytest.raises(ValueError, match="FP8_MLA.*FP8_KV_CACHE"):
-        launcher.launch_config(args)
+    args.fp8_gemm = True
+    environment, command = launcher.launch_config(args)
+    options = dict(zip(command[1::2], command[2::2]))
+    assert environment["QUANTIZATION"] == "FP8_PER_BLOCK"
+    assert environment["FP8_KV_CACHE"] == "0"
+    assert options["--kernel_seq_size_per_block"] == "64"
 
 
 @pytest.mark.parametrize("field", ["start_port", "peer_port"])

@@ -60,19 +60,14 @@ class KimiK3ModelConfig(ModelConfig):
         selected = self.config_dtype if is_draft else (act_type or self.config_dtype)
         if not selected or WEIGHT_TYPE.from_str(selected) != WEIGHT_TYPE.BF16:
             raise ValueError("Kimi K3 requires BF16 compute")
-        if self.quantization:
-            raise ValueError("K3 uses checkpoint-native MXFP4, not global quantization")
-        def enabled(name):
-            value = os.environ.get(name, "0").strip()
-            if value not in ("0", "1"):
-                raise ValueError(f"{name} must be 0 or 1, got {value!r}")
-            return value == "1"
-
-        fp8_gemm = enabled("FP8_GEMM") and not is_draft
-        fp8_mla = enabled("FP8_MLA") and not is_draft
+        quantization = (self.quantization or "").upper()
+        if is_draft and quantization:
+            raise ValueError("K3 draft requires BF16 projections")
+        if quantization not in ("", "FP8_PER_BLOCK"):
+            raise ValueError("K3 supports only FP8_PER_BLOCK projection quantization")
+        fp8_gemm = quantization == "FP8_PER_BLOCK"
         fp8_cache = bool(kv_cache_config and kv_cache_config.fp8_kv_cache) and not is_draft
-        if not is_draft and fp8_cache != fp8_mla:
-            raise ValueError("K3 requires matching FP8_MLA and FP8_KV_CACHE settings")
+        fp8_mla = fp8_cache
         self.quant_algo = QuantAlgo()
         self.quant_config = None
         self.attention_projection_quant_config = Fp8BlockWiseQuantConfig() if fp8_gemm else None
