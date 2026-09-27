@@ -45,6 +45,40 @@ class ServerConfigPortLayoutTest(TestCase):
         ):
             setup_default_args(config)
 
+    def test_memory_cache_rejected_under_pp(self):
+        # Capability limit: memory-cache store/load is PP-root-driven only;
+        # per-stage lifecycle is not implemented, so fail fast at config time.
+        from rtp_llm.config.server_config_setup import setup_default_args
+
+        config = PyEnvConfigs()
+        config.model_args.model_type = "fake_model"
+        config.parallelism_config.pp_size = 2
+        config.kv_cache_config.enable_memory_cache = True
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "enable_memory_cache is not supported with pp_size > 1",
+        ):
+            setup_default_args(config)
+
+    def test_memory_cache_allowed_without_pp(self):
+        from rtp_llm.config.server_config_setup import setup_default_args
+
+        config = PyEnvConfigs()
+        config.model_args.model_type = "fake_model"
+        config.parallelism_config.pp_size = 1
+        config.kv_cache_config.enable_memory_cache = True
+        setup_default_args(config)  # must not raise
+
+    def test_pp_allowed_without_memory_cache(self):
+        from rtp_llm.config.server_config_setup import setup_default_args
+
+        config = PyEnvConfigs()
+        config.model_args.model_type = "fake_model"
+        config.parallelism_config.pp_size = 2
+        config.kv_cache_config.enable_memory_cache = False
+        setup_default_args(config)  # must not raise
+
     def test_dash_sc_rejects_legacy_stride_eight(self):
         config = ServerConfig()
         config.worker_info_port_num = 8

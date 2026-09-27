@@ -634,6 +634,20 @@ def setup_default_args(py_env_configs):
         "1" if py_env_configs.kv_cache_config.dsv4_fixed_pool_use_memory else "0"
     )
 
+    # The memory connector's store/load lifecycle is driven only by the PP root stage, and
+    # reuse semantics across stages are unproven. Fail fast instead of running
+    # a partially-enabled path. Disaggregated cache-store transport is unaffected.
+    if (
+        py_env_configs.kv_cache_config.enable_memory_cache
+        and py_env_configs.parallelism_config.pp_size > 1
+    ):
+        raise ValueError(
+            "enable_memory_cache is not supported with pp_size > 1: memory-cache "
+            "store/load is driven only by the PP root stage and per-stage "
+            "lifecycle support is not implemented. Disable memory cache "
+            "(--enable_memory_cache 0) or run pp_size=1."
+        )
+
     _configure_nccl_p2p_disable(py_env_configs)
 
     if (

@@ -222,6 +222,13 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
 }
 
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
+    // Capability limit (explicit): memory-cache store/load is driven only by
+    // the PP root stage; per-stage lifecycle support is not implemented.
+    // Mirrors the python-side validation in server_config_setup.py.
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config_.pp_size <= 1,
+                            "memory cache connector is not supported with pp_size > 1 "
+                            "(got pp_size=%ld); per-stage store/load lifecycle is not implemented",
+                            parallelism_config_.pp_size);
     auto memory_connector = std::make_shared<KVCacheMemoryConnector>(cache_config_,
                                                                      kv_cache_config_,
                                                                      parallelism_config_,
