@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
@@ -7,8 +8,11 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -18,6 +22,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -84,6 +89,59 @@ class QueuedDecodeWithdrawalTest {
             assertTrue(registry.commitItemForPublication(item, () -> true));
         }
         return item;
+    }
+
+    @Test
+    void lateDecodeFinishedAfterAbsentStatusDrainsAcknowledgedRequest() {
+        decode.close();
+        WorkerStatus status = WorkerStatus.createDiscovered(RoleType.DECODE, null,
+                "127.0.0.1", 8000, 8001, null);
+        decode = new DecodeEndpoint(status, new EndpointEventProjector(registry));
+        applyStatus(Map.of(), Map.of());
+        var item = queued(42);
+        var slot = registry.requestSlot(42);
+        var delivery = slot.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 7L, () -> true);
+        assertNotNull(delivery);
+        delivery.complete(DeliveryResult.delivered());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
+        TaskInfo task = new TaskInfo();
+        task.setRequestId("42");
+        task.setInputLength(16L);
+        task.setPhase(TaskPhase.RUNNING);
+        applyStatus(Map.of("42", task), Map.of());
+        applyStatus(Map.of(), Map.of());
+        applyStatus(Map.of(), Map.of());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
+        assertEquals(1, registry.snapshotActiveRequests().size());
+        assertEquals(0, decode.routingView().engineCapacityUsed());
+        applyStatus(Map.of(), Map.of("42", task));
+        assertEquals(RequestState.Phase.COMPLETED, slot.snapshot().state());
+        assertTrue(registry.snapshotActiveRequests().isEmpty());
+        assertFalse(decode.isAcceptedByEngine(item.decodeReservation()));
+        applyStatus(Map.of(), Map.of("42", task));
+        assertTrue(registry.snapshotActiveRequests().isEmpty());
+        decode.close();
+    }
+
+    private void applyStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
+        WorkerStatus status = decode.getStatus();
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.DECODE);
+        response.setAlive(true);
+        response.setTotalKvCacheTokens(10_000L);
+        response.setAvailableKvCacheTokens(10_000L);
+        response.setRunningTaskInfo(running);
+        response.setFinishedTaskInfo(finished);
+        response.setStatusVersion(Math.max(1, status.appliedStatusCursor().statusVersion() + 1));
+        response.setLatestFinishedVersion(Math.max(0, status.appliedStatusCursor().latestFinishedTaskVersion()) + finished.size());
+        Runnable projection;
+        status.lock.lock();
+        try {
+            projection = decode.applyPreparedStatus(status, status.prepareNewStatus(status.freezeStatusResponse(response)));
+        } finally {
+            status.lock.unlock();
+        }
+        projection.run();
     }
 
     private boolean replace(ScheduledRequest item) {
