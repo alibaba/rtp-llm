@@ -50,7 +50,7 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 for (var external : slot.getRequestsList()) {
                     var input = external.getInput();
                     var task = EngineRpcService.TaskInfoPB.newBuilder()
-                            .setRequestId(input.getRequestId())
+                            .setRequestId(String.valueOf(input.getRequestId()))
                             .setInputLength(input.getTokenIdsCount())
                             .setBatchId(batch.getBatchId())
                             .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)

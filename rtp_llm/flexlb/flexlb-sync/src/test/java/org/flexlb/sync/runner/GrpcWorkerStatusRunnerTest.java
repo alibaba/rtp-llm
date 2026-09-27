@@ -196,7 +196,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(activity);
 
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(123L)
+                .setRequestId("123")
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
         EngineRpcService.WorkerStatusPB response =

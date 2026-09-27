@@ -1467,12 +1467,12 @@ public final class JavaMockEngineCluster {
             if (!suppressRids.isEmpty()) {
                 for (long rid : suppressRids) {
                     for (int i = status.getRunningTaskInfoCount() - 1; i >= 0; i--) {
-                        if (status.getRunningTaskInfo(i).getRequestId() == rid) {
+                        if (status.getRunningTaskInfo(i).getRequestId().equals(Long.toString(rid))) {
                             status.removeRunningTaskInfo(i);
                         }
                     }
                     for (int i = status.getFinishedTaskListCount() - 1; i >= 0; i--) {
-                        if (status.getFinishedTaskList(i).getRequestId() == rid) {
+                        if (status.getFinishedTaskList(i).getRequestId().equals(Long.toString(rid))) {
                             status.removeFinishedTaskList(i);
                         }
                     }
@@ -1490,7 +1490,7 @@ public final class JavaMockEngineCluster {
                 if (fake.isFinishedForm()) {
                     EngineRpcService.TaskInfoPB.Builder finished =
                             EngineRpcService.TaskInfoPB.newBuilder()
-                                    .setRequestId(fake.requestId())
+                                    .setRequestId(String.valueOf(fake.requestId()))
                                     .setInputLength(1)
                                     .setPrefixLength(0)
                                     .setBatchId(fake.batchId())
@@ -1509,7 +1509,7 @@ public final class JavaMockEngineCluster {
                 } else {
                     status.addRunningTaskInfo(withLegacyTaskState(
                             EngineRpcService.TaskInfoPB.newBuilder()
-                                    .setRequestId(fake.requestId())
+                                    .setRequestId(String.valueOf(fake.requestId()))
                                     .setInputLength(1)
                                     .setPrefixLength(0)
                                     .setBatchId(fake.batchId())
@@ -1863,9 +1863,7 @@ public final class JavaMockEngineCluster {
             return cancel(requestId, false, true);
         }
 
-        private EngineRpcService.TaskPhase cancel(long requestId,
-                                                  boolean priorityPreemption,
-                                                  boolean countRpc) {
+        private EngineRpcService.TaskPhase cancel(long requestId, boolean priorityPreemption, boolean countRpc) {
             if (countRpc) {
                 stats.cancelRpcs.increment();
                 rpcCancel.incrementAndGet();
@@ -1984,7 +1982,7 @@ public final class JavaMockEngineCluster {
             requestStates.put(requestId, "cancelled");
             cancelledCount.incrementAndGet();
             EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     // Pass the ACTUAL phase the request was cancelled in through
                     // to the finished entry (P2-1): a queued opt-in decode
                     // request surfaces KV_ALLOCATED, a queued prefill RECEIVED.
@@ -2379,10 +2377,9 @@ public final class JavaMockEngineCluster {
          * the master's reconcile must correlate the cancel with the batch it
          * displaced or the inflight slot leaks.
          */
-        private void recordClientGoneCanceled(long requestId,
-                                              EngineRpcService.TaskPhase phase) {
+        private void recordClientGoneCanceled(long requestId, EngineRpcService.TaskPhase phase) {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     .setPhase(phase)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
@@ -2398,11 +2395,10 @@ public final class JavaMockEngineCluster {
             statusVersion.incrementAndGet();
         }
 
-        private void recordPriorityPreemptionCanceled(long requestId,
-                                                      EngineRpcService.TaskPhase phase) {
+        private void recordPriorityPreemptionCanceled(long requestId, EngineRpcService.TaskPhase phase) {
             addPriorityCancelledRequestId(requestId);
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     .setPhase(phase)
                     .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
                             .PRIORITY_PREEMPTION_CANCELED)
@@ -3827,15 +3823,14 @@ public final class JavaMockEngineCluster {
          * @param stage "admission" (hand-off / run-start / opt-in-enqueue claim
          *             failure) or "growth" (in-step incrKVBlock failure)
          */
-        private void publishDecodeKvFailure(
-                long requestId,
-                MockPerformanceModel.RequestShape shape,
-                long batchId,
-                int terminalBatchSize,
-                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue,
-                String stage) {
+        private void publishDecodeKvFailure(long requestId,
+                                            MockPerformanceModel.RequestShape shape,
+                                            long batchId,
+                                            int terminalBatchSize,
+                                            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue,
+                                            String stage) {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(DECODE_LACK_MEM_ERROR_CODE)
@@ -3909,7 +3904,7 @@ public final class JavaMockEngineCluster {
                                                  int dpRank,
                                                  EngineRpcService.TaskPhase phase) {
             return EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
+                    .setRequestId(String.valueOf(shape.input().getRequestId()))
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)
@@ -3932,7 +3927,7 @@ public final class JavaMockEngineCluster {
                                       int dpRank) {
             recordRecentExecutionTime(executionMs);
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
+                    .setRequestId(String.valueOf(shape.input().getRequestId()))
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)
@@ -3963,7 +3958,7 @@ public final class JavaMockEngineCluster {
                                       long errorCode) {
             recordRecentExecutionTime(executionMs);
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
+                    .setRequestId(String.valueOf(shape.input().getRequestId()))
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)

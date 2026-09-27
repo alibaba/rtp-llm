@@ -109,6 +109,10 @@
                                       tofile="${project.build.directory}/proto-java/flexlb_schedule_service.proto"/>
                                 <copy file="${project.basedir}/src/main/proto/kvcm_meta_service.proto"
                                       tofile="${project.build.directory}/proto-java/kvcm_meta_service.proto"/>
+                                <!-- Java Worker Status accepts string IDs; native integer IDs are read at the protobuf boundary. -->
+                                <replaceregexp file="${project.build.directory}/proto-java/engine_rpc_service.proto"
+                                               match="(message TaskInfoPB\s*\{\s*)int64 request_id = 1;"
+                                               replace="\1string request_id = 1;"/>
                                 <replaceregexp file="${project.build.directory}/proto-java/engine_rpc_service.proto"
                                                match="(syntax\s*=\s*&quot;proto3&quot;\s*;\s*\n)(?:option\s+java_package\s*=\s*&quot;[^&quot;]*&quot;\s*;\s*\n)*(import[^\n]*)"
                                                replace="\1option java_package = &quot;org.flexlb.engine.grpc&quot;;${line.separator}\2"

@@ -23,7 +23,7 @@ class RequestIdTest {
             assertEquals(Descriptors.FieldDescriptor.Type.STRING, descriptor.findFieldByNumber(1).getType());
             assertEquals(1, descriptor.getFields().stream().filter(field -> field.getName().startsWith("request_id")).count());
         }
-        assertEquals(Descriptors.FieldDescriptor.Type.INT64,
+        assertEquals(Descriptors.FieldDescriptor.Type.STRING,
                 EngineRpcService.TaskInfoPB.getDescriptor()
                         .findFieldByNumber(1).getType());
     }
@@ -60,9 +60,9 @@ class RequestIdTest {
 
     @Test
     void preservesWorkerStatusFieldsWithoutRemappingTaskLayout() throws Exception {
-        var oldTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(123)
+        var oldTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("123")
                 .setBatchId(99).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).setWaitingEnteredTimeMs(1700000000123L).build();
-        var current = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(456).setBatchId(42).build();
+        var current = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("456").setBatchId(42).build();
         var status = EngineRpcService.WorkerStatusPB.parseFrom(EngineRpcService.WorkerStatusPB.newBuilder()
                 .addRunningTaskInfo(oldTask).addFinishedTaskList(current).build().toByteArray());
         assertEquals("123", RequestId.parse(status.getRunningTaskInfo(0)));
@@ -81,6 +81,31 @@ class RequestIdTest {
             assertEquals(Long.toString(id), RequestId.parse(EngineRpcService.EnqueueBatchSuccessPB.parseFrom(wire)));
             assertEquals(Long.toString(id), RequestId.parse(EngineRpcService.EnqueueBatchErrorPB.parseFrom(wire)));
         }
+    }
+
+    @Test
+    void workerStatusPreservesStringIdsAndAcceptsNativeIntegerEncoding() throws Exception {
+        for (String id : List.of("req-abc-p-123", "00123", "0", "9223372036854775808")) {
+            var bytes = new ByteArrayOutputStream();
+            var wire = CodedOutputStream.newInstance(bytes);
+            wire.writeString(1, id);
+            wire.flush();
+            var task = EngineRpcService.TaskInfoPB.parseFrom(bytes.toByteArray());
+            assertEquals(id, task.getRequestId());
+            assertEquals(id, RequestId.parse(task));
+            assertEquals(id, RequestId.parse(task.toBuilder()));
+        }
+        for (long id : new long[]{0, 123, Long.MIN_VALUE, Long.MAX_VALUE}) {
+            var task = EngineRpcService.TaskInfoPB.parseFrom(oldIntegerId(id));
+            assertEquals(Long.toString(id), RequestId.parse(task));
+            var forwarded = EngineRpcService.TaskInfoPB.parseFrom(task.toByteArray());
+            assertEquals(Long.toString(id), RequestId.parse(forwarded));
+            assertEquals("req-original", RequestId.parse(task.toBuilder().setRequestId("req-original")));
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> RequestId.parse(EngineRpcService.TaskInfoPB.getDefaultInstance()));
+        assertThrows(IllegalArgumentException.class,
+                () -> RequestId.parse(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(" ")));
     }
 
     private static byte[] oldIntegerId(long id) throws Exception {
