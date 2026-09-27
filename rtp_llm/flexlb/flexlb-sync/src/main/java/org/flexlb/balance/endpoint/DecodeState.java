@@ -202,9 +202,10 @@ final class DecodeState {
         }
         admissionLock.lock();
         try {
-            DecodeRequestState state = confirmedRequest(handle.requestId());
+            DecodeRequestState state = requestState(handle.requestId());
             return handle.endpointGenerationId() == status.getGenerationId()
-                    && state != null && state.reservationToken() == handle.reservationToken();
+                    && state != null && (state.confirmed() || state.awaitingTerminal)
+                    && state.reservationToken() == handle.reservationToken();
         } finally {
             admissionLock.unlock();
         }
@@ -216,7 +217,7 @@ final class DecodeState {
         try {
             DecodeRequestState current = requestState(reservation.requestId());
             return (isExactReservation(current, reservation)
-                    && (current.ownsRequest() || current.hasProtocolOwner()))
+                    && (current.ownsRequest() || current.awaitingTerminal || current.hasProtocolOwner()))
                     || hasExactIncomingAttemptLocked(reservation);
         } finally {
             admissionLock.unlock();
@@ -272,7 +273,8 @@ final class DecodeState {
             rollbackReturnedPreemptionLocked(current);
         }
         boolean protectedOwner = hasExactIncomingAttemptLocked(reservation)
-                || exact && (current.confirmed() || current.engineLifecycleOwned || current.hasProtocolOwner());
+                || exact && (current.confirmed() || current.awaitingTerminal
+                        || current.engineLifecycleOwned || current.hasProtocolOwner());
         if (protectedOwner) {
             if (reason == ReleaseReason.LOCAL_ROLLBACK) {
                 throw localReleaseInvariant(reservation, "exact ownership is held by Engine/protocol lifecycle");
@@ -302,7 +304,8 @@ final class DecodeState {
         DecodeRequestState current = requestState(requestId);
         boolean exact = isExactReservation(current, reservation);
         PreemptionClaim claim = exact ? current.preemptionClaim : null;
-        if (exact && (current.confirmed() || claim != null && claim.owner == ClaimOwner.ENGINE_CONFIRMED)) {
+        if (exact && (current.confirmed() || current.awaitingTerminal
+                || claim != null && claim.owner == ClaimOwner.ENGINE_CONFIRMED)) {
             return ReservationReleaseResult.ENGINE_ACCEPTED;
         }
         if (claim != null) {
@@ -321,7 +324,7 @@ final class DecodeState {
         String requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
         if (!isExactReservation(state, reservation)
-                || (!state.ownsRequest() && !state.hasProtocolOwner()
+                || (!state.ownsRequest() && !state.awaitingTerminal && !state.hasProtocolOwner()
                     && !hasExactIncomingAttemptLocked(reservation))) {
             return false;
         }
@@ -376,10 +379,9 @@ final class DecodeState {
         return true;
     }
 
-    private boolean settleAuthoritativeTerminalLocked(
-            ReservationHandle reservation,
-            boolean retainTerminalRecord,
-            long settledAtMs) {
+    private boolean settleAuthoritativeTerminalLocked(ReservationHandle reservation,
+                                                      boolean retainTerminalRecord,
+                                                      long settledAtMs) {
         String requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
         boolean exactState = isExactReservation(state, reservation);
@@ -419,6 +421,10 @@ final class DecodeState {
                     && removeShadowExactLocked(requestId, request)) {
                 changed = true;
             }
+        }
+        if (exactState && state.awaitingTerminal) {
+            decodeRequests.remove(requestId, state);
+            changed = true;
         }
         if (!decodeRequests.containsKey(requestId) && retainTerminalRecord) {
             changed = rememberSettledLocked(requestId, settledAtMs) || changed;
@@ -625,8 +631,7 @@ final class DecodeState {
         }
     }
 
-    private DispatchResult dispatchToEngine(
-            DispatchLease permit) {
+    private DispatchResult dispatchToEngine(DispatchLease permit) {
         EngineDispatchPermitTransferStatus transferStatus;
         boolean capacityIncreased;
         admissionLock.lock();
@@ -634,7 +639,7 @@ final class DecodeState {
             // Engine status may consume the acquired permit before publication.
             // Only the same canonical reservation can satisfy this handoff.
             DecodeRequestState current = requestState(permit.requestId);
-            if (current == permit.reservation && current.confirmed()
+            if (current == permit.reservation && (current.confirmed() || current.awaitingTerminal)
                     && current.preemptionClaim == null) {
                 return new DispatchResult(EngineDispatchPermitTransferStatus.TRANSFERRED, false);
             }
@@ -1394,9 +1399,8 @@ final class DecodeState {
         return List.copyOf(facts);
     }
 
-    private List<WorkerStatusFact> doCalibrate(
-            WorkerStatus.EngineObservation engine,
-            Map<String, WorkerStatus.TaskObservation> finishedTasks) {
+    private List<WorkerStatusFact> doCalibrate(WorkerStatus.EngineObservation engine,
+                                               Map<String, WorkerStatus.TaskObservation> finishedTasks) {
         admissionVersion.incrementAndGet();
         List<WorkerStatusFact> facts = new ArrayList<>();
 
@@ -1465,9 +1469,8 @@ final class DecodeState {
             }
         }
 
-        // Terminal proof must be captured before absent-task pruning removes
-        // the exact DecodeRequestState identity. Endpoint settlement happens here;
-        // the downstream scheduler receives only the immutable result.
+        // Explicit terminal evidence settles the exact request identity and
+        // notifies the scheduler independently of active-snapshot membership.
         for (WorkerStatus.TaskObservation task
                 : finishedTasks.values()) {
             String requestId = task.requestId();
@@ -1516,9 +1519,9 @@ final class DecodeState {
             }
         }
 
-        // Priority claims retain confirmed accounting until their exact
-        // settlement or local request expiration. Only absence from the FULL active
-        // snapshot permits ordinary pruning; phase regression is not absence.
+        // Full-snapshot absence releases ordinary confirmed capacity. Exact
+        // scheduler identity survives until Finished or local expiration.
+        // Priority claims retain their existing confirmed accounting.
         java.util.Iterator<Map.Entry<String, DecodeRequestState>> confirmedIt =
                 decodeRequests.entrySet().iterator();
         while (confirmedIt.hasNext()) {
@@ -1534,8 +1537,12 @@ final class DecodeState {
             if (entry.getValue().preemptionClaim != null) {
                 continue;
             }
-            confirmedIt.remove();
-            if (!decodeRequests.containsKey(requestId)) {
+            DecodeRequestState absent = entry.getValue();
+            if (absent.reservationToken() > 0L) {
+                absent.clearRequestOwnership();
+                absent.awaitingTerminal = true;
+            } else {
+                confirmedIt.remove();
                 rememberSettledLocked(requestId, now);
             }
         }
@@ -1669,8 +1676,7 @@ final class DecodeState {
         }
     }
 
-    CleanupResult evictExpiredRequests(long ttlMs,
-                                    Predicate<String> retainForSchedulerCleanup) {
+    CleanupResult evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         int evicted;
         boolean capacityChanged;
         admissionLock.lock();
@@ -1697,12 +1703,16 @@ final class DecodeState {
                 confirmedEngineOwnedCount = Math.max(
                         0, confirmedEngineOwnedCount - trackedPurged);
             }
+            boolean awaitingTerminalsPurged = decodeRequests.entrySet()
+                    .removeIf(entry -> entry.getValue().awaitingTerminal
+                            && entry.getValue().lastSeenMs() < cutoff
+                            && !retainForSchedulerCleanup.test(entry.getKey()));
             boolean settledTerminalRecordsPurged = decodeRequests.entrySet()
                     .removeIf(entry -> !entry.getValue().ownsRequest()
                             && !entry.getValue().hasProtocolOwner()
                             && entry.getValue().settledAtMs != 0L
                             && entry.getValue().settledAtMs < cutoff);
-            if (evicted > 0 || trackedPurged > 0 || settledTerminalRecordsPurged) {
+            if (evicted > 0 || trackedPurged > 0 || awaitingTerminalsPurged || settledTerminalRecordsPurged) {
                 admissionVersion.incrementAndGet();
             }
             capacityChanged = evicted > 0 || trackedPurged > 0
@@ -2021,7 +2031,7 @@ final class DecodeState {
     }
 
     private void pruneRequestStateLocked(String requestId, DecodeRequestState state) {
-        if (state != null && !state.ownsRequest()
+        if (state != null && !state.ownsRequest() && !state.awaitingTerminal
                 && !state.hasProtocolOwner() && state.settledAtMs == 0L) {
             decodeRequests.remove(requestId, state);
         }
@@ -2056,6 +2066,10 @@ final class DecodeState {
         private PreemptionClaim preemptionClaim;
         /** Non-zero while stale WorkerStatus must not resurrect this request id. */
         private long settledAtMs;
+        /**
+         * Retains terminal correlation without charging Engine capacity.
+         */
+        private boolean awaitingTerminal;
 
         DecodeRequestState(long kvTokens, long expectedKvTokens,
                         int priority, long reservationToken) {
@@ -2086,14 +2100,12 @@ final class DecodeState {
         boolean priorityKnown() { return priorityKnown; }
         long lastSeenAtMs() { return lastSeenAtMs; }
 
-        void confirm(
-                long engineKvTokens,
-                DecodeTaskPhase phase,
-                long observedAtMs) {
+        void confirm(long engineKvTokens, DecodeTaskPhase phase, long observedAtMs) {
             kvTokens = Math.max(0L, engineKvTokens);
             expectedKvTokens = kvTokens;
             this.phase = java.util.Objects.requireNonNull(phase, "phase");
             lastSeenAtMs = observedAtMs;
+            awaitingTerminal = false;
             queued = false;
             engineLifecycleOwned = false;
             dispatchPermit = null;

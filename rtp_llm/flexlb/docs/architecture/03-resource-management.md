@@ -40,6 +40,11 @@ QUEUE scheduler 选中 Prefill 后，请求进入该 endpoint 的 `WorkerBatcher
 和预期 KV。已在 Prefill 队列中的预留继续保护 KV，但不计入引擎面的
 concurrency，避免引擎空闲时被本地排队预留假性压满。
 
+Decode 的完整 active 快照决定普通请求的引擎容量占用。已确认请求从 active 快照消失后，
+释放容量计数，但保留精确 reservation 身份等待 Finished；仅缺席不产生请求完成事件。
+Finished 到达时通过该身份通知调度器回收 Inflight。等待终态的记录不计入容量或抢占候选，
+由请求超时、endpoint 退役或孤儿清理结束；重新出现在 active 快照时沿用原身份。
+
 WorkerStatus 到达后，`DecodeEndpoint.calibrate()` 用引擎已确认状态对账。对于取消或
 发布结果不确定的请求，Engine fence 在权威终态到达前持有相应账本，防止
 KV 或并发容量被提前释放并二次分配。
