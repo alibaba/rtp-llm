@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/normal_engine/Dsv4DpPrefillPolicy.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTransport.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -109,6 +111,17 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.world_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    dp_prefill_phase_sync_ = dsv4DpPrefillPhaseSyncEnabled(model_config_.model_type,
+                                                           std::getenv("DSV4_MOE_STRATEGY"),
+                                                           pd_sep_config.role_type,
+                                                           parallelism_config.pp_size,
+                                                           parallelism_config.tp_size,
+                                                           parallelism_config.dp_size,
+                                                           parallelism_config.ep_size,
+                                                           parallelism_config.world_size,
+                                                           sp_config.type != SP_TYPE_NONE,
+                                                           parallelism_config.local_cp_enabled(),
+                                                           ffn_disaggregate_config.enable_ffn_disaggregate);
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
@@ -433,7 +446,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 #endif
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens) {
+std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens, bool prefill_only) {
     RTP_LLM_LOG_DEBUG("create min fake query");
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
@@ -443,7 +456,8 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
     stream->initFakeContextChunk();
-    if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
+    if (!prefill_only
+        && (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE)) {
         auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
         StreamUpdateInfo update_info{new_tokens,
@@ -985,6 +999,19 @@ static int decodeFixedBs() {
 }
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+    if (dp_prefill_phase_sync_) {
+        auto reduce_any_prefill = [](bool local_prefill) {
+            auto flag = torch::full(
+                {1}, local_prefill ? 1 : 0, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            // The admitted TP1/PP1/DP=EP profile spans WORLD. The C++ comm
+            // bridge registers WORLD, but does not register ParallelMode::EP.
+            return execAllReduce({flag, ReduceOp::Max, false, ParallelMode::WORLD}).buffer.item<int32_t>() != 0;
+        };
+        if (alignDsv4DpPrefillPhase(streams, reduce_any_prefill, [this] { return createMinFakeStream(1, true); })) {
+            RTP_LLM_LOG_DEBUG("DSV4 DP/EP: synchronized prefill phase, streams=%zu", streams.size());
+            return;
+        }
+    }
     if (parallelism_config.pp_size > 1) {
         /** PP executes one scheduled phase, so only an empty batch needs a placeholder. */
         if (!streams.empty()) {

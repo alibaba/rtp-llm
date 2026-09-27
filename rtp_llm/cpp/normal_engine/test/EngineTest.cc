@@ -28,7 +28,15 @@ TEST_F(NormalEngineTest, fakeStreamsHaveExecutableChunksWithFastGen) {
         CustomConfig config;
         config.enable_fast_gen = fast_gen;
         auto engine            = createMockEngine(config);
-        auto decode            = engine->createMinFakeStream(3);
+        auto prefill           = engine->createMinFakeStream(3, true);
+        EXPECT_TRUE(prefill->isFakeStream());
+        EXPECT_TRUE(prefill->isContextStream());
+        EXPECT_EQ(prefill->enable_fast_gen_, fast_gen);
+        EXPECT_FALSE(prefill->isChunkStream());
+        EXPECT_EQ(prefill->contextLength(), 1);
+        EXPECT_EQ(prefill->prefixLength(), 0);
+        EXPECT_EQ(prefill->currentExecuteTokens(0).size(), 1);
+        auto decode = engine->createMinFakeStream(3, false);
         EXPECT_TRUE(decode->isFakeStream());
         EXPECT_FALSE(decode->isContextStream());
         EXPECT_FALSE(decode->isChunkStream());

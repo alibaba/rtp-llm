@@ -36,6 +36,29 @@ def _a2a_payload_bound_exceeded(recv_counts) -> bool:
         return True
 
 
+def _validate_a2a_token_counts(
+    recv_counts, *, world: int, rank: int, local_tokens: int, max_tokens: int
+) -> None:
+    # A graph/eager collective mismatch can interpret packed FP8 payload bytes
+    # as int64 counts. Never pass those values to the fixed-EP allocation path.
+    if (
+        max_tokens <= 0
+        or not 0 <= rank < world
+        or len(recv_counts) != world
+        or any(
+            type(count) is not int or not 0 <= count <= max_tokens
+            for count in recv_counts
+        )
+        or recv_counts[rank] != local_tokens
+    ):
+        raise RuntimeError(
+            "SM120 MoE received invalid token counts: "
+            f"counts={recv_counts!r}, world={world}, rank={rank}, "
+            f"local_tokens={local_tokens}, max_metadata_tokens={max_tokens}; "
+            "all EP ranks must use the same eager/graph collective protocol"
+        )
+
+
 def _warn_a2a_oversize(recv_counts) -> None:
     if _A2A_OVERSIZE_WARN_CT[0] >= _A2A_OVERSIZE_WARN_MAX:
         return
@@ -278,6 +301,16 @@ class Sm120DecodeStrategy(RoutedExpertsStrategy):
         gathered = torch.empty(world, 1, dtype=torch.int64, device=x.device)
         dist.all_gather_into_tensor(gathered, pair, group=group)
         recv_counts = [int(v) for v in gathered.view(-1).cpu().tolist()]
+        _validate_a2a_token_counts(
+            recv_counts,
+            world=world,
+            rank=dist.get_rank(group),
+            local_tokens=int(x.size(0)),
+            # Framework token counts/positions are int32. The expert's
+            # max_tokens_per_rank can be only its chunk size; it is NOT an
+            # upper bound on the single-round dispatch's full context rows.
+            max_tokens=torch.iinfo(torch.int32).max,
+        )
         try:
             _bad = _a2a_payload_bound_exceeded(recv_counts)
         except Exception:

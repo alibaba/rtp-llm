@@ -162,7 +162,9 @@ class DispatchRoutingTest(unittest.TestCase):
         self.assertIs(caught.exception, failure)
 
     def test_every_prepare_exchanges_fresh_counts(self):
-        strategy = SimpleNamespace(cfg=SimpleNamespace(n_routed_experts=4))
+        strategy = SimpleNamespace(
+            cfg=SimpleNamespace(n_routed_experts=4, max_tokens_per_rank=BOUND)
+        )
         x = torch.zeros((2, 128), dtype=torch.bfloat16)
         weights = torch.ones((2, 1), dtype=torch.float32)
         indices = torch.tensor([[0], [3]], dtype=torch.int64)
@@ -184,6 +186,8 @@ class DispatchRoutingTest(unittest.TestCase):
         ), mock.patch.object(
             torch.distributed, "get_world_size", return_value=2
         ), mock.patch.object(
+            torch.distributed, "get_rank", return_value=0
+        ), mock.patch.object(
             torch.distributed, "all_gather_into_tensor", side_effect=exchange
         ) as gather, mock.patch.object(
             deepep, "_warn_a2a_oversize"
@@ -203,6 +207,110 @@ class DispatchRoutingTest(unittest.TestCase):
         self.assertEqual(fallback["pad_floor"], BOUND)
         self.assertNotIn("recv_counts", fallback)
         warn.assert_called_once_with([2, BOUND])
+
+
+class TokenCountValidationTest(unittest.TestCase):
+    def validate(
+        self, counts, *, local_tokens=11, rank=1, world=4, max_tokens=2147483647
+    ):
+        deepep._validate_a2a_token_counts(
+            counts,
+            world=world,
+            rank=rank,
+            local_tokens=local_tokens,
+            max_tokens=max_tokens,
+        )
+
+    def test_uneven_prefill_and_idle_counts_are_valid(self):
+        self.validate([1, 11, 1, 1])
+        self.validate([1, 2765, 1, 1], local_tokens=2765)
+
+    def test_zero_row_peer_is_valid(self):
+        self.validate([0, 11, 0, 0])
+
+    def test_genuine_capacity_fallback_remains_valid(self):
+        self.validate([20000] * 4, local_tokens=20000)
+        self.assertTrue(deepep._a2a_payload_bound_exceeded([20000] * 4))
+        self.validate([131200] * 4, local_tokens=131200)
+
+    def test_observed_packed_payload_bytes_are_not_allocation_sizes(self):
+        with self.assertRaisesRegex(
+            RuntimeError, "same eager/graph collective protocol"
+        ):
+            self.validate(
+                [8050450151303075561, 11, 8050450151303075561, 8050450151303075561]
+            )
+
+    def test_negative_count_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid token counts"):
+            self.validate([-1, 11, 0, 0])
+
+    def test_one_over_int32_metadata_capacity_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid token counts"):
+            self.validate([2147483648, 11, 1, 1])
+
+    def test_wrong_local_echo_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid token counts"):
+            self.validate([1, 10, 1, 1])
+
+    def test_wrong_peer_count_is_rejected(self):
+        for counts in ([], [1, 11], [1, 11, 1, 1, 1]):
+            with self.subTest(counts=counts), self.assertRaisesRegex(
+                RuntimeError, "invalid token counts"
+            ):
+                self.validate(counts)
+
+    def test_invalid_capacity_rank_and_count_types_are_rejected(self):
+        for kwargs in (
+            {"max_tokens": 0},
+            {"max_tokens": -1},
+            {"rank": -1},
+            {"rank": 4},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+                RuntimeError, "invalid token counts"
+            ):
+                self.validate([1, 11, 1, 1], **kwargs)
+        for bad in (True, 1.0, "1"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(
+                RuntimeError, "invalid token counts"
+            ):
+                self.validate([bad, 11, 1, 1])
+
+    def test_real_prepare_rejects_corrupt_counts_before_fallback(self):
+        strategy = SimpleNamespace(
+            cfg=SimpleNamespace(n_routed_experts=4, max_tokens_per_rank=32768)
+        )
+        x = torch.zeros((11, 128), dtype=torch.bfloat16)
+        weights = torch.ones((11, 1), dtype=torch.float32)
+        indices = torch.zeros((11, 1), dtype=torch.int64)
+
+        def quantize(value, **kwargs):
+            return value.to(torch.float8_e4m3fn), torch.zeros(
+                (value.size(0), value.size(1) // 32), dtype=torch.uint8
+            )
+
+        def exchange(output, local, **kwargs):
+            self.assertEqual(local.tolist(), [11])
+            output.copy_(torch.tensor([8050450151303075561, 11, 1, 1]).view(4, 1))
+
+        with mock.patch.dict(
+            sys.modules, {"flashinfer": SimpleNamespace(mxfp8_quantize=quantize)}
+        ), mock.patch.object(
+            torch.distributed, "get_world_size", return_value=4
+        ), mock.patch.object(
+            torch.distributed, "get_rank", return_value=1
+        ), mock.patch.object(
+            torch.distributed, "all_gather_into_tensor", side_effect=exchange
+        ), mock.patch.object(
+            deepep, "_warn_a2a_oversize"
+        ) as warn, self.assertRaisesRegex(
+            RuntimeError, "invalid token counts"
+        ):
+            deepep.Sm120DecodeStrategy._prepare_sm120_all_to_all(
+                strategy, x, weights, indices
+            )
+        warn.assert_not_called()
 
 
 if __name__ == "__main__":

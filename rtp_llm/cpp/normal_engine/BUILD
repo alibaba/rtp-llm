@@ -27,6 +27,13 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "dsv4_dp_prefill_policy",
+    hdrs = ["Dsv4DpPrefillPolicy.h"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/config:role_types"],
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "normal_engine",
@@ -49,6 +56,7 @@ cc_library(
         "pipeline/PPTransport.cc",
     ],
     deps = [
+        ":dsv4_dp_prefill_policy",
         ":pipeline_types",
         ":pp_prefill_guard_policy",
         "//rtp_llm/cpp/cache:cache",
