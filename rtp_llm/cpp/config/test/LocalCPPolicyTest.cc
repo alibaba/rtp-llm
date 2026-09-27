@@ -28,6 +28,21 @@ rtp_llm::ParallelismConfig makeCompat(bool cep) {
     c.prefill_cp_config.method = rtp_llm::CPRotateMethod::PREFILL_CP;
     return c;
 }
+rtp_llm::ParallelismConfig makeProxy() {
+    // CEP2PP2: the 4-rank local PD proxy (pp2 x dp1 x tp2 x ep2 x world4).
+    rtp_llm::ParallelismConfig c;
+    c.pp_size                  = 2;
+    c.tp_size                  = 2;
+    c.ffn_tp_size              = c.tp_size;
+    c.tp_rank                  = 1;
+    c.ffn_tp_rank              = 1;
+    c.ep_size                  = 2;
+    c.world_size               = 4;
+    c.pp_ep_enabled            = true;
+    c.pp_ep_backend            = "fork_nccl_mxfp8";
+    c.prefill_cp_config.method = rtp_llm::CPRotateMethod::PREFILL_CP;
+    return c;
+}
 void reject(rtp_llm::ParallelismConfig c,
             const std::string&         model       = "deepseek_v4",
             bool                       speculative = false,
@@ -69,7 +84,15 @@ int main() {
     reject(c, "deepseek_v4", true);
     reject(c, "deepseek_v4", false, true);
     reject(c, "deepseek_v4", false, false, true);
+    // PREFILL (the PD prefill role) is admitted at the exact PP+EP shapes.
+    c           = makeCompat(true);
     c.role_type = RoleType::PREFILL;
+    c.resolve_local_cp("deepseek_v4", false, false, false);
+    check(c.local_cp_enabled(), "PREFILL role must engage the qualified CEP4PP2 profile");
+    check(c.get_attn_tp_size() == 1 && c.get_ffn_tp_size() == 1, "PREFILL role must use local CP geometry");
+    c                                    = makeCompat(true);
+    c.role_type                          = RoleType::PREFILL;
+    c.prefill_cp_config.kv_cache_sharded = true;
     reject(c);
     c                                    = makeCompat(true);
     c.prefill_cp_config.kv_cache_sharded = true;
@@ -97,6 +120,50 @@ int main() {
     reject(c);
     c                                                 = makeCompat(true);
     c.ffn_disaggregate_config.enable_ffn_disaggregate = true;
+    reject(c);
+    // CEP2PP2: the 4-rank local PD proxy profile must engage under both roles.
+    for (auto role : {RoleType::PDFUSION, RoleType::PREFILL}) {
+        c           = makeProxy();
+        c.role_type = role;
+        check(!c.local_cp_enabled(), "raw PREFILL_CP is not a local capability (proxy)");
+        c.resolve_local_cp("deepseek_v4", false, false, false);
+        check(c.local_cp_enabled(), "valid CEP2PP2 proxy profile must engage");
+        check(c.get_attn_tp_size() == 1 && c.get_ffn_tp_size() == 1, "proxy weight partition differs from execution");
+        c.role_type = RoleType::DECODE;
+        check(!c.local_cp_enabled(), "stale proxy compatibility leaked into decode");
+    }
+    c           = makeProxy();
+    c.role_type = RoleType::DECODE;
+    c.resolve_local_cp("deepseek_v4", false, false, false);
+    check(!c.dsv4_prefill_cp_compat, "decode resolution retained proxy capability");
+    c                                    = makeProxy();
+    c.prefill_cp_config.kv_cache_sharded = true;
+    reject(c);
+    c                                   = makeProxy();
+    c.prefill_cp_config.prefill_cp_size = 4;
+    reject(c);
+    // The proxy is an exact profile, not a range: every near-miss stays rejected.
+    c            = makeProxy();
+    c.world_size = 8;
+    reject(c);
+    c         = makeProxy();
+    c.tp_size = 4;
+    reject(c);
+    c         = makeProxy();
+    c.ep_size = 4;
+    reject(c);
+    c         = makeProxy();
+    c.pp_size = 1;
+    reject(c);
+    c         = makeProxy();
+    c.dp_size = 2;
+    reject(c);
+    c               = makeProxy();
+    c.pp_ep_backend = "unknown";
+    reject(c);
+    // The world8 target and the world4 proxy must not be confused for each other.
+    c            = makeCompat(true);
+    c.world_size = 4;
     reject(c);
     c         = makeCompat(true);
     c.tp_size = 1;

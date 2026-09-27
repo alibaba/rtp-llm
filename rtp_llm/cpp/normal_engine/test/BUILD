@@ -160,3 +160,18 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+# CPU-only Google Test coverage of the production PP prefill guard.
+# No engine, Torch or CUDA dependencies.
+cc_test(
+    name = "pp_prefill_guard_policy_test",
+    srcs = [
+        "PPPrefillGuardPolicyTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:pp_prefill_guard_policy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

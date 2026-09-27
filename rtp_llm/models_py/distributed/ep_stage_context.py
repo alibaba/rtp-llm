@@ -17,12 +17,14 @@ BACKEND_PURECP_BF16 = "purecp_bf16"
 BACKEND_FORK_NCCL_MXFP8 = "fork_nccl_mxfp8"
 PP_EP_BACKENDS: Tuple[str, ...] = (BACKEND_PURECP_BF16, BACKEND_FORK_NCCL_MXFP8)
 
-#: The single accepted PP+EP shape. Kept exact on purpose.
-PP_EP_PP_SIZE = 2
-PP_EP_DP_SIZE = 1
-PP_EP_TP_SIZE = 4
-PP_EP_EP_SIZE = 4
-PP_EP_WORLD_SIZE = 8
+#: The accepted PP+EP shapes as exact (pp, dp, tp, ep, world) tuples — never a
+#: range. CEP4PP2 is the serving target; CEP2PP2 is the local PD proxy (same
+#: topology ratios at half width, so a CEP2PP2 PREFILL plus a DP4EP4 DECODE fit
+#: on one 8-GPU host). Scale effects above the proxy need the two-node target.
+PP_EP_PROFILES: Tuple[Tuple[int, int, int, int, int], ...] = (
+    (2, 1, 4, 4, 8),  # CEP4PP2
+    (2, 1, 2, 2, 4),  # CEP2PP2
+)
 
 
 def resolve_pp_ep_opt_in(parallelism_config) -> Tuple[bool, str]:
@@ -53,26 +55,17 @@ def validate_pp_ep_shape(parallelism_config) -> RankLayout:
     """Validate the supported topology before allocating weights or issuing collectives."""
     problems: List[str] = []
 
-    if int(parallelism_config.pp_size) != PP_EP_PP_SIZE:
+    shape = (
+        int(parallelism_config.pp_size),
+        int(parallelism_config.dp_size),
+        int(parallelism_config.tp_size),
+        int(parallelism_config.ep_size),
+        int(parallelism_config.world_size),
+    )
+    if shape not in PP_EP_PROFILES:
         problems.append(
-            "pp_size=%d (need %d)" % (parallelism_config.pp_size, PP_EP_PP_SIZE)
-        )
-    if int(parallelism_config.dp_size) != PP_EP_DP_SIZE:
-        problems.append(
-            "dp_size=%d (need %d)" % (parallelism_config.dp_size, PP_EP_DP_SIZE)
-        )
-    if int(parallelism_config.tp_size) != PP_EP_TP_SIZE:
-        problems.append(
-            "tp_size=%d (need %d)" % (parallelism_config.tp_size, PP_EP_TP_SIZE)
-        )
-    if int(parallelism_config.ep_size) != PP_EP_EP_SIZE:
-        problems.append(
-            "ep_size=%d (need %d)" % (parallelism_config.ep_size, PP_EP_EP_SIZE)
-        )
-    if int(parallelism_config.world_size) != PP_EP_WORLD_SIZE:
-        problems.append(
-            "world_size=%d (need %d)"
-            % (parallelism_config.world_size, PP_EP_WORLD_SIZE)
+            "shape (pp, dp, tp, ep, world)=%s is not one of the validated "
+            "PP+EP profiles %s" % (shape, list(PP_EP_PROFILES))
         )
 
     cp_config = getattr(parallelism_config, "prefill_cp_config", None)
@@ -83,10 +76,10 @@ def validate_pp_ep_shape(parallelism_config) -> RankLayout:
             # A second, within-pool slicer on top of the stage slicing is not
             # validated by anything; the design keeps it off.
             problems.append("prefill_cp_config.kv_cache_sharded is set")
-        if int(cp_config.prefill_cp_size) not in (0, PP_EP_TP_SIZE):
+        if int(cp_config.prefill_cp_size) not in (0, int(parallelism_config.tp_size)):
             problems.append(
-                "prefill_cp_config.prefill_cp_size=%d (need 0 or %d)"
-                % (cp_config.prefill_cp_size, PP_EP_TP_SIZE)
+                "prefill_cp_config.prefill_cp_size=%d (need 0 or tp_size=%d)"
+                % (cp_config.prefill_cp_size, parallelism_config.tp_size)
             )
 
     if int(parallelism_config.ep_size) != int(parallelism_config.tp_size) * int(
@@ -99,13 +92,14 @@ def validate_pp_ep_shape(parallelism_config) -> RankLayout:
 
     if problems:
         raise ValueError(
-            "DSV4_PP_EP_ENABLE=1 is only valid for the validated CP4EP4PP2 shape "
-            "(pp2 x dp1 x tp4 x ep4, prefill-CP4, unsharded CP cache, world8). "
-            "Violations: " + "; ".join(problems)
+            "DSV4_PP_EP_ENABLE=1 is only valid for the validated PP+EP profiles "
+            "(CEP4PP2: pp2 x dp1 x tp4 x ep4, prefill-CP4, unsharded CP cache, "
+            "world8; CEP2PP2: pp2 x dp1 x tp2 x ep2, prefill-CP2, unsharded CP "
+            "cache, world4). Violations: " + "; ".join(problems)
         )
 
     layout = RankLayout.from_parallelism_config(parallelism_config)
-    if layout.world_size() != PP_EP_WORLD_SIZE:
+    if layout.world_size() != int(parallelism_config.world_size):
         raise ValueError(
             "RankLayout(pp=%d,dp=%d,tp=%d) implies world_size=%d, but the config says %d"
             % (
@@ -143,8 +137,10 @@ def validate_pp_ep_target(
         problems.append("speculative (MTP/DSpark) models not supported under PP+EP")
 
     role_type = getattr(parallelism_config, "role_type", None)
-    if role_type is not None and role_type != RoleType.PDFUSION:
-        problems.append("PP+EP requires role PDFUSION; got %r" % role_type)
+    if role_type is not None and role_type not in (RoleType.PDFUSION, RoleType.PREFILL):
+        # PREFILL is the disaggregated (PD) prefill role; DECODE is served by
+        # the decode-side topology, not this stage context.
+        problems.append("PP+EP requires role PDFUSION or PREFILL; got %r" % role_type)
 
     # Graph flags belong to the resolved HWKernelConfig, not ParallelismConfig.
     # Missing configuration must not silently look like disabled graphs.
@@ -210,9 +206,10 @@ class EpStageContext:
 
         layout = validate_pp_ep_shape(parallelism_config)
         world_rank = int(parallelism_config.world_rank)
-        if not 0 <= world_rank < PP_EP_WORLD_SIZE:
+        world_size = int(parallelism_config.world_size)
+        if not 0 <= world_rank < world_size:
             raise ValueError(
-                "world_rank=%d outside world_size=%d" % (world_rank, PP_EP_WORLD_SIZE)
+                "world_rank=%d outside world_size=%d" % (world_rank, world_size)
             )
 
         stage_ranks = tuple(layout.group_of(Group.STAGE, world_rank))

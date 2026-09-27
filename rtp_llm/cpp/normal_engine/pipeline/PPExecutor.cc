@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPPrefillGuardPolicy.h"
 
 #include <algorithm>
 #include <chrono>
@@ -547,10 +548,17 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
 }
 
 void PPExecutor::prepareStreams(std::list<GenerateStreamPtr>& streams) {
+    // PREFILL servers can also receive requests that bypass PD. Exempt only
+    // streams marked as real PD, using the same predicate as the policy tests.
     if (parallelism_config_.dsv4_prefill_cp_compat) {
         for (auto it = streams.begin(); it != streams.end();) {
             const auto& stream = *it;
-            if (!stream->isFakeStream() && !stream->isPerfTest() && stream->generateConfig()->max_new_tokens != 1) {
+            if (dsv4PrefillCpGuardRejects(parallelism_config_.dsv4_prefill_cp_compat,
+                                          parallelism_config_.role_type,
+                                          stream->queryPdSep(),
+                                          stream->isFakeStream(),
+                                          stream->isPerfTest(),
+                                          stream->generateConfig()->max_new_tokens)) {
                 stream->reportError(ErrorCode::INVALID_PARAMS,
                                     "DSV4 PP PREFILL_CP compatibility supports one-token prefill requests only");
                 if (!sp_enabled_ && stream->enableFastGen() && stream->isContextStream() && !stream->isFakeStream()) {

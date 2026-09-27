@@ -24,8 +24,13 @@ def dispatch_pack_experimental_enabled() -> bool:
 
 
 def _validate(q, scale, weights, ids, experts_per_rank: int, world: int):
-    if not isinstance(world, int) or world != 4:
-        raise ValueError("dispatch packet kernel currently requires integer world=4")
+    # The kernel is generic in WORLD (a constexpr grid extent); the accepted set
+    # stays enumerated to the validated PP+EP profile widths (CEP4PP2 and its
+    # CEP2PP2 local PD proxy).
+    if not isinstance(world, int) or world not in (2, 4):
+        raise ValueError(
+            "dispatch packet kernel currently requires integer world in (2, 4)"
+        )
     if not isinstance(experts_per_rank, int) or experts_per_rank <= 0:
         raise ValueError("experts_per_rank must be a positive integer")
     if q.dtype != torch.uint8 or scale.dtype != torch.uint8:

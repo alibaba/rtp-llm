@@ -115,7 +115,7 @@ def source_inputs(n, d=128, k=6):
     return q.contiguous(), scale.contiguous(), weights.contiguous(), ids.contiguous()
 
 
-def old_pack(q, scale, weights, ids, experts_per_rank=8):
+def old_pack(q, scale, weights, ids, experts_per_rank=8, world=4):
     flashinfer = types.ModuleType("flashinfer")
     flashinfer.mxfp8_quantize = lambda x, is_sf_swizzled_layout=False: (q, scale)
     before = sys.modules.get("flashinfer")
@@ -135,7 +135,7 @@ def old_pack(q, scale, weights, ids, experts_per_rank=8):
             scale.shape[1],
             ids.shape[1],
             q.shape[1] + scale.shape[1] + 8 * ids.shape[1],
-            4,
+            world,
         )
     finally:
         if before is None:
@@ -308,6 +308,67 @@ check(
     "actual-triton-interpreter-all-four-dest-n2",
     torch.equal(interpreter_out.view(4, 2, payload2), legacy2.view(4, 2, payload2)),
 )
+
+# World=2 (the CEP2PP2 local PD proxy width): the same byte contract must hold
+# against the legacy strategy path, and the actual Triton kernel must emit it.
+for n in (1, 3):
+    q_w2, scale_w2, weights_w2, ids_w2 = source_inputs(n)
+    legacy_w2 = old_pack(
+        q_w2, scale_w2, weights_w2, ids_w2, experts_per_rank=16, world=2
+    )
+    oracle_w2 = packet.pack_dispatch_packet_torch(
+        q_w2, scale_w2, weights_w2, ids_w2, experts_per_rank=16, world=2
+    )
+    check("world2-legacy-byte-equality-n%d" % n, torch.equal(oracle_w2, legacy_w2))
+    check("world2-shape-n%d" % n, tuple(oracle_w2.shape) == (2 * n, 180))
+    if n:
+        packed_w2 = oracle_w2.view(2, n, 180)
+        for dst in range(2):
+            got_i = packed_w2[dst, :, 156:].view(torch.int32).to(torch.int64)
+            owned = (ids_w2 >= 0) & (
+                torch.div(ids_w2, 16, rounding_mode="floor") == dst
+            )
+            expected_i = (
+                torch.where(owned, ids_w2, torch.full_like(ids_w2, -1))
+                .to(torch.int32)
+                .to(torch.int64)
+            )
+            check("world2-ids-owner-n%d-d%d" % (n, dst), torch.equal(got_i, expected_i))
+
+q_w2i, scale_w2i, weights_w2i, ids_w2i = source_inputs(2)
+legacy_w2i = old_pack(
+    q_w2i, scale_w2i, weights_w2i, ids_w2i, experts_per_rank=16, world=2
+)
+payload_w2i = legacy_w2i.shape[1]
+interpreter_w2 = torch.empty_like(legacy_w2i)
+packet._dispatch_packet_write_kernel[(4, packet.triton.cdiv(132, 256))](
+    q_w2i,
+    scale_w2i,
+    weights_w2i,
+    ids_w2i,
+    interpreter_w2,
+    2,
+    128,
+    4,
+    6,
+    payload_w2i,
+    16,
+    WORLD=2,
+    BLOCK_BYTES=256,
+    BLOCK_K=8,
+    num_warps=1,
+)
+check(
+    "world2-actual-triton-interpreter-byte-equal-n2",
+    torch.equal(interpreter_w2, legacy_w2i),
+)
+
+# Widths outside the two validated profiles stay rejected.
+try:
+    packet.pack_dispatch_packet_torch(*source_inputs(1), experts_per_rank=8, world=3)
+    check("world3-rejected", False)
+except ValueError as exc_w3:
+    check("world3-rejected", "world in (2, 4)" in str(exc_w3))
 
 old = os.environ.pop("DSV4_NCCL_EP_MXFP8_DISPATCH_PACK", None)
 check("strict-default-off", not packet.dispatch_pack_experimental_enabled())

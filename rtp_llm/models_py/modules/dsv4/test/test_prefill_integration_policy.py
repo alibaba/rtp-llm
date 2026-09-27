@@ -147,5 +147,158 @@ class IntegrationPolicyTest(unittest.TestCase):
         self.assertEqual(text.count("inputs.pd_separation                   ="), 1)
 
 
+class PpEpProfilePolicyTest(unittest.TestCase):
+    """Exact-shape PP+EP profile contract: CEP4PP2 target + CEP2PP2 local PD proxy."""
+
+    @staticmethod
+    def _load_ep_stage_context():
+        import importlib.util
+        import sys
+
+        rl_path = ROOT / "rtp_llm/models_py/distributed/rank_layout.py"
+        spec = importlib.util.spec_from_file_location(
+            "rtp_llm.models_py.distributed.rank_layout", rl_path
+        )
+        rl = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = rl
+        spec.loader.exec_module(rl)
+        esc_path = ROOT / "rtp_llm/models_py/distributed/ep_stage_context.py"
+        spec = importlib.util.spec_from_file_location(
+            "_ep_stage_context_under_test", esc_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _cfg(pp, dp, tp, ep, world, role=None, cp_size=0, sharded=False):
+        cp = types.SimpleNamespace(
+            is_prefill_enabled=lambda: True,
+            kv_cache_sharded=sharded,
+            prefill_cp_size=cp_size,
+        )
+        return types.SimpleNamespace(
+            pp_size=pp,
+            dp_size=dp,
+            tp_size=tp,
+            ep_size=ep,
+            world_size=world,
+            world_rank=0,
+            ep_rank=0,
+            role_type=role,
+            prefill_cp_config=cp,
+        )
+
+    def test_exact_profiles_accepted(self):
+        mod = self._load_ep_stage_context()
+        for shape in mod.PP_EP_PROFILES:
+            cfg = self._cfg(*shape)
+            layout = mod.validate_pp_ep_shape(cfg)
+            self.assertEqual(layout.world_size(), shape[4])
+
+    def test_near_miss_shapes_rejected(self):
+        mod = self._load_ep_stage_context()
+        for shape in (
+            (2, 1, 4, 4, 4),  # CEP4PP2 with proxy world
+            (2, 1, 2, 2, 8),  # CEP2PP2 with target world
+            (2, 1, 2, 2, 2),  # truncated world
+            (2, 1, 2, 4, 4),  # ep != tp
+            (4, 1, 2, 2, 8),  # pp4
+            (2, 2, 2, 2, 8),  # dp2
+            (2, 1, 3, 3, 6),  # unvalidated width
+        ):
+            with self.assertRaises(ValueError, msg=f"shape {shape} must be rejected"):
+                mod.validate_pp_ep_shape(self._cfg(*shape))
+
+    def test_cp_config_checks_use_configured_tp(self):
+        mod = self._load_ep_stage_context()
+        # cp_size equal to the profile's own tp is fine; foreign values are not.
+        mod.validate_pp_ep_shape(self._cfg(2, 1, 2, 2, 4, cp_size=2))
+        mod.validate_pp_ep_shape(self._cfg(2, 1, 4, 4, 8, cp_size=4))
+        with self.assertRaises(ValueError):
+            mod.validate_pp_ep_shape(self._cfg(2, 1, 2, 2, 4, cp_size=4))
+        with self.assertRaises(ValueError):
+            mod.validate_pp_ep_shape(self._cfg(2, 1, 4, 4, 8, cp_size=2))
+        with self.assertRaises(ValueError):
+            mod.validate_pp_ep_shape(self._cfg(2, 1, 2, 2, 4, sharded=True))
+
+    def test_role_gate_admits_prefill_and_pdfusion(self):
+        import enum
+        import sys
+
+        mod = self._load_ep_stage_context()
+
+        class RoleType(enum.Enum):
+            PDFUSION = 0
+            PREFILL = 1
+            DECODE = 2
+
+        fake_ops = types.ModuleType("rtp_llm.ops")
+        fake_ops.RoleType = RoleType
+        sys.modules["rtp_llm.ops"] = fake_ops
+        try:
+            hw = types.SimpleNamespace(
+                enable_cuda_graph=False, enable_native_cuda_graph=False
+            )
+            for role in (RoleType.PDFUSION, RoleType.PREFILL):
+                for shape in mod.PP_EP_PROFILES:
+                    mod.validate_pp_ep_target(
+                        self._cfg(*shape, role=role),
+                        hw_kernel_config=hw,
+                        is_sm120=True,
+                        has_grouped_fp4=True,
+                    )
+            with self.assertRaises(ValueError, msg="DECODE must stay rejected"):
+                mod.validate_pp_ep_target(
+                    self._cfg(2, 1, 2, 2, 4, role=RoleType.DECODE),
+                    hw_kernel_config=hw,
+                    is_sm120=True,
+                    has_grouped_fp4=True,
+                )
+            with self.assertRaises(ValueError, msg="cuda graphs stay rejected"):
+                mod.validate_pp_ep_target(
+                    self._cfg(2, 1, 2, 2, 4, role=RoleType.PREFILL),
+                    hw_kernel_config=types.SimpleNamespace(
+                        enable_cuda_graph=True, enable_native_cuda_graph=False
+                    ),
+                    is_sm120=True,
+                    has_grouped_fp4=True,
+                )
+        finally:
+            del sys.modules["rtp_llm.ops"]
+
+    def test_cpp_gate_enumerates_both_profiles(self):
+        text = (ROOT / "rtp_llm/cpp/config/ConfigModules.h").read_text()
+        self.assertEqual(text.count("pp_ep_shape_valid"), 2)  # declaration + one use
+        self.assertIn("tp_size == 4 && world_size == 8", text)
+        self.assertIn("tp_size == 2 && world_size == 4", text)
+        self.assertIn(
+            "role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL", text
+        )
+
+    def test_one_token_guard_is_per_request_pd_aware(self):
+        # The guard must exempt only streams that took the PD
+        # branch (role PREFILL && per-request queryPdSep()), not every request
+        # on a PREFILL-role server (a local-bypass multi-token request must
+        # still be rejected). This source-policy test only checks that
+        # production routes the decision through the shared predicate with the
+        # real stream state; the executable truth table lives in the C++ test
+        # //rtp_llm/cpp/normal_engine/test:pp_prefill_guard_policy_test, which
+        # calls the same predicate.
+        text = (ROOT / "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.cc").read_text()
+        start = "void PPExecutor::prepareStreams"
+        body = text.split(start, 1)[1].split("void PPExecutor::", 1)[0]
+        self.assertIn("dsv4PrefillCpGuardRejects(", body)
+        self.assertIn("stream->queryPdSep()", body)
+        self.assertIn("parallelism_config_.role_type", body)
+        # The predicate itself must require BOTH the PREFILL role and the
+        # per-request PD flag for the exemption.
+        policy = (
+            ROOT / "rtp_llm/cpp/normal_engine/pipeline/PPPrefillGuardPolicy.h"
+        ).read_text()
+        self.assertIn("role == RoleType::PREFILL) && stream_pd_separation", policy)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

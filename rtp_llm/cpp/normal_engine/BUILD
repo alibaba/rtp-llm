@@ -15,6 +15,19 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Header-only pure policy for the DSV4 PP PREFILL_CP one-token guard
+# (PPExecutor::prepareStreams). Separate target so the executable truth-table
+# test links just this header, without the executor/torch/CUDA dependency
+# chain. Production calls this predicate; tests must not copy it.
+cc_library(
+    name = "pp_prefill_guard_policy",
+    hdrs = ["pipeline/PPPrefillGuardPolicy.h"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/config:role_types"],
+    visibility = ["//visibility:public"],
+)
+
+
 cc_library(
     name = "normal_engine",
     hdrs = glob([
@@ -37,6 +50,7 @@ cc_library(
     ],
     deps = [
         ":pipeline_types",
+        ":pp_prefill_guard_policy",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:pp_topology_validator",
         "//rtp_llm/cpp/config:config_modules",
@@ -86,6 +100,9 @@ cc_library(
 
 filegroup(
     name = "prefill_pipeline_source_data",
-    srcs = ["pipeline/PPExecutor.cc"],
+    srcs = [
+        "pipeline/PPExecutor.cc",
+        "pipeline/PPPrefillGuardPolicy.h",
+    ],
     visibility = ["//visibility:public"],
 )

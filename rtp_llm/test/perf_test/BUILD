@@ -1378,6 +1378,89 @@ py_test(
     target_compatible_with = _DSV4_SM120_ONLY,
 )
 
+# PREFILL-role compute check only: one-token requests bypass PD publishing.
+# Validate KV transfer separately with multi-token requests and a decode peer.
+py_test(
+    name = "v4_flash_sm120_cep4pp2_32k_prefill_role_compute",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = ["//rtp_llm:pyodps", "//rtp_llm:testlib", ":perf_test_lib"],
+    data = ["//rtp_llm:sdk"],
+    args = ["PREFILL" if a == "PDFUSION" else a for a in _CEP4PP2_PREFILL_ARGS],
+    env = _CEP4PP2_REFERENCE_ENV,
+    tags = ["manual", "SM120_X86"],
+    exec_properties = {"gpu": "SM120_X86", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+# CEP2PP2: the 4-rank local PD proxy profile (pp2 x dp1 x tp2 x ep2, world4).
+# Same topology ratios as CEP4PP2 at half width so a proxy prefill plus a
+# DP4EP4 decode colocate on one 8-GPU host. Keep step-for-step with the target.
+py_test(
+    name = "v4_flash_sm120_cep2pp2_32k_prefill",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = ["//rtp_llm:pyodps", "//rtp_llm:testlib", ":perf_test_lib"],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--role_type", "PDFUSION",
+        "--pp_size", "2",
+        "--tp_size", "2",
+        "--dp_size", "1",
+        "--ep_size", "2",
+        "--world_size", "4",
+        "--cp_rotate_method", "PREFILL_CP",
+        "--prefill_cp_size", "2",
+        "--prefill_cp_kv_cache_sharded", "0",
+        "--warm_up", "0",
+        "--model_warm_up", "0",
+        "--load_method", "fastsafetensors",
+        "--max_seq_len", "32832",
+        "--enable_cuda_graph", "0",
+        "--act_type", "BF16",
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "128",
+        "--cache_store_rdma_mode", "0",
+        "--cache_store_rdma_connect_timeout_ms", "800",
+        "--use_local", "1",
+        "--reuse_cache", "0",
+        "--enable_device_cache", "0",
+        "--enable_memory_cache", "0",
+        "--memory_cache_size_mb", "256",
+        "--write_cache_sync", "1",
+        "--use_deepep_moe", "0",
+        "--use_deepep_low_latency", "0",
+        "--reserver_runtime_mem_mb", "12288",
+        "--concurrency_limit", "1",
+        "--max_context_batch_size", "1",
+        "--fp8_kv_cache", "1",
+        "--enable_fp32_lm_head", "0",
+        "--enable_fast_gen", "1",
+        "--fast_gen_context_budget", "4096",
+        "--use_batch_decode_scheduler", "0",
+        "--batch_size", "1",
+        "--input_len", "32768",
+        "--partial", "2",
+        "--decode_test_length", "1",
+    ],
+    # Proxy-only deltas from the serving recipe: the local-replay capture
+    # buckets are sized for CP4 row counts (512/1024 rows/owner), which the
+    # half-width CP2 slicing (2048) does not produce. The proxy validates the
+    # PD contract and lifecycle, not replay performance, so replay stays off.
+    env = dict(
+        _CEP4PP2_REFERENCE_ENV,
+        WORLD_SIZE = "4",
+        DSV4_MOE_LOCAL_REPLAY = "0",
+        DSV4_MOE_LOCAL_REPLAY_REQUIRED = "0",
+    ),
+    tags = ["manual", "SM120_X86"],
+    exec_properties = {"gpu": "SM120_X86", "gpu_count": "4"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
 py_test(
     name = "v4_flash_sm120_cep4pp2_32k_reference",
     main = "reference_benchmark_test.py",

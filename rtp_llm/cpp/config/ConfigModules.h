@@ -97,12 +97,12 @@ struct ParallelismConfig {
     bool dsv4_prefill_cp_compat = false;
 
     bool dsv4_prefill_cp_profile_valid() const {
-        const bool cp2pp4  = pp_size == 4 && tp_size == 2 && ep_size == 1 && !pp_ep_enabled;
-        const bool cep4pp2 = pp_ep_experimental_ok();
-        return dp_size == 1 && world_size == 8 && role_type == RoleType::PDFUSION
-               && prefill_cp_config.is_prefill_enabled() && !prefill_cp_config.kv_cache_sharded
+        const bool cp2pp4 = pp_size == 4 && tp_size == 2 && ep_size == 1 && !pp_ep_enabled && world_size == 8
+                            && role_type == RoleType::PDFUSION;
+        const bool cep = pp_ep_experimental_ok();
+        return dp_size == 1 && prefill_cp_config.is_prefill_enabled() && !prefill_cp_config.kv_cache_sharded
                && (prefill_cp_config.prefill_cp_size == 0 || prefill_cp_config.prefill_cp_size == tp_size)
-               && (cp2pp4 || cep4pp2);
+               && (cp2pp4 || cep);
     }
 
     // Shared by C++ execution, Python model setup and effective TP weight loading.
@@ -123,8 +123,9 @@ struct ParallelismConfig {
         }
         if (model_type != "deepseek_v4" || !dsv4_prefill_cp_profile_valid() || speculative || cuda_graph
             || layer_micro_batch || enable_sp || use_ub_comm || ffn_disaggregate_config.enable_ffn_disaggregate) {
-            throw std::invalid_argument("local PREFILL_CP requires the DSV4 PDFUSION CP2PP4 or opted-in CEP4PP2 "
-                                        "prefill-only profile, with unsharded cache and no speculative, graph, "
+            throw std::invalid_argument("local PREFILL_CP requires a DSV4 PDFUSION CP2PP4 or opted-in "
+                                        "CEP4PP2/CEP2PP2 prefill-only profile (PDFUSION, or PREFILL role for "
+                                        "the PP+EP shapes), with unsharded cache and no speculative, graph, "
                                         "micro-batch, SP, UB or FFN-disaggregation execution");
         }
         dsv4_prefill_cp_compat = true;
@@ -147,16 +148,24 @@ struct ParallelismConfig {
     bool        pp_ep_enabled = false;
     std::string pp_ep_backend;  // "purecp_bf16" | "fork_nccl_mxfp8"
 
-    // The only shape accepted by our experimental NCCL adapter: pp2 x dp1 x tp4(=>cp4) x ep4 on
-    // 8 ranks, with an explicitly resolved and named expert backend. Deliberately
-    // exact rather than range-based — a PP+EP guard widened by one working test
-    // would silently admit unvalidated dp>1 / tp!=4 / ep!=tp combinations.
+    // The shapes accepted by our experimental NCCL adapter, kept exact and enumerated rather
+    // than range-based — a PP+EP guard widened by one working test would silently admit
+    // unvalidated dp>1 / tp!=ep / world!=pp*tp*dp combinations.
+    //   CEP4PP2: pp2 x dp1 x tp4(=>cp4) x ep4 on 8 ranks — the serving target.
+    //   CEP2PP2: pp2 x dp1 x tp2(=>cp2) x ep2 on 4 ranks — the local PD proxy (same topology
+    //            ratios at half width, so the CEP2PP2 PREFILL x DP4EP4 DECODE pair fits on
+    //            one 8-GPU host; scale effects still require the two-node target).
+    // PDFUSION serves standalone prefill; PREFILL is the disaggregated (PD) prefill role.
     static bool pp_ep_backend_valid(const std::string& backend) {
         return backend == "purecp_bf16" || backend == "fork_nccl_mxfp8";
     }
+    bool pp_ep_shape_valid() const {
+        return pp_size == 2 && dp_size == 1 && ep_size == tp_size
+               && ((tp_size == 4 && world_size == 8) || (tp_size == 2 && world_size == 4));
+    }
     bool pp_ep_experimental_ok() const {
-        return pp_ep_enabled && pp_ep_backend_valid(pp_ep_backend) && pp_size == 2 && dp_size == 1 && tp_size == 4
-               && ep_size == 4 && world_size == 8 && role_type == RoleType::PDFUSION;
+        const bool role_ok = role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL;
+        return pp_ep_enabled && pp_ep_backend_valid(pp_ep_backend) && pp_ep_shape_valid() && role_ok;
     }
 
     std::string to_string() const;
