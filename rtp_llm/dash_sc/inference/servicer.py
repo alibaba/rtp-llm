@@ -984,6 +984,7 @@ async def iter_real_model_stream_infer(
             eos_token_id=eos_id,
             max_token_id=max_id,
             prompt_token_offset=prompt_token_offset,
+            top_logprobs=sampling.top_logprobs,
         )
         chunk_idx = 0
         phase2_needed = False
@@ -1120,6 +1121,7 @@ async def iter_real_model_stream_infer(
                         ),
                         stream_finished=not will_do_phase2,
                         token_ids=list(runtime.eos_tokens),
+                        emit_logprobs=False,
                     )
                     eos_finished = not will_do_phase2
                     eos_finish_reason = (
@@ -1279,6 +1281,7 @@ async def iter_real_model_stream_infer(
                 generate_config=phase2_config,
                 eos_token_id=eos_id,
                 max_token_id=max_id,
+                top_logprobs=sampling.top_logprobs,
             )
             phase2_cumulative_sent_ids: list[int] = []
 

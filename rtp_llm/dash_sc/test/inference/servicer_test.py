@@ -16,6 +16,7 @@ import struct
 import unittest
 from unittest.mock import MagicMock, patch
 
+import grpc
 import torch
 
 from rtp_llm.config.exceptions import (
@@ -68,7 +69,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
     iter_real_model_stream_infer,
 )
-from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
@@ -1633,6 +1634,76 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
+    async def test_thinking_logprobs_skip_injected_close_and_resume_in_phase2(
+        self,
+    ) -> None:
+        phase1_probs = torch.zeros((2, 32), dtype=torch.float32)
+        phase1_probs[0, 10] = 0.8
+        phase1_probs[0, 11] = 0.2
+        phase1_probs[1, 1] = 1.0
+        phase2_probs = torch.zeros((1, 32), dtype=torch.float32)
+        phase2_probs[0, 20] = 0.7
+        phase2_probs[0, 21] = 0.3
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    all_probs=phase1_probs,
+                    finished=False,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    all_probs=phase2_probs,
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tokenizer = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                [7, 8],
+                SamplingParams(logprobs=True, top_logprobs=2),
+                DashScRequestControls(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tokenizer,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tokenizer, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in chunks], [[10], [128822, 271], [20]]
+        )
+        first_scores = json.loads(
+            chunks[0].infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(set(first_scores[0]), {"10", "11"})
+        self.assertNotIn("logprobs", chunks[1].infer_response.parameters)
+        second_scores = json.loads(
+            chunks[2].infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(set(second_scores[0]), {"20", "21"})
+        self.assertEqual(
+            visitor.generate_inputs[0].generate_config.return_all_probs, 1
+        )
+        self.assertEqual(
+            visitor.generate_inputs[1].generate_config.return_all_probs, 1
+        )
+
     async def test_phase2_finished_at_max_new_tokens_reports_length(self) -> None:
         req = self._minimal_request()
         phase1 = GenerateOutputs(
@@ -2457,11 +2528,18 @@ class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
         _add_input_tensor(req, "input_ids", "INT32", [2], struct.pack("<2i", 99, 100))
         return req
 
-    async def _run(self, *, input_ids, echo_prefix_ids, upstream_ids):
+    async def _run(self, *, input_ids, echo_prefix_ids, upstream_ids, logprobs=False):
         chunks_proto = []
         for ids in upstream_ids:
+            probabilities = None
+            if logprobs and ids:
+                probabilities = torch.zeros((len(ids), 128), dtype=torch.float32)
+                for row, token_id in enumerate(ids):
+                    probabilities[row, token_id] = 0.8
+                    probabilities[row, token_id + 1] = 0.2
             out = GenerateOutput(
                 output_ids=torch.tensor(ids, dtype=torch.int32) if ids else None,
+                all_probs=probabilities,
                 finished=False,
                 aux_info=AuxInfo(input_len=len(input_ids), reuse_len=0),
             )
@@ -2471,7 +2549,9 @@ class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
             iter_real_model_stream_infer(
                 self._req(),
                 input_ids,
-                SamplingParams(),
+                SamplingParams(logprobs=True, top_logprobs=2)
+                if logprobs
+                else SamplingParams(),
                 DashScRequestControls(),
                 visitor,
                 rtp_llm_request_id=1,
@@ -2500,6 +2580,30 @@ class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chunks), 2)
         self.assertEqual(self._gen_ids(chunks[0]), [99, 100, 3, 4])
         self.assertEqual(self._gen_ids(chunks[1]), [5, 6])
+
+    async def test_echo_with_logprobs_has_one_row_per_wire_token(self) -> None:
+        chunks = await self._run(
+            input_ids=[1, 2, 99, 100],
+            echo_prefix_ids=[99, 100],
+            upstream_ids=[[3, 4], [5]],
+            logprobs=True,
+        )
+        self.assertEqual(
+            [self._gen_ids(chunk) for chunk in chunks], [[99, 100, 3, 4], [5]]
+        )
+        first_rows = json.loads(
+            chunks[0].infer_response.parameters["logprobs"].string_param
+        )
+        second_rows = json.loads(
+            chunks[1].infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(len(first_rows), len(self._gen_ids(chunks[0])))
+        self.assertEqual(first_rows[:2], [{}, {}])
+        self.assertEqual(
+            [set(row) for row in first_rows[2:]], [{"3", "4"}, {"4", "5"}]
+        )
+        self.assertEqual(len(second_rows), len(self._gen_ids(chunks[1])))
+        self.assertEqual(set(second_rows[0]), {"5", "6"})
 
     async def test_no_echo_when_tail_mismatch(self) -> None:
         chunks = await self._run(
@@ -2645,6 +2749,99 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             aux_info=AuxInfo(input_len=1, reuse_len=0),
         )
         return _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
+
+    async def test_logprobs_request_reaches_engine_and_wire_response(self) -> None:
+        output = GenerateOutput(
+            output_ids=torch.tensor([2], dtype=torch.int32),
+            all_probs=torch.tensor([0.1, 0.2, 0.7], dtype=torch.float32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[output])])
+        )
+        request = self._valid_infer_request()
+        request.parameters["logprobs"].bool_param = True
+        request.parameters["top_logprobs"].int64_param = 2
+
+        responses = await _drain(
+            DashScInferenceServicer(backend_visitor=visitor).ModelStreamInfer(
+                _areq_iter([request]), MagicMock()
+            )
+        )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(
+            visitor.last_generate_input.generate_config.return_all_probs, 1
+        )
+        scores = json.loads(
+            responses[0].infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(len(scores), 1)
+        self.assertEqual(set(scores[0]), {"1", "2"})
+        self.assertAlmostEqual(scores[0]["2"], torch.tensor(0.7).log().item())
+
+    async def test_grpc_echo_prefix_keeps_logprobs_aligned(self) -> None:
+        output = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            all_probs=torch.tensor([0.0, 0.0, 0.0, 0.8, 0.2]),
+            finished=True,
+            aux_info=AuxInfo(input_len=4, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[output])])
+        )
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, echo_prefix_ids=[99, 100]
+        )
+        request = predict_v2_pb2.ModelInferRequest()
+        request.id = "grpc-echo-logprobs"
+        request.model_name = "default"
+        _add_input_tensor(
+            request, "input_ids", "INT32", [4], struct.pack("<4i", 1, 2, 99, 100)
+        )
+        request.parameters["logprobs"].bool_param = True
+        request.parameters["top_logprobs"].int64_param = 2
+
+        server = grpc.aio.server()
+        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+            servicer, server
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        self.assertGreater(port, 0)
+        await server.start()
+        try:
+            async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+                stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+                responses = [
+                    response
+                    async for response in stub.ModelStreamInfer(_areq_iter([request]))
+                ]
+        finally:
+            await server.stop(0)
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0].error_message, "")
+        self.assertEqual(
+            visitor.last_generate_input.token_ids.reshape(-1).tolist(),
+            [1, 2, 99, 100],
+        )
+        infer = responses[0].infer_response
+        generated_index = next(
+            index
+            for index, item in enumerate(infer.outputs)
+            if item.name == "generated_ids"
+        )
+        self.assertEqual(list(infer.outputs[generated_index].shape), [1, 3])
+        self.assertEqual(
+            _unpack_int32_le(infer.raw_output_contents[generated_index]),
+            [99, 100, 3],
+        )
+        rows = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[:2], [{}, {}])
+        self.assertEqual(set(rows[2]), {"3", "4"})
+        self.assertAlmostEqual(rows[2]["3"], torch.tensor(0.8).log().item())
 
     async def test_close_closes_grammar_validator_once_and_is_idempotent(self) -> None:
         validator = MagicMock()
