@@ -106,14 +106,16 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGroups& stream_groups,
                                                                 size_t              total_batch_size_in,
                                                                 size_t              total_batch_size_out,
-                                                                size_t              propose_step) const {
+                                                                size_t              propose_step,
+                                                                bool                compact_token_ids) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
-    sampler_inputs.step             = stream_groups.maxSeqLen() + propose_step;
-    sampler_inputs.batch_size       = total_batch_size_in;
-    sampler_inputs.batch_size_out   = total_batch_size_out;
-    auto bs                         = (int64_t)total_batch_size_in;
-    sampler_inputs.sequence_lengths = torch::empty({bs}, torch::kInt32);
+    sampler_inputs.step              = stream_groups.maxSeqLen() + propose_step;
+    sampler_inputs.compact_token_ids = compact_token_ids;
+    sampler_inputs.batch_size        = total_batch_size_in;
+    sampler_inputs.batch_size_out    = total_batch_size_out;
+    auto bs                          = (int64_t)total_batch_size_in;
+    sampler_inputs.sequence_lengths  = torch::empty({bs}, torch::kInt32);
     sampler_inputs.logits_processor_states_ptr.reset();
     sampler_inputs.input_lengths  = torch::empty({bs}, torch::kInt32);
     sampler_inputs.num_beams_in   = torch::empty({bs}, torch::kLong);
@@ -139,8 +141,8 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
     // shows up as Memcpy Pageable→Device on the timeline (~33 MiB/rank/step
     // at bs=128 / step=65552).
-    sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
+    sampler_inputs.token_ids = compact_token_ids ? torch::zeros({bs, 1}, pinned_i32) :
+                                                   torch::empty({bs, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }

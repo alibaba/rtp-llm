@@ -94,6 +94,54 @@ public:
 
 class SamplerTest: public DeviceTestBase {};
 
+TEST_F(SamplerTest, testCompactSlotsPreserveThinkStateTransitions) {
+    SamplerDataBuilder builder;
+    for (auto state : {ThinkProcessState::UNDECIDED,
+                       ThinkProcessState::OPENING_THINK,
+                       ThinkProcessState::NO_THINK,
+                       ThinkProcessState::IN_THINK,
+                       ThinkProcessState::CLOSING_THINK,
+                       ThinkProcessState::AFTER_THINK}) {
+        for (int budget : {0, 3}) {
+            SCOPED_TRACE(static_cast<int>(state));
+            SCOPED_TRACE(budget);
+            StreamThinkInfo info(ThinkingMode::ADAPTIVE,
+                                 budget,
+                                 {6, 7},
+                                 {8, 9},
+                                 81920,
+                                 3,
+                                 false,
+                                 std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{8, 9}));
+            info.process_state           = state;
+            info.begin_think_token_index = state == ThinkProcessState::OPENING_THINK ? 1 : 0;
+            auto full    = std::make_shared<ThinkModeLogitsProcessor>(std::vector<StreamThinkInfo>{info.copy()});
+            auto compact = std::make_shared<ThinkModeLogitsProcessor>(std::vector<StreamThinkInfo>{info.copy()});
+            ASSERT_FALSE(full->requiresTokenHistory());
+            ASSERT_FALSE(compact->requiresTokenHistory());
+            for (int round = 0; round < 3; ++round) {
+                auto a              = builder.allocate({1, 16, 81924}, {full}, {1});
+                auto b              = builder.allocate({1, 16, 81924}, {compact}, {1});
+                b.token_ids         = torch::full({1, 1}, -1, torch::kInt32);
+                b.compact_token_ids = true;
+                a.phase = b.phase = LogitsProcessorPhase::MTP_VERIFY;
+                a.input_lengths = b.input_lengths = torch::tensor({81920}, torch::kInt32);
+                a.sequence_lengths = b.sequence_lengths = torch::tensor({81923 + round}, torch::kInt32);
+                ASSERT_FALSE(b.logits_processor_states_ptr->requiresTokenHistory());
+                a.logits_processor_states_ptr->batchProcess(a);
+                b.logits_processor_states_ptr->batchProcess(b);
+                EXPECT_TRUE(torch::equal(a.logits, b.logits));
+                auto token = a.logits.argmax(-1).to(torch::kInt32).reshape({1, 1});
+                full->updateStatus(token, 1);
+                compact->updateStatus(token, 1);
+                EXPECT_EQ(full->acceptedTokenLen(), compact->acceptedTokenLen());
+                EXPECT_EQ(full->thinkEndTokensStatus(), compact->thinkEndTokensStatus());
+                EXPECT_EQ(b.token_ids.item<int32_t>(), -1);
+            }
+        }
+    }
+}
+
 #define EXPECT_SIMILAR(vec1, vec2, eps)                                                                                \
     do {                                                                                                               \
         bool similar = true;                                                                                           \

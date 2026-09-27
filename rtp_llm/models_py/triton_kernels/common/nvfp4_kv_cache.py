@@ -39,6 +39,75 @@ _TL_E2M1_MAX = tl.constexpr(6.0)
 
 
 @triton.jit
+def _decode_physical_slots_kernel(
+    LENS,
+    TABLE,
+    OUT,
+    N: tl.constexpr,
+    COLS: tl.constexpr,
+    LS: tl.constexpr,
+    TS0: tl.constexpr,
+    TS1: tl.constexpr,
+    PAGE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    active = row < N
+    if COLS == 0:
+        tl.store(OUT + row, -1, mask=active)
+    else:
+        pos = tl.load(LENS + row * LS, mask=active, other=0).to(tl.int64) - 1
+        col = tl.maximum(pos, 0) // PAGE
+        valid = active & (pos >= 0) & (col < COLS)
+        page = tl.load(
+            TABLE + row.to(tl.int64) * TS0 + col * TS1,
+            mask=valid,
+            other=0,
+        ).to(tl.int64)
+        slot = page * PAGE + pos % PAGE
+        tl.store(OUT + row, tl.where(valid & (page > 0), slot, -1), mask=active)
+
+
+def build_decode_physical_slots(seq_lens, block_table, page_size=128):
+    """Map token rows to int64 cache slots; invalid/padded rows become -1.
+
+    The writer retains responsibility for physical pool bounds. Empty tables
+    explicitly yield invalid slots. Allocation during capture belongs to the
+    existing graph pool, avoiding mutable cross-layer workspace ownership.
+    """
+    if seq_lens.ndim != 1 or block_table.ndim != 2:
+        raise ValueError("expected lens[N] and table[N,C]")
+    n = seq_lens.numel()
+    if block_table.shape[0] != n:
+        raise ValueError("token dimensions must match")
+    if seq_lens.dtype not in (torch.int32, torch.int64) or block_table.dtype not in (
+        torch.int32,
+        torch.int64,
+    ):
+        raise ValueError("lens/table must be int32 or int64")
+    if not seq_lens.is_cuda or seq_lens.device != block_table.device:
+        raise ValueError("lens/table must use the same CUDA device")
+    if not isinstance(page_size, int) or page_size <= 0:
+        raise ValueError("page_size must be a positive integer")
+    out = torch.empty((n,), dtype=torch.int64, device=seq_lens.device)
+    if n:
+        _decode_physical_slots_kernel[(triton.cdiv(n, 128),)](
+            seq_lens,
+            block_table,
+            out,
+            n,
+            block_table.shape[1],
+            seq_lens.stride(0),
+            block_table.stride(0),
+            block_table.stride(1),
+            page_size,
+            128,
+            num_warps=4,
+        )
+    return out
+
+
+@triton.jit
 def _scale_128x4_offset(row, group):
     """Offset inside one 128-row cuBLAS/cuDNN block-scale tile."""
     return (group // 4) * 512 + (row % 32) * 16 + (row // 32) * 4 + group % 4
@@ -550,13 +619,12 @@ def _quantize_main_index_rows_d128_kernel(
     PAGE_SIZE: tl.constexpr,
     MMA_SCALE_LAYOUT: tl.constexpr,
 ):
-    """D=128 writer with one program per row and logical plane.
+    """One row/plane CTA, eight independent groups by eight nibble pairs.
 
-    The generic writer launches one program per 16-value scale group. M3.1
-    always uses D=128 for main K/V and indexer-K, so one program can process
-    all eight groups while preserving each group's reduction and RNE order.
+    Reduction axis 1 preserves each group of sixteen. Scale stores are 1D;
+    packed byte stores are 2D. Row and slot offsets promote to int64.
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     plane = tl.program_id(1)
     is_k = plane < NUM_HEADS
     is_v = (plane >= NUM_HEADS) & (plane < 2 * NUM_HEADS)
@@ -568,95 +636,91 @@ def _quantize_main_index_rows_d128_kernel(
     valid_slot = valid_row & (slot >= 0) & (slot < NUM_BLOCKS * PAGE_SIZE)
     block = slot // PAGE_SIZE
     page_offset = slot - block * PAGE_SIZE
-    pair = tl.arange(0, 8)
+    pair = tl.arange(0, 8)[None, :]
+    groups = tl.arange(0, 8)
+    group = groups[:, None]
+    element = group * 16 + 2 * pair
+    main_even_offset = row * K_S0 + head * K_S1 + element * K_S2
+    main_odd_offset = main_even_offset + K_S2
+    v_even_offset = row * V_S0 + head * V_S1 + element * V_S2
+    v_odd_offset = v_even_offset + V_S2
+    idx_even_offset = row * IDX_S0 + element * IDX_S2
+    idx_odd_offset = idx_even_offset + IDX_S2
 
-    for group in tl.static_range(8):
-        element = group * 16 + 2 * pair
-        main_even_offset = row * K_S0 + head * K_S1 + element * K_S2
-        main_odd_offset = main_even_offset + K_S2
-        v_even_offset = row * V_S0 + head * V_S1 + element * V_S2
-        v_odd_offset = v_even_offset + V_S2
-        idx_even_offset = row * IDX_S0 + element * IDX_S2
-        idx_odd_offset = idx_even_offset + IDX_S2
+    k_even = tl.load(k_ptr + main_even_offset, mask=valid_slot & is_k, other=0.0)
+    k_odd = tl.load(k_ptr + main_odd_offset, mask=valid_slot & is_k, other=0.0)
+    v_even = tl.load(v_ptr + v_even_offset, mask=valid_slot & is_v, other=0.0)
+    v_odd = tl.load(v_ptr + v_odd_offset, mask=valid_slot & is_v, other=0.0)
+    idx_even = tl.load(idx_ptr + idx_even_offset, mask=valid_slot & is_idx, other=0.0)
+    idx_odd = tl.load(idx_ptr + idx_odd_offset, mask=valid_slot & is_idx, other=0.0)
+    even_values = tl.where(is_k, k_even, tl.where(is_v, v_even, idx_even)).to(
+        tl.float32
+    )
+    odd_values = tl.where(is_k, k_odd, tl.where(is_v, v_odd, idx_odd)).to(tl.float32)
+    amax = tl.max(tl.maximum(tl.abs(even_values), tl.abs(odd_values)), axis=1)
+    raw_scale = tl.minimum(
+        tl.maximum(amax / _TL_E2M1_MAX, _TL_SCALE_MIN), _TL_SCALE_MAX
+    )
+    stored_scale = raw_scale.to(tl.float8e4nv)
+    scale = stored_scale.to(tl.float32)[:, None]
+    packed_codes = _e2m1_encode(even_values, scale) | (
+        _e2m1_encode(odd_values, scale) << 4
+    )
 
-        k_even = tl.load(k_ptr + main_even_offset, mask=valid_slot & is_k, other=0.0)
-        k_odd = tl.load(k_ptr + main_odd_offset, mask=valid_slot & is_k, other=0.0)
-        v_even = tl.load(v_ptr + v_even_offset, mask=valid_slot & is_v, other=0.0)
-        v_odd = tl.load(v_ptr + v_odd_offset, mask=valid_slot & is_v, other=0.0)
-        idx_even = tl.load(
-            idx_ptr + idx_even_offset, mask=valid_slot & is_idx, other=0.0
+    main_packed_offset = (
+        block * MAIN_PACKED_S0
+        + (head * PAGE_SIZE + page_offset) * 64
+        + group * 8
+        + pair
+    )
+    if MMA_SCALE_LAYOUT:
+        main_scale_offset = (
+            block * MAIN_SCALE_S0
+            + head * PAGE_SIZE * 8
+            + _scale_128x4_offset(page_offset, groups)
         )
-        idx_odd = tl.load(idx_ptr + idx_odd_offset, mask=valid_slot & is_idx, other=0.0)
-        even_values = tl.where(is_k, k_even, tl.where(is_v, v_even, idx_even)).to(
-            tl.float32
+    else:
+        main_scale_offset = (
+            block * MAIN_SCALE_S0 + (head * PAGE_SIZE + page_offset) * 8 + groups
         )
-        odd_values = tl.where(is_k, k_odd, tl.where(is_v, v_odd, idx_odd)).to(
-            tl.float32
+    idx_packed_offset = block * IDX_PACKED_S0 + page_offset * 64 + group * 8 + pair
+    if MMA_SCALE_LAYOUT:
+        idx_scale_offset = block * IDX_SCALE_S0 + _scale_128x4_offset(
+            page_offset, groups
         )
-        amax = tl.max(tl.maximum(tl.abs(even_values), tl.abs(odd_values)), axis=0)
-        raw_scale = tl.minimum(
-            tl.maximum(amax / _TL_E2M1_MAX, _TL_SCALE_MIN), _TL_SCALE_MAX
-        )
-        stored_scale = raw_scale.to(tl.float8e4nv)
-        scale = stored_scale.to(tl.float32)
-        packed_codes = _e2m1_encode(even_values, scale) | (
-            _e2m1_encode(odd_values, scale) << 4
-        )
+    else:
+        idx_scale_offset = block * IDX_SCALE_S0 + page_offset * 8 + groups
 
-        main_packed_offset = (
-            block * MAIN_PACKED_S0
-            + (head * PAGE_SIZE + page_offset) * 64
-            + group * 8
-            + pair
-        )
-        if MMA_SCALE_LAYOUT:
-            main_scale_offset = (
-                block * MAIN_SCALE_S0
-                + head * PAGE_SIZE * 8
-                + _scale_128x4_offset(page_offset, group)
-            )
-        else:
-            main_scale_offset = (
-                block * MAIN_SCALE_S0 + (head * PAGE_SIZE + page_offset) * 8 + group
-            )
-        idx_packed_offset = block * IDX_PACKED_S0 + page_offset * 64 + group * 8 + pair
-        if MMA_SCALE_LAYOUT:
-            idx_scale_offset = block * IDX_SCALE_S0 + _scale_128x4_offset(
-                page_offset, group
-            )
-        else:
-            idx_scale_offset = block * IDX_SCALE_S0 + page_offset * 8 + group
-
-        tl.store(
-            k_packed_ptr + main_packed_offset,
-            packed_codes,
-            mask=valid_slot & is_k,
-        )
-        tl.store(
-            k_scales_ptr + main_scale_offset,
-            stored_scale,
-            mask=valid_slot & is_k,
-        )
-        tl.store(
-            v_packed_ptr + main_packed_offset,
-            packed_codes,
-            mask=valid_slot & is_v,
-        )
-        tl.store(
-            v_scales_ptr + main_scale_offset,
-            stored_scale,
-            mask=valid_slot & is_v,
-        )
-        tl.store(
-            idx_packed_ptr + idx_packed_offset,
-            packed_codes,
-            mask=valid_slot & is_idx,
-        )
-        tl.store(
-            idx_scales_ptr + idx_scale_offset,
-            stored_scale,
-            mask=valid_slot & is_idx,
-        )
+    tl.store(
+        k_packed_ptr + main_packed_offset,
+        packed_codes,
+        mask=valid_slot & is_k,
+    )
+    tl.store(
+        k_scales_ptr + main_scale_offset,
+        stored_scale,
+        mask=valid_slot & is_k,
+    )
+    tl.store(
+        v_packed_ptr + main_packed_offset,
+        packed_codes,
+        mask=valid_slot & is_v,
+    )
+    tl.store(
+        v_scales_ptr + main_scale_offset,
+        stored_scale,
+        mask=valid_slot & is_v,
+    )
+    tl.store(
+        idx_packed_ptr + idx_packed_offset,
+        packed_codes,
+        mask=valid_slot & is_idx,
+    )
+    tl.store(
+        idx_scales_ptr + idx_scale_offset,
+        stored_scale,
+        mask=valid_slot & is_idx,
+    )
 
 
 @triton.jit

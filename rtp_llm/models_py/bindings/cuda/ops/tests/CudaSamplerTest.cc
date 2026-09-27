@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
+#include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include <ATen/cuda/CUDAContext.h>
@@ -152,6 +153,196 @@ void assertSamplingStatsClose(const std::string& name, const SamplingAccuracySta
 class CudaSamplerTest: public DeviceTestBase {
 public:
 protected:
+    void assertBatchTemperatureBeyondBlock(torch::ScalarType dtype) {
+        constexpr int64_t vocab = 32;  // The kernel launches only 32 threads per block.
+        for (const int64_t batch : {80, 128}) {
+            SCOPED_TRACE(::testing::Message() << "batch=" << batch << " dtype=" << dtype);
+            std::vector<float> logits_data(batch * vocab), temperature_data(batch), inverse_data(batch);
+            for (int64_t row = 0; row < batch; ++row) {
+                temperature_data[row] = 0.5f + static_cast<float>(row % 17) / 10.0f;
+                inverse_data[row]     = 1.0f / (temperature_data[row] + 1e-6f);
+                for (int64_t col = 0; col < vocab; ++col) {
+                    logits_data[row * vocab + col] = static_cast<float>(1 + (row * 7 + col * 3) % 53) / 8.0f;
+                }
+            }
+            auto input_cpu = torch::tensor(logits_data, torch::kFloat32).reshape({batch, vocab}).to(dtype);
+            // The even-vocabulary FP16 path rounds the reciprocal to half before
+            // multiplying in half2. Match both roundings, not float division.
+            auto       inverse_cpu  = torch::tensor(inverse_data, torch::kFloat32).to(dtype).to(torch::kFloat32);
+            auto       expected     = (input_cpu.to(torch::kFloat32) * inverse_cpu.unsqueeze(1)).to(dtype);
+            auto       logits       = input_cpu.cuda();
+            auto       temperatures = cudaTensor(temperature_data, {batch});
+            const auto stream       = at::cuda::getCurrentCUDAStream().stream();
+            if (dtype == torch::kFloat32) {
+                invokeBatchApplyTemperaturePenalty<float>(
+                    logits.data_ptr<float>(), nullptr, temperatures.data_ptr<float>(), batch, vocab, vocab, stream);
+            } else {
+                invokeBatchApplyTemperaturePenalty<half>(reinterpret_cast<half*>(logits.data_ptr<at::Half>()),
+                                                         nullptr,
+                                                         temperatures.data_ptr<float>(),
+                                                         batch,
+                                                         vocab,
+                                                         vocab,
+                                                         stream);
+            }
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            auto actual = logits.cpu();
+            ASSERT_TRUE(torch::isfinite(actual).all().item<bool>());
+            if (dtype == torch::kFloat16) {
+                ASSERT_TRUE(torch::equal(actual, expected));
+            } else {
+                ASSERT_TRUE(torch::allclose(actual, expected, /*rtol=*/1e-6, /*atol=*/1e-6));
+            }
+        }
+    }
+
+    // This is a lowest-layer equivalence check, not permission to omit history
+    // for penalties, processors, beam search, or arbitrary Sampler consumers.
+    void assertCompactHistoryEquivalent(int64_t batch,
+                                        int64_t history,
+                                        int     mode,
+                                        bool    with_all_probs      = true,
+                                        int64_t vocab               = 32,
+                                        bool    exact_probabilities = true) {
+        SCOPED_TRACE(::testing::Message() << "batch=" << batch << " history=" << history << " mode=" << mode
+                                          << " all_probs=" << with_all_probs << " vocab=" << vocab);
+        ASSERT_TRUE(with_all_probs || mode == 0);
+        std::vector<float>   logits_data(batch * vocab);
+        std::vector<int32_t> input_data(batch), sequence_data(batch), top_k_data(batch);
+        std::vector<float>   top_p_data(batch), temperature_data(batch);
+        for (int64_t row = 0; row < batch; ++row) {
+            input_data[row]       = static_cast<int32_t>(history - 4 - row % 3);
+            sequence_data[row]    = static_cast<int32_t>(history - row % 3);
+            top_k_data[row]       = mode == 0 ? 1 : (row % 2 ? 8 : 0);
+            top_p_data[row]       = mode == 0 ? 1.0f : (row % 2 ? 0.85f : 0.7f);
+            temperature_data[row] = mode == 0 ? 1.0f : (row % 2 ? 0.8f : 1.2f);
+            if (mode == 2 && row % 2 == 0) {
+                // Match fillSamplerCommonInputs' do_sample=false normalization.
+                top_k_data[row]       = 1;
+                top_p_data[row]       = 1.0f;
+                temperature_data[row] = 1.0f;
+            }
+            for (int64_t col = 0; col < vocab; ++col) {
+                logits_data[row * vocab + col] = static_cast<float>((col * 7 + row * 3) % 31) / 9.0f;
+            }
+        }
+        auto logits           = cudaTensor(logits_data, {batch, vocab});
+        auto input_lengths    = torch::tensor(input_data, torch::kInt32);
+        auto sequence_lengths = torch::tensor(sequence_data, torch::kInt32);
+        auto input_before     = input_lengths.clone();
+        auto sequence_before  = sequence_lengths.clone();
+        auto do_sample        = torch::ones({batch}, torch::kBool).pin_memory();
+        for (int64_t row = 0; row < batch; ++row) {
+            do_sample.data_ptr<bool>()[row] = mode != 2 || row % 2 != 0;
+        }
+        std::vector<at::Generator> full_generators, compact_generators;
+        for (int64_t row = 0; row < batch; ++row) {
+            full_generators.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            compact_generators.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            full_generators.back().set_current_seed(9100 + row);
+            compact_generators.back().set_current_seed(9100 + row);
+        }
+        // Two successive calls verify continuation, not just an equal first draw.
+        for (int round = 0; round < 2; ++round) {
+            SCOPED_TRACE(::testing::Message() << "round=" << round);
+            auto device_i32     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            auto full_tokens    = torch::full({batch, history + 1}, 7, device_i32);
+            auto compact_tokens = torch::full({batch, 1}, -1, device_i32);
+            full_tokens.select(1, history).fill_(-1);
+            auto                       full_logits    = logits.clone();
+            auto                       compact_logits = logits.clone();
+            auto                       full_probs     = torch::zeros_like(logits);
+            auto                       compact_probs  = torch::zeros_like(logits);
+            auto                       full_cum       = torch::full({batch}, -0.5f, logits.options());
+            auto                       compact_cum    = full_cum.clone();
+            std::vector<torch::Tensor> before_rng;
+            for (int64_t row = 0; row < batch; ++row) {
+                before_rng.push_back(full_generators[row].get_state().clone());
+            }
+
+            auto make_params = [&](torch::Tensor                     l,
+                                   torch::Tensor                     tokens,
+                                   torch::Tensor                     probs,
+                                   torch::Tensor                     cum,
+                                   const std::vector<at::Generator>& generators) {
+                return GreedyParams{l,
+                                    input_lengths,
+                                    sequence_lengths,
+                                    tokens,
+                                    static_cast<size_t>(history),
+                                    pinnedIntTensor(top_k_data),
+                                    pinnedFloatTensor(top_p_data),
+                                    pinnedFloatTensor(temperature_data),
+                                    pinnedFloatTensor(std::vector<float>(batch, 1.0f)),
+                                    pinnedIntTensor(std::vector<int32_t>(batch, 0)),
+                                    cum,
+                                    std::nullopt,
+                                    false,
+                                    with_all_probs ? std::optional<torch::Tensor>(probs) : std::nullopt,
+                                    pinnedFloatTensor(std::vector<float>(batch, 0.0f)),
+                                    pinnedFloatTensor(std::vector<float>(batch, 0.0f)),
+                                    do_sample,
+                                    generators};
+            };
+            auto full_params = make_params(full_logits, full_tokens, full_probs, full_cum, full_generators);
+            auto compact_params =
+                make_params(compact_logits, compact_tokens, compact_probs, compact_cum, compact_generators);
+            ASSERT_EQ(full_params.output_all_probs.has_value(), with_all_probs);
+            ASSERT_EQ(compact_params.output_all_probs.has_value(), with_all_probs);
+            // Logical step and lengths intentionally remain real, including 81920.
+            ASSERT_EQ(full_params.step, compact_params.step);
+            auto full_output    = execSampleGreedy(full_params);
+            auto compact_output = execSampleGreedy(compact_params);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            ASSERT_TRUE(torch::equal(full_tokens.select(1, history), compact_tokens.select(1, 0)));
+            ASSERT_TRUE(compact_tokens.ge(0).logical_and(compact_tokens.lt(vocab)).all().item<bool>());
+            if (exact_probabilities) {
+                ASSERT_TRUE(torch::equal(full_probs, compact_probs));
+                ASSERT_TRUE(torch::equal(full_cum, compact_cum));
+            } else {
+                // Real-vocab multi-CTA renorm is not bitwise repeatable even
+                // full/full with frozen input. Stage-isolation tests retain
+                // that evidence. Bound distribution drift per row, not only
+                // per-element absolute error (which hides broad mass shifts).
+                ASSERT_TRUE(torch::isfinite(full_probs).all().item<bool>());
+                ASSERT_TRUE(torch::isfinite(compact_probs).all().item<bool>());
+                ASSERT_TRUE(torch::equal(full_probs.gt(0), compact_probs.gt(0)));
+                ASSERT_LE((full_probs - compact_probs).abs().sum(-1).max().item<float>(), 1e-6f);
+                ASSERT_LE((full_probs.sum(-1) - 1).abs().max().item<float>(), 1e-6f);
+                ASSERT_LE((compact_probs.sum(-1) - 1).abs().max().item<float>(), 1e-6f);
+                ASSERT_LE((full_cum - compact_cum).abs().max().item<float>(), 2e-6f);
+            }
+            ASSERT_TRUE(torch::equal(full_logits, compact_logits));
+            ASSERT_EQ(full_output.success.defined(), compact_output.success.defined());
+            if (full_output.success.defined()) {
+                ASSERT_TRUE(torch::equal(full_output.success, compact_output.success));
+                ASSERT_TRUE(full_output.success.all().item<bool>());
+            }
+            if (!with_all_probs) {
+                // top1's no-all_probs fast path is argmax only: no softmax or RNG draw.
+                ASSERT_FALSE(full_output.success.defined());
+                ASSERT_FALSE(compact_output.success.defined());
+                ASSERT_TRUE(torch::equal(compact_tokens.select(1, 0), logits.argmax(-1).to(torch::kInt32)));
+                ASSERT_TRUE(torch::equal(full_logits, logits));
+                ASSERT_TRUE(full_cum.eq(-0.5f).all().item<bool>());
+            }
+            ASSERT_TRUE(full_tokens.narrow(1, 0, history).eq(7).all().item<bool>());
+            ASSERT_TRUE(torch::equal(input_lengths, input_before));
+            ASSERT_TRUE(torch::equal(sequence_lengths, sequence_before));
+            for (int64_t row = 0; row < batch; ++row) {
+                ASSERT_TRUE(torch::equal(full_generators[row].get_state(), compact_generators[row].get_state()));
+                if (!with_all_probs) {
+                    ASSERT_TRUE(torch::equal(before_rng[row], full_generators[row].get_state()));
+                    ASSERT_TRUE(torch::equal(before_rng[row], compact_generators[row].get_state()));
+                }
+            }
+            // Even top1 with all_probs must retain the current RNG reservation.
+            if (with_all_probs) {
+                ASSERT_FALSE(torch::equal(before_rng.front(), full_generators.front().get_state()));
+            }
+        }
+    }
+
     // Helper: create a CUDA tensor from float data
     torch::Tensor cudaTensor(std::vector<float> data, std::vector<int64_t> shape) {
         return torch::tensor(data, torch::kFloat32).reshape(shape).to(torch::kCUDA);
@@ -925,6 +1116,263 @@ TEST_F(CudaSamplerTest, testBanRepeatNGram) {
             } else {
                 EXPECT_GT(logits_cpu[i][j].item<float>(), 0.0f);
             }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, BatchTemperaturePenaltyFloatBatchExceedsBlock) {
+    assertBatchTemperatureBeyondBlock(torch::kFloat32);
+}
+
+TEST_F(CudaSamplerTest, BatchTemperaturePenaltyHalfBatchExceedsBlock) {
+    assertBatchTemperatureBeyondBlock(torch::kFloat16);
+}
+
+TEST_F(CudaSamplerTest, CompactHistoryTop1AllProbsLong81920B80PreservesRng) {
+    assertCompactHistoryEquivalent(80, 81920, 0);
+}
+
+TEST_F(CudaSamplerTest, CompactHistoryTop1NoAllProbsLong81920B80LeavesRngUnchanged) {
+    assertCompactHistoryEquivalent(80, 81920, 0, /*with_all_probs=*/false);
+}
+
+TEST_F(CudaSamplerTest, CompactHistoryRandomTopKTopPPreservesRngAcrossShapes) {
+    assertCompactHistoryEquivalent(80, 81920, 1);
+    assertCompactHistoryEquivalent(5, 17, 1);
+    assertCompactHistoryEquivalent(128, 31, 1);
+}
+
+TEST_F(CudaSamplerTest, CompactHistoryMixedDoSamplePreservesRngAcrossShapes) {
+    assertCompactHistoryEquivalent(80, 81920, 2);
+    assertCompactHistoryEquivalent(1, 9, 2);
+    assertCompactHistoryEquivalent(80, 23, 2);
+}
+
+TEST_F(CudaSamplerTest, CompactHistoryRealVocab200064Top1AllProbsLong81920B80PreservesRng) {
+    assertCompactHistoryEquivalent(80,
+                                   81920,
+                                   0,
+                                   /*with_all_probs=*/true,
+                                   /*vocab=*/200064,
+                                   /*exact_probabilities=*/false);
+}
+
+TEST_F(CudaSamplerTest, CompactHistoryRealVocab200064Top1NoAllProbsLong81920B80LeavesRngUnchanged) {
+    assertCompactHistoryEquivalent(80, 81920, 0, /*with_all_probs=*/false, /*vocab=*/200064);
+}
+
+TEST_F(CudaSamplerTest, CompactHistoryRealVocab200064RandomTopKTopPLong81920B80PreservesRng) {
+    assertCompactHistoryEquivalent(80,
+                                   81920,
+                                   1,
+                                   /*with_all_probs=*/true,
+                                   /*vocab=*/200064,
+                                   /*exact_probabilities=*/false);
+}
+
+TEST_F(CudaSamplerTest, CompactHistoryRealVocab200064MixedDoSampleLong81920B80PreservesRng) {
+    assertCompactHistoryEquivalent(80,
+                                   81920,
+                                   2,
+                                   /*with_all_probs=*/true,
+                                   /*vocab=*/200064,
+                                   /*exact_probabilities=*/false);
+}
+
+// Opt-in bitwise diagnostic: intentionally fails for multi-CTA FP32 renorm,
+// including full/full controls. Kept to reproduce the numerical-bound evidence;
+// enabled regressions above enforce exact tokens/logits/RNG and bounded mass.
+TEST_F(CudaSamplerTest, DISABLED_DiagnosticCompactHistoryFullFullCompactSampling) {
+    struct Case {
+        int64_t batch;
+        int64_t history;
+        int     mode;
+        bool    hold_seed_inputs = false;
+        int64_t vocab            = 32;
+    };
+    const std::vector<Case> cases   = {{80, 81920, 1},
+                                       {128, 31, 1},
+                                       {80, 31, 1},
+                                       {80, 81920, 2},
+                                       {80, 23, 2},
+                                       {80, 31, 3},
+                                       {80, 81920, 1, true},
+                                       {128, 31, 1, true},
+                                       {80, 31, 1, true},
+                                       {80, 81920, 2, true},
+                                       {80, 23, 2, true},
+                                       {80, 31, 3, true},
+                                       {80, 81920, 0, true, 200064},
+                                       {80, 81920, 1, true, 200064},
+                                       {80, 81920, 2, true, 200064}};
+    constexpr int           repeats = 5;
+    for (const auto& c : cases) {
+        const int64_t vocab = c.vocab;
+        for (int repeat = 0; repeat < repeats; ++repeat) {
+            SCOPED_TRACE(::testing::Message()
+                         << "diagnostic batch=" << c.batch << " history=" << c.history << " mode=" << c.mode
+                         << " repeat=" << repeat << " hold_seed_inputs=" << c.hold_seed_inputs);
+            std::cout << "COMPACT_DIAGNOSTIC batch=" << c.batch << " history=" << c.history << " mode=" << c.mode
+                      << " repeat=" << repeat << " vocab=" << vocab << " first_call=" << repeat % 3
+                      << " hold_seed_inputs=" << c.hold_seed_inputs << std::endl;
+            std::vector<float>   data(c.batch * vocab), top_p(c.batch), temperature(c.batch);
+            std::vector<int32_t> input(c.batch), sequence(c.batch), top_k(c.batch);
+            for (int64_t row = 0; row < c.batch; ++row) {
+                input[row]       = static_cast<int32_t>(c.history - 4 - row % 3);
+                sequence[row]    = static_cast<int32_t>(c.history - row % 3);
+                top_k[row]       = row % 2 ? 8 : 0;
+                top_p[row]       = row % 2 ? 0.85f : 0.7f;
+                temperature[row] = row % 2 ? 0.8f : 1.2f;
+                if (c.mode == 0) {
+                    top_k[row]       = 1;
+                    top_p[row]       = 1.0f;
+                    temperature[row] = 1.0f;
+                }
+                if (c.mode == 2 && row % 2 == 0) {
+                    top_k[row]       = 1;
+                    top_p[row]       = 1.0f;
+                    temperature[row] = 1.0f;
+                }
+                // Dedicated all-zero top_k control exercises no-limit top-p,
+                // distinct from mixed {0,8} rows in the combined top-k/top-p branch.
+                if (c.mode == 3) {
+                    top_k[row] = 0;
+                }
+                for (int64_t col = 0; col < vocab; ++col) {
+                    data[row * vocab + col] = static_cast<float>((col * 7 + row * 3) % 31) / 9.0f;
+                }
+            }
+            std::vector<GreedyParams> params;
+            std::vector<GreedyOutput> outputs(3);
+            // Caller-owned pinned inputs in params remain alive through sync in
+            // both controls. Holders additionally retain internally created
+            // seed/offset host tensors, matching the production ownership path.
+            std::vector<TensorHolder> holders(3);
+            for (int variant = 0; variant < 3; ++variant) {
+                auto logits = cudaTensor(data, {c.batch, vocab});
+                auto tokens = torch::full({c.batch, variant == 2 ? 1 : c.history + 1},
+                                          7,
+                                          torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                tokens.select(1, tokens.size(1) - 1).fill_(-1);
+                auto                       do_sample = torch::ones({c.batch}, torch::kBool).pin_memory();
+                std::vector<at::Generator> generators;
+                for (int64_t row = 0; row < c.batch; ++row) {
+                    do_sample.data_ptr<bool>()[row] = c.mode != 2 || row % 2 != 0;
+                    generators.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+                    generators.back().set_current_seed(9100 + row);
+                }
+                params.push_back(GreedyParams{logits,
+                                              torch::tensor(input, torch::kInt32),
+                                              torch::tensor(sequence, torch::kInt32),
+                                              tokens,
+                                              static_cast<size_t>(c.history),
+                                              pinnedIntTensor(top_k),
+                                              pinnedFloatTensor(top_p),
+                                              pinnedFloatTensor(temperature),
+                                              pinnedFloatTensor(std::vector<float>(c.batch, 1.0f)),
+                                              pinnedIntTensor(std::vector<int32_t>(c.batch, 0)),
+                                              torch::full({c.batch}, -0.5f, logits.options()),
+                                              std::nullopt,
+                                              false,
+                                              torch::zeros_like(logits),
+                                              pinnedFloatTensor(std::vector<float>(c.batch, 0.0f)),
+                                              pinnedFloatTensor(std::vector<float>(c.batch, 0.0f)),
+                                              do_sample,
+                                              generators,
+                                              c.hold_seed_inputs ? &holders[variant] : nullptr});
+            }
+            for (int variant = 1; variant < 3; ++variant) {
+                for (int64_t row = 0; row < c.batch; ++row) {
+                    EXPECT_TRUE(
+                        torch::equal(params[0].generator[row].get_state(), params[variant].generator[row].get_state()))
+                        << "initial RNG";
+                }
+            }
+            // Rotate submission order; retain all three independent inputs/outputs.
+            for (int call = 0; call < 3; ++call) {
+                const int variant = (call + repeat) % 3;
+                outputs[variant]  = execSampleGreedy(params[variant]);
+            }
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            for (int variant = 0; variant < 3; ++variant) {
+                std::cout << "COMPACT_DIAGNOSTIC variant=" << variant
+                          << " held_host_tensors=" << holders[variant].tensors.size()
+                          << " top_k_zero_after=" << params[variant].top_k.eq(0).sum().item<int64_t>()
+                          << " top_k_no_limit_after=" << params[variant].top_k.eq(1 << 30).sum().item<int64_t>()
+                          << std::endl;
+            }
+            auto report = [&](const char* pair, const char* field, const torch::Tensor& a, const torch::Tensor& b) {
+                std::cout << "COMPACT_DIAGNOSTIC pair=" << pair << " field=" << field << " defined_a=" << a.defined()
+                          << " defined_b=" << b.defined();
+                if (!a.defined() || !b.defined()) {
+                    std::cout << std::endl;
+                    EXPECT_EQ(a.defined(), b.defined()) << pair << "/" << field;
+                    return;
+                }
+                auto       x      = a.cpu().to(torch::kFloat64);
+                auto       y      = b.cpu().to(torch::kFloat64);
+                auto       finite = torch::isfinite(x).logical_and(torch::isfinite(y));
+                auto       delta  = (x - y).abs().masked_select(finite);
+                const bool equal  = torch::equal(a, b);
+                std::cout << " exact=" << equal << " different=" << x.ne(y).sum().item<int64_t>()
+                          << " finite_a=" << torch::isfinite(x).sum().item<int64_t>()
+                          << " finite_b=" << torch::isfinite(y).sum().item<int64_t>()
+                          << " nan_a=" << torch::isnan(x).sum().item<int64_t>()
+                          << " nan_b=" << torch::isnan(y).sum().item<int64_t>()
+                          << " inf_a=" << torch::isinf(x).sum().item<int64_t>()
+                          << " inf_b=" << torch::isinf(y).sum().item<int64_t>()
+                          << " finite_max_abs=" << (delta.numel() ? delta.max().item<double>() : 0.0)
+                          << " finite_L1=" << delta.sum().item<double>() << std::endl;
+                // Nonfatal: report every field and every repetition before failing.
+                EXPECT_TRUE(equal) << pair << "/" << field;
+            };
+            for (int other = 1; other < 3; ++other) {
+                const char* pair = other == 1 ? "fullA/fullB" : "fullA/compact";
+                report(pair,
+                       "tokens",
+                       params[0].token_ids.select(1, c.history),
+                       params[other].token_ids.select(1, params[other].token_ids.size(1) - 1));
+                report(
+                    pair, "probabilities", params[0].output_all_probs.value(), params[other].output_all_probs.value());
+                report(pair, "logits", params[0].logits, params[other].logits);
+                report(pair, "cum_log_probs", params[0].cum_log_probs.value(), params[other].cum_log_probs.value());
+                report(pair, "success", outputs[0].success, outputs[other].success);
+                int64_t rng_different_rows = 0;
+                for (int64_t row = 0; row < c.batch; ++row) {
+                    rng_different_rows +=
+                        !torch::equal(params[0].generator[row].get_state(), params[other].generator[row].get_state());
+                }
+                std::cout << "COMPACT_DIAGNOSTIC pair=" << pair
+                          << " field=post_rng different_rows=" << rng_different_rows << " total_rows=" << c.batch
+                          << std::endl;
+                EXPECT_EQ(rng_different_rows, 0) << pair;
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, DiagnosticRealVocabSoftmaxAndRenormRepeatability) {
+    constexpr int64_t batch = 80, vocab = 200064;
+    auto              rows         = torch::arange(batch, torch::kInt64).unsqueeze(1);
+    auto              cols         = torch::arange(vocab, torch::kInt64).unsqueeze(0);
+    auto              logits       = ((cols * 7 + rows * 3).remainder(31).to(torch::kFloat32) / 9.0f).cuda();
+    auto              frozen_probs = torch::softmax(logits, -1);
+    const auto        stream       = at::cuda::getCurrentCUDAStream().stream();
+    for (int64_t top_k : {int64_t{1}, int64_t{8}, int64_t{1 << 30}}) {
+        auto reference = torch::empty_like(frozen_probs);
+        top_k_renorm_probs(frozen_probs, reference, std::nullopt, top_k, (int64_t)stream);
+        for (int repeat = 0; repeat < 5; ++repeat) {
+            auto repeated_softmax = torch::softmax(logits, -1);
+            ASSERT_TRUE(torch::equal(frozen_probs, repeated_softmax));
+            auto actual = torch::empty_like(frozen_probs);
+            top_k_renorm_probs(frozen_probs, actual, std::nullopt, top_k, (int64_t)stream);
+            auto delta = (reference - actual).abs();
+            std::cout << "RENORM_DIAGNOSTIC top_k=" << top_k << " repeat=" << repeat
+                      << " softmax_exact=1 renorm_exact=" << torch::equal(reference, actual)
+                      << " max_abs=" << delta.max().item<float>() << " max_row_l1=" << delta.sum(-1).max().item<float>()
+                      << " row_sum_error=" << (actual.sum(-1) - 1).abs().max().item<float>() << std::endl;
+            ASSERT_TRUE(torch::isfinite(actual).all().item<bool>());
+            ASSERT_TRUE(actual.ge(0).all().item<bool>());
         }
     }
 }

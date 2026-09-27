@@ -679,5 +679,56 @@ class TestComputeLocalLastHidden(unittest.TestCase):
         self._run_case(stream_lens=[10, 20, 7], cp_size=4)
 
 
+class TestDSparkRuntimeCPRows(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CP handleInputs requires CUDA")
+    def test_actual_shuffle_matches_captured_feature_rows(self):
+        from rtp_llm.models_py.speculative.minimax_m31_dspark_context import (
+            map_cp_context_rows,
+        )
+
+        for sizes in ([521, 17], [9, 2, 0], [1], [128, 129]):
+            lengths = torch.tensor(sizes, dtype=torch.int32)
+            prefixes = torch.arange(len(sizes), dtype=torch.int32) * 127
+            starts = lengths.cumsum(0) - lengths
+            total = sum(sizes)
+            # Unique row identities in features prove the mapper agrees with
+            # the real C++ split, rather than another hand-written shuffle.
+            features = torch.arange(total, dtype=torch.float32).view(-1, 1).repeat(1, 3)
+            tokens = torch.arange(total, dtype=torch.int32)
+            seen = []
+            for rank in range(4):
+                _, chunks, local_features, shuffle = cp_test.handle_inputs_with_hidden(
+                    tokens,
+                    lengths,
+                    torch.empty(0, dtype=torch.int32),
+                    features,
+                    rank,
+                    4,
+                )
+                requests, positions = map_cp_context_rows(
+                    chunks, shuffle, prefixes, lengths
+                )
+                for row, (request, position) in enumerate(
+                    zip(requests.tolist(), positions.tolist())
+                ):
+                    if request < 0:
+                        self.assertEqual(position, -1)
+                        continue
+                    packed = int(starts[request]) + position - int(prefixes[request])
+                    torch.testing.assert_close(
+                        local_features[row], features[packed], rtol=0, atol=0
+                    )
+                    seen.append((request, position))
+            self.assertCountEqual(
+                seen,
+                [
+                    (request, int(prefixes[request]) + offset)
+                    for request, size in enumerate(sizes)
+                    for offset in range(size)
+                ],
+            )
+            self.assertEqual(len(seen), len(set(seen)))
+
+
 if __name__ == "__main__":
     unittest.main()

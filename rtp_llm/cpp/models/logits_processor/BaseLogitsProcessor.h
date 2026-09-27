@@ -27,6 +27,12 @@ public:
     virtual bool isStateful() const {
         return false;
     }
+    // Conservative capability for verify-only sampled-token slots. Returning
+    // false promises process/processSpeculative never index inputs.token_ids;
+    // semantic lengths, logits, and processor-owned state remain available.
+    virtual bool requiresTokenHistory() const {
+        return true;
+    }
     virtual bool supportsNormalAsyncDeviceState() const {
         return false;
     }

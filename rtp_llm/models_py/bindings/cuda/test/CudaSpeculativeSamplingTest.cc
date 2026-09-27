@@ -178,7 +178,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ExactMatchIgnoresRequest
     EXPECT_EQ(output_token_ids[0][2].item<int>(), -1);
 }
 
-TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_LegacyImmediateReject) {
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_GreedyImmediateMismatchUsesTargetToken) {
     const int batch_size    = 1;
     const int num_spec      = 3;
     const int vocab_size    = 16;
@@ -223,8 +223,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_LegacyImmediateReject) {
 
     // Rejected at position 0, so accepted count = 0 + 1 = 1 (the resampled token)
     EXPECT_EQ(acc_num_h[0].item<int>(), 1);
-    // Legacy rejection resamples from relu(target_probs - draft_probs), whose
-    // only non-zero residual mass is on token 7.
+    // Greedy verification emits the target top-1 token directly.
     EXPECT_EQ(out_ids_h[0][0].item<int>(), 7);
     // Remaining positions padded with -1
     EXPECT_EQ(out_ids_h[0][1].item<int>(), -1);
@@ -265,7 +264,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_GreedyRejectUsesTargetTo
                                                                output_token_ids.data_ptr<int>(),
                                                                output_accepted_num.data_ptr<int>(),
                                                                do_sample.data_ptr<bool>(),
-                                                               true,
+                                                               false,
                                                                batch_size,
                                                                num_spec,
                                                                vocab_size,
@@ -339,10 +338,98 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_LegacyPartialAccept) {
     EXPECT_EQ(acc_num_h[0].item<int>(), 3);
     EXPECT_EQ(out_ids_h[0][0].item<int>(), 5);
     EXPECT_EQ(out_ids_h[0][1].item<int>(), 5);
-    // Legacy rejection resamples from relu(target_probs - draft_probs), whose
-    // only non-zero residual mass at position 2 is on token 7.
+    // Greedy verification emits the target top-1 token directly.
     EXPECT_EQ(out_ids_h[0][2].item<int>(), 7);
     EXPECT_EQ(out_ids_h[0][3].item<int>(), -1);
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_SampledSameTokenStillTestsProbabilityRatio) {
+    // Nondegenerate P(A,B)=(.8,.2), Q(A,B)=(.2,.8). At u=.5,
+    // .5*.8 >= .2: reject A even if the independent target draw is A.
+    // The normalized positive residual is point mass B, not target draw A.
+    constexpr int batch  = 5;
+    constexpr int vocab  = 16;
+    constexpr int stride = 2;
+    for (int steps : {1, 4, 7}) {
+        SCOPED_TRACE(steps);
+        auto draft_probs = torch::zeros({batch, steps, vocab}, floatCuda());
+        draft_probs.select(2, 0).fill_(0.8f);
+        draft_probs.select(2, 1).fill_(0.2f);
+        auto target_probs = torch::zeros({batch, steps + 1, vocab}, floatCuda());
+        target_probs.narrow(1, 0, steps).select(2, 0).fill_(0.2f);
+        target_probs.narrow(1, 0, steps).select(2, 1).fill_(0.8f);
+        target_probs.select(1, steps).select(1, 7).fill_(1.0f);
+        auto drafts  = torch::zeros({batch, steps}, intCuda());
+        auto targets = torch::full({batch, steps + 1, stride}, 9, intCuda());
+        targets.select(2, stride - 1).fill_(0);
+        targets.select(1, steps).select(1, stride - 1).fill_(7);
+        // Row4 exercises full acceptance when target draws differ from draft;
+        // row3 exercises the all-same fast path. Both must emit bonus7.
+        targets[4].narrow(0, 0, steps).select(1, stride - 1).fill_(1);
+        auto uniforms = torch::full({batch, steps + 1}, 0.1f, floatCuda());
+        uniforms[0][0].fill_(0.5f);
+        uniforms[1].fill_(0.5f);  // Greedy row ignores the ratio.
+        uniforms[2][steps / 2].fill_(0.5f);
+        auto modes   = torch::tensor({true, false, true, true, true}, boolCuda());
+        auto output  = torch::full({batch, steps + 1}, -1, intCuda());
+        auto lengths = torch::zeros({batch}, intCuda());
+        // Tensor initialization uses Torch's stream; the fixture launches on
+        // its own CUDA stream. Establish setup completion explicitly.
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        ASSERT_EQ((rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
+                                                                drafts.data_ptr<int>(),
+                                                                uniforms.data_ptr<float>(),
+                                                                target_probs.data_ptr<float>(),
+                                                                targets.data_ptr<int>(),
+                                                                stride,
+                                                                output.data_ptr<int>(),
+                                                                lengths.data_ptr<int>(),
+                                                                modes.data_ptr<bool>(),
+                                                                false,
+                                                                batch,
+                                                                steps,
+                                                                vocab,
+                                                                stream_,
+                                                                true)),
+                  cudaSuccess);
+        ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        const auto out = output.cpu();
+        const auto len = lengths.cpu();
+        for (int row = 0; row < batch; ++row) {
+            const int accepted_drafts = row == 0 ? 0 : row == 2 ? steps / 2 : steps;
+            EXPECT_EQ(len[row].item<int>(), accepted_drafts + 1) << "row=" << row;
+            for (int col = 0; col < accepted_drafts; ++col) {
+                EXPECT_EQ(out[row][col].item<int>(), 0) << "row=" << row << " col=" << col;
+            }
+            EXPECT_EQ(out[row][accepted_drafts].item<int>(), accepted_drafts == steps ? 7 : 1) << "row=" << row;
+            for (int col = accepted_drafts + 1; col <= steps; ++col) {
+                EXPECT_EQ(out[row][col].item<int>(), -1) << "row=" << row << " col=" << col;
+            }
+        }
+        // The default ABI preserves historical MTP same-token acceptance.
+        ASSERT_EQ((rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
+                                                                drafts.data_ptr<int>(),
+                                                                uniforms.data_ptr<float>(),
+                                                                target_probs.data_ptr<float>(),
+                                                                targets.data_ptr<int>(),
+                                                                stride,
+                                                                output.data_ptr<int>(),
+                                                                lengths.data_ptr<int>(),
+                                                                modes.data_ptr<bool>(),
+                                                                false,
+                                                                batch,
+                                                                steps,
+                                                                vocab,
+                                                                stream_)),
+                  cudaSuccess);
+        ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        const auto legacy_out     = output.cpu();
+        const auto legacy_lengths = lengths.cpu();
+        for (int row = 0; row < batch; ++row) {
+            EXPECT_EQ(legacy_lengths[row].item<int>(), steps + 1);
+            EXPECT_EQ(legacy_out[row][steps].item<int>(), 7);
+        }
+    }
 }
 
 TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BatchSizeZero) {

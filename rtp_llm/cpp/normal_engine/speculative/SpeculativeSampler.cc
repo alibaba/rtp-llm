@@ -91,8 +91,12 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                                     const torch::Tensor& temperature,
                                                     const torch::Tensor& markov_w1,
                                                     const torch::Tensor& markov_w2,
-                                                    size_t               draft_vocab_size) const {
+                                                    size_t               draft_vocab_size,
+                                                    size_t               sampled_prefix_steps) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
+    const size_t prefix_steps = sampled_prefix_steps == 0 ? propose_step_ : sampled_prefix_steps;
+    RTP_LLM_CHECK_WITH_INFO(prefix_steps > 0 && prefix_steps <= propose_step_,
+                            "DSpARK sampled prefix must be in [1,gamma]");
     RTP_LLM_CHECK_WITH_INFO(temperature.defined() && temperature.is_cuda() && temperature.is_contiguous()
                                 && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1,
                             "DSpARK draft temperatures must be contiguous CUDA FP32 [B]");
@@ -112,22 +116,29 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                 && markov_w2.size(1) == markov_w1.size(1),
                             "DSpARK markov_w2 must be CUDA [draft_vocab, rank]");
 
+    // The backbone and LM head still produce all gamma rows. Only CUDA's
+    // FlashInfer path has a known per-call RNG reservation contract. Keep the
+    // full legacy loop for HIP and empty batches, then select the prefix.
+    size_t sampling_steps = propose_step_;
+#if USING_CUDA
+    if (batch_size > 0) {
+        sampling_steps = prefix_steps;
+    }
+#endif
     auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
     auto all_probabilities =
-        torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
+        torch::empty({batch_size, static_cast<int64_t>(sampling_steps), static_cast<int64_t>(draft_vocab_size)},
                      torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
     std::vector<torch::Tensor> token_columns;
-    token_columns.reserve(propose_step_);
+    token_columns.reserve(sampling_steps);
     auto proposal_logits =
         base_logits.narrow(1, 0, draft_vocab_size)
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
-    auto temperature_column = temperature.unsqueeze(1);
 
-    for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
+    for (int64_t step = 0; step < static_cast<int64_t>(sampling_steps); ++step) {
         auto markov_embedding = markov_w1.index_select(0, previous_tokens);
-        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1)).to(torch::kFloat32);
-        auto logits           = proposal_logits.select(1, step) + markov_bias;
-        logits.div_(temperature_column);
+        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
+        auto logits           = execDSparkCombineLogits(proposal_logits.select(1, step), markov_bias, temperature);
         auto sampling_probabilities = torch::softmax(logits, -1);
         auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
         auto sampled_target_tokens  = sampled_draft_tokens;
@@ -139,9 +150,19 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         previous_tokens = sampled_target_tokens.to(torch::kLong);
     }
 
+    if (sampling_steps < propose_step_) {
+        // Preserve the RNG position seen by target sampling and later rounds.
+        // This must run after the retained prefix, on the sampling rank only.
+        execReserveSampleFromProbsRng(base_logits, static_cast<int64_t>(propose_step_ - sampling_steps));
+    }
+
     SamplerOutput output;
     output.token_ids = torch::stack(token_columns, 1).contiguous();
     output.all_probs = std::move(all_probabilities);
+    if (prefix_steps < sampling_steps) {
+        output.token_ids = output.token_ids.narrow(1, 0, prefix_steps).contiguous();
+        output.all_probs = output.all_probs.narrow(1, 0, prefix_steps).contiguous();
+    }
     return output;
 }
 
@@ -257,6 +278,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             output_accepted_token_num_d,
             do_sample_d,
             proposal_mode_ == DraftProposalMode::DETERMINISTIC,
+            proposal_mode_ == DraftProposalMode::SAMPLED,
         });
     }
 

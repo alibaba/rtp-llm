@@ -40,8 +40,13 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
 
 namespace rtp_llm {
-GreedyOutput     sampleGreedy(const GreedyParams& params);
-torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
+GreedyOutput  sampleGreedy(const GreedyParams& params);
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities);
+#if USING_CUDA
+torch::Tensor
+combineDSparkLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature);
+#endif
+void             reserveSampleFromProbsRng(const torch::Tensor& device_anchor, int64_t skipped_calls);
 BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params);
 void             chainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             rejectionSampling(const RejectionSamplingParams& params);
@@ -746,6 +751,20 @@ GreedyOutput execSampleGreedy(const GreedyParams& params) {
 
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
     return sampleFromProbs(probabilities);
+}
+
+torch::Tensor
+execDSparkCombineLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature) {
+#if USING_CUDA
+    return combineDSparkLogits(base, bias, temperature);
+#else
+    auto result = base + bias.to(torch::kFloat32);
+    return result.div_(temperature.unsqueeze(1));
+#endif
+}
+
+void execReserveSampleFromProbsRng(const torch::Tensor& device_anchor, int64_t skipped_calls) {
+    reserveSampleFromProbsRng(device_anchor, skipped_calls);
 }
 
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params) {

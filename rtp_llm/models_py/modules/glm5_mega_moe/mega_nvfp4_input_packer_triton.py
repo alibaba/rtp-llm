@@ -18,25 +18,11 @@ if triton is not None:
 
     @triton.jit
     def _cast_ue4m3_nearest(value):
-        value = tl.minimum(tl.maximum(value, 1.0 / 64.0), 448.0)
-        bits = value.to(tl.int32, bitcast=True)
-        exponent_field = ((bits >> 23) & 0xFF) - 120
-        mantissa = bits & 0x7FFFFF
-        mantissa_high = mantissa >> 20
-        remainder = mantissa & 0xFFFFF
-        round_up = (remainder > 0x80000) | (
-            (remainder == 0x80000) & ((mantissa_high & 1) != 0)
-        )
-        rounded_mantissa = mantissa_high + round_up.to(tl.int32)
-        exponent_field += rounded_mantissa >> 3
-        code = (exponent_field << 3) | (rounded_mantissa & 0x7)
-        code = tl.minimum(code, 126)
-        out_exp = (code >> 3) & 0xF
-        out_mantissa = code & 0x7
-        scale = (1.0 + out_mantissa.to(tl.float32) / 8.0) * tl.exp2(
-            (out_exp - 7).to(tl.float32)
-        )
-        return code, scale
+        # Include E4M3 subnormals, matching DeepGEMM's scale cast. Clamping
+        # to the minimum normal (1/64) also changes FP4 values in tiny groups.
+        value = tl.minimum(tl.maximum(value, 1.0 / 512.0), 448.0)
+        fp8 = value.to(tl.float8e4nv, fp_downcast_rounding="rtne")
+        return fp8.to(tl.uint8, bitcast=True).to(tl.int32), fp8.to(tl.float32)
 
     @triton.jit
     def _e2m1_code(value):
@@ -113,32 +99,18 @@ if triton is not None:
             packed_sf = packed_sf | (sf_code << (scale_group * 8))
             scale_inv = tl.div_rn(tl.div_rn(1.0, gsf), sf_value)
 
-            for pair in tl.static_range(8):
-                col0 = dim_block * 64 + scale_group * 16 + pair * 2
-                col1 = col0 + 1
-                value0 = tl.load(
-                    x_ptr + rows * x_stride_m + col0,
-                    mask=row_mask & (col0 < D),
-                    other=0.0,
-                ).to(tl.float32)
-                value1 = tl.load(
-                    x_ptr + rows * x_stride_m + col1,
-                    mask=row_mask & (col1 < D),
-                    other=0.0,
-                ).to(tl.float32)
-                code0 = _e2m1_code(
-                    tl.maximum(tl.minimum(value0 * scale_inv, 6.0), -6.0)
-                )
-                code1 = _e2m1_code(
-                    tl.maximum(tl.minimum(value1 * scale_inv, 6.0), -6.0)
-                )
-                packed_fp4 = code0 | (code1 << 4)
-                out_col = dim_block * 32 + scale_group * 8 + pair
-                tl.store(
-                    out_fp4_ptr + rows * out_fp4_stride_m + out_col,
-                    packed_fp4,
-                    mask=row_mask,
-                )
+            # Reuse the loaded group; even features occupy the low nibble.
+            codes = _e2m1_code(
+                tl.maximum(tl.minimum(group_values * scale_inv[:, None], 6.0), -6.0)
+            )
+            code0, code1 = tl.split(tl.reshape(codes, (BLOCK_M, 8, 2)))
+            packed_fp4 = code0 | (code1 << 4)
+            out_cols = dim_block * 32 + scale_group * 8 + tl.arange(0, 8)
+            tl.store(
+                out_fp4_ptr + rows[:, None] * out_fp4_stride_m + out_cols[None, :],
+                packed_fp4,
+                mask=row_mask[:, None],
+            )
 
         tl.store(
             out_sf_ptr + rows * out_sf_stride_m + dim_block,
@@ -222,11 +194,13 @@ def fused_pack_mega_nvfp4_inputs(
     if tokens == 0:
         return
     block_m_env = os.environ.get("GLM5_MEGA_MOE_NVFP4_PACK_BLOCK_M")
-    # Large prefill chunks are launch-bound: BLOCK_M=16 quarters the program
-    # count relative to the old fixed value of 4. Keep the smaller tile for
-    # decode-sized inputs, where it avoids padding most of the token lanes.
+    # Keep the large-chunk policy and widen the measured decode shapes.
+    # Other small shapes retain tile 4; explicit overrides take precedence.
+    use_wide_tile = tokens >= 1024 or (
+        hidden == 6144 and topk == 4 and tokens in (80, 96, 112, 128)
+    )
     block_m = (
-        int(block_m_env) if block_m_env is not None else (16 if tokens >= 1024 else 4)
+        int(block_m_env) if block_m_env is not None else (16 if use_wide_tile else 4)
     )
     if block_m not in (1, 2, 4, 8, 16):
         raise ValueError("GLM5_MEGA_MOE_NVFP4_PACK_BLOCK_M must be one of 1,2,4,8,16")

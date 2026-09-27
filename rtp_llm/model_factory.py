@@ -147,6 +147,7 @@ class ModelFactory:
         Returns:
             ProposeModel instance or None if no propose model needed
         """
+        engine_config.sp_config.verifySteps()
         sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
         if sp_type == SpeculativeType.NONE:
             return None
@@ -183,6 +184,8 @@ class ModelFactory:
                 engine_config.sp_config.type = SpeculativeType.EAGLE3
                 sp_type = SpeculativeType.EAGLE3
 
+            # Model-family normalization may have changed the speculative type.
+            engine_config.sp_config.verifySteps()
             # Need to create GPT model for propose model
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
@@ -243,6 +246,7 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
+        engine_config.sp_config.verifySteps()
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
         # for RoPE cache sizing in speculative decoding
         model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
@@ -492,6 +496,7 @@ class ModelFactory:
             )
 
         gamma = int(sp_config.gen_num_per_cycle)
+        verify_steps = sp_config.verifySteps()
         if gamma <= 0:
             raise ValueError(
                 f"dspark requires a positive gen_num_per_cycle, got {gamma}"
@@ -542,9 +547,10 @@ class ModelFactory:
         model_config.capture_aux_hidden_layer_ids = target_layer_ids
         propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
         logging.info(
-            "DSpARK fixed-width wiring: gamma=%d, noise_token_id=%d, "
+            "DSpARK fixed-width wiring: gamma=%d, verify_steps=%d, noise_token_id=%d, "
             "target capture layer ids=%s, markov_rank=%d",
             gamma,
+            verify_steps,
             noise_token_id,
             target_layer_ids,
             markov_rank,

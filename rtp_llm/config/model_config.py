@@ -62,6 +62,7 @@ class ModelConfig(CppModelConfig):
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
+        "dspark_checkpoint_metadata",
         "dspark_sample_from_anchor",
         "mock_nvfp4_moe",
         "prepacked_nvfp4_moe",

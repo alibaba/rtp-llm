@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, List, NamedTuple, Optional
 
 import torch
@@ -349,6 +350,7 @@ class GenericMoeLayer(nn.Module):
         hidden_states: torch.Tensor,
         x_fp8: "Optional[torch.Tensor]" = None,
         x_scale: "Optional[torch.Tensor]" = None,
+        prefill_chunk_plan=None,
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         # Some architectures (MiniMax-M3) deliberately store and evaluate the
@@ -418,6 +420,8 @@ class GenericMoeLayer(nn.Module):
         if _oai is not None:
             _moe_act = "swiglu_oai"
             _moe_extra = {"swiglu_alpha": _oai[0], "swiglu_limit": _oai[1]}
+        if prefill_chunk_plan is not None:
+            _moe_extra = dict(_moe_extra or {}, prefill_chunk_plan=prefill_chunk_plan)
 
         # Launch shared expert on auxiliary stream before routed expert work.
         # When overlap is disabled (env var / CUDA graph capture / non-CUDA),
@@ -734,6 +738,7 @@ class GenericMoeDecoderLayer(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
         attn_inputs: Optional[Any] = None,
+        prefill_chunk_plan=None,
     ) -> DecodeLayerOutput:
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
             params = self._fuse_input_norm_quant_params
@@ -771,6 +776,12 @@ class GenericMoeDecoderLayer(nn.Module):
         if self._join_cp_prefix_prefetch is not None:
             self._join_cp_prefix_prefetch()
 
+        # Dense/shared experts retain their original interface and row count.
+        moe_kwargs = (
+            {"prefill_chunk_plan": prefill_chunk_plan}
+            if prefill_chunk_plan is not None and isinstance(self.mlp, GenericMoeLayer)
+            else {}
+        )
         if self._fuse_post_norm_quant and hidden_states.dim() == 2:
             _params = self._fuse_post_norm_quant_params
             assert _params is not None
@@ -783,7 +794,9 @@ class GenericMoeDecoderLayer(nn.Module):
                 scale_ue8m0=_params.scale_ue8m0,
                 round_to_pow2=_params.round_to_pow2,
             )
-            hidden_states = self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(
+                hidden_states, x_fp8=fp8_hs, x_scale=scale, **moe_kwargs
+            )
         elif self._fuse_post_norm_quant_moe and hidden_states.dim() == 2:
             _params = self._fuse_post_norm_quant_moe_params
             assert _params is not None
@@ -796,12 +809,12 @@ class GenericMoeDecoderLayer(nn.Module):
                 scale_ue8m0=_params.scale_ue8m0,
                 round_to_pow2=_params.round_to_pow2,
             )
-            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale, **moe_kwargs)
         else:
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-            hidden_states = self.mlp(hidden_states)
+            hidden_states = self.mlp(hidden_states, **moe_kwargs)
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 
 
@@ -959,6 +972,10 @@ class GenericMoeModel(GptModelBase):
             )
         return self._cuda_graph_layers
 
+    def _prepare_prefill_moe_chunk_plan(self, inputs, hidden_states, layers):
+        # Model-owned opt-in; legacy models and all graph paths are unchanged.
+        return None
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embedding(inputs)
@@ -987,6 +1004,10 @@ class GenericMoeModel(GptModelBase):
         mtp_target_hidden_capture = self._begin_mtp_target_hidden_capture(hidden_states)
         prev_topk_indices = None
         layers = self._layers_for_forward()
+        chunk_plan = self._prepare_prefill_moe_chunk_plan(inputs, hidden_states, layers)
+        layer_kwargs = (
+            {"prefill_chunk_plan": chunk_plan} if chunk_plan is not None else {}
+        )
         prefetch_hooks = (
             self._resolve_prefix_prefetch_hooks(layers)
             if inputs.attention_inputs.is_prefill and self.kv_cache is not None
@@ -1007,6 +1028,7 @@ class GenericMoeModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
                 attn_inputs=inputs.attention_inputs,
+                **layer_kwargs,
             )
             hidden_states = output.hidden_states
             residual = output.residual

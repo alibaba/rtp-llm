@@ -29,6 +29,8 @@ using SamplerT = float;
 
 namespace {
 
+constexpr int kSampleFromProbsRngIncrement = 4;
+
 // Cached handles to flashinfer.sampling Python entry points. The static
 // initialization is guarded by C++17 thread-safe statics + GIL, and the
 // caller must hold the GIL when invoking these helpers.
@@ -165,6 +167,11 @@ void processLogits(const GreedyParams&  params,
             }
             auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, true);
             auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA, true);
+            if (params.token_history_lengths_are_counts) {
+                // ban_repeat_ngram adds one internally for the legacy FMHA
+                // convention. DSpARK verify already supplies true counts.
+                sequence_lengths_gpu = sequence_lengths_gpu - 1;
+            }
 
             tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
                                                         (int32_t const**)(output_ids_ptrs_gpu.data_ptr()),
@@ -376,13 +383,54 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                int64_t(stream));
 }
 
+torch::Tensor
+combineDSparkLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature) {
+    TORCH_CHECK(base.is_cuda() && base.scalar_type() == torch::kFloat32 && base.dim() == 2,
+                "DSpark base logits must be CUDA FP32 [batch,vocab]");
+    TORCH_CHECK(bias.device() == base.device() && bias.sizes() == base.sizes() && temperature.device() == base.device()
+                    && temperature.dim() == 1 && temperature.numel() == base.size(0)
+                    && temperature.scalar_type() == torch::kFloat32,
+                "DSpark bias/temperature shape or device mismatch");
+    // Preserve other existing dtypes/layouts without extending the optimized ABI.
+    if (base.stride(1) != 1 || !bias.is_contiguous() || !temperature.is_contiguous() || base.size(0) > 65535
+        || (bias.scalar_type() != torch::kBFloat16 && bias.scalar_type() != torch::kFloat32)) {
+        auto result = base + bias.to(torch::kFloat32);
+        return result.div_(temperature.unsqueeze(1));
+    }
+    c10::cuda::CUDAGuard device_guard(base.device());
+    auto                 output = torch::empty(base.sizes(), base.options());
+    auto                 stream = at::cuda::getCurrentCUDAStream().stream();
+    cudaError_t          status;
+    if (bias.scalar_type() == torch::kBFloat16) {
+        status = invokeDSparkCombineLogits(base.data_ptr<float>(),
+                                           reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr<at::BFloat16>()),
+                                           temperature.data_ptr<float>(),
+                                           output.data_ptr<float>(),
+                                           base.size(0),
+                                           base.size(1),
+                                           base.stride(0),
+                                           stream);
+    } else {
+        status = invokeDSparkCombineLogits(base.data_ptr<float>(),
+                                           bias.data_ptr<float>(),
+                                           temperature.data_ptr<float>(),
+                                           output.data_ptr<float>(),
+                                           base.size(0),
+                                           base.size(1),
+                                           base.stride(0),
+                                           stream);
+    }
+    TORCH_CHECK(status == cudaSuccess, "DSpark logits kernel: ", cudaGetErrorString(status));
+    return output;
+}
+
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
                                 && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
                             "probability sampling expects contiguous CUDA FP32 [batch,vocab] probabilities");
     const auto           batch_size = probabilities.size(0);
     c10::cuda::CUDAGuard device_guard(probabilities.device());
-    auto [seed, offset] = get_seed_and_offset(/*increment_size=*/4);
+    auto [seed, offset] = get_seed_and_offset(kSampleFromProbsRngIncrement);
     auto token_ids =
         torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(probabilities.device()));
     auto valid = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(probabilities.device()));
@@ -396,6 +444,15 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
                         std::nullopt,
                         offset);
     return token_ids;
+}
+
+void reserveSampleFromProbsRng(const torch::Tensor& device_anchor, int64_t skipped_calls) {
+    RTP_LLM_CHECK_WITH_INFO(device_anchor.defined() && device_anchor.is_cuda() && skipped_calls >= 0,
+                            "sampleFromProbs RNG reservation requires a CUDA tensor and nonnegative count");
+    c10::cuda::CUDAGuard device_guard(device_anchor.device());
+    for (int64_t i = 0; i < skipped_calls; ++i) {
+        (void)get_seed_and_offset(kSampleFromProbsRngIncrement);
+    }
 }
 
 void rejectionSampling(const RejectionSamplingParams& params) {
@@ -431,7 +488,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                              batch_size,
                                              num_speculative_tokens,
                                              target_vocab_size,
-                                             stream));
+                                             stream,
+                                             params.sampled_draft));
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {
@@ -769,6 +827,10 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     return torch::multinomial(probabilities, 1, /*replacement=*/false).squeeze(-1).to(torch::kInt32);
 }
 
+void reserveSampleFromProbsRng(const torch::Tensor&, int64_t) {
+    TORCH_CHECK(false, "sampleFromProbs RNG reservation is only supported by the CUDA FlashInfer backend");
+}
+
 void rejectionSampling(const RejectionSamplingParams& params) {
     RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
     RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
@@ -779,6 +841,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     int  target_vocab_size      = params.target_probs_d.size(2);
     int  target_token_stride    = params.target_token_ids_d.size(1);
     auto stream                 = at::hip::getCurrentHIPStream().stream();
+    RTP_LLM_CHECK_WITH_INFO(!params.sampled_draft, "sampled-draft rejection sampling requires the CUDA backend");
 
     RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
     RTP_LLM_CHECK(params.draft_token_ids_d.dim() == 2);

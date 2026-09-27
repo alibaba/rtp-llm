@@ -13,6 +13,7 @@ public:
 
 public:
     void batchProcess(const SamplerInputs& inputs);
+    bool requiresTokenHistory() const;
     void insert(const BaseLogitsProcessorPtr& ptr,
                 size_t                        start,
                 size_t                        finish,

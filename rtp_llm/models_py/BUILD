@@ -32,6 +32,54 @@ py_test(
     ],
 )
 
+py_test(
+    name = "test_nvfp4_pack_tile_selection",
+    srcs = ["modules/glm5_mega_moe/test_nvfp4_pack_tile_selection.py"],
+    main = "modules/glm5_mega_moe/test_nvfp4_pack_tile_selection.py",
+    deps = [
+        ":modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+
+py_test(
+    name = "test_prefill_chunk_plan",
+    srcs = [
+        "modules/glm5_mega_moe/test_prefill_chunk_plan.py",
+        "modules/glm5_mega_moe/prefill_chunk_plan.py",
+    ],
+    main = "modules/glm5_mega_moe/test_prefill_chunk_plan.py",
+    deps = ["//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_prefill_chunk_plan_integration",
+    srcs = ["modules/glm5_mega_moe/test_prefill_chunk_plan_integration.py"],
+    main = "modules/glm5_mega_moe/test_prefill_chunk_plan_integration.py",
+    deps = [
+        ":models",
+        ":modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_nvfp4_input_packer",
+    srcs = ["modules/glm5_mega_moe/test_nvfp4_input_packer.py"],
+    main = "modules/glm5_mega_moe/test_nvfp4_input_packer.py",
+    deps = [
+        ":modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:deep_gemm",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
 
 filegroup(
     name = "cutlass_moe_config",

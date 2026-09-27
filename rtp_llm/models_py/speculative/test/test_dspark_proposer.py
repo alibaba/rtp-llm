@@ -21,6 +21,18 @@ class _TinyProposer(DSparkProposerMixin):
 
 
 class ProposerContractTest(unittest.TestCase):
+    def test_cuda_graph_input_width_is_target_features_not_draft_hidden(self):
+        for aux_dim, hidden_dim in ((8, 4), (30720, 6144)):
+            with self.subTest(aux_dim=aux_dim, hidden_dim=hidden_dim):
+                proposer = DSparkProposerMixin()
+                proposer.init_dspark_proposer(
+                    width=7,
+                    noise_token_id=1,
+                    aux_feature_dim=aux_dim,
+                    hidden_dim=hidden_dim,
+                )
+                self.assertEqual(proposer.cuda_graph_input_hidden_size(), aux_dim)
+
     def test_primary_attention_inputs_supports_single_and_tagged_inputs(self):
         single = SimpleNamespace(input_lengths=torch.tensor([1]))
         self.assertIs(primary_attention_inputs(single), single)

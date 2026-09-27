@@ -958,6 +958,8 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     Args:
         py_env_configs: PyEnvConfigs object to configure
     """
+    # Reject invalid startup budgets before fetching weights or configuring devices.
+    py_env_configs.sp_config.verifySteps()
     setup_default_args(py_env_configs)
     setup_jit_cache_envs(py_env_configs)
     fetch_model_files_to_local(py_env_configs)

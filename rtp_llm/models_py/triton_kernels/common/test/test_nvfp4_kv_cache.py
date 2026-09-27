@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    build_decode_physical_slots,
     cache_layout,
     clear_working_tails,
     convert_active_pages,
@@ -29,6 +30,136 @@ def _reference_groups(values: torch.Tensor) -> torch.Tensor:
 
 
 class TestNVFP4KVCache(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_target_verify_writer_projection_v_stride(self):
+        """Removing the target V copy preserves both cache regions on replay."""
+        torch.manual_seed(20260927)
+        for batch in (1, 3, 16):
+            for width in (1, 5, 6, 7, 8):
+                for mma in (False, True):
+                    with self.subTest(batch=batch, width=width, mma=mma):
+                        rows = batch * width
+                        carrier = torch.randn(
+                            rows, 9856, device="cuda", dtype=torch.bfloat16
+                        )
+                        k = carrier[:, 8192:8704].reshape(rows, 4, 128).contiguous()
+                        v = carrier[:, 8704:9216].reshape(rows, 4, 128)
+                        idx = carrier[:, 9728:9856].reshape(rows, 1, 128).contiguous()
+                        # reshape may canonicalize the unused singleton row
+                        # stride; multi-row views retain projection padding.
+                        self.assertEqual(v.stride()[1:], (128, 1))
+                        if rows > 1:
+                            self.assertEqual(v.stride(0), 9856)
+                        slots = (
+                            torch.arange(rows, device="cuda", dtype=torch.int64) + 127
+                        )
+                        pairs, graphs = [], []
+                        for materialize in (True, False):
+                            base = torch.full(
+                                (6, 65536), 165, device="cuda", dtype=torch.uint8
+                            )
+                            side = torch.full(
+                                (6, 17408), 165, device="cuda", dtype=torch.uint8
+                            )
+                            layout = cache_layout(base, side, 4, 128, 128)
+
+                            def write():
+                                quantize_main_index_rows(
+                                    k,
+                                    v.contiguous() if materialize else v,
+                                    idx,
+                                    slots,
+                                    layout,
+                                    mma_scale_layout=mma,
+                                )
+
+                            write()
+                            torch.cuda.synchronize()
+                            graph = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(graph):
+                                write()
+                            graphs.append(graph)
+                            pairs.append((base, side))
+                        for left, right in zip(*pairs):
+                            self.assertTrue(torch.equal(left, right))
+                        for state in ("fake", "live", "changed"):
+                            carrier.normal_()
+                            carrier.mul_(448 if state == "changed" else 0.001)
+                            k.copy_(carrier[:, 8192:8704].reshape_as(k))
+                            idx.copy_(carrier[:, 9728:9856].reshape_as(idx))
+                            slots.copy_(torch.arange(rows, device="cuda") + 256)
+                            slots[::3] = -1
+                            if state == "fake":
+                                slots.fill_(-1)
+                            inputs = tuple(t.clone() for t in (carrier, k, idx, slots))
+                            for pair in pairs:
+                                for tensor in pair:
+                                    tensor.fill_(165)
+                            for graph in graphs:
+                                graph.replay()
+                            torch.cuda.synchronize()
+                            for left, right in zip(*pairs):
+                                self.assertTrue(torch.equal(left, right))
+                            for tensor, original in zip(
+                                (carrier, k, idx, slots), inputs
+                            ):
+                                self.assertTrue(torch.equal(tensor, original))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_decode_physical_slots_strides_and_graph_refresh(self):
+        for dtype in (torch.int32, torch.int64):
+            for n in (1, 33, 80, 96, 112, 128, 256):
+                lens = torch.zeros(n * 2, dtype=dtype, device="cuda")[::2]
+                table = torch.ones((n, 6), dtype=dtype, device="cuda")[:, ::2]
+
+                def reference():
+                    pos = lens.long() - 1
+                    col = pos.clamp_min(0) // 128
+                    page = table[
+                        torch.arange(n, device="cuda"), col.clamp_max(2)
+                    ].long()
+                    valid = (pos >= 0) & (col < 3) & (page > 0)
+                    return torch.where(valid, page * 128 + pos.remainder(128), -1)
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        build_decode_physical_slots(lens, table)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = build_decode_physical_slots(lens, table)
+                for length, page in (
+                    (1, 1),
+                    (128, 9),
+                    (129, 0),
+                    (384, -1),
+                    (385, 1),
+                    (0, 1),
+                    (-3, 1),
+                ):
+                    lens.fill_(length)
+                    lens[::3].zero_()
+                    table.fill_(page)
+                    graph.replay()
+                    self.assertTrue(torch.equal(output, reference()))
+                expanded = table[:1].expand(n, -1)
+                self.assertTrue(
+                    torch.equal(
+                        build_decode_physical_slots(lens, expanded), reference()
+                    )
+                )
+        for n in (0, 3):
+            lens = torch.ones(n, dtype=torch.int64, device="cuda")
+            table = torch.empty((n, 0), dtype=torch.int32, device="cuda")
+            self.assertTrue(
+                torch.equal(
+                    build_decode_physical_slots(lens, table),
+                    torch.full((n,), -1, dtype=torch.int64, device="cuda"),
+                )
+            )
+
     def test_layout_rejects_short_or_mismatched_sidecar(self):
         blocks, heads, page, dim, index_dim = 2, 2, 4, 32, 64
         main_bytes = 2 * heads * page * dim // 2
@@ -426,6 +557,137 @@ class TestNVFP4KVCache(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(fused_base, reference_base, rtol=0, atol=0)
         torch.testing.assert_close(fused_side, reference_side, rtol=0, atol=0)
+
+    def test_fused_d128_writer_strided_aliases_and_graph_slot_refresh(self):
+        """Representative head counts preserve the two-region ABI on replay."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        torch.manual_seed(20260926)
+        device = torch.device("cuda")
+        blocks, page, dim, groups = 3, 128, 128, 8
+        row = torch.arange(page, device=device)[:, None]
+        group = torch.arange(groups, device=device)[None, :]
+        offset = (group // 4) * 512 + (row % 32) * 16 + (row // 32) * 4 + group % 4
+
+        for heads in (1, 2, 4, 8):
+            for rows in (1, 7):
+                for mma in (False, True):
+                    with self.subTest(heads=heads, rows=rows, mma=mma):
+                        main_bytes = 2 * heads * page * dim // 2
+                        side_bytes = 2 * heads * page * groups + page * (
+                            dim // 2 + groups
+                        )
+
+                        def make_layout():
+                            base = torch.full(
+                                (blocks, main_bytes),
+                                0xA5,
+                                dtype=torch.uint8,
+                                device=device,
+                            )
+                            side = torch.full(
+                                (blocks, side_bytes),
+                                0xA5,
+                                dtype=torch.uint8,
+                                device=device,
+                            )
+                            return (
+                                base,
+                                side,
+                                cache_layout(base, side, heads, page, dim),
+                            )
+
+                        ref_base, ref_side, ref_layout = make_layout()
+                        base, side, layout = make_layout()
+                        projection = torch.randn(
+                            rows,
+                            2 * heads + 3,
+                            dim,
+                            dtype=torch.bfloat16,
+                            device=device,
+                        )
+                        k = projection[:, 1 : heads + 1]
+                        v = projection[:, heads + 1 : 2 * heads + 1]
+                        idx = projection[:, 2 * heads + 1 : 2 * heads + 2]
+                        for values in (k, v, idx):
+                            self.assertGreater(values.storage_offset(), 0)
+                            self.assertEqual(values.stride(-1), 1)
+                            if rows > 1:
+                                self.assertFalse(values.is_contiguous())
+                        valid_slots = torch.tensor(
+                            [0, 127, 128, blocks * page - 1, -1, 2**40, -(2**40)],
+                            dtype=torch.int64,
+                            device=device,
+                        )[:rows]
+                        slots = valid_slots.clone()
+
+                        def write_fused():
+                            quantize_main_index_rows(
+                                k, v, idx, slots, layout, mma_scale_layout=mma
+                            )
+
+                        def check_reference():
+                            # Independent per-plane writer is the byte oracle.
+                            quantize_main_rows(k, v, slots, ref_layout)
+                            quantize_index_rows(idx, slots, ref_layout)
+                            torch.testing.assert_close(base, ref_base, rtol=0, atol=0)
+                            normalized = side.clone()
+                            if mma:
+                                normalized_layout = cache_layout(
+                                    base, normalized, heads, page, dim
+                                )
+                                pairs = [
+                                    (
+                                        layout.main_plane(i)[1],
+                                        normalized_layout.main_plane(i)[1],
+                                        heads,
+                                    )
+                                    for i in (0, 1)
+                                ]
+                                pairs.append(
+                                    (
+                                        layout.indexer(dim)[1],
+                                        normalized_layout.indexer(dim)[1],
+                                        1,
+                                    )
+                                )
+                                for source, destination, count in pairs:
+                                    restored = source.view(torch.uint8).reshape(
+                                        blocks, count, page * groups
+                                    )[:, :, offset]
+                                    destination.view(torch.uint8).copy_(
+                                        restored.reshape_as(destination)
+                                    )
+                            # Includes index values and every untouched byte/page.
+                            torch.testing.assert_close(
+                                normalized, ref_side, rtol=0, atol=0
+                            )
+
+                        write_fused()
+                        check_reference()
+                        torch.cuda.synchronize()
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            write_fused()
+                        addresses = [
+                            x.data_ptr() for x in (k, v, idx, slots, base, side)
+                        ]
+                        for live in (False, True):
+                            projection.neg_()
+                            if live:
+                                slots.copy_(valid_slots.flip(0))
+                            else:
+                                slots.fill_(-1)
+                            if live and rows == 1:
+                                slots.fill_(blocks * page - 1)
+                            for backing in (base, side, ref_base, ref_side):
+                                backing.fill_(0xA5)
+                            graph.replay()
+                            check_reference()
+                            self.assertEqual(
+                                addresses,
+                                [x.data_ptr() for x in (k, v, idx, slots, base, side)],
+                            )
 
     def test_fused_writer_mma_scales_match_compact_logical_values(self):
         if not torch.cuda.is_available():

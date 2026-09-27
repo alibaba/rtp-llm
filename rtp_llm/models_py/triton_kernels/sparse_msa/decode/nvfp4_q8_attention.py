@@ -122,7 +122,9 @@ def _q8kv4_selected_page_partial(
         tl.store(lse_ptr + base, float("-inf"))
         return
 
-    rows = tl.arange(0, 128)
+    # Only 16 GQA rows are live. M64 preserves the token reduction order while
+    # reducing padded FP8 MMA work and register pressure versus M128.
+    rows = tl.arange(0, 64)
     group = rows % 16
     active = rows // 16 == 0
     dim = tl.arange(0, 128)
@@ -165,7 +167,7 @@ def _q8kv4_selected_page_partial(
         ex2_ftz(exponent),
     )
     probability_fp8 = probability.to(tl.float8e4nv)
-    denominator = tree_sum_128(probability, 128)
+    denominator = tree_sum_128(probability, 64)
     numerator = tl.dot(probability_fp8, value, out_dtype=tl.float32)
     inverse = rcp_ftz(tl.where(denominator != 0.0, denominator, 1.0))
     output = (numerator * inverse[:, None]).to(tl.bfloat16)
@@ -192,6 +194,9 @@ def _q8kv4_combine(
     out_batch_stride,
     out_head_stride,
     LOG2E: tl.constexpr,
+    valid_token_mask=None,
+    HAS_VALID_TOKEN_MASK: tl.constexpr = False,
+    valid_token_mask_stride=1,
 ):
     batch = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -235,6 +240,14 @@ def _q8kv4_combine(
             tl.fma(selected_weight[:, None], partial, accumulator),
             accumulator,
         )
+    if HAS_VALID_TOKEN_MASK:
+        # Clear padding even when the partial reduction produced NaN. Multiplying
+        # by zero would retain NaN and would not match torch.where semantics.
+        accumulator = tl.where(
+            tl.load(valid_token_mask + batch * valid_token_mask_stride),
+            accumulator,
+            0.0,
+        )
     tl.store(
         out_ptr
         + batch * out_batch_stride
@@ -261,9 +274,16 @@ def q8kv4_sparse_decode_attention(
     partial_lse: torch.Tensor,
     counts: torch.Tensor,
     mma_scale_layout: bool = False,
+    valid_token_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run the fixed M3.1 64Q/4KV/D128/TopK16 decode contract."""
     batch = q.shape[0]
+    if valid_token_mask is not None and (
+        valid_token_mask.dtype != torch.bool
+        or tuple(valid_token_mask.shape) != (batch,)
+        or valid_token_mask.device != q.device
+    ):
+        raise ValueError("valid_token_mask must be bool [batch] on Q device")
     if q.dtype != torch.float8_e4m3fn or tuple(q.shape[1:]) != (64, 128):
         raise ValueError("Q8KV4 attention requires E4M3 Q [batch,64,128]")
     if packed_k.dtype != torch.uint8 or packed_v.dtype != torch.uint8:
@@ -325,6 +345,11 @@ def q8kv4_sparse_decode_attention(
         out.stride(0),
         out.stride(1),
         LOG2E=LOG2E_F32,
+        valid_token_mask=valid_token_mask,
+        HAS_VALID_TOKEN_MASK=valid_token_mask is not None,
+        valid_token_mask_stride=(
+            valid_token_mask.stride(0) if valid_token_mask is not None else 1
+        ),
         num_warps=4,
     )
     return out

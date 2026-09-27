@@ -16,6 +16,30 @@ Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::grap
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
+    if (inputs.compact_token_ids) {
+        // Fail closed: semantic lengths may exceed slot width only when no
+        // consumer can index history. Do not rewrite lengths or RNG behavior.
+        const auto neutral = [](const torch::Tensor& tensor, auto value) {
+            using T = decltype(value);
+            if (!tensor.defined()) {
+                return true;
+            }
+            RTP_LLM_CHECK(!tensor.is_cuda() && tensor.is_contiguous());
+            const auto* ptr = tensor.data_ptr<T>();
+            return std::all_of(ptr, ptr + tensor.numel(), [value](T x) { return x == value; });
+        };
+        RTP_LLM_CHECK_WITH_INFO(
+            inputs.phase == LogitsProcessorPhase::MTP_VERIFY && inputs.token_ids.dim() == 2
+                && inputs.token_ids.size(1) == 1 && inputs.batch_size == inputs.batch_size_out
+                && (inputs.logits_processor_states_ptr ?
+                        !inputs.logits_processor_states_ptr->requiresTokenHistory() :
+                        (!inputs.spec_vocab_mask_gpu.defined() && !inputs.spec_cap_gpu.defined()
+                         && inputs.spec_applied_processors.empty()))
+                && neutral(inputs.num_beams_in, int64_t{1}) && neutral(inputs.num_beams_out, int64_t{1})
+                && neutral(inputs.repetition_penalty, 1.0f) && neutral(inputs.presence_penalty, 0.0f)
+                && neutral(inputs.frequency_penalty, 0.0f) && neutral(inputs.no_repeat_ngram_size, int32_t{0}),
+            "compact verify sample slots cannot be used with history-dependent sampling");
+    }
     // Helper: narrow a tensor if defined, else return undefined tensor
     auto mayNarrow = [](const torch::Tensor& t, int64_t offset, int64_t size) -> torch::Tensor {
         return t.defined() ? t.narrow(0, offset, size) : torch::Tensor();
@@ -139,7 +163,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 &buffer_holder_});
+                 &buffer_holder_,
+                 inputs.token_history_lengths_are_counts});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy

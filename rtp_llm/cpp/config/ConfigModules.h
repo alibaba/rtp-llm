@@ -349,7 +349,10 @@ struct SpeculativeExecutionConfig {
     std::string     checkpoint_path                 = "";
     int64_t         sp_dspark_mask_token_id         = -1;
     bool            sp_dspark_sample_from_anchor    = true;
-    std::string     to_string() const;
+    // Zero preserves gamma; otherwise verify only this many DSpARK draft tokens.
+    int64_t     sp_dspark_verify_tokens = 0;
+    int64_t     verifySteps() const;
+    std::string to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);

@@ -75,6 +75,12 @@ public:
     std::shared_ptr<torch::Event>      spec_mask_consumed_event;
     std::vector<SpecLogitsProcessorId> spec_applied_processors;
     int                                spec_propose_step = 0;
+    // Verify-only output slots [batch_size, 1], never history. Semantic step
+    // and lengths remain unchanged; Sampler rejects history-dependent inputs.
+    bool compact_token_ids = false;
+    // DSpARK full-history verify rows carry actual token counts, including
+    // their proposal prefix. The legacy ngram operator expects count - 1.
+    bool token_history_lengths_are_counts = false;
 };
 
 struct SamplerOutput {

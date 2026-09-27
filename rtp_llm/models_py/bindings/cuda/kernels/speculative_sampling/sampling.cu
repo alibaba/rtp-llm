@@ -13,6 +13,52 @@
 namespace rtp_llm {
 using namespace cub;
 
+template<typename BiasT>
+__global__ void dsparkCombineLogitsKernel(const float* base,
+                                          const BiasT* bias,
+                                          const float* temperature,
+                                          float*       output,
+                                          int64_t      vocab,
+                                          int64_t      base_row_stride) {
+    const int64_t row = blockIdx.y;
+    const int64_t col = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (col < vocab) {
+        // Do not replace division by reciprocal multiplication or remove the
+        // intermediate FP32 addition rounding. No softmax or RNG changes here.
+        const float base_value = base[row * base_row_stride + col];
+        const float bias_value = static_cast<float>(bias[row * vocab + col]);
+        const float temp       = temperature[row];
+        float       sum, result;
+        // This target is compiled with ftz=true. Explicit PTX without .ftz
+        // preserves Torch's subnormal input/output behavior for this operation.
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(sum) : "f"(base_value), "f"(bias_value));
+        asm("div.rn.f32 %0, %1, %2;" : "=f"(result) : "f"(sum), "f"(temp));
+        output[row * vocab + col] = result;
+    }
+}
+
+template<typename BiasT>
+cudaError_t invokeDSparkCombineLogits(const float* base,
+                                      const BiasT* bias,
+                                      const float* temperature,
+                                      float*       output,
+                                      int64_t      batch,
+                                      int64_t      vocab,
+                                      int64_t      base_row_stride,
+                                      cudaStream_t stream) {
+    if (batch == 0 || vocab == 0) {
+        return cudaSuccess;
+    }
+    dsparkCombineLogitsKernel<<<dim3((vocab + 255) / 256, batch), 256, 0, stream>>>(
+        base, bias, temperature, output, vocab, base_row_stride);
+    return cudaGetLastError();
+}
+
+template cudaError_t invokeDSparkCombineLogits<float>(
+    const float*, const float*, const float*, float*, int64_t, int64_t, int64_t, cudaStream_t);
+template cudaError_t invokeDSparkCombineLogits<__nv_bfloat16>(
+    const float*, const __nv_bfloat16*, const float*, float*, int64_t, int64_t, int64_t, cudaStream_t);
+
 constexpr BlockScanAlgorithm   SCAN_ALGO   = BLOCK_SCAN_WARP_SCANS;
 constexpr BlockReduceAlgorithm REDUCE_ALGO = BLOCK_REDUCE_WARP_REDUCTIONS;
 
@@ -236,7 +282,8 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                                           bool    deterministic_draft,
                                           int     batch_size,
                                           int     num_speculative_tokens,
-                                          int     target_vocab_size) {
+                                          int     target_vocab_size,
+                                          bool    sampled_draft) {
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
     const uint32_t row_idx = bx;
 
@@ -277,13 +324,16 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
         return;
     }
 
-    // Legacy rejection sampling is deliberately kept unchanged when the switch is off.
+    // Preserve the legacy MTP contract unless the caller supplies an actual
+    // sampled proposal distribution. DSpARK opts into exact q/p rejection.
     __shared__ int  s_pos;
     __shared__ bool s_all_same_token;
+    __shared__ bool s_greedy_exact_done;
 
     if (tx == 0) {
-        bool all_same_token = true;
-        int  pos            = num_speculative_tokens;
+        bool all_same_token    = true;
+        bool greedy_exact_done = false;
+        int  pos               = num_speculative_tokens;
         for (int i = 0; i < num_speculative_tokens; ++i) {
             IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
             IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
@@ -294,11 +344,41 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
 
             bool same_token = target_id == draft_id;
-            if (same_token || (do_sample[row_idx] && u * p < q)) {
+            // For sampled requests the target draw is independent evidence,
+            // not an additional acceptance event. Always test q/p, even when
+            // that draw happens to equal the draft token.
+            if (!sampled_draft) {
+                // Historical MTP proposals are argmax/top-k selections with
+                // softmax scores, not draws from those scores. Do not silently
+                // reinterpret that existing contract as probability sampling.
+                if (same_token || (do_sample[row_idx] && u * p < q)) {
+                    output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
+                    all_same_token                                               = all_same_token && same_token;
+                } else {
+                    pos = i;
+                    break;
+                }
+            } else if (!do_sample[row_idx] && same_token) {
+                output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
+            } else if (!do_sample[row_idx]) {
+                // Greedy target decoding verifies by exact token match.  On
+                // the first mismatch emit the target token and terminate the
+                // speculative block; q-p rejection sampling is only valid for
+                // stochastic requests.
+                pos                                                          = i;
+                output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = target_id;
+                for (int j = i + 1; j < num_speculative_tokens + 1; ++j) {
+                    output_token_ids[row_idx * (num_speculative_tokens + 1) + j] = -1;
+                }
+                all_same_token    = false;
+                greedy_exact_done = true;
+                break;
+            } else if (u * p < q) {
                 output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
                 all_same_token                                               = all_same_token && same_token;
             } else {
-                pos = i;
+                pos            = i;
+                all_same_token = false;
                 break;
             }
         }
@@ -312,12 +392,13 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = bonus_token_id;
         }
 
-        s_pos            = pos;
-        s_all_same_token = all_same_token;
+        s_pos               = pos;
+        s_all_same_token    = all_same_token;
+        s_greedy_exact_done = greedy_exact_done;
     }
     __syncthreads();
 
-    if (s_all_same_token) {
+    if (s_all_same_token || s_greedy_exact_done) {
         return;
     }
     int pos = s_pos;
@@ -413,7 +494,8 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          batch_size,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
-                                    cudaStream_t stream) {
+                                    cudaStream_t stream,
+                                    bool         sampled_draft) {
     if (batch_size == 0) {
         return cudaSuccess;
     }
@@ -437,7 +519,8 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                     &deterministic_draft,
                     &batch_size,
                     &num_speculative_tokens,
-                    &target_vocab_size};
+                    &target_vocab_size,
+                    &sampled_draft};
 
     DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
         auto kernel = rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, false, DType, IdType>;
@@ -462,7 +545,8 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                                  int          batch_size,                                              \
                                                  int          num_speculative_tokens,                                  \
                                                  int          target_vocab_size,                                       \
-                                                 cudaStream_t stream);
+                                                 cudaStream_t stream,                                                  \
+                                                 bool         sampled_draft);
 
 INSTANTIATE_REJECTION_SAMPLING(float, int);
 }  // namespace rtp_llm

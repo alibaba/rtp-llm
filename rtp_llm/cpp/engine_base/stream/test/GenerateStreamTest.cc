@@ -169,6 +169,49 @@ TEST_F(GenerateStreamTest, testMinNewTokensIgnoresEarlyEosUntilLaterEos) {
     EXPECT_TRUE(normal_stream->finished_);
 }
 
+TEST_F(GenerateStreamTest, testPendingGenerateDoneRejectsStaleUpdates) {
+    for (bool speculative : {false, true}) {
+        auto stream                                          = GenerateStreamBuilder().createContextStream({1, 2, 3});
+        auto normal                                          = std::dynamic_pointer_cast<NormalGenerateStream>(stream);
+        stream->special_tokens_.eos_token_id                 = 99;
+        stream->vocab_size_                                  = 100;
+        stream->generate_input_->generate_config->ignore_eos = false;
+        stream->generate_input_->generate_config->min_new_tokens = 0;
+        stream->generate_input_->generate_config->max_new_tokens = 20;
+        stream->generate_input_->generate_config->reuse_cache    = false;
+        auto sp                                                  = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp->tokens                                               = torch::zeros({2}, torch::kInt32);
+        stream->setSPOutputBuffer(sp);
+        auto update = [&](int token) {
+            if (speculative) {
+                stream->specUpdate({torch::tensor({{token}}, torch::kInt32), 1, -1, torch::Tensor(), torch::Tensor()});
+            } else {
+                stream->update({torch::tensor({{token}}, torch::kInt32),
+                                1,
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor(),
+                                torch::Tensor()});
+            }
+        };
+        update(99);
+        ASSERT_TRUE(normal->finished_);
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+        // No scheduler moveToNext(): reproduce the event/state lag deterministically.
+        ASSERT_FALSE(stream->isFinished());
+        const int  length = stream->seqLength();
+        const auto queued = normal->generate_outputs_queue_.getSize();
+        update(99);
+        update(7);
+        EXPECT_EQ(stream->seqLength(), length);
+        EXPECT_EQ(normal->generate_outputs_queue_.getSize(), queued);
+    }
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});

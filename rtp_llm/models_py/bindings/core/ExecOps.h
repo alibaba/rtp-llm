@@ -90,8 +90,11 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 // Sample ops
 // ===================================================================
 
-GreedyOutput     execSampleGreedy(const GreedyParams& params);
-torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
+GreedyOutput  execSampleGreedy(const GreedyParams& params);
+torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities);
+torch::Tensor
+     execDSparkCombineLogits(const torch::Tensor& base, const torch::Tensor& bias, const torch::Tensor& temperature);
+void execReserveSampleFromProbsRng(const torch::Tensor& device_anchor, int64_t skipped_calls);
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params);
 void             execChainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             execRejectionSampling(const RejectionSamplingParams& params);

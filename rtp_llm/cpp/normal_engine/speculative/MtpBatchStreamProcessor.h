@@ -17,6 +17,7 @@ public:
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
+        verify_step_(sp_config.verifySteps()),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
@@ -41,7 +42,8 @@ public:
     gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                            const GptModelInputs&                       model_inputs,
                            const GptModelOutputs&                      model_output,
-                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {}) const;
+                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {},
+                           const torch::Tensor&                        verify_token_ids   = {}) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
@@ -153,7 +155,10 @@ protected:
         return propose_step_ + static_cast<int64_t>(!dspark_sample_from_anchor_);
     }
 
-    int     propose_step_;
+    int propose_step_;
+    // DSpARK may verify a prefix of its fixed-width proposal block. Other
+    // speculative models retain verify_step_ == propose_step_.
+    int     verify_step_;
     bool    is_dspark_                 = false;
     int32_t dspark_mask_token_id_      = -1;
     bool    dspark_sample_from_anchor_ = true;

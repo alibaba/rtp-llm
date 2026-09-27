@@ -119,10 +119,7 @@ protected:
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                              const torch::Tensor&                draft_tokens,
                                              std::shared_ptr<torch::Event>       draft_tokens_ready_event);
-    void         collectDecodeMetrics(const StreamGroups&                          stream_groups,
-                                      torch::Event&                                accept_len_ready_event,
-                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                      MtpMetricsCollector&                         metrics_collector);
+    void         collectDecodeMetrics(const StreamGroups& stream_groups, MtpMetricsCollector& metrics_collector);
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -208,16 +205,27 @@ private:
     size_t                                                                                     vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
-    size_t                                           draft_vocab_size_;
-    bool                                             is_dspark_ = false;
-    torch::Tensor                                    dspark_markov_w1_;
-    torch::Tensor                                    dspark_markov_w2_;
+    DataType data_type_;
+    size_t   hidden_size_;
+    size_t   propose_step_;
+    // DSpARK may verify only a prefix of its fixed checkpoint proposal block.
+    // Zero retains the proposal width for default-constructed test executors.
+    size_t dspark_verify_step_ = 0;
+    size_t verifySteps() const {
+        return is_dspark_ && dspark_verify_step_ ? dspark_verify_step_ : propose_step_;
+    }
+    size_t        draft_vocab_size_;
+    bool          is_dspark_ = false;
+    torch::Tensor dspark_markov_w1_;
+    torch::Tensor dspark_markov_w2_;
+    // One immutable temperature entry, owned by the serial sampling executor.
+    std::vector<float>                               dspark_temperatures_;
+    torch::Tensor                                    dspark_temperature_gpu_;
+    int64_t                                          dspark_temperature_stream_id_ = -1;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
+    std::unique_ptr<speculative::SpeculativeSampler> dspark_verify_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 
     // Keeps async copy source tensors alive across release points.

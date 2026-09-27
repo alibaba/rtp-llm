@@ -351,9 +351,16 @@ py_test(
 )
 
 py_test(
-    name = "minimax_m31_dspark_mock_test",
-    srcs = ["minimax_m31_dspark_mock_test.py"],
+    name = "minimax_m31_config_test",
+    srcs = ["minimax_m31_config_test.py"],
     deps = ["//rtp_llm:testlib"],
+    timeout = "short",
+)
+
+py_test(
+    name = "minimax_m31_dspark_checkpoint_test",
+    srcs = ["minimax_m31_dspark_checkpoint_test.py"],
+    data = ["//rtp_llm:models"],
     timeout = "short",
 )
 

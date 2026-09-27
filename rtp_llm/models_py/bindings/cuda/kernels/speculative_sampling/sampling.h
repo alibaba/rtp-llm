@@ -13,6 +13,17 @@
 
 namespace rtp_llm {
 
+// Bias is the already-rounded GEMM output. Base may be a strided gamma slice.
+template<typename BiasT>
+cudaError_t invokeDSparkCombineLogits(const float* base,
+                                      const BiasT* bias,
+                                      const float* temperature,
+                                      float*       output,
+                                      int64_t      batch,
+                                      int64_t      vocab,
+                                      int64_t      base_row_stride,
+                                      cudaStream_t stream);
+
 template<typename DType, typename IdType>
 cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     IdType*      draft_token_ids,
@@ -27,5 +38,6 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          batch_size,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
-                                    cudaStream_t stream);
+                                    cudaStream_t stream,
+                                    bool         sampled_draft = false);
 }  // namespace rtp_llm

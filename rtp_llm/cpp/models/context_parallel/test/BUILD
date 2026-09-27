@@ -33,8 +33,8 @@ py_test(
         ":th_context_parallel_py_wrapper_test"
     ],
     deps = [
-        "//rtp_llm:torch"
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     exec_properties = {'gpu':'H20'},
 )
-

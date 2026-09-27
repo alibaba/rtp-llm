@@ -3,7 +3,8 @@ import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -16,6 +17,13 @@ from rtp_llm.models.minimax_m31_dspark import MiniMaxM31DSpark, MiniMaxM31DSpark
 from rtp_llm.models.minimax_m31_vl import MiniMaxM31_VL
 from rtp_llm.openai.renderer_factory_register import _renderer_type_to_module
 from rtp_llm.utils.model_weight import W
+
+
+class DSparkBackendTest(unittest.TestCase):
+    def test_hip_rejected_before_model_construction(self):
+        with patch.object(torch.version, "hip", "test-hip"):
+            with self.assertRaisesRegex(RuntimeError, "requires the CUDA backend"):
+                MiniMaxM31DSpark._create_python_model(SimpleNamespace())
 
 
 def _m31_config():
@@ -61,6 +69,102 @@ class MiniMaxM31ConfigTest(unittest.TestCase):
     def test_dspark_has_only_m31_python_identity(self):
         self.assertEqual(MiniMaxM31DSpark.__name__, "MiniMaxM31DSpark")
         self.assertEqual(MiniMaxM31DSparkWeight.__name__, "MiniMaxM31DSparkWeight")
+
+    def test_dspark_uses_five_swa_dense_layers(self):
+        raw = _m31_config()
+        raw["text_config"].update(
+            num_hidden_layers=5,
+            moe_layer_freq=[0] * 5,
+            sparse_attention_config=None,
+            dspark_noise_token_id=200058,
+            dspark_markov_rank=256,
+        )
+        report = {"target_layer_ids": [3, 17, 31, 45, 59], "sliding_window": 4096}
+        with TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "config.json").write_text(json.dumps(raw))
+            with patch(
+                "rtp_llm.models.minimax_m31_dspark.inspect_checkpoint",
+                return_value=report,
+            ):
+                config = MiniMaxM31DSpark._create_config(tmpdir)
+
+        self.assertEqual(config.model_type, "minimax_m31_dspark")
+        self.assertEqual(config.num_layers, 5)
+        self.assertEqual(config.physical_mtp_module_num, 1)
+        self.assertEqual(config.moe_layer_index, [])
+        self.assertIsNone(config.msa_sparse_config)
+        self.assertEqual(config.dspark_target_layer_ids, [3, 17, 31, 45, 59])
+        self.assertEqual(config.dspark_checkpoint_metadata["sliding_window"], 4096)
+        self.assertFalse(config.prepacked_nvfp4_moe)
+        self.assertFalse(config.mock_nvfp4_moe)
+
+    def test_dspark_execution_requires_reference_math(self):
+        with patch.object(torch.version, "hip", None), patch.dict(
+            os.environ, {"M31_DSPARK_CANDIDATE_MATH": ""}
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "training forward is not yet verified"
+            ):
+                MiniMaxM31DSpark._create_python_model(None)
+
+    def test_dspark_shares_target_weights_before_dynamic_loading(self):
+        from rtp_llm.models.minimax_m31_dspark import TargetSharedDSparkWeight
+
+        for name, getter in (
+            (W.embedding, "_get_target_embedding"),
+            (W.lm_head, "_get_target_lm_head"),
+        ):
+            original = torch.ones(2, 3)
+            with patch(
+                "rtp_llm.models.minimax_m31_dspark." + getter, return_value=original
+            ):
+                weight = TargetSharedDSparkWeight(name)
+                self.assertEqual(weight.weights, [])
+                self.assertIs(weight.load(None, None, "cpu", None)[name], original)
+
+    def test_dspark_fastsafetensors_loads_zero_dependency_shared_weights(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+        from rtp_llm.model_loader.tensor_source import TensorCollector
+        from rtp_llm.models.minimax_m31_dspark import TargetSharedDSparkWeight
+
+        database = Mock()
+        database.fastsafetensors_weights_iterator.return_value = iter(())
+        items = [
+            SimpleNamespace(
+                weight=TargetSharedDSparkWeight(name),
+                layer_id=None,
+                collector=TensorCollector(set(), database),
+            )
+            for name in (W.embedding, W.lm_head)
+        ]
+        output = {}
+        model_weights = SimpleNamespace(set_global_weight=output.__setitem__)
+        loader = SimpleNamespace(
+            _create_model_weights=lambda device: model_weights,
+            _generate_weight_info=lambda: ({}, items),
+            _build_stacked_key_config=lambda items: {},
+            _load_config=SimpleNamespace(database=database),
+        )
+        embedding, head = torch.ones(2, 3), torch.zeros(2, 3)
+        with patch(
+            "rtp_llm.models.minimax_m31_dspark._get_target_embedding",
+            return_value=embedding,
+        ), patch(
+            "rtp_llm.models.minimax_m31_dspark._get_target_lm_head", return_value=head
+        ):
+            ModelLoader._load_from_fastsafetensor(loader, "cpu")
+        self.assertIs(output[W.embedding], embedding)
+        self.assertIs(output[W.lm_head], head)
+        database.load_tensor.assert_not_called()
+
+    def test_dspark_missing_target_is_an_error(self):
+        from rtp_llm.models.minimax_m31_dspark import TargetSharedDSparkWeight
+
+        for name in (W.embedding, W.lm_head):
+            with self.assertRaisesRegex(RuntimeError, "requires a live target"):
+                TargetSharedDSparkWeight(name).load(
+                    None, None, "missing-test-device", None
+                )
 
     def test_auto_model_version_defaults_to_m31(self):
         with patch.dict(os.environ, {}, clear=True):

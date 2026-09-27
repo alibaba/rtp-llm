@@ -256,6 +256,9 @@ public:
     FakeSampler(const SamplerInitParams& params): Sampler(params) {}
 
     SamplerOutput forward(const SamplerInputs& inputs) override {
+        if (capture_inputs) {
+            captured_inputs = inputs;
+        }
         if (inputs.logits_processor_states_ptr) {
             inputs.logits_processor_states_ptr->batchProcess(inputs);
         }
@@ -276,6 +279,9 @@ public:
     void setOutputs(const vector<SamplerOutput>& outputs) {
         output_holder.push(outputs);
     }
+
+    bool          capture_inputs = false;
+    SamplerInputs captured_inputs;
 
 private:
     TestDataHolder<SamplerInputs> input_holder;
@@ -327,6 +333,27 @@ public:
 private:
     int32_t rejected_token_;
     int64_t accepted_token_len_;
+};
+
+// Synthetic constraint, but the artifact builder, mask application, cap
+// application and dispatch below are the real executor process() path.
+class FixedOffsetSpecProcessor: public RejectDraftTokenSpecProcessor {
+public:
+    FixedOffsetSpecProcessor(int cap, int64_t accepted_token_len):
+        RejectDraftTokenSpecProcessor(3, accepted_token_len), cap_(cap) {}
+
+    int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
+        std::fill_n(request.bitmask_cpu_out,
+                    static_cast<size_t>(request.propose_step + 1) * request.bitmask_size_int32,
+                    SpecLogitsProcessor::kBitmaskAllowAll);
+        if (cap_ < request.propose_step) {
+            request.bitmask_cpu_out[cap_ * request.bitmask_size_int32] &= ~(1u << 3);
+        }
+        return cap_;
+    }
+
+private:
+    int cap_;
 };
 
 struct MtpExecutorComponents {
@@ -512,6 +539,61 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, DSparkVerifyBudgetDoesNotChangeProposalWidthOrLegacyMtp) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 7;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    EXPECT_EQ(executor.verifySteps(), 7);
+    for (const size_t budget : {1, 3, 4, 5, 7}) {
+        executor.dspark_verify_step_ = budget;
+        executor.is_dspark_          = false;
+        EXPECT_EQ(executor.verifySteps(), 7);
+        executor.is_dspark_ = true;
+        EXPECT_EQ(executor.verifySteps(), budget);
+        EXPECT_EQ(executor.propose_step_, 7);
+    }
+    executor.dspark_verify_step_ = 0;
+    EXPECT_EQ(executor.verifySteps(), 7);
+}
+
+TEST_F(MtpExecutorTest, AcceptMetricsReportCurrentRoundWithoutPendingTail) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 7;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    // Synthetic acceptance inputs exercise real CPU/CUDA metric staging, not
+    // model accuracy. Every round must finish before the next dataset starts.
+    for (const bool cuda : {false, true}) {
+        for (const std::vector<int32_t>& lengths :
+             {std::vector<int32_t>{3}, std::vector<int32_t>{1, 8}, std::vector<int32_t>{2}}) {
+            std::list<GenerateStreamPtr> streams;
+            int64_t                      expected_sum = 0;
+            for (const auto length : lengths) {
+                expected_sum += length;
+                streams.push_back(createContextStream(
+                    components.model_config, components.runtime_config, components.resource_context, {0, 1}));
+            }
+            auto accept_len = torch::tensor(lengths, torch::kInt32);
+            auto ready      = cuda_graph::makeGraphEvent();
+            if (cuda) {
+                accept_len = accept_len.cuda();
+                ready.record(cuda_graph::graphGetCurrentStream());
+            }
+            executor.stageAcceptLenMetrics(accept_len, ready, streams.size());
+            MtpMetricsCollector collector;
+            executor.collectDecodeMetrics(StreamGroups(streams), collector);
+            EXPECT_EQ(collector.sp_engine_collector.total_accepted_token_num, expected_sum);
+            EXPECT_EQ(collector.sp_engine_collector.total_stream_num, lengths.size());
+            EXPECT_EQ(collector.sp_engine_collector.total_propose_token_num, lengths.size() * 7);
+            EXPECT_EQ(collector.executor_collector.execute_token_size, expected_sum);
+            EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+            EXPECT_FALSE(executor.metrics_accept_len_sum_cpu_.defined());
+            EXPECT_FALSE(executor.metrics_accept_len_sum_gpu_.defined());
+        }
+    }
+}
 
 TEST_F(MtpExecutorTest, testMtpHiddenOverrideUsesExplicitCpLocalRowsAndLayout) {
     auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
@@ -892,12 +974,179 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    // Verify executor was created successfully
+    // Exercise production process() metric gating as well as the helper test.
+    // This single decode must not strand acceptance until a second request.
+    // The model/sampler fixtures isolate bookkeeping, not model precision.
+    components.executor->metrics_reporter_ =
+        std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags());
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    EXPECT_FALSE(components.executor->metrics_accept_len_sum_cpu_.defined());
+    EXPECT_FALSE(components.executor->consumePendingAcceptLenMetrics().valid);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
+}
+
+TEST_F(MtpExecutorTest, SpecLogitsCapCompactAndHistoryStrideMixedCapsWidths4567ThroughProcess) {
+    // Exercise the anonymous production cap helper through process(), not a
+    // copied helper. Legacy proposal fixtures isolate the shared cap consumer;
+    // this does not claim coverage of DSpark proposal generation or sampling.
+    constexpr int64_t                                    batch = 3;
+    std::vector<std::pair<torch::Tensor, torch::Tensor>> retained;
+    std::vector<SamplerInputs>                           retained_artifacts;
+    for (const int64_t width : {4, 7, 5, 6, 4}) {
+        for (const int64_t stride : {1, 9}) {
+            SCOPED_TRACE(::testing::Message() << "width=" << width << " stride=" << stride);
+            MtpExecutorTestConfig config;
+            config.gen_num_per_cycle                = width;
+            config.vocab_size_override              = 4;
+            auto                         components = createMtpExecutorComponents(config);
+            const std::vector<int32_t>   caps       = {0, static_cast<int32_t>(width / 2), static_cast<int32_t>(width)};
+            std::list<GenerateStreamPtr> streams;
+            auto                         hidden = torch::zeros({batch, 2});
+            for (int64_t row = 0; row < batch; ++row) {
+                StreamSpecUpdateInfo update{torch::tensor({{2}}, torch::kInt32),
+                                            1,
+                                            3,
+                                            hidden.narrow(0, row, 1),
+                                            torch::tensor({{0.f, 0.f, 0.f, 1.f}})};
+                auto                 stream = createDecodeStream(
+                    components.model_config, components.runtime_config, components.resource_context, {0, 1}, update);
+                stream->logits_processor_list_.push_back(
+                    std::make_shared<FixedOffsetSpecProcessor>(caps[row], stream->outputTokenLen()));
+                streams.push_back(stream);
+            }
+
+            std::vector<GptModelInputs>              draft_inputs;
+            std::vector<GptModelOutputs>             draft_outputs;
+            std::vector<torch::Tensor>               draft_logits;
+            std::vector<spec::FastTopKSamplerOutput> draft_samples;
+            for (int64_t step = 0; step < width - 1; ++step) {
+                GptModelInputs input;
+                input.combo_tokens      = torch::full({batch}, 3, torch::kInt32);
+                input.input_lengths     = torch::full({batch}, 2, torch::kInt32);
+                input.sequence_lengths  = torch::full({batch}, 3 + step, torch::kInt32);
+                input.lm_output_indexes = torch::arange(batch, torch::kInt32);
+                input.setLastHiddenStates(hidden, MtpHiddenStatesLayout::GLOBAL);
+                GptModelOutputs output;
+                output.logits            = torch::ones({batch, 4});
+                output.all_hidden_states = hidden;
+                draft_inputs.push_back(input);
+                draft_outputs.push_back(output);
+                draft_logits.push_back(output.logits);
+                draft_samples.push_back({torch::zeros({batch, 4}), torch::full({batch, 1}, 3, torch::kInt32)});
+            }
+
+            GptModelInputs target_input;
+            auto           target_combo = torch::full({batch, width + 1}, 3, torch::kInt32);
+            target_combo.select(1, 0).fill_(2);
+            target_input.combo_tokens      = target_combo.flatten();
+            target_input.input_lengths     = torch::full({batch}, width + 1, torch::kInt32);
+            target_input.prefix_lengths    = torch::full({batch}, 2, torch::kInt32);
+            target_input.lm_output_indexes = torch::arange(batch * (width + 1), torch::kInt32);
+            GptModelOutputs target_output;
+            target_output.logits            = torch::ones({batch * (width + 1), 4}).cuda();
+            target_output.all_hidden_states = torch::zeros({batch * (width + 1), 2});
+            components.fake_target_model->setInputs({target_input});
+            components.fake_target_model->setOutputs({target_output});
+
+            auto original_tokens = torch::full({batch, width + 1}, 3, torch::kInt32);
+            original_tokens.select(1, width).fill_(2);  // Original rejection-sampler bonus.
+            auto                 expected_tokens = original_tokens.clone();
+            std::vector<int32_t> indexes;
+            for (int64_t row = 0; row < batch; ++row) {
+                if (caps[row] < width) {
+                    expected_tokens[row][caps[row]].fill_(1);  // Target correction, not history poison.
+                }
+                indexes.push_back(static_cast<int32_t>(row * (width + 1) + caps[row]));
+            }
+            GptModelInputs next_input;
+            next_input.combo_tokens      = expected_tokens.flatten();
+            next_input.input_lengths     = target_input.input_lengths;
+            next_input.prefix_lengths    = target_input.prefix_lengths;
+            next_input.lm_output_indexes = torch::tensor(indexes, torch::kInt32);
+            next_input.setLastHiddenStates(target_output.all_hidden_states, MtpHiddenStatesLayout::GLOBAL);
+            GptModelOutputs next_output;
+            next_output.logits            = torch::ones({batch, 4});
+            next_output.all_hidden_states = target_output.all_hidden_states;
+            draft_inputs.push_back(next_input);
+            draft_outputs.push_back(next_output);
+            draft_logits.push_back(next_output.logits);
+            draft_samples.push_back({torch::zeros({batch, 4}), torch::zeros({batch, 1}, torch::kInt32)});
+            components.fake_draft_model->setInputs(draft_inputs);
+            components.fake_draft_model->setOutputs(draft_outputs);
+            components.fake_fast_topk_sampler->setInputs(draft_logits);
+            components.fake_fast_topk_sampler->setOutputs(draft_samples);
+
+            SamplerInputs expected_sampler_input{target_output.logits.clone()};
+            for (int64_t row = 0; row < batch; ++row) {
+                if (caps[row] < width) {
+                    expected_sampler_input.logits[row * (width + 1) + caps[row]][3] = BaseLogitsProcessor::neg_inf;
+                }
+            }
+            SamplerOutput target_sample;
+            target_sample.token_ids = torch::full({batch * (width + 1), stride}, -99, torch::kInt32).cuda();
+            target_sample.token_ids.select(1, stride - 1).fill_(1);
+            target_sample.all_probs = torch::zeros({batch * (width + 1), 4});
+            auto* sampler           = components.fake_sampler.get();
+            sampler->capture_inputs = true;
+            sampler->setInputs({expected_sampler_input});
+            sampler->setOutputs({target_sample});
+            spec::SpeculativeSamplerOutput rejection;
+            rejection.accept_tokens_cpu = original_tokens;
+            rejection.accept_tokens     = original_tokens.cuda();
+            rejection.accept_len_cpu    = torch::full({batch}, width + 1, torch::kInt32);
+            rejection.accept_len        = rejection.accept_len_cpu.cuda();
+            components.fake_speculative_sampler->setOutputs({rejection});
+            setupFakeModels(components.executor.get(),
+                            std::move(components.fake_target_model),
+                            std::move(components.fake_draft_model),
+                            std::move(components.fake_fast_topk_sampler),
+                            std::move(components.fake_speculative_sampler),
+                            std::move(components.fake_sampler));
+            ASSERT_TRUE(components.executor->process(streams).ok());
+
+            const auto& artifacts = sampler->captured_inputs;
+            ASSERT_TRUE(artifacts.spec_mask_ready_event);
+            ASSERT_TRUE(artifacts.spec_mask_consumed_event);
+            // Real cap application re-records this shared event after its D2H
+            // mirrors, and records consumed only after the final artifact read.
+            rejection.transfer_done_event->synchronize();
+            artifacts.spec_mask_consumed_event->synchronize();
+            EXPECT_TRUE(artifacts.spec_mask_ready_event->query());
+            EXPECT_TRUE(artifacts.spec_mask_consumed_event->query());
+            checkTensorEqual(artifacts.spec_cap_gpu, torch::tensor(caps, torch::kInt32));
+            retained.emplace_back(artifacts.spec_cap_gpu, torch::tensor(caps, torch::kInt32));
+            retained_artifacts.push_back(artifacts);
+            int64_t row = 0;
+            for (const auto& stream : streams) {
+                stream->waitPendingAsyncBookkeeping();
+                std::vector<int> expected_complete{0, 1, 2};
+                for (int p = 0; p <= caps[row]; ++p) {
+                    expected_complete.push_back(expected_tokens[row][p].item<int32_t>());
+                }
+                // CPU dispatch consumed the newly capped accept_len/tokens;
+                // device-state publication must retain the same correction/bonus.
+                EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), expected_complete);
+                ASSERT_TRUE(stream->getAcceptLenGpu().defined());
+                ASSERT_TRUE(stream->getAcceptTokensGpu().defined());
+                EXPECT_EQ(stream->getAcceptLenGpu().item<int32_t>(), caps[row] + 1);
+                checkTensorEqual(stream->getAcceptTokensGpu().reshape({width + 1}), expected_tokens[row]);
+                ASSERT_TRUE(stream->getSPOutputBuffer()->target_token_gpu.defined());
+                EXPECT_EQ(stream->getSPOutputBuffer()->target_token_gpu.item<int32_t>(),
+                          expected_tokens[row][caps[row]].item<int32_t>());
+                retained.emplace_back(stream->getAcceptLenGpu(), stream->getAcceptLenGpu().cpu().clone());
+                retained.emplace_back(stream->getAcceptTokensGpu(), expected_tokens[row].clone());
+                ++row;
+            }
+            // Keep actual output tensors, not just copies, through subsequent
+            // growing/shrinking widths and both target-token strides.
+            for (const auto& value : retained) {
+                checkTensorEqual(value.first.flatten(), value.second.flatten());
+            }
+        }
+    }
 }
 
 TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetToken) {

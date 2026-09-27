@@ -53,9 +53,10 @@ def optional_tensor(value: Any) -> Optional[torch.Tensor]:
 def device_metadata_tensor(attention_inputs: Any, name: str) -> Optional[torch.Tensor]:
     """Prefer framework-owned device metadata over its host mirror.
 
-    CUDA Graph replay updates the ``*_device`` tensors in place. Falling back
-    to the host field keeps eager and unit-test callers compatible, while the
-    preferred path avoids introducing a host-to-device copy inside capture.
+    CudaGraphRunner stores CUDA tensors directly in the ordinary fields and
+    updates them in place on replay. Optional ``*_device`` mirrors are accepted
+    for other callers, but are not required by the bound PyAttentionInputs.
+    Eager callers may instead supply host tensors in the ordinary fields.
     """
     device_value = optional_tensor(getattr(attention_inputs, f"{name}_device", None))
     if device_value is not None:
@@ -145,6 +146,14 @@ class DSparkProposerMixin:
         self._dspark_noise_token_id = int(noise_token_id)
         self._dspark_aux_feature_dim = int(aux_feature_dim)
         self._dspark_hidden_dim = int(hidden_dim)
+
+    def cuda_graph_input_hidden_size(self) -> int:
+        """Width of target features copied into the commit graph's input buffer.
+
+        This differs from the projected draft/output width. Proposal graphs
+        share the capability contract but do not consume input features.
+        """
+        return self._dspark_aux_feature_dim
 
     # ------------------------------------------------------------------
     # Model-specific hooks
@@ -243,9 +252,8 @@ class DSparkProposerMixin:
         input_lengths = optional_tensor(
             getattr(attention_inputs, "input_lengths", None)
         )
-        # The device mirror feeds the tensor math below; the host field stays
-        # the batch-size probe. Copying the pinned host buffer to the device is
-        # a blocking H2D transfer, which CUDA rejects mid graph capture.
+        # Graph inputs already hold CUDA lengths in the ordinary field. Accept
+        # an optional explicit mirror as well; never require a host read here.
         lengths_source = optional_tensor(
             getattr(attention_inputs, "input_lengths_device", None)
         )
@@ -351,9 +359,8 @@ class DSparkProposerMixin:
             )
         batch_size = token_count // width
 
-        # Read the CUDA-resident mirror: copying the pinned host field to the
-        # device is a blocking H2D transfer, which CUDA rejects while the decode
-        # graph is capturing.
+        # Graph inputs must provide CUDA-resident lengths (directly or through
+        # an optional mirror), avoiding a host-to-device copy during capture.
         prefix_lengths_source = device_metadata_tensor(
             attention_inputs, "prefix_lengths"
         )

@@ -6,6 +6,7 @@
 #include <string>
 #include <cctype>
 #include <regex>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -307,6 +308,22 @@ std::string SpeculativeExecutionConfig::to_string(SpeculativeType type) {
     }
 }
 
+int64_t SpeculativeExecutionConfig::verifySteps() const {
+    if (type != SP_TYPE_DSPARK) {
+        if (sp_dspark_verify_tokens != 0) {
+            throw std::invalid_argument("sp_dspark_verify_tokens requires sp_type=dspark");
+        }
+        return gen_num_per_cycle;
+    }
+    if (gen_num_per_cycle <= 0) {
+        throw std::invalid_argument("dspark requires a positive gen_num_per_cycle");
+    }
+    if (sp_dspark_verify_tokens < 0 || sp_dspark_verify_tokens > gen_num_per_cycle) {
+        throw std::invalid_argument("sp_dspark_verify_tokens must be 0 (default) or in [1, gen_num_per_cycle]");
+    }
+    return sp_dspark_verify_tokens == 0 ? gen_num_per_cycle : sp_dspark_verify_tokens;
+}
+
 std::string SpeculativeExecutionConfig::to_string() const {
     std::ostringstream oss;
     oss << "model_type: " << model_type << "\n"
@@ -322,7 +339,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << "\n"
-        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor << "\n"
+        << "sp_dspark_verify_tokens: " << sp_dspark_verify_tokens;
     return oss.str();
 }
 

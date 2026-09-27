@@ -95,6 +95,71 @@ class MiniMaxM31DecoderLayer(MiniMaxM3DecoderLayer):
 class MiniMaxM31Model(MiniMaxM3Model):
     decoder_layer_cls = MiniMaxM31DecoderLayer
 
+    def _prepare_prefill_moe_chunk_plan(self, inputs, hidden_states, layers):
+        from rtp_llm.models_py.model_desc.generic_moe import (
+            cuda_graph_capture_forward_enabled,
+            cuda_graph_warmup_forward_enabled,
+        )
+
+        attn = inputs.attention_inputs
+        if (
+            not attn.is_prefill
+            or getattr(attn, "is_target_verify", False)
+            or cuda_graph_capture_forward_enabled()
+            or cuda_graph_warmup_forward_enabled()
+            or (hidden_states.is_cuda and torch.cuda.is_current_stream_capturing())
+        ):
+            return None
+
+        import torch.distributed as dist
+
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_nvfp4_wrapper import (
+            MegaMoeNvfp4Wrapper,
+        )
+        from rtp_llm.models_py.modules.glm5_mega_moe.prefill_chunk_plan import (
+            PrefillChunkPlan,
+            local_chunk_count,
+        )
+
+        routed = [
+            getattr(layer.mlp, "fused_moe", None) for layer in layers[: self.layer_num]
+        ]
+        nvfp4 = [m.mega_moe for m in routed if isinstance(m, MegaMoeNvfp4Wrapper)]
+        if not nvfp4:
+            return None
+        first = nvfp4[0]
+        group = first._mega_group
+        if dist.get_world_size(group) == 1:
+            return None
+        capacity = int(first._mega_buf.num_max_tokens_per_rank)
+        if any(
+            m._mega_group is not group
+            or int(m._mega_buf.num_max_tokens_per_rank) != capacity
+            for m in nvfp4
+        ):
+            raise ValueError(
+                "NVFP4 prefill layers must share EP group and chunk capacity"
+            )
+        if any(
+            m is not None and not isinstance(m, MegaMoeNvfp4Wrapper) for m in routed
+        ):
+            raise ValueError(
+                "mixed routed MoE strategies cannot use NVFP4 prefill plan"
+            )
+        # One forward-local collective, including fake/short ranks. Use actual
+        # local embedding rows (already CP-local), never divide by CP again.
+        # +/- capacity also detects inconsistent buffer limits across ranks.
+        agreed = torch.tensor(
+            [local_chunk_count(hidden_states.shape[0], capacity), capacity, -capacity],
+            dtype=torch.int64,
+            device=hidden_states.device,
+        )
+        dist.all_reduce(agreed, op=dist.ReduceOp.MAX, group=group)
+        chunks, max_capacity, neg_min_capacity = agreed.tolist()
+        if max_capacity != -neg_min_capacity:
+            raise ValueError("NVFP4 prefill chunk capacity differs across EP ranks")
+        return PrefillChunkPlan(capacity, chunks)
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:

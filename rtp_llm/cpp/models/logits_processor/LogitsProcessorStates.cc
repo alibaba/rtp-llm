@@ -39,6 +39,12 @@ void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
 
 }  // namespace
 
+bool LogitsProcessorStates::requiresTokenHistory() const {
+    return std::any_of(logits_processors_.begin(), logits_processors_.end(), [](const auto& processor) {
+        return !processor || processor->requiresTokenHistory();
+    });
+}
+
 void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
     const bool has_spec_mask = inputs.phase == LogitsProcessorPhase::MTP_VERIFY && inputs.spec_vocab_mask_gpu.defined();
     if (has_spec_mask) {
@@ -63,11 +69,8 @@ void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
     }
 }
 
-void LogitsProcessorStates::insert(const BaseLogitsProcessorPtr& ptr,
-                                   size_t                        start,
-                                   size_t                        finish,
-                                   uint64_t                      stream_id,
-                                   size_t                        processor_idx) {
+void LogitsProcessorStates::insert(
+    const BaseLogitsProcessorPtr& ptr, size_t start, size_t finish, uint64_t stream_id, size_t processor_idx) {
     logits_processors_.push_back(ptr);
     intervals_.push_back(std::make_pair(start, finish));
     draft_prefixes_.emplace_back();

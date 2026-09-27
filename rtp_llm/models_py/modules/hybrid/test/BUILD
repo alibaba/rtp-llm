@@ -1,5 +1,31 @@
 test_envs = {}
 
+# Separate CPU source contracts from explicitly enabled native GPU tests.
+py_test(
+    name = "test_msa_nvfp4_prefill_cpu",
+    srcs = ["test_msa_nvfp4_prefill.py"],
+    main = "test_msa_nvfp4_prefill.py",
+    args = ["SourceContractTest"],
+    data = ["//rtp_llm/models_py:modules"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_msa_nvfp4_prefill",
+    srcs = ["test_msa_nvfp4_prefill.py"],
+    main = "test_msa_nvfp4_prefill.py",
+    args = ["NativeWrapperTest"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:fmha-sm100",
+    ],
+    env = {"GPU_COUNT": "1", "RTP_TEST_NVFP4_PREFILL_GPU": "1"},
+    tags = ["open_skip", "SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
 }
@@ -111,8 +137,12 @@ py_test(
 )
 
 py_test(
-    name = "test_minimax_m31_dspark_attention",
-    srcs = ["test_minimax_m31_dspark_attention.py"],
-    deps = ["//rtp_llm:testlib"],
-    timeout = "short",
+    name = "test_msa_nvfp4_rope",
+    srcs = ["test_msa_nvfp4_rope.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:flashinfer-python",
+    ],
+    tags = ["open_skip", "SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
 )

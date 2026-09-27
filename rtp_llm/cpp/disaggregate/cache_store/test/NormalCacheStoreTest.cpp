@@ -6,12 +6,20 @@
 #include "autil/EnvUtil.h"
 #include <cuda_runtime.h>
 #include <unordered_set>
+#include <future>
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 namespace rtp_llm {
 
 class NormalCacheStoreTest: public CacheStoreTestBase {
 protected:
     bool initCacheStores();
+    void verifyDSparkMixedCacheTransport(bool asynchronous);
 
     void verifyBlock(
         const std::shared_ptr<BlockBuffer>& block, const std::string& key, uint32_t len, bool gpu_mem, char val);
@@ -73,6 +81,181 @@ void NormalCacheStoreTest::verifyBlock(
     ASSERT_EQ(val, ((char*)(buf))[0]) << key << " " << reinterpret_cast<uint64_t>(block->addr.get());
 
     device_util_->freeCPU(buf);
+}
+
+// Exercise the production publisher and TCP transport, not model arithmetic.
+// Both model formats and addresses come from the mixed production cache allocator.
+void NormalCacheStoreTest::verifyDSparkMixedCacheTransport(bool asynchronous) {
+    ASSERT_TRUE(initCacheStores());
+    ModelConfig target;
+    target.num_layers                         = 60;
+    target.max_seq_len                        = 1152;
+    target.data_type                          = DataType::TYPE_BF16;
+    target.attn_config.tokens_per_block       = 128;
+    target.attn_config.head_num               = 64;
+    target.attn_config.kv_head_num            = 4;
+    target.attn_config.size_per_head          = 256;
+    target.attn_config.kv_cache_dtype         = KvCacheDataType::BASE;
+    target.attn_config.nvfp4_kv_cache         = true;
+    target.attn_config.indexer_head_dim       = 128;
+    target.attn_config.indexer_cache_fp8_mode = 3;
+    ModelConfig draft;
+    draft.num_layers                   = 5;
+    draft.max_seq_len                  = 1152;
+    draft.data_type                    = DataType::TYPE_BF16;
+    draft.attn_config.tokens_per_block = 128;
+    draft.attn_config.head_num         = 64;
+    draft.attn_config.kv_head_num      = 4;
+    draft.attn_config.size_per_head    = 128;
+    draft.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+    draft.physical_mtp_module_num      = 1;
+    ParallelismConfig parallel;
+    parallel.tp_size                            = 4;
+    parallel.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    parallel.prefill_cp_config.kv_cache_sharded = true;
+    KVCacheConfig kv;
+    kv.test_block_num            = 4;
+    kv.kernel_seq_size_per_block = 128;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 7;
+    auto config =
+        CacheConfigCreator::createSpConfig(target, draft, parallel, RuntimeConfig{}, kv, sp, std::nullopt, true);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    auto pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
+    ASSERT_TRUE(pool->init());
+    const auto            cpu_byte = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+    CacheStoreAsyncWriter writer(0);
+    for (int rank = 0; rank < 4; ++rank) {
+        std::vector<std::function<void()>> checks;
+        if (asynchronous) {
+            writer.init();
+        }
+        for (int layer = 0; layer < 6; ++layer) {
+            const auto& layer_config = layer == 0 ? config : *config.mtp_sub_configs[0];
+            const bool  opaque       = layer_config.use_opaque_kv_cache_store;
+            ASSERT_EQ(opaque, layer == 0);
+            const int64_t stride       = layer_config.kv_block_stride_bytes;
+            const int64_t scale_stride = layer_config.kv_scale_stride_bytes;
+            const int     global_layer = layer == 0 ? 0 : 59 + layer;
+            const auto    base         = pool->convertIndexToAddr(global_layer, 0);
+            const auto    next         = pool->convertIndexToAddr(global_layer, 1);
+            ASSERT_EQ(static_cast<char*>(next.kv_addr) - static_cast<char*>(base.kv_addr), stride);
+            CacheStoreInputs inputs{};
+            inputs.context_batch_size        = 1;
+            inputs.tokens_per_block          = 128;
+            inputs.pd_separation             = true;
+            inputs.warmup                    = false;
+            inputs.model_id                  = opaque ? 0 : 1;
+            inputs.layer_id                  = opaque ? 0 : layer - 1;
+            inputs.cp_size                   = 4;
+            inputs.cp_rank                   = rank;
+            inputs.kv_block_stride_bytes     = stride;
+            inputs.kv_scale_stride_bytes     = scale_stride;
+            inputs.use_opaque_kv_cache_store = opaque;
+            inputs.prefix_lengths_host       = torch::tensor({128}, torch::kInt32);
+            inputs.input_lengths_host        = torch::tensor({897}, torch::kInt32);
+            inputs.host_kv_cache_offset      = torch::tensor({3, 1, 2}, torch::kInt32).reshape({1, 3});
+            const int64_t request_id         = 31000 + rank;
+            inputs.request_id                = torch::tensor({request_id}, torch::kInt64);
+            inputs.request_pd_separation     = torch::tensor({true}, torch::kBool);
+            for (int page = 0; page < 9; ++page) {
+                inputs.cache_keys.push_back("page_" + std::to_string(page));
+            }
+            auto host   = torch::empty({4, stride}, cpu_byte);
+            auto scales = torch::empty({4, scale_stride}, cpu_byte);
+            for (int64_t i = 0; i < host.numel(); ++i) {
+                host.data_ptr<uint8_t>()[i] = (i * 17 + i / stride * 29 + rank * 31 + layer * 43) % 251;
+            }
+            for (int64_t i = 0; i < scales.numel(); ++i) {
+                scales.data_ptr<uint8_t>()[i] = (i * 7 + i / scale_stride * 19 + rank * 23) % 251;
+            }
+            KvCacheInfo cache{};
+            cache.kv_cache_buffer =
+                torch::from_blob(base.kv_addr, {4, stride}, [pool](void*) {}, cpu_byte.device(torch::kCUDA));
+            cache.kv_cache_buffer.copy_(host);
+            if (scale_stride > 0) {
+                ASSERT_NE(base.kv_scale_addr, nullptr);
+                ASSERT_EQ(static_cast<char*>(next.kv_scale_addr) - static_cast<char*>(base.kv_scale_addr),
+                          scale_stride);
+                cache.kv_scale_buffer = torch::from_blob(
+                    base.kv_scale_addr, {4, scale_stride}, [pool](void*) {}, cpu_byte.device(torch::kCUDA));
+                cache.kv_scale_buffer.copy_(scales);
+            }
+            if (asynchronous) {
+                inputs.pre_created_event        = runtimeCreateEvent();
+                inputs.cache_store_async_writer = &writer;
+                // Capture tensors and the event by value: the loop's input objects
+                // are destroyed before the six-layer forward publication drains.
+                writer.submit(
+                    [inputs, cache, store = cache_store2_]() { execWriteCacheStore(inputs, cache, false, store); });
+            } else {
+                execWriteCacheStore(inputs, cache, false, cache_store2_);
+            }
+            auto request = std::make_shared<RequestBlockBuffer>(std::to_string(request_id));
+            std::vector<std::pair<std::shared_ptr<BlockBuffer>, torch::Tensor>> expected;
+            for (int page = 0; page < 9; ++page) {
+                const auto key = makeCacheKey(inputs.model_id, inputs.cache_keys[page], inputs.layer_id);
+                if (page % 4 != rank) {
+                    checks.emplace_back([this, request_id, opaque, key]() {
+                        EXPECT_EQ(cache_store2_->getRequestBlockBufferStore()->getBlockBuffer(
+                                      std::to_string(request_id), (opaque ? "kv_" : "k_") + key),
+                                  nullptr);
+                    });
+                    continue;
+                }
+                const int physical = inputs.host_kv_cache_offset.data_ptr<int32_t>()[page / 4];
+                auto      add      = [&](const std::string& name, const torch::Tensor& reference) {
+                    auto block = block_buffer_util_->makeBlockBuffer(name + key, reference.numel(), 0, true);
+                    request->addBlock(block);
+                    expected.emplace_back(block, reference);
+                };
+                if (opaque) {
+                    add("kv_", host[physical]);
+                    add("kv_scale_", scales[physical]);
+                } else {
+                    add("k_", host[physical].narrow(0, 0, stride / 2));
+                    add("v_", host[physical].narrow(0, stride / 2, stride / 2));
+                }
+            }
+            checks.emplace_back([this, request, expected, cpu_byte]() {
+                auto result = std::make_shared<std::promise<std::pair<bool, CacheStoreErrorCode>>>();
+                auto future = result->get_future();
+                cache_store1_->load(
+                    request,
+                    [result](bool ok, CacheStoreErrorCode ec) { result->set_value({ok, ec}); },
+                    autil::NetUtil::getBindIp(),
+                    port2_,
+                    0,
+                    5000);
+                ASSERT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+                const auto status = future.get();
+                ASSERT_TRUE(status.first);
+                ASSERT_EQ(status.second, CacheStoreErrorCode::None);
+                for (const auto& item : expected) {
+                    auto actual = torch::empty({item.first->len}, cpu_byte);
+                    ASSERT_EQ(
+                        cudaMemcpy(actual.data_ptr(), item.first->addr.get(), item.first->len, cudaMemcpyDeviceToHost),
+                        cudaSuccess);
+                    EXPECT_TRUE(torch::equal(actual, item.second)) << item.first->key;
+                }
+            });
+        }
+        if (asynchronous) {
+            ASSERT_NO_THROW(writer.waitAllDone());
+        }
+        for (auto& check : checks) {
+            check();
+        }
+    }
+}
+
+TEST_F(NormalCacheStoreTest, DSparkMixedCacheCP4PublicationAndTcpLoad) {
+    verifyDSparkMixedCacheTransport(false);
+}
+
+TEST_F(NormalCacheStoreTest, DSparkMixedCacheCP4AsyncPublicationAndTcpLoad) {
+    verifyDSparkMixedCacheTransport(true);
 }
 
 TEST_F(NormalCacheStoreTest, testStore_Success) {

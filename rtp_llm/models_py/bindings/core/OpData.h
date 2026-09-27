@@ -397,6 +397,9 @@ struct GreedyParams {
 
     std::vector<at::Generator> generator;
     TensorHolder*              buffer_holder = nullptr;
+    // True token counts for DSpARK verify history; normalize only when calling
+    // the legacy ngram kernel, which adds one to its length argument.
+    bool token_history_lengths_are_counts = false;
 };
 
 struct GreedyOutput {
@@ -475,6 +478,8 @@ struct RejectionSamplingParams {
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
     bool          deterministic_draft = false;
+    // Opt in only when draft_probs is the actual proposal distribution.
+    bool sampled_draft = false;
 };
 
 struct MappingDraft2TargetParams {

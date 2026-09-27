@@ -354,6 +354,66 @@ TEST_F(BlockPoolTest, NativeMtpPhysicalModuleCapabilityUsesSingleDraftCache) {
     EXPECT_EQ(pool_cfg.memory_layouts.size(), 2u);
 }
 
+TEST_F(BlockPoolTest, MiniMaxM31DSparkMixedPrecisionSingleFiveLayerCache) {
+    for (const int cp_size : {1, 4}) {
+        auto target                               = makeTestModelConfig(60);
+        target.data_type                          = DataType::TYPE_BF16;
+        target.attn_config.tokens_per_block       = 128;
+        target.attn_config.head_num               = 64;
+        target.attn_config.kv_head_num            = 4;
+        target.attn_config.size_per_head          = 256;
+        target.attn_config.kv_cache_dtype         = KvCacheDataType::BASE;
+        target.attn_config.nvfp4_kv_cache         = true;
+        target.attn_config.indexer_head_dim       = 128;
+        target.attn_config.indexer_cache_fp8_mode = 3;
+
+        auto draft                         = makeTestModelConfig(5);
+        draft.data_type                    = DataType::TYPE_BF16;
+        draft.attn_config.tokens_per_block = 128;
+        draft.attn_config.head_num         = 64;
+        draft.attn_config.kv_head_num      = 4;
+        draft.attn_config.size_per_head    = 128;
+        draft.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+        draft.physical_mtp_module_num      = 1;
+
+        ParallelismConfig parallel;
+        parallel.tp_size = cp_size;
+        if (cp_size > 1) {
+            parallel.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+            parallel.prefill_cp_config.kv_cache_sharded = true;
+        }
+        KVCacheConfig kv;
+        kv.test_block_num            = 4;
+        kv.kernel_seq_size_per_block = 128;
+        SpeculativeExecutionConfig sp;
+        sp.type              = SP_TYPE_DSPARK;
+        sp.gen_num_per_cycle = 7;
+        auto config =
+            CacheConfigCreator::createSpConfig(target, draft, parallel, RuntimeConfig{}, kv, sp, std::nullopt, true);
+        ASSERT_EQ(config.layer_all_num, 65u);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+        const auto& sub = *config.mtp_sub_configs[0];
+        EXPECT_EQ(config.dtype, DataType::TYPE_BYTES);
+        EXPECT_EQ(sub.dtype, DataType::TYPE_BF16);
+        EXPECT_EQ(sub.layer_num, 5u);
+        EXPECT_EQ(sub.kv_block_stride_bytes, 2u * 4 * 128 * 128 * sizeof(uint16_t));
+        EXPECT_EQ(sub.kv_scale_stride_bytes, 0u);
+        EXPECT_EQ(sub.global_layer_ids[0], (std::vector<int>{60, 61, 62, 63, 64}));
+        EXPECT_TRUE(config.use_opaque_kv_cache_store);
+        EXPECT_FALSE(sub.use_opaque_kv_cache_store);
+        auto pool_config = BlockPoolConfigHelper::createConfig(config);
+        ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
+        EXPECT_EQ(pool_config.memory_layouts[0].layer_num, 60u);
+        EXPECT_EQ(pool_config.memory_layouts[1].layer_num, 5u);
+        block_pool_ = std::make_shared<BlockPool>(pool_config);
+        ASSERT_TRUE(block_pool_->init());
+        for (int layer = 60; layer < 65; ++layer) {
+            EXPECT_NE(block_pool_->convertIndexToAddr(layer, 1).kv_addr, nullptr);
+        }
+        block_pool_.reset();
+    }
+}
+
 // Allocation Test
 TEST_F(BlockPoolTest, AllocSingleBlock) {
     auto config = createTestConfig();

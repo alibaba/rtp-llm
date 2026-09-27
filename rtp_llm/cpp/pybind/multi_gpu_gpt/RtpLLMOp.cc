@@ -42,7 +42,49 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
     size_t     model_num             = py_layers_weights_vec.size();
     size_t     gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
-    size_t     expected_model_num    = gen_num_per_cycle;
+
+    // Get py_eplb if available (from model)
+    py::object py_eplb = py::none();
+    if (py::hasattr(sp_model, "py_eplb")) {
+        py_eplb = sp_model.attr("py_eplb");
+    }
+
+    if (sp_type == SP_TYPE_DSPARK) {
+        // DSpark is one multi-layer backbone, not a list of recurrent MTP
+        // modules. Its transformer depth is independent of proposal width.
+        RTP_LLM_CHECK_WITH_INFO(py_layers_weights_vec.size() == static_cast<size_t>(model_config.num_layers),
+                                "DSpARK backbone layer count mismatch: configured=%zu loaded=%zu",
+                                static_cast<size_t>(model_config.num_layers),
+                                py_layers_weights_vec.size());
+        auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
+        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
+                                                                           model_config,
+                                                                           base_params.parallelism_config,
+                                                                           base_params.runtime_config,
+                                                                           base_params.pd_sep_config,
+                                                                           base_params.concurrency_config,
+                                                                           base_params.fmha_config,
+                                                                           base_params.kv_cache_config,
+                                                                           base_params.profiling_debug_logging_config,
+                                                                           base_params.hw_kernel_config,
+                                                                           base_params.device_resource_config,
+                                                                           base_params.moe_config,
+                                                                           base_params.model_specific_config,
+                                                                           base_params.sp_config,
+                                                                           base_params.cache_store_config,
+                                                                           base_params.misc_config,
+                                                                           base_params.arpc_config,
+                                                                           base_params.grpc_config,
+                                                                           base_params.ffn_disaggregate_config,
+                                                                           base_params.vit_config,
+                                                                           std::move(*gpt_weight),
+                                                                           py::none(),
+                                                                           py_eplb)));
+        return std::move(
+            std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
+    }
+
+    size_t expected_model_num = gen_num_per_cycle;
     if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
         expected_model_num = 1;
     } else if (model_config.physical_mtp_module_num > 0) {
@@ -71,41 +113,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                             expected_model_num,
                             py_layers_weights_vec.size());
         model_num = std::min(model_num, expected_model_num);
-    }
-
-    // Get py_eplb if available (from model)
-    py::object py_eplb = py::none();
-    if (py::hasattr(sp_model, "py_eplb")) {
-        py_eplb = sp_model.attr("py_eplb");
-    }
-
-    if (sp_type == SP_TYPE_DSPARK) {
-        auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
-        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                           model_config,
-                                                                           base_params.parallelism_config,
-                                                                           base_params.runtime_config,
-                                                                           base_params.pd_sep_config,
-                                                                           base_params.concurrency_config,
-                                                                           base_params.fmha_config,
-                                                                           base_params.kv_cache_config,
-                                                                           base_params.profiling_debug_logging_config,
-                                                                           base_params.hw_kernel_config,
-                                                                           base_params.device_resource_config,
-                                                                           base_params.moe_config,
-                                                                           base_params.model_specific_config,
-                                                                           base_params.sp_config,
-                                                                           base_params.cache_store_config,
-                                                                           base_params.misc_config,
-                                                                           base_params.arpc_config,
-                                                                           base_params.grpc_config,
-                                                                           base_params.ffn_disaggregate_config,
-                                                                           base_params.vit_config,
-                                                                           std::move(*gpt_weight),
-                                                                           py::none(),
-                                                                           py_eplb)));
-        return std::move(
-            std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
     }
 
     // Create a temporary ModelConfig with num_layers = 1 for MTP

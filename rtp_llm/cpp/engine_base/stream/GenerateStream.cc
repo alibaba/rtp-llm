@@ -863,7 +863,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
     // Ignore stale worker updates after finish; committing them would duplicate
     // tokens and touch KV blocks only deferred until this worker exits.
-    if (isFinished() && !update_info.force_update_info) {
+    // Output publication precedes the scheduler consuming GenerateDone. Check
+    // the pending event under mutex_ as well, or a queued async update can
+    // append tokens after an already-published terminal response.
+    if ((isFinished() || generate_status_->hasEvent(StreamEvents::GenerateDone)) && !update_info.force_update_info) {
         return;
     }
 
@@ -1000,7 +1003,8 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     }
     // Ignore stale worker updates after finish; committing them would duplicate
     // tokens and touch KV blocks only deferred until this worker exits.
-    if (isFinished() && !update_info.force_update_info) {
+    // GenerateDone may be pending while scheduler-visible status is RUNNING.
+    if ((isFinished() || generate_status_->hasEvent(StreamEvents::GenerateDone)) && !update_info.force_update_info) {
         return;
     }
 

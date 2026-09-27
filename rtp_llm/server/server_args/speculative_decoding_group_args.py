@@ -1,4 +1,20 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _dspark_verify_tokens(value):
+    # The shared parser ignores ValueError/TypeError for mixed CLI/env input.
+    # This opt-in must fail explicitly rather than silently defaulting to zero.
+    try:
+        result = int(value)
+    except (ValueError, TypeError) as error:
+        raise argparse.ArgumentTypeError(
+            "sp_dspark_verify_tokens must be an integer"
+        ) from error
+    if not -(1 << 63) <= result < (1 << 63):
+        raise argparse.ArgumentTypeError("sp_dspark_verify_tokens must fit int64")
+    return result
 
 
 def init_speculative_decoding_group_args(parser, sp_config):
@@ -90,6 +106,15 @@ def init_speculative_decoding_group_args(parser, sp_config):
         type=int,
         default=1,
         help="每一轮 speculative execution（推测式生成）中，最多生成多少个 token。",
+    )
+
+    speculative_decoding_group.add_argument(
+        "--sp_dspark_verify_tokens",
+        env_name="SP_DSPARK_VERIFY_TOKENS",
+        bind_to=(sp_config, "sp_dspark_verify_tokens"),
+        type=_dspark_verify_tokens,
+        default=0,
+        help="DSpARK verify draft-token budget: 0 uses gen_num_per_cycle; otherwise 1..gamma. Draft width is unchanged.",
     )
 
     speculative_decoding_group.add_argument(

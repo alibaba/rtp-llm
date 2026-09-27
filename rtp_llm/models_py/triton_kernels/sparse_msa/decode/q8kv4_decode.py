@@ -159,13 +159,26 @@ def q8kv4_paged_sparse_decode(
     sm_scale: float | None = None,
     idx_sm_scale: float | None = None,
     mma_scale_layout: bool = False,
+    query_width: int = 1,
+    fuse_bf16_query_rounding: bool = False,
+    valid_token_mask: torch.Tensor | None = None,
 ) -> Q8KV4DecodeResult:
-    """Run the initial RTP Q8KV4 ordinary-decode path.
+    """Run RTP Q8KV4 decode or grouped target verification.
 
     M3.1 has one local index-Q head per local KV head.  Other index-head
-    reduction contracts remain on the existing BF16 working-page path until a
-    reviewed mapping is added.
+    reduction contracts require a separate native-kernel mapping. Grouped
+    verification keeps token-row block tables and causal sequence lengths;
+    all query rows in one request must share the same physical page table.
+
+    fuse_bf16_query_rounding replaces saturating BF16 pre-rounding plus the
+    scale-1 copy, preserving the unrounded input carriers. Only MSA callers
+    that previously pre-rounded both queries should opt in. The default keeps
+    PyTorch conversion semantics for direct BF16/FP16/FP32 callers.
     """
+    if fuse_bf16_query_rounding and (
+        q.dtype != torch.bfloat16 or idx_q.dtype != torch.bfloat16
+    ):
+        raise ValueError("fused query rounding requires BF16 Q and index-Q")
     if score_type != "max":
         raise ValueError("Q8KV4 decode currently supports max index score only")
     if block_size != layout.page_size or block_size != 128:
@@ -183,6 +196,8 @@ def q8kv4_paged_sparse_decode(
         raise ValueError("block_table must be int32 [batch,max_blocks]")
     if seq_lens.dtype != torch.int32 or seq_lens.shape != (q.shape[0],):
         raise ValueError("seq_lens must be int32 [batch]")
+    if query_width < 1 or q.shape[0] % query_width:
+        raise ValueError("query_width must be positive and divide the token batch")
     max_blocks = int(block_table.shape[1])
     target_chunks = max(
         1,
@@ -192,10 +207,23 @@ def q8kv4_paged_sparse_decode(
     workspace = _Q8KV4DecodeWorkspace.acquire(
         q, idx_q, max_blocks, topk, num_topk_chunks
     )
-    q8 = _scale1_e4m3(q, "q", workspace.q8)
-    idx_q8 = _scale1_e4m3(idx_q, "idx_q", workspace.idx_q8)
+    if fuse_bf16_query_rounding:
+        from .nvfp4_q8_query_cast import fused_query_cast
+
+        fused_query_cast(q, idx_q, workspace.q8, workspace.idx_q8)
+        q8, idx_q8 = workspace.q8, workspace.idx_q8
+    else:
+        q8 = _scale1_e4m3(q, "q", workspace.q8)
+        idx_q8 = _scale1_e4m3(idx_q, "idx_q", workspace.idx_q8)
     logical = layout.logical_views(indexer_dim)
-    index_scores = q8kv4_index_score(
+    score_fn = q8kv4_index_score
+    score_options = {}
+    if 2 <= query_width <= 16 and idx_q.shape[1] == 4:
+        from .nvfp4_q8_grouped_index_score import q8kv4_grouped_index_score
+
+        score_fn = q8kv4_grouped_index_score
+        score_options["query_width"] = query_width
+    index_scores = score_fn(
         idx_q8,
         logical.idx_k_fp4,
         logical.idx_k_scale,
@@ -206,6 +234,7 @@ def q8kv4_paged_sparse_decode(
         local_blocks=local_blocks,
         sm_scale=indexer_dim**-0.5 if idx_sm_scale is None else idx_sm_scale,
         mma_scale_layout=mma_scale_layout,
+        **score_options,
     )
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -235,6 +264,7 @@ def q8kv4_paged_sparse_decode(
         partial_lse=workspace.partial_lse,
         counts=workspace.partial_counts,
         mma_scale_layout=mma_scale_layout,
+        valid_token_mask=valid_token_mask,
     )
     return Q8KV4DecodeResult(
         output=output,

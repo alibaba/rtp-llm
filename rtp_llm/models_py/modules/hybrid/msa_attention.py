@@ -54,30 +54,6 @@ _FP8_E4M3_MAX = tl.constexpr(448.0)
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-def expand_dspark_visible_seq_lens(
-    write_seq_lens: torch.Tensor, request_batch_size: int, total_tokens: int
-) -> torch.Tensor:
-    """Make every row in a request's DSpARK query block see the block tail.
-
-    ``write_seq_lens`` must remain untouched for paged slot writes.  This
-    helper derives the attention-only lengths after those writes complete.
-    """
-    if request_batch_size <= 0 or total_tokens <= 0:
-        raise ValueError("DSpARK query geometry must be positive")
-    if total_tokens % request_batch_size:
-        raise ValueError("DSpARK query rows must be divisible by request rows")
-    if write_seq_lens.numel() != total_tokens:
-        raise ValueError("DSpARK write length rows must match query token rows")
-    query_width = total_tokens // request_batch_size
-    return (
-        write_seq_lens.view(request_batch_size, query_width)[:, -1:]
-        .expand(request_batch_size, query_width)
-        .reshape(-1)
-        .contiguous()
-    )
-
-
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -88,7 +64,10 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
     CudaMxfp8Linear,
 )
-from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import NVFP4_GROUP_SIZE
+from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
+    NVFP4_GROUP_SIZE,
+    build_decode_physical_slots,
+)
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
     cache_layout as nvfp4_cache_layout,
 )
@@ -103,6 +82,9 @@ from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
 )
 from rtp_llm.models_py.triton_kernels.common.nvfp4_kv_cache import (
     round_to_e4m3_compute_grid_ as nvfp4_round_to_e4m3_compute_grid_,
+)
+from rtp_llm.models_py.triton_kernels.common.nvfp4_prefix_restore import (
+    restore_prefix_planes,
 )
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -2555,6 +2537,33 @@ class MSAAttention(nn.Module):
                 q, k, positions, rope_theta=self._rope_theta
             )
 
+    def _apply_rope_contiguous(
+        self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pack projection views while applying the existing cached RoPE."""
+        if self.cos_sin_cache is None or (q.is_contiguous() and k.is_contiguous()):
+            q, k = q.contiguous(), k.contiguous()
+            self._apply_rope(q, k, positions)
+            return q, k
+
+        import flashinfer.rope as fi_rope
+
+        # Cached RoPE accepts separate input/output strides and writes the
+        # non-rotary tail too. Keep its arithmetic, but eliminate the two
+        # projection-to-contiguous copies preceding the old in-place call.
+        q_out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+        k_out = torch.empty(k.shape, device=k.device, dtype=k.dtype)
+        fi_rope._apply_rope_pos_ids_cos_sin_cache(
+            q=q,
+            k=k,
+            q_rope=q_out,
+            k_rope=k_out,
+            cos_sin_cache=self.cos_sin_cache,
+            pos_ids=positions,
+            interleave=self._rope_interleave,
+        )
+        return q_out, k_out
+
     def _ensure_scratch_addressing_capacity(
         self,
         bsz: Optional[int] = None,
@@ -2853,70 +2862,37 @@ class MSAAttention(nn.Module):
                 prefix_cpu_list,
                 prefix_gather_plan,
             )
-            if prefix_gather_plan is not None and self._kv_sharded:
-                restore = prefix_gather_plan.restore_indices.to(torch.long)
-                prefix_values = prefix_values.index_select(0, restore)
-                prefix_side = prefix_side.index_select(0, restore)
-            if int(prefix_values.shape[0]) != int(prefix_dst_pages.numel()):
+            restore = (
+                prefix_gather_plan.restore_indices
+                if prefix_gather_plan is not None and self._kv_sharded
+                else None
+            )
+            logical_prefix_pages = (
+                int(restore.numel())
+                if restore is not None
+                else int(prefix_values.shape[0])
+            )
+            if logical_prefix_pages != int(prefix_dst_pages.numel()):
                 raise RuntimeError(
                     "MSA CP FP4 prefix page count mismatch: "
-                    f"gathered={prefix_values.shape[0]} "
+                    f"logical={logical_prefix_pages} gathered={prefix_values.shape[0]} "
                     f"destination={prefix_dst_pages.numel()}"
                 )
-            dst = prefix_dst_pages.to(torch.long)
-            prefix_count = int(prefix_values.shape[0])
-            main_plane_bytes = self.kv_head_num * self.page_size * self.head_dim // 2
-            main_scale_plane_bytes = (
-                self.kv_head_num * self.page_size * (self.head_dim // NVFP4_GROUP_SIZE)
-            )
-            idx_value_bytes = self.page_size * ni // 2
-            idx_scale_bytes = self.page_size * (ni // NVFP4_GROUP_SIZE)
-            main[0].index_copy_(
-                0,
-                dst,
-                prefix_values[:, :main_plane_bytes].view(
-                    prefix_count,
-                    self.kv_head_num,
-                    self.page_size,
-                    self.head_dim // 2,
+            # Restore directly from rank-major opaque blocks. Six independent
+            # views preserve larger-capacity working-pool plane offsets.
+            restore_prefix_planes(
+                prefix_values,
+                prefix_side,
+                restore,
+                prefix_dst_pages,
+                (
+                    main[0],
+                    main[1],
+                    main_scales[0],
+                    main_scales[1],
+                    idx_packed,
+                    idx_scales,
                 ),
-            )
-            main[1].index_copy_(
-                0,
-                dst,
-                prefix_values[:, main_plane_bytes : 2 * main_plane_bytes].view(
-                    prefix_count,
-                    self.kv_head_num,
-                    self.page_size,
-                    self.head_dim // 2,
-                ),
-            )
-            main_scales[0].view(torch.uint8).index_copy_(
-                0, dst, prefix_side[:, :main_scale_plane_bytes]
-            )
-            main_scales[1].view(torch.uint8).index_copy_(
-                0,
-                dst,
-                prefix_side[:, main_scale_plane_bytes : 2 * main_scale_plane_bytes],
-            )
-            idx_begin = 2 * main_scale_plane_bytes
-            idx_packed.index_copy_(
-                0,
-                dst,
-                prefix_side[:, idx_begin : idx_begin + idx_value_bytes].view(
-                    prefix_count, 1, self.page_size, ni // 2
-                ),
-            )
-            idx_scales.view(torch.uint8).index_copy_(
-                0,
-                dst,
-                prefix_side[
-                    :,
-                    idx_begin
-                    + idx_value_bytes : idx_begin
-                    + idx_value_bytes
-                    + idx_scale_bytes,
-                ],
             )
 
         # write_slots address the shared request-local working page namespace.
@@ -3184,22 +3160,8 @@ class MSAAttention(nn.Module):
                 self.physical_page_size,
                 self.head_dim,
             )
-            positions = seq_lens.to(torch.int64) - 1
-            block_columns = torch.div(
-                positions.clamp_min(0), self.page_size, rounding_mode="floor"
-            )
-            valid = (positions >= 0) & (block_columns < int(phys_block_table.shape[1]))
-            rows = torch.arange(
-                int(positions.numel()), device=positions.device, dtype=torch.long
-            )
-            selected_blocks = phys_block_table[
-                rows, block_columns.clamp_max(int(phys_block_table.shape[1]) - 1)
-            ].to(torch.int64)
-            valid = valid & (selected_blocks > 0)
-            physical_slots = torch.where(
-                valid,
-                selected_blocks * self.page_size + positions.remainder(self.page_size),
-                torch.full_like(positions, -1),
+            physical_slots = build_decode_physical_slots(
+                seq_lens, phys_block_table, page_size=self.page_size
             )
             # Decode owns K, V and the shared indexer-K row at the same token
             # slot. Emit all three persistent NVFP4 planes in one launch; the
@@ -3207,7 +3169,10 @@ class MSAAttention(nn.Module):
             # writers and keeps the phase-1 cache ABI unchanged.
             nvfp4_quantize_main_index_rows(
                 k.contiguous(),
-                v.contiguous(),
+                # V is an unrotated column view of the fused projection. The
+                # writer consumes explicit strides; materializing it adds a
+                # copy per layer without changing the stored cache bytes.
+                v,
                 idx_k.contiguous(),
                 physical_slots.contiguous(),
                 layout,
@@ -3662,6 +3627,254 @@ class MSAAttention(nn.Module):
         if self.tp_size > 1:
             projected = all_reduce(projected, group=Group.TP)
         return projected
+
+    def _forward_nvfp4_prefill(
+        self,
+        hidden_states: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        kv_cache: LayerKVCache,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Ordinary TP1 prefill with packed persistent and working FP4 pages.
+
+        Unlike CP, each request is one contiguous query segment, including odd
+        and single-token suffixes. Working slots and physical persistent slots
+        are separate namespaces; neither CP metadata nor CP collectives apply.
+        """
+        if self.tp_size != 1 or int(self.parallelism_config.tp_size) != 1:
+            raise RuntimeError("MSA ordinary NVFP4 prefill currently requires TP1")
+        if (
+            self.cp_enabled
+            or self._kv_sharded
+            or getattr(attn_inputs, "context_parallel_info", None) is not None
+        ):
+            raise RuntimeError(
+                "MSA ordinary NVFP4 prefill does not accept CP metadata or sharded KV"
+            )
+        if (
+            kv_cache is None
+            or not self.nvfp4_kv_cache
+            or self.page_size != 128
+            or self.block_size != self.page_size
+            or self.physical_page_size != self.page_size
+            or not self.disable_index_value
+            or self.num_idx_heads != self.kv_head_num
+        ):
+            raise RuntimeError(
+                "MSA ordinary NVFP4 prefill requires aligned native FP4 cache geometry"
+            )
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.score_chunk import (
+            PrefillScoreHostMetadata,
+            m3_index_score_chunk_enabled,
+            m3_index_score_chunk_rows,
+        )
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+            build_index_score_plan,
+            build_kv_page_indices,
+            build_sparse_attn_plan,
+            flash_prefill_topk_to_block_tables_fp4,
+            prepare_fmha_index_score_chunks,
+            sparse_prefill_from_topk_fp4,
+        )
+
+        device = hidden_states.device
+        total_tokens = int(hidden_states.shape[0])
+        kv_lens, prefix_lens, inlens = self._get_lengths(attn_inputs)
+        prefix_cpu = [int(x) for x in prefix_lens.cpu().tolist()]
+        inlen_cpu = [int(x) for x in inlens.cpu().tolist()]
+        kv_cpu = [p + n for p, n in zip(prefix_cpu, inlen_cpu)]
+        if (
+            not kv_cpu
+            or len(prefix_cpu) != len(inlen_cpu)
+            or sum(inlen_cpu) != total_tokens
+            or any(n <= 0 for n in inlen_cpu)
+        ):
+            raise RuntimeError(
+                "MSA ordinary NVFP4 prefill token/request lengths mismatch"
+            )
+        if any(p < 0 or p % self.page_size for p in prefix_cpu):
+            raise RuntimeError(
+                "MSA ordinary NVFP4 prefill requires page-aligned prefixes"
+            )
+        bsz, max_kv = len(kv_cpu), max(kv_cpu)
+        table = self._physical_block_table(attn_inputs)
+        if table.shape[0] < bsz or table.shape[1] < triton.cdiv(max_kv, self.page_size):
+            raise RuntimeError(
+                "MSA ordinary NVFP4 prefill physical page table is too short"
+            )
+        self._ensure_scratch_addressing_capacity(bsz, max_kv, exact_cp_shape=True)
+        stride = int(self._scratch_seq_len)
+        req_to_token = (
+            torch.arange(bsz, device=device, dtype=torch.int32)[:, None] * stride
+            + torch.arange(max_kv, device=device, dtype=torch.int32)[None, :]
+        ).contiguous()
+        positions, working_slots, physical_slots, prefix_pages = [], [], [], []
+        for b, (prefix, length) in enumerate(zip(prefix_cpu, kv_cpu)):
+            pos = torch.arange(prefix, length, device=device, dtype=torch.int64)
+            positions.append(pos)
+            working_slots.append(pos + b * stride)
+            # _kernel_slots_to_paged is identity outside CP. Resolve physical
+            # slots explicitly instead of passing compact working addresses.
+            physical_slots.append(
+                table[b, pos // self.page_size].long() * self.page_size
+                + pos % self.page_size
+            )
+            prefix_pages.append(
+                torch.arange(prefix // self.page_size, device=device, dtype=torch.int64)
+                + b * (stride // self.page_size)
+            )
+        positions = torch.cat(positions)
+        working_slots = torch.cat(working_slots)
+        physical_slots = torch.cat(physical_slots)
+        prefix_pages = torch.cat(prefix_pages)
+        identity_rows = torch.arange(total_tokens, device=device, dtype=torch.int64)
+        seq_lens = kv_lens.to(device=device, dtype=torch.int32)
+        prefix_i32 = prefix_lens.to(device=device, dtype=torch.int32)
+        cu_seqlens = torch.zeros(bsz + 1, device=device, dtype=torch.int32)
+        cu_seqlens[1:] = torch.cumsum(
+            inlens.to(device=device, dtype=torch.int32), dim=0
+        )
+        kv_indices = build_kv_page_indices(req_to_token, seq_lens, self.block_size)
+        sparse_plan = build_sparse_attn_plan(
+            cu_seqlens,
+            seq_lens,
+            prefix_i32,
+            self.head_num,
+            self.kv_head_num,
+            self.block_size,
+            self.topk_blocks,
+            use_fp8_kvcache=False,
+        )
+        if m3_index_score_chunk_enabled(total_tokens):
+            index_plan = {}
+            host = PrefillScoreHostMetadata(
+                tuple(inlen_cpu), tuple(kv_cpu), tuple(prefix_cpu), tuple(range(bsz))
+            )
+            prepare_fmha_index_score_chunks(
+                index_score_plan=index_plan,
+                cu_seqlens=cu_seqlens,
+                seq_lens=seq_lens,
+                prefix_lens=prefix_i32,
+                kv_indices=kv_indices,
+                chunk_rows=m3_index_score_chunk_rows(),
+                block_size_k=self.block_size,
+                num_heads=self.num_idx_heads,
+                idx_kv_heads=1,
+                total_q=total_tokens,
+                max_seqlen_k=max_kv,
+                host_metadata=host,
+                use_fp8_kvcache=False,
+            )
+            index_plan["_fp4_host_metadata"] = host
+        else:
+            index_plan = build_index_score_plan(
+                cu_seqlens,
+                seq_lens,
+                prefix_i32,
+                self.num_idx_heads,
+                1,
+                self.block_size,
+                use_fp8_kvcache=False,
+            )
+
+        qkv, idx_q, idx_k = self._project_qkv_idx(hidden_states, x_fp8, x_scale)
+        if self.qk_fuse_norm is not None:
+            qkv = self.qk_fuse_norm(qkv)
+        q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.reshape(total_tokens, self.head_num, self.head_dim).contiguous()
+        k = k.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
+        v = v.reshape(total_tokens, self.kv_head_num, self.head_dim).contiguous()
+        idx_q = _gemma_rmsnorm_per_head(
+            idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim),
+            self.idx_q_norm_w,
+            self.layernorm_eps,
+        ).contiguous()
+        idx_k = _gemma_rmsnorm_per_head(
+            idx_k.reshape(total_tokens, 1, self.idx_head_dim),
+            self.idx_k_norm_w,
+            self.layernorm_eps,
+        ).contiguous()
+        self._apply_rope(q, k, positions)
+        self._apply_rope(idx_q, idx_k, positions)
+        nk, ni = self.kv_size, self.idx_head_dim
+        packed = torch.cat(
+            (
+                k.reshape(total_tokens, nk),
+                v.reshape(total_tokens, nk),
+                idx_k.reshape(total_tokens, ni),
+            ),
+            dim=-1,
+        )
+        # Existing writer preserves both opaque persistent planes and builds
+        # FP4 working pages without ever expanding historical KV to BF16.
+        main, scales, idx_fp4, idx_scales = (
+            self._write_cp_suffix_to_nvfp4_working_pages(
+                kv_cache,
+                packed,
+                identity_rows,
+                working_slots,
+                physical_slots,
+                None,
+                None,
+                nk,
+                ni,
+                total_tokens,
+                prefix_cpu,
+                prefix_pages,
+                None,
+                attn_inputs,
+            )
+        )
+        del packed, qkv, k, v, idx_k
+        if attn_inputs.cache_store_inputs:
+            from rtp_llm.models_py.modules.factory.attention import common
+
+            write_impl = common.create_write_cache_store_impl(attn_inputs)
+            common.apply_write_cache_store(write_impl, attn_inputs, kv_cache)
+        pages = int(main.shape[1])
+        groups = self.head_dim // NVFP4_GROUP_SIZE
+        k_scale = (
+            scales[0]
+            .view(torch.uint8)
+            .view(pages * self.kv_head_num * self.page_size, groups)
+        )
+        v_scale = scales[1].view(torch.uint8).view_as(k_scale)
+        idx_scale_mma = idx_scales.view(
+            pages, 1, (ni // NVFP4_GROUP_SIZE) // 4, 32, 4, 4
+        )
+        _, _, topk = flash_prefill_topk_to_block_tables_fp4(
+            idx_q=idx_q,
+            idx_k_fp4=idx_fp4,
+            idx_k_scale_mma=idx_scale_mma,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_i32,
+            max_seqlen_q=max(inlen_cpu),
+            max_seqlen_k=max_kv,
+            block_size_k=self.block_size,
+            topk=self.topk_blocks,
+            num_pages=triton.cdiv(max_kv, self.block_size),
+            init_blocks=self.init_blocks,
+            local_blocks=self.local_blocks,
+            index_score_plan=index_plan,
+            kv_indices=kv_indices,
+            emit_block_table=False,
+        )
+        output = sparse_prefill_from_topk_fp4(
+            q,
+            main[0],
+            main[1],
+            k_scale,
+            v_scale,
+            topk,
+            kv_indices,
+            sparse_plan,
+            self.topk_blocks,
+            self.block_size,
+            self.head_dim**-0.5,
+        )
+        return self.o_proj(output.reshape(total_tokens, -1).contiguous())
 
     def _forward_cp_prefill(
         self,
@@ -4483,8 +4696,12 @@ class MSAAttention(nn.Module):
             idx_k = idx_k.contiguous()
             self._apply_rope(idx_q, idx_k, positions)
             if self.nvfp4_kv_cache:
-                nvfp4_round_to_e4m3_compute_grid_(q)
-                nvfp4_round_to_e4m3_compute_grid_(idx_q)
+                fuse_bf16_query_rounding = (
+                    q.dtype == torch.bfloat16 and idx_q.dtype == torch.bfloat16
+                )
+                if not fuse_bf16_query_rounding:
+                    nvfp4_round_to_e4m3_compute_grid_(q)
+                    nvfp4_round_to_e4m3_compute_grid_(idx_q)
 
             paged_decode_views = self._write_kv_cache_and_idx_k_for_decode(
                 kv_cache, k, v, idx_k, seq_lens, phys_block_table
@@ -4514,6 +4731,7 @@ class MSAAttention(nn.Module):
                     local_blocks=self.local_blocks,
                     score_type=self.score_type,
                     mma_scale_layout=True,
+                    fuse_bf16_query_rounding=fuse_bf16_query_rounding,
                 )
                 attn_output = q8kv4.output.reshape(*input_shape, -1).contiguous()
                 output = self.o_proj(attn_output)
@@ -4563,7 +4781,6 @@ class MSAAttention(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         use_fused_addressing: bool = False,
         use_paged_capacity_bound: bool = False,
-        noncausal_query_block: bool = False,
     ) -> torch.Tensor:
         from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
             minimax_paged_sparse_decode,
@@ -4642,15 +4859,22 @@ class MSAAttention(nn.Module):
                 idx_k, self.idx_k_norm_w, self.layernorm_eps
             )
 
-            q = q.contiguous()
-            k = k.contiguous()
-            self._apply_rope(q, k, positions)
+            if self.nvfp4_kv_cache:
+                q, k = self._apply_rope_contiguous(q, k, positions)
+            else:
+                q = q.contiguous()
+                k = k.contiguous()
+                self._apply_rope(q, k, positions)
             idx_q = idx_q.contiguous()
             idx_k = idx_k.contiguous()
             self._apply_rope(idx_q, idx_k, positions)
             if self.nvfp4_kv_cache:
-                nvfp4_round_to_e4m3_compute_grid_(q)
-                nvfp4_round_to_e4m3_compute_grid_(idx_q)
+                fuse_bf16_query_rounding = (
+                    q.dtype == torch.bfloat16 and idx_q.dtype == torch.bfloat16
+                )
+                if not fuse_bf16_query_rounding:
+                    nvfp4_round_to_e4m3_compute_grid_(q)
+                    nvfp4_round_to_e4m3_compute_grid_(idx_q)
 
             paged_decode_views = self._write_kv_cache_and_idx_k_for_decode(
                 kv_cache, k, v, idx_k, write_seq_lens, phys_block_table
@@ -4660,13 +4884,6 @@ class MSAAttention(nn.Module):
                     q8kv4_paged_sparse_decode,
                 )
 
-                visible_seq_lens = (
-                    expand_dspark_visible_seq_lens(
-                        write_seq_lens, request_batch_size, total_tokens
-                    )
-                    if noncausal_query_block
-                    else seq_lens
-                )
                 layout = nvfp4_cache_layout(
                     kv_cache.kv_cache_base,
                     kv_cache.kv_scale_base,
@@ -4679,7 +4896,7 @@ class MSAAttention(nn.Module):
                     idx_q,
                     layout,
                     phys_block_table,
-                    visible_seq_lens,
+                    seq_lens,
                     indexer_dim=self.idx_head_dim,
                     block_size=self.block_size,
                     topk=self.topk_blocks,
@@ -4687,13 +4904,13 @@ class MSAAttention(nn.Module):
                     local_blocks=self.local_blocks,
                     score_type=self.score_type,
                     mma_scale_layout=True,
+                    fuse_bf16_query_rounding=fuse_bf16_query_rounding,
+                    # Addressing expands one shared page table per request
+                    # into contiguous query rows with individual causal lengths.
+                    query_width=total_tokens // request_batch_size,
+                    valid_token_mask=valid_token_mask,
                 )
-                o = torch.where(
-                    valid_token_mask[:, None, None],
-                    q8kv4.output,
-                    torch.zeros_like(q8kv4.output),
-                )
-                attn_output = o.reshape(*input_shape, -1).contiguous()
+                attn_output = q8kv4.output.reshape(*input_shape, -1).contiguous()
                 output = self.o_proj(attn_output)
                 output = torch.where(
                     valid_token_mask[:, None], output, torch.zeros_like(output)
@@ -4708,16 +4925,6 @@ class MSAAttention(nn.Module):
         paged_main_k, paged_main_v, phys_block_table, paged_idx_k, paged_idx_scale = (
             paged_decode_views
         )
-        # Target verification is causal inside its fixed-width block. DSpARK
-        # deliberately is not: every query row attends to the complete query
-        # block after all K/V/index-K rows have been written. Preserve the
-        # original per-token lengths for slot addressing above, then widen only
-        # the attention-visible length here.
-        if noncausal_query_block:
-            seq_lens = expand_dspark_visible_seq_lens(
-                write_seq_lens, request_batch_size, total_tokens
-            )
-
         if self._cuda_graph_forward_active() or use_paged_capacity_bound:
             max_seqlen_k = self._cuda_graph_max_kv(attn_inputs, request_block_table)
         else:
@@ -4753,26 +4960,6 @@ class MSAAttention(nn.Module):
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output
-
-    def forward_dspark_query_block(
-        self,
-        hidden_states: torch.Tensor,
-        attn_inputs: PyAttentionInputs,
-        kv_cache: LayerKVCache,
-        x_fp8: Optional[torch.Tensor] = None,
-        x_scale: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Evaluate a fixed-width DSpARK block with non-causal intra-block visibility."""
-        return self._forward_target_verify(
-            hidden_states,
-            attn_inputs,
-            kv_cache,
-            x_fp8=x_fp8,
-            x_scale=x_scale,
-            use_fused_addressing=True,
-            use_paged_capacity_bound=True,
-            noncausal_query_block=True,
-        )
 
     def forward_paged_continuation(
         self,
@@ -4859,6 +5046,10 @@ class MSAAttention(nn.Module):
             if attn_inputs.context_parallel_info is None:
                 raise RuntimeError("MSA CP prefill requires context-parallel metadata")
             return self._forward_cp_prefill(
+                hidden_states, attn_inputs, kv_cache, x_fp8=x_fp8, x_scale=x_scale
+            )
+        if self.nvfp4_kv_cache:
+            return self._forward_nvfp4_prefill(
                 hidden_states, attn_inputs, kv_cache, x_fp8=x_fp8, x_scale=x_scale
             )
         return self._forward_prefill(
