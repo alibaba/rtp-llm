@@ -1,24 +1,17 @@
 kind: ha
 title: 双 Master HA · 核心观测
-subtitle: Master 事件、客户端请求结果与两台 FlexLB 的 inflight 状态
+subtitle: Master 事件、请求结果与两台 FlexLB 的 inflight 状态
 events:
   kill_a: A kill
   kill_b: B kill
   restart_a: A restart
   restart_b: B restart
 panels:
-- id: master_state
-  title: Master HTTP 状态与故障事件
-  source: master_state
-  fields: [http_up]
-  caption: 1 表示 /rtp_llm/inflight_status 可回读；0 表示采样失败。竖线为实际故障与重启阶段结束时间，不代表 gRPC 已恢复。
 - id: request_qps
-  title: 请求发出 / 成功 / 失败 QPS
-  source: requests
-  fields: [sent, success, failed]
-  caption: 按请求发送时间分桶，终态按 status=ok 判成功；故障窗口内失败不被过滤。
+  title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态
+  fields: [sent, success, failed, http_up]
+  caption: 请求按发送时间分桶；HTTP 状态用右轴（1 为可回读，0 为采样失败）。竖线为故障与重启事件，不代表 gRPC 已恢复。
 - id: inflight
-  title: 两台 FlexLB 的 inflight 状态量
-  source: master_state
-  fields: [scheduler_inflight, prefill_inflight_requests, decode_master_queued, decode_confirmed_running]
-  caption: 每秒回读两台 Master 的 /rtp_llm/inflight_status；P/D 数量为对应端点求和。采集不到时断线，不补零。
+  title: 两台 FlexLB 的 inflight 状态量 · Master HTTP 状态
+  fields: [scheduler_inflight, prefill_inflight_requests, decode_master_queued, decode_confirmed_running, http_up]
+  caption: 每秒回读两台 Master；P/D 数量为对应端点求和。HTTP 状态用右轴；采集不到时断线，不补零。

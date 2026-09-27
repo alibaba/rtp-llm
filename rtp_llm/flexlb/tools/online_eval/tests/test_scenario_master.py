@@ -531,15 +531,32 @@ class MasterActionsTest(unittest.TestCase):
                 )
                 ids = [stage["id"] for stage in plan["stages"]]
                 self.assertLess(ids.index("kill_a"), ids.index("kill_b"))
-                self.assertLess(ids.index("kill_b"), ids.index("restart_a"))
+                self.assertLess(ids.index("restart_a"), ids.index("a_ready"))
+                self.assertLess(ids.index("a_ready"), ids.index("kill_b"))
                 self.assertLess(ids.index("restart_a"), ids.index("restart_b"))
-                self.assertIn("outage_failures", ids)
+                self.assertNotIn("outage_failures", ids)
                 self.assertIn("both_balance", ids)
                 flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
                 self.assertEqual("prefix_lineage", flow["params"]["source"]["model"])
                 self.assertEqual(10000, flow["params"]["max_requests"])
                 self.assertEqual(125, plan["environment"]["n_prefill"])
                 self.assertEqual(536, plan["environment"]["n_decode"])
+
+    def test_ha_non_rolling_option_retains_full_outage_checks(self):
+        from cases.config import configure_program
+        from scenario.loader import load_document, ScenarioError
+
+        path = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
+        config = load_document(path)
+        config["parameters"]["dual_master_cycle"]["restart_mode"] = "non_rolling"
+        document = configure_program(config, str(path))
+        ids = [stage["id"] for stage in document["variants"][0]["stages"]]
+        self.assertLess(ids.index("kill_b"), ids.index("outage_start"))
+        self.assertLess(ids.index("outage_end"), ids.index("restart_a"))
+        self.assertIn("outage_failures", ids)
+        config["parameters"]["dual_master_cycle"]["restart_mode"] = "typo"
+        with self.assertRaisesRegex(ScenarioError, "restart_mode"):
+            configure_program(config, str(path))
 
     def test_ha_prefill_balance_uses_successful_requests_and_known_pool(self):
         rows = self.ctx.register_resource("ha_rows", [

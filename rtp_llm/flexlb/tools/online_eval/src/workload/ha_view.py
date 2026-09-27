@@ -88,7 +88,7 @@ def build_spec(payload, presentation, default_path):
     for descriptor in presentation["panels"]:
         curves = []
         for field in descriptor["fields"]:
-            if descriptor["source"] == "requests":
+            if field in qps:
                 curves.append(dict(
                     name={"sent": "发出", "success": "成功", "failed": "失败"}[field],
                     group="请求", axis="qps", color=COLORS[field],
@@ -113,7 +113,7 @@ def build_spec(payload, presentation, default_path):
             overlay=True, timeX=True, axes={
                 "qps": {"title": "requests / s", "position": "left"},
                 "count": {"title": "requests", "position": "left"},
-                "up": {"title": "HTTP 状态 (0/1)", "position": "left"},
+                "up": {"title": "HTTP 状态 (0/1)", "position": "right", "min": 0, "max": 1},
             }, series=curves, events=events,
         ))
     sections = [

@@ -15,10 +15,11 @@ variants:
 - id: dual_master_cycle
   program: dual_master_cycle
 metadata:
-  description: One real frontend prefix-lineage replay across A kill, B kill, A restart and B restart.
+  description: One real frontend prefix-lineage replay across a selectable dual-master restart cycle.
   category: master
 parameters:
   dual_master_cycle:
+    restart_mode: rolling # non_rolling keeps both masters down before restarting A
     setup_timeout_s: 600
     flow:
       targets: [A, B]
@@ -69,7 +70,7 @@ parameters:
       unique_requests: {metric: duplicate_ids, op: eq, expected: 0, min_samples: 1}
 test:
   kind: workload
-  description: Continuous request outcomes, owner state and Prefill distribution during a full dual-master cycle
+  description: Continuous request outcomes, owner state and Prefill distribution during a dual-master restart cycle
   collection: request
 reports:
 - workload.yaml

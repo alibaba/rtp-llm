@@ -1,10 +1,14 @@
 """One continuous real-trace replay across the complete dual-master failure cycle."""
 
 from cases.config import output
+from scenario.loader import ScenarioError
 
 
 def dual_master_cycle(case):
     root = "dual_master_cycle"
+    restart_mode = case.value(f"{root}.restart_mode")
+    if restart_mode not in ("rolling", "non_rolling"):
+        raise ScenarioError("dual_master_cycle.restart_mode must be rolling or non_rolling")
     case.step("setup", "setup", timeout_s=case.value(f"{root}.setup_timeout_s"))
     case.step("flow", "master_client_start", params=case.value(f"{root}.flow"))
 
@@ -14,12 +18,15 @@ def dual_master_cycle(case):
     case.step("b_ready", "master_ready", params=case.value(f"{root}.b_ready"))
     case.step("b_start", "master_mark", params=case.value(f"{root}.settle"))
     case.step("b_end", "master_mark", params=case.value(f"{root}.survivor_wait"))
-    case.step("kill_b", "master_fault", params=case.value(f"{root}.kill_b"))
-    case.step("outage_start", "master_mark", params=case.value(f"{root}.settle"))
-    case.step("outage_end", "master_mark", params=case.value(f"{root}.outage_wait"))
+    if restart_mode == "non_rolling":
+        case.step("kill_b", "master_fault", params=case.value(f"{root}.kill_b"))
+        case.step("outage_start", "master_mark", params=case.value(f"{root}.settle"))
+        case.step("outage_end", "master_mark", params=case.value(f"{root}.outage_wait"))
     case.step("restart_a", "master_restore", timeout_s=case.value(f"{root}.restart_timeout_s"),
               params={"fault": output("kill_a", "fault")})
     case.step("a_ready", "master_ready", params=case.value(f"{root}.a_ready"))
+    if restart_mode == "rolling":
+        case.step("kill_b", "master_fault", params=case.value(f"{root}.kill_b"))
     case.step("a_start", "master_mark", params=case.value(f"{root}.settle"))
     case.step("a_end", "master_mark", params=case.value(f"{root}.survivor_wait"))
     case.step("restart_b", "master_restore", timeout_s=case.value(f"{root}.restart_timeout_s"),
@@ -34,10 +41,12 @@ def dual_master_cycle(case):
     windows = {
         "baseline": {"until": output("baseline_end", "epoch_s"), "until_offset_s": -2},
         "b_only": {"from": output("b_start", "epoch_s"), "until": output("b_end", "epoch_s")},
-        "outage": {"from": output("outage_start", "epoch_s"), "until": output("outage_end", "epoch_s")},
         "a_only": {"from": output("a_start", "epoch_s"), "until": output("a_end", "epoch_s")},
         "both": {"from": output("both_start", "epoch_s"), "until": output("both_end", "epoch_s")},
     }
+    if restart_mode == "non_rolling":
+        windows["outage"] = {"from": output("outage_start", "epoch_s"),
+                              "until": output("outage_end", "epoch_s")}
     for name, boundaries in windows.items():
         case.step(name, "master_client_window", params={"rows": output("finish", "rows"), **boundaries})
 
@@ -46,15 +55,15 @@ def dual_master_cycle(case):
         "b_success": "b_only",
         "b_route": "b_only",
         "b_balance": "b_only",
-        "outage_failures": "outage",
-        "outage_no_master": "outage",
-        "outage_terminal": "outage",
         "a_success": "a_only",
         "a_route": "a_only",
         "a_balance": "a_only",
         "both_success": "both",
         "both_balance": "both",
     }
+    if restart_mode == "non_rolling":
+        checks.update(outage_failures="outage", outage_no_master="outage",
+                      outage_terminal="outage")
     for name, window in checks.items():
         case.observe(name, "master_client_check", params=case.params(
             f"{root}.checks.{name}", {"rows": output(window, "rows")}))

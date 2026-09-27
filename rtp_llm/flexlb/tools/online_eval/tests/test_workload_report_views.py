@@ -51,9 +51,13 @@ class WorkloadReportViewsTest(unittest.TestCase):
             path = paths["master_ha_core.yaml"]
             spec = json.loads((path.parent / "report-spec.json").read_text())
             panels = {panel["id"]: panel for panel in spec["panels"]}
+            self.assertEqual({"request_qps", "inflight"}, set(panels))
             self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][2]["points"]])
-            self.assertEqual([1, 0], [point["y"] for point in panels["master_state"]["series"][0]["points"]])
+            self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][3]["points"]])
             self.assertEqual([3, None], [point["y"] for point in panels["inflight"]["series"][0]["points"]])
+            self.assertEqual([1, 0], [point["y"] for point in panels["inflight"]["series"][-2]["points"]])
+            self.assertTrue(all(panel["axes"]["up"]["position"] == "right"
+                                and panel["events"] for panel in panels.values()))
             self.assertEqual(1, panels["request_qps"]["events"][0]["t"])
             self.assertEqual(5, spec["timeAxis"]["max"])
             self.assertIn("../ha/report.html", json.dumps(spec["sections"]))

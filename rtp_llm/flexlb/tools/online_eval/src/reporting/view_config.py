@@ -58,12 +58,9 @@ def view(name):
             for stage, label in data["events"].items()
         ):
             _fail(path, "invalid HA event labels")
-        allowed = {
-            "requests": {"sent", "success", "failed"},
-            "master_state": {"http_up", "scheduler_inflight",
-                             "prefill_inflight_requests", "decode_master_queued",
-                             "decode_confirmed_running"},
-        }
+        allowed = {"sent", "success", "failed", "http_up", "scheduler_inflight",
+                   "prefill_inflight_requests", "decode_master_queued",
+                   "decode_confirmed_running"}
         panels = data["panels"]
         if not isinstance(panels, list) or not panels or len({
             panel.get("id") for panel in panels if isinstance(panel, dict)
@@ -71,8 +68,8 @@ def view(name):
             _fail(path, "invalid HA panels")
         for panel in panels:
             if not isinstance(panel, dict) or set(panel) != {
-                "id", "title", "source", "fields", "caption"
-            } or type(panel["id"]) is not str or not panel["id"] or type(panel["title"]) is not str or not panel["title"] or type(panel["caption"]) is not str or not panel["caption"] or panel["source"] not in allowed or not isinstance(panel["fields"], list) or not panel["fields"] or len(set(panel["fields"])) != len(panel["fields"]) or set(panel["fields"]) - allowed[panel["source"]]:
+                "id", "title", "fields", "caption"
+            } or type(panel["id"]) is not str or not panel["id"] or type(panel["title"]) is not str or not panel["title"] or type(panel["caption"]) is not str or not panel["caption"] or not isinstance(panel["fields"], list) or not panel["fields"] or len(set(panel["fields"])) != len(panel["fields"]) or set(panel["fields"]) - allowed:
                 _fail(path, "invalid HA panel")
     else:
         required = {"kind", "report", "producer", "title", "subtitle", "panel", "sections"}
