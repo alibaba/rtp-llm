@@ -13,9 +13,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scenario.actions import master
 from scenario.contracts import PlanContext
 from scenario.runtime import Deadline, RuntimeContext
+from runtime.ha import HaMasterStateSampler
 
 
 class MasterActionsTest(unittest.TestCase):
+    def test_ha_state_sampler_keeps_each_master_and_missing_inflight_distinct(self):
+        root = Path(self.tmp.name)
+        env = SimpleNamespace(master_specs={
+            "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=101),
+            "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=102),
+        })
+        sampler = HaMasterStateSampler(env, root / "master_states.jsonl", 0.01)
+
+        def fetch(url, timeout):
+            if url.endswith(":101/rtp_llm/inflight_status"):
+                return dict(scheduler_inflight=4,
+                            prefill_endpoints=[{"inflight_requests": 2}, {"inflight_requests": 3}],
+                            decode_endpoints=[{"master_queued": 1, "confirmed_running": 6}])
+            sampler._stop.set()
+            return None
+
+        with patch("runtime.ha.http_get_json", side_effect=fetch):
+            sampler._run()
+        rows = [json.loads(line) for line in sampler.path.read_text().splitlines()]
+        self.assertEqual(["A", "B"], [row["master"] for row in rows])
+        self.assertEqual(5, rows[0]["prefill_inflight_requests"])
+        self.assertEqual(6, rows[0]["decode_confirmed_running"])
+        self.assertEqual(0, rows[1]["http_up"])
+        self.assertNotIn("scheduler_inflight", rows[1])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

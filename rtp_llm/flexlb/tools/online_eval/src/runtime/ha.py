@@ -3,16 +3,72 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-from runtime.harness import ClientOps
+from runtime.harness import ClientOps, http_get_json
 
 HA_TRACE_ROWS = 20
 HA_TRACE_SPACING_MS = 100
 HA_TRACE_IL = 16
 HA_TRACE_OL = 4
+
+
+class HaMasterStateSampler:
+    """Record both Masters' HTTP inflight state during the traffic window."""
+
+    def __init__(self, env, path: Path, interval_s: float = 1.0):
+        self.path = path
+        self.urls = {
+            name: f"http://{spec.bind_ip}:{spec.http_port}/rtp_llm/inflight_status"
+            for name, spec in env.master_specs.items()
+        }
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="ha-master-state", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                raise TimeoutError("HA Master state sampler did not stop")
+
+    def _run(self):
+        with self.path.open("w", encoding="utf-8") as stream:
+            while not self._stop.is_set():
+                started = time.monotonic()
+                for name, url in self.urls.items():
+                    data = http_get_json(url, timeout=0.4)
+                    valid = isinstance(data, dict) and isinstance(
+                        data.get("scheduler_inflight"), (int, float)
+                    )
+                    row = {"epoch_s": time.time(), "master": name, "http_up": int(valid)}
+                    if valid:
+                        row.update(
+                            scheduler_inflight=data["scheduler_inflight"],
+                            prefill_inflight_requests=sum(
+                                ep.get("inflight_requests", 0)
+                                for ep in data.get("prefill_endpoints", [])
+                            ),
+                            decode_master_queued=sum(
+                                ep.get("master_queued", 0)
+                                for ep in data.get("decode_endpoints", [])
+                            ),
+                            decode_confirmed_running=sum(
+                                ep.get("confirmed_running", 0)
+                                for ep in data.get("decode_endpoints", [])
+                            ),
+                        )
+                    stream.write(json.dumps(row, allow_nan=False) + "\n")
+                stream.flush()
+                self._stop.wait(max(0, self.interval_s - (time.monotonic() - started)))
 
 
 def write_ha_trace(case_dir: Path) -> Path:
@@ -70,6 +126,7 @@ class HaTrafficRunner:
         self.targets = list(targets)
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
+        self.state_sampler = HaMasterStateSampler(env, case_dir / "master_states.jsonl")
         heap = "8g" if source is not None else "1g"
         self._client = ClientOps(manager, heap, heap)
         if source is None:
@@ -108,9 +165,14 @@ class HaTrafficRunner:
         self.proc = None
 
     def start(self) -> None:
-        self.proc, self.out_dir = self._client.run_async(
-            self._overrides, self.out_dir, self.log_file, label=self.name
-        )
+        self.state_sampler.start()
+        try:
+            self.proc, self.out_dir = self._client.run_async(
+                self._overrides, self.out_dir, self.log_file, label=self.name
+            )
+        except Exception:
+            self.state_sampler.stop()
+            raise
 
     @staticmethod
     def now() -> float:

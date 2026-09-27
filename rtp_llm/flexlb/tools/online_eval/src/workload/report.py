@@ -99,6 +99,11 @@ def write_views(directory, analysis, names=None):
         if name == DEFAULT_VIEW:
             continue
         presentation = view(name)
+        if presentation["kind"] == "ha":
+            from workload.ha_view import write_report as write_ha_report
+
+            paths[name] = write_ha_report(directory, analysis, presentation)
+            continue
         bundle = read_bundle(bundle_path(directory, "run", presentation["report"]))
         manifest = json.loads((bundle / "manifest.json").read_text())
         if manifest.get("producer") != presentation["producer"]:

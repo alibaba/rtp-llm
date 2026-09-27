@@ -25,6 +25,41 @@ def payload(series=None, gates=None):
 
 
 class WorkloadReportViewsTest(unittest.TestCase):
+    def test_ha_core_view_aligns_events_requests_and_master_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            requests = root / "client_events.jsonl"
+            requests.write_text("\n".join(json.dumps(row) for row in [
+                {"send_start_epoch_ms": 11_100, "status": "ok"},
+                {"send_start_epoch_ms": 11_800, "status": "exception"},
+                {"send_start_epoch_ms": 12_100, "status": "ok"},
+            ]) + "\n")
+            state = root / "master_states.jsonl"
+            state.write_text("\n".join(json.dumps(row) for row in [
+                {"epoch_s": 11, "master": "A", "http_up": 1,
+                 "scheduler_inflight": 3, "prefill_inflight_requests": 2,
+                 "decode_master_queued": 1, "decode_confirmed_running": 4},
+                {"epoch_s": 11, "master": "B", "http_up": 0},
+                {"epoch_s": 15, "master": "A", "http_up": 0},
+            ]) + "\n")
+            analysis = payload()
+            analysis["id"] = "ha"
+            analysis["status"] = "FAIL"
+            analysis["stages"] = [dict(id="finish", artifacts=[str(requests), str(state)])]
+            analysis["phases"] = [dict(stage="kill_a", event="end", epoch_s=11)]
+            paths = write_views(root, analysis, ["workload.yaml", "master_ha_core.yaml"])
+            path = paths["master_ha_core.yaml"]
+            spec = json.loads((path.parent / "report-spec.json").read_text())
+            panels = {panel["id"]: panel for panel in spec["panels"]}
+            self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][2]["points"]])
+            self.assertEqual([1, 0], [point["y"] for point in panels["master_state"]["series"][0]["points"]])
+            self.assertEqual([3, None], [point["y"] for point in panels["inflight"]["series"][0]["points"]])
+            self.assertEqual(1, panels["request_qps"]["events"][0]["t"])
+            self.assertEqual(5, spec["timeAxis"]["max"])
+            self.assertIn("../ha/report.html", json.dumps(spec["sections"]))
+            default = json.loads((paths["workload.yaml"].parent / "report-spec.json").read_text())
+            self.assertIn("../ha-ha-core/report.html", json.dumps(default["sections"]))
+
     def test_per_engine_metrics_share_one_chart_with_switchable_detail(self):
         series = {
             f'1/mock/running_streams/{{"engine_name":"p-{i}"}}':

@@ -621,6 +621,9 @@ class OwnedHaClient:
         )
 
     def cleanup(self, deadline):
+        sampler = getattr(self.flow, "state_sampler", None)
+        if sampler is not None:
+            sampler.stop()
         process = self.flow.proc
         if process is not None:
             if process.alive():
@@ -635,6 +638,9 @@ class OwnedHaClient:
         if self.flow.proc is None:
             raise RuntimeError("HA client was not started")
         rc = self.flow.proc.proc.wait(timeout=deadline.remaining())
+        sampler = getattr(self.flow, "state_sampler", None)
+        if sampler is not None:
+            sampler.stop()
         if rc != 0:
             raise RuntimeError(f"HA client exit code {rc}")
         path = self.flow.out_dir / "client_events.jsonl"
@@ -725,9 +731,10 @@ def _ha_finish_validate(params, plan):
 def _ha_finish(ctx, params, deadline):
     client = ctx.resource(params["client"], "ha_client")
     rows, path = client.finish(deadline)
+    sampler = getattr(client.flow, "state_sampler", None)
     return StageOutput(
         {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
-        artifacts=[str(path)],
+        artifacts=[str(path)] + ([str(sampler.path)] if sampler is not None else []),
     )
 
 
