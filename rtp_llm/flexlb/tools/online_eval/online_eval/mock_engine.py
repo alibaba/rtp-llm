@@ -1034,7 +1034,7 @@ class MockEngineState:
 
     def _task_pb(self, task: TaskRuntime):
         task_pb = self.pb2.TaskInfoPB(
-            request_id=task.request_id,
+            request_id=str(task.request_id),
             prefix_length=task.prefix_len,
             input_length=task.input_len,
             waiting_time_ms=0,
