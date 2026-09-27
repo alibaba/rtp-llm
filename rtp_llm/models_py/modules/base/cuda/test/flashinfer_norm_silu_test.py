@@ -54,7 +54,9 @@ class FlashInferNormSiluTest(TestCase):
     DTYPES = [torch.float16, torch.bfloat16]
     NUM_TOKENS = [1, 16, 128]
     HIDDEN_SIZES = [128, 896]
-    SILU_HIDDEN_SIZES = [256, 4864]
+    # 256 and 4864 are multiples of the fp16/bf16 vector width (8). 260, 769,
+    # 771, and 5125 are not; flashinfer picks a vector width that divides them.
+    SILU_HIDDEN_SIZES = [256, 260, 769, 771, 4864, 5125]
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
@@ -102,14 +104,15 @@ class FlashInferNormSiluTest(TestCase):
         weight = torch.randn(hidden_size, dtype=dtype)
         hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype)
         residual = torch.randn(num_tokens, hidden_size, dtype=dtype)
-        actual, actual_residual = RMSResNorm(weight, eps=_EPS)(
-            hidden_states.clone(), residual.clone()
-        )
+        hidden_in = hidden_states.clone()
+        residual_in = residual.clone()
+        actual, actual_residual = RMSResNorm(weight, eps=_EPS)(hidden_in, residual_in)
+        # fused_add_rmsnorm returns None and writes both results into the inputs.
+        self.assertIs(actual, hidden_in)
+        self.assertIs(actual_residual, residual_in)
         reference_residual = hidden_states.float() + residual.float()
         _assert_within_one_ulp(self, actual_residual, reference_residual)
-        _assert_within_one_ulp(
-            self, actual, _fp32_rmsnorm(reference_residual, weight)
-        )
+        _assert_within_one_ulp(self, actual, _fp32_rmsnorm(reference_residual, weight))
 
     def _check_silu_and_mul(
         self, num_tokens: int, hidden_size: int, dtype: _dtype

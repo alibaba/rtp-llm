@@ -20,7 +20,9 @@ py_test (
 py_test (
     name = "flashinfer_norm_silu_test",
     srcs = ["flashinfer_norm_silu_test.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + [
+        "//rtp_llm:flashinfer-python",
+    ],
     exec_properties = {'gpu':'A10'},
 )
 
