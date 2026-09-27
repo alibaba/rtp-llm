@@ -6,6 +6,7 @@ import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
 from unittest import IsolatedAsyncioTestCase, main
+from unittest.mock import Mock
 
 import torch
 from typing_extensions import override
@@ -1052,19 +1053,56 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(delta.reasoning_content, "<thix")
         self.assertFalse(delta.content)
 
-    def test_release_think_tail_drops_a_partial_tag_of_either_kind(self):
-        # The released text is checked against both tags, so neither a partial
-        # think_end_tag nor a partial think_start_tag can reach the client.
+    def test_release_think_tail_matches_the_parser_parking_conditions(self):
+        # A start-tag prefix is parked only at the start of the buffer. Unlike
+        # an end-tag prefix, it is ordinary text after other reasoning text.
         _, renderer, _ = self._create_base_thinking_endpoint("enabled")
 
         self.assertEqual(
             renderer._release_think_tail("ratio is a/b</thi"), "ratio is a/b"
         )
         self.assertEqual(
-            renderer._release_think_tail("ratio is a/b<thi"), "ratio is a/b"
+            renderer._release_think_tail("ratio is a/b<thi"), "ratio is a/b<thi"
         )
         self.assertEqual(renderer._release_think_tail("<thi"), "")
         self.assertEqual(renderer._release_think_tail("ratio is a/b"), "ratio is a/b")
+
+    async def test_parked_end_tag_prefix_does_not_drop_a_longer_start_tag_suffix(self):
+        for is_streaming in (True, False):
+            with self.subTest(is_streaming=is_streaming):
+                renderer = object.__new__(custom_renderer.CustomChatRenderer)
+                renderer.think_start_tag = "X response"
+                renderer.think_end_tag = " response"
+                renderer.tokenizer = Mock()
+                renderer.tokenizer.tokenize.side_effect = list
+                think_status = custom_renderer.ThinkStatus(
+                    enable_think_mode=True,
+                    in_think_mode=True,
+                    is_streaming=is_streaming,
+                    thinking_mode=ThinkingMode.ENABLED,
+                )
+                text = "ratio is a/bX "
+                delta = renderer._split_reasoning_text_and_content(
+                    custom_renderer.OutputDelta(text, None, 10, 8, 0), think_status
+                )
+                self.assertFalse(delta.reasoning_content)
+                self.assertEqual(think_status.think_buffer, text)
+
+                # The parser parks the trailing space as an end-tag prefix.
+                # "X " is a start-tag prefix, but only at the start of a buffer.
+                buffer = Mock(
+                    delta_output_string="",
+                    output=Mock(aux_info=AuxInfo(input_len=10, output_len=8)),
+                    request=Mock(logprobs=False),
+                )
+                response = await renderer._flush_buffer(
+                    [buffer], [], is_streaming, [think_status]
+                )
+                self.assertEqual(
+                    response.choices[0].delta.reasoning_content, "ratio is a/bX"
+                )
+                self.assertFalse(response.choices[0].delta.content)
+                self.assertEqual(think_status.think_buffer, "")
 
     async def test_enabled_parked_think_tail_is_completed_by_final_chunk(self):
         # "/think>Ans" is held back by the stop-word buffer ("Answer!"), so the

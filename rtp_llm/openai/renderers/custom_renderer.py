@@ -1028,19 +1028,19 @@ class CustomChatRenderer:
         """Drop only the tail that could still have grown into a think tag.
 
         ``_split_reasoning_text_and_content`` parks reasoning text whose tail
-        may turn out to be the start of ``think_end_tag`` (or of a new
-        ``think_start_tag``). Once generation has stopped nothing can complete
-        that tag any more, so everything in front of the tail is ordinary
-        reasoning text and has to be released; the tail itself is a partial tag
-        and stays dropped, like the streaming reasoning parser does with its
-        own buffer. Both tags are checked, so the same fragment that made the
-        state machine park the text is the fragment that gets dropped here.
+        may turn out to be the start of ``think_end_tag``, or whose entire
+        buffer is a prefix of ``think_start_tag``. Once generation has stopped
+        nothing can complete that tag any more, so everything in front of the
+        tail is ordinary reasoning text and has to be released; the tail itself
+        is a partial tag and stays dropped, like the streaming reasoning parser
+        does with its own buffer. A start-tag prefix after ordinary reasoning
+        text is not a parking condition and must not cause extra text to drop.
         """
+        if self.think_start_tag.startswith(text):
+            return ""
         for cut in range(len(text)):
             tail = text[cut:]
-            if self.think_end_tag.startswith(tail) or self.think_start_tag.startswith(
-                tail
-            ):
+            if self.think_end_tag.startswith(tail):
                 return text[:cut]
         return text
 
