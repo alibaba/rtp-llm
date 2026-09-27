@@ -638,6 +638,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
         return prepareBlockCacheKeys(ctx).thenCompose(ignored -> routeService.route(ctx)).thenApply(response -> {
+            if (response.isSuccess() && cacheAwareService != null) {
+                try {
+                    cacheAwareService.updateFromRoutedRequest(ctx.getRequest(), response.getServerStatus());
+                } catch (RuntimeException error) {
+                    Logger.warn("Local Standby metadata update failed, request_id={}", ctx.getRequestId(), error);
+                }
+            }
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                     toProtoResponse(response).toBuilder();
             RequestState lifecycle = routeService.getRequestState(ctx.getRequestId(), 0);
