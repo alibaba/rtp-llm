@@ -141,14 +141,15 @@ class CacheHitFeedbackFlowTest {
 
     @Test
     void realSelectionAndStatusPollingEmitComparisonPvAndMetricsExactlyOnce() throws Exception {
-        select("1001");
-        poll(worker, task("1001", false, 0), false, 2);
+        select("req-cache-feedback-p-001");
+        poll(worker, task("req-cache-feedback-p-001", false, 0), false, 2);
         assertTrue(events("cache_hit_comparison").isEmpty(), "missing validity must not mean zero cache hit");
-        poll(worker, task("1001", true, 500), false, 3);
-        poll(worker, task("1001", true, 500), true, 4);
-        poll(worker, task("1001", true, 500), true, 4);
+        poll(worker, task("req-cache-feedback-p-001", true, 500), false, 3);
+        poll(worker, task("req-cache-feedback-p-001", true, 500), true, 4);
+        poll(worker, task("req-cache-feedback-p-001", true, 500), true, 4);
         JsonNode comparison = events("cache_hit_comparison").getFirst();
         assertEquals(1, events("cache_hit_comparison").size());
+        assertEquals("req-cache-feedback-p-001", comparison.path("requestId").asText());
         assertEquals(500, comparison.path("actual").path("hit").asLong());
         assertEquals(400, comparison.path("kvcm").path("hit").asLong());
         assertEquals(100, comparison.path("kvcm").path("delta").asLong());
@@ -316,7 +317,7 @@ class CacheHitFeedbackFlowTest {
     }
 
     private EngineRpcService.TaskInfoPB task(String id, boolean valid, long hit) {
-        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(Long.parseLong(id)).setInputLength(1000)
+        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(id).setInputLength(1000)
                 .setPrefixLength(hit).setPrefixLengthValid(valid).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING);
         if (valid) {
             task.setRequestReceivedTimeMs(990).setInputQueueEnqueueTimeMs(1000).setInputQueueDrainTimeMs(1010)

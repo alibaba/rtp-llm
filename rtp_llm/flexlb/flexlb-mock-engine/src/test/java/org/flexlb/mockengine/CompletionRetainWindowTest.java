@@ -152,7 +152,7 @@ class CompletionRetainWindowTest {
 
         // Cursor 0 → the full increment.
         EngineRpcService.WorkerStatusPB all = workerStatus(prefill, 0);
-        assertEquals(List.of(1L, 2L), finishedRids(all));
+        assertEquals(List.of("1", "2"), finishedRids(all));
         assertEquals(2, all.getLatestFinishedVersion());
 
         // Cursor advanced to latest → empty increment, cursor unchanged.
@@ -163,12 +163,12 @@ class CompletionRetainWindowTest {
         // New completion after the cursor → exactly the delta.
         publishCompletions(3, 1);
         EngineRpcService.WorkerStatusPB delta = workerStatus(prefill, 2);
-        assertEquals(List.of(3L), finishedRids(delta));
+        assertEquals(List.of("3"), finishedRids(delta));
         assertEquals(3, delta.getLatestFinishedVersion());
 
         // Mid-window cursor → only the tail past that cursor.
         EngineRpcService.WorkerStatusPB tail = workerStatus(prefill, 1);
-        assertEquals(List.of(2L, 3L), finishedRids(tail));
+        assertEquals(List.of("2", "3"), finishedRids(tail));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -189,7 +189,7 @@ class CompletionRetainWindowTest {
         EngineRpcService.WorkerStatusPB afterTrim = workerStatus(prefill, 0);
         assertEquals(2, afterTrim.getFinishedTaskListCount(),
                 "backlog is capped at the retain window");
-        assertEquals(List.of(3L, 4L), finishedRids(afterTrim),
+        assertEquals(List.of("3", "4"), finishedRids(afterTrim),
                 "the most recent records are retained, oldest trimmed first");
         assertEquals(4, afterTrim.getLatestFinishedVersion(),
                 "latestFinishedVersion never regresses on trim");
@@ -197,7 +197,7 @@ class CompletionRetainWindowTest {
         // A slow consumer whose cursor is still inside the retained window
         // keeps receiving its slice.
         EngineRpcService.WorkerStatusPB lagging = workerStatus(prefill, 3);
-        assertEquals(List.of(4L), finishedRids(lagging));
+        assertEquals(List.of("4"), finishedRids(lagging));
     }
 
     @Test
@@ -210,7 +210,7 @@ class CompletionRetainWindowTest {
         EngineRpcService.WorkerStatusPB afterCleanup = workerStatus(prefill, 0);
         assertEquals(3, afterCleanup.getFinishedTaskListCount(),
                 "cleanup must not trim inside the retain window");
-        assertEquals(List.of(1L, 2L, 3L), finishedRids(afterCleanup));
+        assertEquals(List.of("1", "2", "3"), finishedRids(afterCleanup));
     }
 
     @Test
@@ -231,7 +231,7 @@ class CompletionRetainWindowTest {
         assertEquals(6, bounded.getLatestFinishedVersion());
         // The last round's records (rid 5, 6) plus one older (rid 4) — the
         // 3 most recent by version.
-        assertEquals(List.of(4L, 5L, 6L), finishedRids(bounded));
+        assertEquals(List.of("4", "5", "6"), finishedRids(bounded));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -271,7 +271,7 @@ class CompletionRetainWindowTest {
                 "completions did not publish within the timeout");
     }
 
-    private static List<Long> finishedRids(EngineRpcService.WorkerStatusPB status) {
+    private static List<String> finishedRids(EngineRpcService.WorkerStatusPB status) {
         return status.getFinishedTaskListList().stream()
                 .map(EngineRpcService.TaskInfoPB::getRequestId)
                 .collect(Collectors.toList());

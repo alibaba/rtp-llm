@@ -227,7 +227,7 @@ public class EngineStatusConverter {
     /**
      * Convert protobuf task values directly into immutable observations.
      */
-    private static Map<String, TaskObservation> convertTasks( List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
+    private static Map<String, TaskObservation> convertTasks(List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
         if (taskInfoPBList == null || taskInfoPBList.isEmpty()) {
             return Map.of();
         }
@@ -276,7 +276,7 @@ public class EngineStatusConverter {
                             task.getPrefillStepCount(),
                             task.getPrefillNonfinalChunkTokensMin(),
                             task.getPrefillNonfinalChunkTokensMax()));
-            tasks.put(String.valueOf(task.getRequestId()), observation);
+            tasks.put(observation.requestId(), observation);
         }
         return Map.copyOf(tasks);
     }
