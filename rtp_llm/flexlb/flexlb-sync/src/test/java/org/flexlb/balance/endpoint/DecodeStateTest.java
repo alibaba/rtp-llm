@@ -166,15 +166,15 @@ class DecodeStateTest {
     }
 
     @Test
-    void absentSnapshotReleasesCapacityAndLateFinishedRetainsExactTerminalIdentity() {
+    void emptyWorkerReportReleasesCapacityAndLateFinishedKeepsOriginalReservation() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
         var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
         var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         for (int i = 0; i < 3; i++) {
-            var absent = calibrate(state, status, Map.of(), Map.of());
-            assertTrue(absent.facts().isEmpty());
+            var emptyReportResult = calibrate(state, status, Map.of(), Map.of());
+            assertTrue(emptyReportResult.facts().isEmpty());
             assertEquals(0, state.routingView().engineCapacityUsed());
             assertEquals(0, state.routingView().engineLoad());
             assertTrue(state.resourceSnapshot().reserved().isEmpty());
@@ -203,7 +203,7 @@ class DecodeStateTest {
     }
 
     @Test
-    void absentRequestCanResumeAndExpireWithoutReleasingAnotherRequestsCapacity() {
+    void requestMissingFromWorkerReportCanResumeAndExpireWithoutReleasingAnotherRequestsCapacity() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
         var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
@@ -225,7 +225,7 @@ class DecodeStateTest {
     }
 
     @Test
-    void awaitingTerminalSurvivesSchedulerRetentionAndRetiresWithGeneration() {
+    void requestWaitingForFinishedRemainsUntilSchedulerCleanupOrEndpointRemoval() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
         var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
@@ -238,7 +238,7 @@ class DecodeStateTest {
     }
 
     @Test
-    void orphanAwaitingTerminalIsEvictedWithoutChargingCapacity() {
+    void requestWaitingForFinishedWithoutSchedulerTrackingIsRemovedAfterTimeout() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
         var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
