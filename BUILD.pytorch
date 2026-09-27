@@ -25,6 +25,9 @@ cc_library(
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
+            # Some CUDA wheels reference Torch's optional NVSHMEM library.
+            # Include it when present; older wheels keep their existing layout.
+            "torch/lib/libtorch_nvshmem*.so*",
         ]),
         "@//:using_rocm": [
             # "torch/lib/librocfft.so",
