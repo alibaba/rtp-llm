@@ -1,5 +1,12 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 
+cc_library(
+    name = "bound_sleep_controller",
+    hdrs = ["BoundSleepLifecycleController.h"],
+    deps = ["//rtp_llm/cpp/engine_base/sleep"],
+    visibility = ["//visibility:public"],
+)
+
 cc_test_wrapper(
     name = "sleep_round_fence_test",
     srcs = ["SleepRoundFenceTest.cc"],
@@ -18,6 +25,7 @@ cc_test_wrapper(
     ],
     copts = copts(),
     deps = [
+        ":bound_sleep_controller",
         "//rtp_llm/cpp/engine_base/sleep",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -31,6 +39,7 @@ cc_test_wrapper(
     ],
     copts = copts(),
     deps = [
+        ":bound_sleep_controller",
         "//rtp_llm/cpp/engine_base/sleep:drain_manager",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -44,6 +53,7 @@ cc_test_wrapper(
     ],
     copts = copts(),
     deps = [
+        ":bound_sleep_controller",
         "//rtp_llm/cpp/engine_base/sleep:admission_gate",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

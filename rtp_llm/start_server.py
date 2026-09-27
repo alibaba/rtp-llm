@@ -486,6 +486,24 @@ def start_server(py_env_configs: PyEnvConfigs):
         py_env_configs.concurrency_config,
         dp_size=py_env_configs.parallelism_config.dp_size,
     )
+    if py_env_configs.runtime_config.enable_sleep_mode:
+        from rtp_llm.aios.kmonitor.python_client.kmonitor.reporting import (
+            ReportingState,
+            configure,
+        )
+        from rtp_llm.start_backend_server import _get_local_world_size
+
+        rank_count = (
+            _get_local_world_size(py_env_configs)
+            if py_env_configs.parallelism_config.world_size > 1
+            and py_env_configs.role_config.role_type != RoleType.FRONTEND
+            else 1
+        )
+        global_controller.metrics_reporting_state = ReportingState(
+            rank_count,
+            frontend_only=py_env_configs.role_config.role_type == RoleType.FRONTEND,
+        )
+        configure(global_controller.metrics_reporting_state)
     _sync_server_shutdown_timeout(py_env_configs)
 
     # Create process manager with config values

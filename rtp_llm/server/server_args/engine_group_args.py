@@ -1,3 +1,15 @@
+import logging
+import os
+
+from rtp_llm.config.sleep_mode import (
+    COLLECTIVE_MEMORY_ENV,
+    ENABLE_ENV,
+    LEGACY_RUNTIME_CACHES_ENV,
+    LEVEL_ENV,
+    RUNTIME_CACHES_ENV,
+    resolve_sleep_level,
+    resource_release_enabled,
+)
 from rtp_llm.server.server_args.util import str2bool
 
 
@@ -44,42 +56,76 @@ def init_engine_group_args(parser, runtime_config):
     engine_group.add_argument(
         "--enable_sleep_mode",
         "--enable-sleep-mode",
-        env_name="ENABLE_SLEEP_MODE",
-        bind_to=(runtime_config, "enable_sleep_mode"),
+        env_name=ENABLE_ENV,
         type=str2bool,
-        default=False,
-        help="是否开启 sleep/wake_up 生命周期管理接口，默认关闭",
+        default=None,
+        help="兼容旧配置；新部署只需 sleep_mode_level。单独设为 1 等价于 level 1；"
+        "与显式 level 矛盾时启动报错",
     )
     engine_group.add_argument(
         "--sleep_mode_level",
         "--sleep-mode-level",
-        env_name="SLEEP_MODE_LEVEL",
-        bind_to=(runtime_config, "sleep_mode_level"),
+        env_name=LEVEL_ENV,
         type=int,
-        choices=[1, 2],
-        default=1,
-        help="本进程启动时选定的 sleep level（torch_memory_saver 在加载时就绑定权重 region 的 "
-        "cpu_backup，无法按请求切换）。1=sleep 时权重备份到 pinned host（唤醒快，常驻 host 内存）；"
-        "2=sleep 时丢弃权重（释放 GPU+host，零落盘），唤醒时由 model loader 从原始 checkpoint "
-        "流式原地 copy_ 重载（不写磁盘）。/sleep 请求的 level 必须与此值一致，默认 1。仅接受 1/2："
-        "level 0（state-preserving）尚未实现，非法值在启动期即被 argparse 拒绝，避免 Python 权重层与 "
-        "C++ RuntimeConfig 对 level 认知分歧",
+        choices=[0, 1, 2],
+        default=None,
+        help="统一 sleep 开关和权重策略：0=关闭（默认），1=权重备份到 pinned host，"
+        "2=丢弃权重并在 wake 从原始 checkpoint 原地重载。level 在加载前固定；"
+        "/sleep 请求仍只接受与启动配置一致的 1/2，0 不是一种 sleep 操作",
+    )
+    engine_group.add_argument(
+        "--sleep_free_runtime_caches",
+        "--sleep-free-runtime-caches",
+        env_name=RUNTIME_CACHES_ENV,
+        type=str2bool,
+        default=None,
+        help="sleep 时释放安全可重建的 Python runtime caches；未设置时跟随 sleep 开启，"
+        "显式 0 可关闭。CUDA graph 捕获的指针和必须保留的通信资源不受此开关强制释放",
     )
     engine_group.add_argument(
         "--sleep_release_collective_memory",
         "--sleep-release-collective-memory",
-        env_name="SLEEP_RELEASE_COLLECTIVE_MEMORY",
-        # No bind_to, unlike the two switches above: nothing on the C++ side reads
-        # this, so RuntimeConfig has no field for it. The only consumer is
-        # rtp_llm.utils.nccl_memory, a leaf utils module with no config handle, so
-        # the os.environ mirror written in server_args.py is the whole transport.
+        env_name=COLLECTIVE_MEMORY_ENV,
         type=str2bool,
-        default=False,
-        help="sleep 时是否同时释放 NCCL 通信器占用的显存（ncclCommSuspend/Resume，保留虚拟地址"
-        "所以 CUDA graph 里烘死的通信指针依然有效、无需重录）。实测 DSV4-Flash PD 单 DP_AND_TP "
-        "通信器每 rank 可回收 576 MiB。代价有三：等量的 pinned host 内存（NCCL 把这些 buffer 一律"
-        "按 ncclMemOffload 拷到锁页内存而非丢弃）、sleep/wake 各多几秒（成本由锁页分配次数决定，"
-        "≈ channels x peers x 通信器数）、以及运行时 NCCL 必须 >= 2.29.7 才有该 API。因为这三项"
-        "代价与 sleep level 无关，所以做成独立开关而不是跟随 level；默认关闭。显式设置为 1 才开启。"
-        "NCCL 版本不够时自动降级为无操作（只打一行日志），不影响启动",
+        default=None,
+        help="sleep 时通过 ncclCommSuspend/Resume 释放通信显存；未设置时跟随 sleep 开启，"
+        "显式 0 可关闭。需要兼容的 NCCL API/通信器及所有 rank 同意；不支持时记录原因并跳过。"
+        "释放的显存会等量占用 pinned host 内存，并增加 sleep/wake 耗时",
+    )
+
+
+def configure_sleep_args(args, runtime_config):
+    """Resolve once, then publish identical settings to C++ and child Python."""
+    level = resolve_sleep_level(args.sleep_mode_level, args.enable_sleep_mode)
+    enabled = level > 0
+    runtime_caches = args.sleep_free_runtime_caches
+    if runtime_caches is None:
+        runtime_caches = resource_release_enabled(
+            RUNTIME_CACHES_ENV, default=enabled, legacy_alias=LEGACY_RUNTIME_CACHES_ENV
+        )
+    collective = args.sleep_release_collective_memory
+    if collective is None:
+        collective = enabled
+    # Keep the native/pickle contract; the boolean is derived, not another input.
+    runtime_config.enable_sleep_mode = enabled
+    runtime_config.sleep_mode_level = level
+    os.environ.update(
+        {
+            LEVEL_ENV: str(level),
+            ENABLE_ENV: str(int(enabled)),
+            RUNTIME_CACHES_ENV: str(int(runtime_caches)),
+            COLLECTIVE_MEMORY_ENV: str(int(collective)),
+        }
+    )
+    if args.enable_sleep_mode is not None:
+        logging.warning(
+            "ENABLE_SLEEP_MODE is deprecated; use SLEEP_MODE_LEVEL=%d", level
+        )
+    logging.info(
+        "Sleep configuration: level=%d enabled=%s runtime_caches=%s collective_memory=%s "
+        "(resource capability/safety checks still apply)",
+        level,
+        enabled,
+        runtime_caches,
+        collective,
     )

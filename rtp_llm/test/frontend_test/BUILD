@@ -1,3 +1,20 @@
+load("//bazel:arch_select.bzl", "requirement")
+
+requirement(["httpx"])
+
+py_test(
+    name = "lifecycle_http_test",
+    srcs = ["lifecycle_http_test.py"],
+    deps = [
+        ":httpx",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:frontend_sleep_routes",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
 py_test(
     name = "vip_server_test",
     srcs = [

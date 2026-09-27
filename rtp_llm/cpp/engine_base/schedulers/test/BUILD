@@ -3,6 +3,17 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "scheduler_base_lifecycle_test",
+    srcs = ["SchedulerBaseLifecycleTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base/schedulers:scheduler_admission",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -33,6 +44,15 @@ async_cache_test_deps = test_deps + [
     "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
 ]
+
+cc_test(
+    name = "batch_decode_scheduler_test",
+    srcs = ["BatchDecodeSchedulerTest.cc"],
+    copts = copts(),
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+)
 
 cc_test(
     name = "fifo_scheduler_test",

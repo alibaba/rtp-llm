@@ -6,6 +6,28 @@ from unittest import mock
 
 class TestCudaGraphSleepReclaim(unittest.TestCase):
 
+    def test_sleep_level_defaults_to_safe_runtime_reclaim(self):
+        from rtp_llm.utils.sleep_gpu_reclaim import _optional_release_allowed
+
+        for level in ("0", "1", "2"):
+            with self.subTest(level=level), mock.patch.dict(
+                os.environ, {"SLEEP_MODE_LEVEL": level}, clear=True
+            ):
+                self.assertEqual(_optional_release_allowed(False), level != "0")
+                self.assertFalse(_optional_release_allowed(True))
+
+    def test_explicit_runtime_cache_zero_overrides_legacy_one(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SLEEP_MODE_LEVEL": "2",
+                "RTP_LLM_SLEEP_FREE_RUNTIME_CACHES": "0",
+                "RTP_LLM_SLEEP_FREE_MEGA_SYMM": "1",
+            },
+            clear=True,
+        ):
+            self.assertFalse(self.state.runtime_cache_release_enabled())
+
     def test_sleep_preserves_tp_communicator_and_disabled_topology(self):
         from rtp_llm.models_py.distributed import symm_mem
         from rtp_llm.models_py.modules.dsv4.moe import mega_buf

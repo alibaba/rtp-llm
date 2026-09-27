@@ -290,7 +290,9 @@ class ServerArgsSetTest(TestCase):
 
         try:
             for sleep_enabled in ("0", "1"):
-                with self.subTest(sleep_enabled=sleep_enabled):
+                with self.subTest(sleep_enabled=sleep_enabled), patch.dict(
+                    os.environ, {}, clear=True
+                ):
                     os.environ.pop("WARM_UP", None)
                     sys.argv = ["prog", "--enable-sleep-mode", sleep_enabled]
                     config = setup_args()
@@ -357,8 +359,151 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.runtime_config.sleep_mode_level, 1)
         self.assertTrue(wms.is_enabled())
 
+    def test_sleep_level_is_the_single_startup_switch(self):
+        from rtp_llm.model_loader import weight_memory_saver as wms
+        from rtp_llm.models_py.utils.cuda_graph_state import (
+            runtime_cache_release_enabled,
+        )
+
+        for level in (0, 1, 2):
+            for source in ("cli", "env"):
+                with self.subTest(level=level, source=source), patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    wms._reset_for_testing()
+                    self.addCleanup(wms._reset_for_testing)
+                    args = ["--sleep-mode-level", str(level)] if source == "cli" else []
+                    if source == "env":
+                        os.environ["SLEEP_MODE_LEVEL"] = str(level)
+                    config = self._setup_args(args).runtime_config
+                    self.assertEqual(config.enable_sleep_mode, level > 0)
+                    self.assertEqual(config.sleep_mode_level, level)
+                    self.assertEqual(wms.is_enabled(), level > 0)
+                    self.assertEqual(wms.release_collective_memory(), level > 0)
+                    self.assertEqual(runtime_cache_release_enabled(), level > 0)
+                    self.assertEqual(
+                        os.environ["ENABLE_SLEEP_MODE"], str(int(level > 0))
+                    )
+
+    def test_sleep_level_conflicting_legacy_enable_is_rejected(self):
+        for level, enabled in ((0, "1"), (1, "0"), (2, "0")):
+            with self.subTest(level=level, enabled=enabled), patch.dict(
+                os.environ, {}, clear=True
+            ):
+                with self.assertRaises(SystemExit):
+                    self._setup_args(
+                        [
+                            "--sleep-mode-level",
+                            str(level),
+                            "--enable-sleep-mode",
+                            enabled,
+                        ]
+                    )
+
+    def test_sleep_resource_defaults_can_be_disabled_independently(self):
+        from rtp_llm.model_loader import weight_memory_saver as wms
+        from rtp_llm.models_py.utils.cuda_graph_state import (
+            runtime_cache_release_enabled,
+        )
+
+        for option, env in (
+            ("--sleep-free-runtime-caches", "RTP_LLM_SLEEP_FREE_RUNTIME_CACHES"),
+            ("--sleep-release-collective-memory", "SLEEP_RELEASE_COLLECTIVE_MEMORY"),
+        ):
+            for source in ("cli", "env"):
+                with self.subTest(option=option, source=source), patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    wms._reset_for_testing()
+                    self.addCleanup(wms._reset_for_testing)
+                    args = ["--sleep-mode-level", "2"]
+                    if source == "cli":
+                        os.environ[env] = "1"
+                        args += [option, "0"]
+                    else:
+                        os.environ[env] = "0"
+                    self._setup_args(args)
+                    self.assertEqual(
+                        runtime_cache_release_enabled(),
+                        env != "RTP_LLM_SLEEP_FREE_RUNTIME_CACHES",
+                    )
+                    self.assertEqual(
+                        wms.release_collective_memory(),
+                        env != "SLEEP_RELEASE_COLLECTIVE_MEMORY",
+                    )
+
+    def test_sleep_runtime_cache_canonical_zero_wins_legacy_alias(self):
+        from rtp_llm.models_py.utils.cuda_graph_state import (
+            runtime_cache_release_enabled,
+        )
+
+        os.environ.update(
+            SLEEP_MODE_LEVEL="2",
+            RTP_LLM_SLEEP_FREE_MEGA_SYMM="1",
+            RTP_LLM_SLEEP_FREE_RUNTIME_CACHES="0",
+        )
+        self._setup_args([])
+        self.assertFalse(runtime_cache_release_enabled())
+
+    def test_sleep_legacy_enable_only_and_disabled_defaults(self):
+        for enabled in (None, "0", "1"):
+            with self.subTest(enabled=enabled), patch.dict(os.environ, {}, clear=True):
+                if enabled is not None:
+                    os.environ["ENABLE_SLEEP_MODE"] = enabled
+                config = self._setup_args([]).runtime_config
+                level = 1 if enabled == "1" else 0
+                self.assertEqual(config.sleep_mode_level, level)
+                self.assertEqual(config.enable_sleep_mode, level > 0)
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.sleep_mode_level, level)
+                self.assertEqual(restored.enable_sleep_mode, level > 0)
+
+    def test_sleep_cli_level_overrides_environment_including_zero(self):
+        for level in (0, 1, 2):
+            for flag in ("--sleep-mode-level", "--sleep_mode_level"):
+                with self.subTest(level=level, flag=flag), patch.dict(
+                    os.environ, {"SLEEP_MODE_LEVEL": "invalid"}, clear=True
+                ):
+                    config = self._setup_args([f"{flag}={level}"]).runtime_config
+                    self.assertEqual(config.sleep_mode_level, level)
+                    self.assertEqual(config.enable_sleep_mode, level > 0)
+
+    def test_sleep_conflict_between_cli_and_old_environment_is_rejected(self):
+        with patch.dict(os.environ, {"ENABLE_SLEEP_MODE": "0"}, clear=True):
+            with self.assertRaises(SystemExit):
+                self._setup_args(["--sleep-mode-level", "2"])
+
+    def test_sleep_resolved_environment_is_consistent_after_spawn(self):
+        import json
+        import subprocess
+
+        self._setup_args(
+            ["--sleep-mode-level", "2", "--sleep-free-runtime-caches", "0"]
+        )
+        code = (
+            "import json; from rtp_llm.model_loader import weight_memory_saver as w; "
+            "from rtp_llm.models_py.utils.cuda_graph_state import runtime_cache_release_enabled as r; "
+            "print(json.dumps([w.is_enabled(), w.sleep_mode_level(), w.release_collective_memory(), r()]))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=os.getcwd(),
+            env=dict(
+                os.environ,
+                PYTHONPATH=os.pathsep.join(sys.path),
+                CUDA_VISIBLE_DEVICES="",
+            ),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        self.assertEqual(
+            json.loads(result.stdout.splitlines()[-1]), [True, 2, True, False]
+        )
+
     def test_sleep_level_env_validation_with_and_without_cli(self):
-        for value in ("0", "3", "invalid", "1.5"):
+        for value in ("-1", "3", "invalid", "1.5"):
             for args in ([], ["--enable-sleep-mode", "1"]):
                 with self.subTest(value=value, args=args):
                     os.environ["SLEEP_MODE_LEVEL"] = value
