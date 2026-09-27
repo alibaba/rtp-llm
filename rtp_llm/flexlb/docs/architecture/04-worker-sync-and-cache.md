@@ -11,9 +11,9 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
 ### 请求 ID 协议
 
-FlexLB 的 Java Worker Status 协议使用 `string TaskInfoPB.request_id = 1`。
-Java 协议生成时仅调整该字段；共享 C++ proto 保留原生引擎的 `int64` 定义。
-`RequestId.parse` 优先保留原始字符串，也接受同字段编号的整数编码；缺失 ID 会报错。
+Worker Status 的共享 PB 协议定义为 `string TaskInfoPB.request_id = 1`，
+Java、C++ 和 Python 使用同一字段定义生成代码。
+`RequestId.parse` 保留原始字符串，并兼容旧版本同字段编号的整数编码；缺失 ID 会报错。
 Running 和 Finished 任务表均以解析后的 ID 为键，缓存反馈与调度请求使用同一 ID 关联。
 
 ### 调度拓扑
