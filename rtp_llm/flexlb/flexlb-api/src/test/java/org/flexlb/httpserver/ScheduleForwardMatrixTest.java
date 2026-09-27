@@ -88,6 +88,7 @@ class ScheduleForwardMatrixTest {
 
     // ---- shared mocks for the schedule() matrix ----
     private RouteService routeService;
+    private CacheAwareService cacheAwareService;
     private LBStatusConsistencyService consistency;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;
@@ -109,7 +110,7 @@ class ScheduleForwardMatrixTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
 
-        CacheAwareService cacheAwareService = mock(CacheAwareService.class);
+        cacheAwareService = mock(CacheAwareService.class);
         when(cacheAwareService.prepareBlockCacheKeys(any()))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
@@ -214,6 +215,7 @@ class ScheduleForwardMatrixTest {
         verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
         verify(grpcForwarder, never()).forwardCancelToMaster(any());
         assertSuccessfulResponse(observer);
+        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
     }
 
@@ -238,6 +240,7 @@ class ScheduleForwardMatrixTest {
                 .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
         verify(routeService, times(1)).route(any());
         assertSuccessfulResponse(observer);
+        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
     }
 
@@ -266,6 +269,7 @@ class ScheduleForwardMatrixTest {
 
         // The exact master response object is delivered — byte-for-byte
         // passthrough, the client cannot perceive it talked to a follower.
+        verify(cacheAwareService, never()).updateFromRoutedRequest(any(), any());
         verify(observer, times(1)).onNext(masterResponse);
         verify(observer, times(1)).onCompleted();
         verify(observer, never()).onError(any());
@@ -319,6 +323,7 @@ class ScheduleForwardMatrixTest {
         verify(grpcForwarder, never()).forwardCancelToMaster(any());
         verify(routeService, times(1)).route(any());
         assertSuccessfulResponse(observer);
+        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
     }
 
@@ -439,6 +444,7 @@ class ScheduleForwardMatrixTest {
 
             verify(routeService, times(1)).route(any());
             assertSuccessfulResponse(observer);
+            verify(cacheAwareService).updateFromRoutedRequest(any(), any());
             assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
         }
     }

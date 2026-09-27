@@ -149,7 +149,9 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 ### LOCAL_STANDBY（兜底索引）
 
 - 近似索引，**只由已路由请求写入**（write-on-route）：PREFILL/PDFUSION 路由成功后
-  `HttpLoadBalanceServer` 调 `updateFromRoutedRequest` 异步落库。master/follower 之间不复制。
+  `FlexlbServiceImpl` 在本地调度成功后调 `updateFromRoutedRequest`，由独立线程池异步落库，
+  不等待哈希计算或索引写入完成；更新失败不影响调度响应。转发成功的 follower 不写入，
+  follower 在本地兜底调度成功时写入自己的索引。master/follower 之间不复制。
 - `LocalStandbyCacheIndex`：`ConcurrentHashMap<Long blockHash, ConcurrentHashMap<worker,
   lastUpdatedNanos>>`，TTL 过期（用量超 `ttlReductionStartRatio(0.8)` 后 TTL 从
   `ttlMs(300s)` 线性降至 `minimumTtlMs(100s)`），容量上限
