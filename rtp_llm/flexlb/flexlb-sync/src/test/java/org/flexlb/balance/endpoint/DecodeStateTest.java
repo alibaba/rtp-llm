@@ -165,6 +165,90 @@ class DecodeStateTest {
         assertEquals(0, state.routingView().engineCapacityUsed());
     }
 
+    @Test
+    void absentSnapshotReleasesCapacityAndLateFinishedRetainsExactTerminalIdentity() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        for (int i = 0; i < 3; i++) {
+            var absent = calibrate(state, status, Map.of(), Map.of());
+            assertTrue(absent.facts().isEmpty());
+            assertEquals(0, state.routingView().engineCapacityUsed());
+            assertEquals(0, state.routingView().engineLoad());
+            assertTrue(state.resourceSnapshot().reserved().isEmpty());
+            assertTrue(state.hasOwnedResources(reservation));
+            assertTrue(state.isAcceptedByEngine(reservation));
+        }
+        assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
+        assertEquals(STILL_OWNED, state.release(reservation, ReleaseReason.COUNTERPART_FINISHED));
+        assertThrows(IllegalStateException.class, () -> state.release(reservation, ReleaseReason.LOCAL_ROLLBACK));
+        var other = state.reserve(11, 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)), Map.of());
+        var terminal = calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
+                Map.of("10", task(10, TaskPhase.RUNNING)));
+        var terminals = terminal.facts().stream()
+                .filter(fact -> fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL).toList();
+        assertEquals(1, terminals.size());
+        assertEquals(reservation, terminals.getFirst().reservation());
+        assertFalse(state.hasOwnedResources(reservation));
+        assertTrue(state.hasOwnedResources(other));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        var duplicate = calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
+                Map.of("10", task(10, TaskPhase.RUNNING)));
+        assertTrue(duplicate.facts().stream()
+                .noneMatch(fact -> fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+    }
+
+    @Test
+    void absentRequestCanResumeAndExpireWithoutReleasingAnotherRequestsCapacity() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        calibrate(state, status, Map.of(), Map.of());
+        var resumed = calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        assertEquals(reservation, resumed.facts().getFirst().reservation());
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        var other = state.reserve(11, 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)), Map.of());
+        assertEquals(RELEASED, state.release(reservation, ReleaseReason.EXPIRED));
+        assertFalse(state.hasOwnedResources(reservation));
+        assertTrue(state.hasOwnedResources(other));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        var late = calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
+                Map.of("10", task(10, TaskPhase.RUNNING)));
+        assertTrue(late.facts().stream()
+                .noneMatch(fact -> fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL));
+    }
+
+    @Test
+    void awaitingTerminalSurvivesSchedulerRetentionAndRetiresWithGeneration() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        calibrate(state, status, Map.of(), Map.of());
+        state.evictExpiredRequests(-1, requestId -> true);
+        assertTrue(state.hasOwnedResources(reservation));
+        assertEquals(java.util.List.of(reservation), state.retire());
+        assertFalse(state.hasOwnedResources(reservation));
+    }
+
+    @Test
+    void orphanAwaitingTerminalIsEvictedWithoutChargingCapacity() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
+        calibrate(state, status, Map.of(), Map.of());
+        state.evictExpiredRequests(-1, requestId -> false);
+        assertFalse(state.hasOwnedResources(reservation));
+        assertEquals(0, state.routingView().engineCapacityUsed());
+    }
+
     private static TaskInfo task(long requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);

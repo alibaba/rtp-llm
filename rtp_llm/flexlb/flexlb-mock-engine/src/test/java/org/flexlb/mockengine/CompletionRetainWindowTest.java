@@ -93,6 +93,46 @@ class CompletionRetainWindowTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
+    @SuppressWarnings("unchecked")
+    void terminalPublicationKeepsActiveEvidenceUntilFinishedIsVisible() throws Exception {
+        var runningField = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("runningTasks");
+        runningField.setAccessible(true);
+        var running = (Map<Long, EngineRpcService.TaskInfoPB>) runningField.get(prefill);
+        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("42")
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
+        running.put(42L, task);
+        var claim = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod("claimTaskCompletion", long.class);
+        claim.setAccessible(true);
+        assertEquals(task, claim.invoke(prefill, 42L));
+        assertTrue(running.isEmpty(), "execution ownership is already released");
+        for (int i = 0; i < 3; i++) {
+            var status = workerStatus(prefill, 0);
+            assertEquals(List.of(task.getRequestId()), status.getRunningTaskInfoList().stream()
+                    .map(EngineRpcService.TaskInfoPB::getRequestId).toList());
+            assertEquals(1, status.getRunningQueryLen());
+            assertEquals(0, status.getFinishedTaskListCount());
+            assertEquals(0, status.getLatestFinishedVersion());
+        }
+        var publish = JavaMockEngineCluster.FastRpcService.class
+                .getDeclaredMethod("publishCompletion", EngineRpcService.TaskInfoPB.class);
+        publish.setAccessible(true);
+        publish.invoke(prefill, task);
+        var finished = workerStatus(prefill, 0);
+        assertEquals(0, finished.getRunningTaskInfoCount());
+        assertEquals(0, finished.getRunningQueryLen());
+        assertEquals(List.of(task), finished.getFinishedTaskListList());
+        assertEquals(1, finished.getLatestFinishedVersion());
+        var caughtUp = workerStatus(prefill, finished.getLatestFinishedVersion());
+        assertEquals(0, caughtUp.getRunningTaskInfoCount());
+        assertEquals(0, caughtUp.getFinishedTaskListCount());
+        running.put(42L, task);
+        claim.invoke(prefill, 42L);
+        prefill.crashNow();
+        assertEquals(0, workerStatus(prefill, 0).getRunningTaskInfoCount(),
+                "process death discards pending terminal publication");
+    }
+
+    @Test
     void secondMasterWithIndependentCursorStillReceivesFullBacklog() throws Exception {
         publishCompletions(1, 2);
 
