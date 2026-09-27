@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -43,6 +44,10 @@ public:
                    bool                                            use_cuda_malloc_block_pool = false,
                    const std::shared_ptr<CacheCapacityNegotiator>& capacity_negotiator        = nullptr);
     ~KVCacheManager();
+
+    // Join reporting before process-global metrics shutdown, even when cache
+    // buffers remain owned by streams/executors. Safe to call more than once.
+    void stopMetricsReporting();
 
     // 初始化和配置相关
     bool init();
@@ -196,8 +201,11 @@ private:
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
 
-    std::atomic<bool> stop_{false};
-    std::thread       metrics_reporter_thread_;
+    std::atomic<bool>       stop_{false};
+    std::thread             metrics_reporter_thread_;
+    std::mutex              metrics_stop_mutex_;
+    std::mutex              metrics_wait_mutex_;
+    std::condition_variable metrics_wait_cv_;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
 

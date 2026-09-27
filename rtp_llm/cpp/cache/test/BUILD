@@ -268,6 +268,14 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_metrics_lifecycle_test",
+    srcs = ["KVCacheMetricsLifecycleTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    timeout = "short",
+)
+
+cc_test(
     name = "kv_cache_manager_test",
     srcs = [
         "KVCacheManagerTest.cc",

@@ -192,6 +192,12 @@ void NormalCacheStore::debugInfo() {
     request_block_buffer_store_->debugInfo();
 }
 
+void NormalCacheStore::stopTransport() {
+    if (messager_) {
+        messager_->stop();
+    }
+}
+
 void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              request_block_buffer,
                                     CacheStoreStoreDoneCallback                             callback,
                                     const std::shared_ptr<CacheStoreStoreMetricsCollector>& collector) {

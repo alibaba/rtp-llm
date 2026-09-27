@@ -1,6 +1,8 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
+#include <atomic>
 #include <cstdlib>
+#include <future>
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -9,6 +11,8 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "autil/NetUtil.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
@@ -22,6 +26,87 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+namespace {
+class BarrierStopStore final: public NormalCacheStore {
+public:
+    std::promise<void>       entered;
+    std::promise<void>       release;
+    std::shared_future<void> released = release.get_future().share();
+    std::atomic<bool>        started{false};
+    std::atomic<bool>        stopped{false};
+
+    void stopTransport() override {
+        if (started.exchange(true)) {
+            return;
+        }
+        entered.set_value();
+        released.wait();
+        NormalCacheStore::stopTransport();
+        stopped = true;
+    }
+};
+}  // namespace
+
+TEST_F(NormalEngineTest, stopQuiescesTransportWithRetainedCacheStore) {
+    using namespace std::chrono_literals;
+    auto                 engine         = createMockEngine(CustomConfig{});
+    auto                 retained_cache = engine->getCacheManager();
+    auto                 retained_store = std::make_shared<BarrierStopStore>();
+    CacheStoreInitParams params;
+    params.listen_port      = autil::NetUtil::randomPort();
+    params.rdma_listen_port = 0;
+    params.rdma_mode        = false;
+    params.thread_count     = 2;
+    ASSERT_TRUE(retained_store->init(params));
+    retained_cache->setCacheStore(retained_store);
+    auto stopping = std::async(std::launch::async, [&]() { return engine->stop(); });
+    EXPECT_EQ(retained_store->entered.get_future().wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(stopping.wait_for(0s), std::future_status::timeout);
+    EXPECT_FALSE(retained_store->stopped.load());
+    retained_store->release.set_value();
+    EXPECT_EQ(stopping.wait_for(5s), std::future_status::ready);
+    EXPECT_TRUE(stopping.get().ok());
+    EXPECT_TRUE(retained_store->stopped.load());
+    EXPECT_EQ(retained_cache->getCacheStore(), retained_store);
+    EXPECT_TRUE(engine->stop().ok());
+}
+
+TEST_F(NormalEngineTest, stopJoinsCacheReporterWithRetainedOwner) {
+    using namespace std::chrono_literals;
+    auto engine         = createMockEngine(CustomConfig{});
+    auto retained_cache = engine->getCacheManager();
+    // Replace only the periodic callback with a barrier; exercise the real
+    // NormalEngine::stop -> KVCacheManager::stopMetricsReporting call chain.
+    retained_cache->stopMetricsReporting();
+    retained_cache->stop_.store(false);
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto               released = release.get_future().share();
+    std::atomic<bool>  callback_done{false};
+    retained_cache->metrics_reporter_thread_ = std::thread([&]() {
+        entered.set_value();
+        released.wait();
+        callback_done.store(true);
+    });
+    EXPECT_EQ(entered.get_future().wait_for(5s), std::future_status::ready);
+    auto stopping = std::async(std::launch::async, [&]() { return engine->stop(); });
+    {
+        std::unique_lock<std::mutex> lock(retained_cache->metrics_wait_mutex_);
+        EXPECT_TRUE(
+            retained_cache->metrics_wait_cv_.wait_for(lock, 5s, [&]() { return retained_cache->stop_.load(); }));
+    }
+    EXPECT_EQ(stopping.wait_for(0s), std::future_status::timeout);
+    EXPECT_FALSE(callback_done.load());
+    release.set_value();
+    EXPECT_EQ(stopping.wait_for(5s), std::future_status::ready);
+    EXPECT_TRUE(stopping.get().ok());
+    EXPECT_TRUE(callback_done.load());
+    EXPECT_FALSE(retained_cache->metrics_reporter_thread_.joinable());
+    EXPECT_TRUE(engine->stop().ok());
+    engine.reset();
+    EXPECT_TRUE(retained_cache->stop_.load());
+}
 
 TEST_F(NormalEngineTest, fakeStreamsHaveExecutableChunksWithFastGen) {
     for (const bool fast_gen : {false, true}) {

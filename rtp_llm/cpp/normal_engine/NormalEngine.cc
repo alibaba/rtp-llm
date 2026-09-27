@@ -726,6 +726,19 @@ absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     executor_->notifyShutdown();
+    // Python models, streams and RPC owners can retain the cache manager after
+    // engine stop. Its destructor is therefore too late to quiesce reporting.
+    if (resource_context_.cache_manager) {
+        resource_context_.cache_manager->stopMetricsReporting();
+        // The cache store's TCP transport runs ANet metric reporter threads
+        // into the process-global kmonitor. Quiesce that transport now —
+        // destructor-only teardown can run after kmonitor factory shutdown
+        // (doReportConnStat -> MergeTags). Cache buffers stay
+        // intact for their remaining owners.
+        if (auto cache_store = resource_context_.cache_manager->getCacheStore()) {
+            cache_store->stopTransport();
+        }
+    }
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     return absl::OkStatus();

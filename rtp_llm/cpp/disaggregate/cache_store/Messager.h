@@ -27,6 +27,10 @@ public:
 public:
     virtual bool init(MessagerInitParams params) = 0;
 
+    // Stop the transport threads/reporters at controlled shutdown. Default
+    // no-op for messengers without a transport. Idempotent.
+    virtual void stop() {}
+
     virtual void load(const std::shared_ptr<LoadRequest>&                          request,
                       const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) = 0;
     virtual void transfer(const std::shared_ptr<TransferRequest>& request);
