@@ -94,6 +94,10 @@ def append_sampling_params_to_model_infer_request(
     _append_fp32_scalar(request, "repetition_penalty", sampling.repetition_penalty)
     _append_fp32_scalar(request, "frequency_penalty", sampling.frequency_penalty)
     _append_fp32_scalar(request, "presence_penalty", sampling.presence_penalty)
+    if sampling.logprobs:
+        request.parameters["logprobs"].bool_param = True
+    if sampling.top_logprobs:
+        request.parameters["top_logprobs"].int64_param = sampling.top_logprobs
     if sampling.max_new_think_tokens is not None:
         _append_int32_scalar(
             request, "max_new_think_tokens", sampling.max_new_think_tokens

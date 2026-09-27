@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 from unittest import TestCase, main
 
@@ -22,6 +23,7 @@ from rtp_llm.dash_sc.codec import (
     ParsedInputIds,
     SamplingParams,
     StreamResponseBuilder,
+    _token_logprobs_payload,
     build_dash_error_response,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
@@ -194,6 +196,38 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.num_return_sequences, 1)
         self.assertEqual(sp.min_new_tokens, 2)
+
+    def test_logprobs_request_precedence_and_config(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"parameters": {"logprobs": True, "top_logprobs": 2}}
+        )
+        req.parameters["logprobs"].bool_param = True
+        req.parameters["top_logprobs"].int64_param = 3
+        _add_tensor(req, "logprobs", "BOOL", [1], b"\x00")
+        _add_tensor(req, "top_logprobs", "INT32", [1], struct.pack("<i", 4))
+        sampling = parse_sampling_params(req)
+        self.assertFalse(sampling.logprobs)
+        self.assertEqual(sampling.top_logprobs, 4)
+        self.assertEqual(sampling.to_generate_config().return_all_probs, 0)
+        self.assertEqual(sampling.specified_fields, {"logprobs", "top_logprobs"})
+
+        req = build_model_infer_request(
+            request_id="logprobs", model_name="m", input_ids=[1],
+            sampling=SamplingParams(logprobs=True, top_logprobs=3),
+        )
+        sampling = parse_sampling_params(req)
+        self.assertTrue(sampling.logprobs)
+        self.assertEqual(sampling.top_logprobs, 3)
+        self.assertEqual(sampling.to_generate_config().return_all_probs, 1)
+
+    def test_top_logprobs_alone_does_not_request_probabilities(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["top_logprobs"].int64_param = 5
+        sampling = parse_sampling_params(req)
+        self.assertFalse(sampling.logprobs)
+        self.assertEqual(sampling.top_logprobs, 5)
+        self.assertEqual(sampling.to_generate_config().return_all_probs, 0)
 
     def test_parse_sampling_response_format_parameters(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -1282,6 +1316,96 @@ class DashScMultimodalRequestTest(TestCase):
 
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):
+    def test_top_logprobs_excludes_filtered_zero_probability_tokens(self) -> None:
+        config = SamplingParams(logprobs=True, top_logprobs=3).to_generate_config()
+        output = GenerateOutput(
+            output_ids=torch.tensor([1, 2]),
+            all_probs=torch.tensor([[[0.0, 1.0, 0.0, 0.0], [0.1, 0.0, 0.9, 0.0]]]),
+            aux_info=AuxInfo(input_len=1),
+        )
+        frame = StreamResponseBuilder(
+            dash_sc_request_id="filtered",
+            model_name="m",
+            request_log_tag="filtered",
+            generate_config=config,
+            top_logprobs=3,
+        ).build(GenerateOutputs(generate_outputs=[output]))
+
+        def reject_non_json_constant(value: str) -> None:
+            raise ValueError(f"non-JSON number: {value}")
+
+        rows = json.loads(
+            frame.infer_response.parameters["logprobs"].string_param,
+            parse_constant=reject_non_json_constant,
+        )
+        self.assertEqual(list(rows[0]), ["1"])
+        self.assertEqual(rows[0]["1"], 0.0)
+        self.assertEqual(set(rows[1]), {"0", "2"})
+        self.assertAlmostEqual(rows[1]["2"], math.log(0.9), places=6)
+
+    def test_logprobs_follow_token_positions_and_cached_frames(self) -> None:
+        config = SamplingParams(logprobs=True, top_logprobs=2).to_generate_config()
+        builder = StreamResponseBuilder(
+            dash_sc_request_id="prob", model_name="m", request_log_tag="prob",
+            generate_config=config, top_logprobs=2,
+        )
+        first = GenerateOutput(
+            output_ids=torch.tensor([1, 2, 1]),
+            all_probs=torch.tensor(
+                [[[0.1, 0.8, 0.1], [0.2, 0.2, 0.6], [0.3, 0.4, 0.3]]]
+            ),
+            aux_info=AuxInfo(input_len=1),
+        )
+        first_frame = builder.build(GenerateOutputs(generate_outputs=[first]))
+        first_scores = json.loads(
+            first_frame.infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(len(first_scores), 3)
+        self.assertAlmostEqual(first_scores[0]["1"], math.log(0.8), places=6)
+        self.assertAlmostEqual(first_scores[1]["2"], math.log(0.6), places=6)
+        self.assertAlmostEqual(first_scores[2]["1"], math.log(0.4), places=6)
+        self.assertEqual(len(first_scores[0]), 2)
+        self.assertIn("1", first_scores[0])
+
+        second = GenerateOutput(
+            output_ids=torch.tensor([2]), all_probs=torch.tensor([[0.1, 0.2, 0.7]]),
+            aux_info=AuxInfo(input_len=1),
+        )
+        second_frame = builder.build(GenerateOutputs(generate_outputs=[second]))
+        second_scores = json.loads(
+            second_frame.infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(len(second_scores), 1)
+        self.assertEqual(set(second_scores[0]), {"1", "2"})
+        self.assertAlmostEqual(second_scores[0]["2"], math.log(0.7), places=6)
+        self.assertEqual(
+            json.loads(first_frame.infer_response.parameters["logprobs"].string_param),
+            first_scores,
+        )
+
+        synthetic = builder.build(
+            GenerateOutputs(generate_outputs=[second]), token_ids=[99],
+            emit_logprobs=False,
+        )
+        self.assertNotIn("logprobs", synthetic.infer_response.parameters)
+        resumed = builder.build(GenerateOutputs(generate_outputs=[second]))
+        self.assertEqual(
+            json.loads(resumed.infer_response.parameters["logprobs"].string_param),
+            second_scores,
+        )
+
+    def test_logprobs_require_matching_engine_rows(self) -> None:
+        output = GenerateOutput(
+            output_ids=torch.tensor([1, 2]), all_probs=torch.tensor([[0.2, 0.8, 0.0]]),
+            aux_info=AuxInfo(input_len=1),
+        )
+        self.assertIsNone(_token_logprobs_payload(output, [1, 2], 2))
+        with self.assertRaisesRegex(RuntimeError, "cannot be aligned"):
+            StreamResponseBuilder(
+                dash_sc_request_id="prob", model_name="m", request_log_tag="prob",
+                generate_config=SamplingParams(logprobs=True).to_generate_config(),
+            ).build(GenerateOutputs(generate_outputs=[output]))
+
     def test_empty_generate_outputs_raises(self) -> None:
         go = GenerateOutputs(generate_outputs=[])
         builder = StreamResponseBuilder(

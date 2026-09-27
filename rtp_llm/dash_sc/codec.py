@@ -221,6 +221,18 @@ def _parse_optional_scalar_int(request, tensor_name: str) -> int | None:
     return int(ids[0])
 
 
+def _parse_optional_scalar_bool(request, tensor_name: str) -> bool | None:
+    inp, raw = _find_input_raw(request, tensor_name)
+    if inp is None or raw is None or not raw:
+        return None
+    if inp.datatype == "BOOL":
+        return raw[0] != 0
+    value = _parse_optional_scalar_int(request, tensor_name)
+    if value is None:
+        value = _parse_optional_scalar_float(request, tensor_name)
+    return value != 0 if value is not None else None
+
+
 def _parse_optional_scalar_float(request, tensor_name: str) -> float | None:
     inp, raw = _find_input_raw(request, tensor_name)
     if inp is None or raw is None or not raw:
@@ -727,6 +739,8 @@ class SamplingParams:
     repetition_penalty: float = 1.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
+    logprobs: bool = False
+    top_logprobs: int = 0
     stop_words_list: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
     max_new_think_tokens: int | None = None
     response_format: str | None = None
@@ -749,7 +763,7 @@ class SamplingParams:
         request_controls: DashScRequestControls | None = None,
     ):
         """Build ``GenerateConfig``; request controls supply non-sampling knobs."""
-        from rtp_llm.config.generate_config import GenerateConfig
+        from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
 
         structural_tag = self.structural_tag
         if self.response_format is not None:
@@ -798,6 +812,9 @@ class SamplingParams:
             stop_words_list=self.stop_words_list_py(),
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
+            return_all_probs=(
+                ReturnAllProbsMode.DEFAULT if self.logprobs else ReturnAllProbsMode.NONE
+            ),
             is_streaming=True,
             response_format=response_format,
             structural_tag=structural_tag,
@@ -874,6 +891,8 @@ def parse_sampling_params(
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    logprobs = False
+    top_logprobs = 0
     specified_fields: set[str] = set()
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
@@ -939,6 +958,26 @@ def parse_sampling_params(
         presence_penalty = vf
         specified_fields.add("presence_penalty")
 
+    vb = _parse_optional_scalar_bool(request, "logprobs")
+    if vb is None:
+        vb = _parse_optional_parameter_bool(request, "logprobs")
+    if vb is None:
+        vb = _parse_optional_bool(_lookup_ds_request_control(ds_attrs, "logprobs"))
+    if vb is not None:
+        logprobs = vb
+        specified_fields.add("logprobs")
+
+    v = _parse_optional_scalar_int(request, "top_logprobs")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "top_logprobs")
+    if v is None:
+        v = _parse_optional_int_value(
+            _lookup_ds_request_control(ds_attrs, "top_logprobs")
+        )
+    if v is not None:
+        top_logprobs = v
+        specified_fields.add("top_logprobs")
+
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
         if v is not None:
@@ -966,6 +1005,8 @@ def parse_sampling_params(
         repetition_penalty=repetition_penalty,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
         max_new_think_tokens=max_new_think_tokens,
         stop_words_list=stop_words_list,
         response_format=response_format,
@@ -1289,6 +1330,62 @@ def _token_ids_list_from_generate_output(out_py: GenerateOutput) -> list[int]:
     return ids
 
 
+def _token_logprobs_payload(
+    out_py: GenerateOutput, emitted_token_ids: list[int], top_logprobs: int
+) -> list[dict[str, float]] | None:
+    """Use only model-provided rows aligned with the tokens sent in this frame."""
+    if not emitted_token_ids:
+        return []
+    all_probs = out_py.all_probs
+    if all_probs is None:
+        return None
+    probabilities = all_probs.detach().to(device="cpu", dtype=torch.float32)
+    while probabilities.dim() > 2 and probabilities.shape[0] == 1:
+        probabilities = probabilities.squeeze(0)
+    if probabilities.dim() == 1:
+        probabilities = probabilities.unsqueeze(0)
+    source_ids = _token_ids_list_from_generate_output(out_py)
+    if (
+        probabilities.dim() != 2
+        or probabilities.shape[0] != len(source_ids)
+        or source_ids[: len(emitted_token_ids)] != emitted_token_ids
+    ):
+        return None
+
+    payload: list[dict[str, float]] = []
+    for offset, selected_id in enumerate(emitted_token_ids):
+        row = probabilities[offset]
+        if selected_id < 0 or selected_id >= row.numel():
+            return None
+        scores: dict[str, float] = {}
+        candidate_count = max(0, min(int(top_logprobs), int(row.count_nonzero())))
+        if candidate_count:
+            candidate_probs, candidate_ids = row.topk(candidate_count, sorted=True)
+            for candidate_id, log_probability in zip(
+                candidate_ids.tolist(), candidate_probs.log().tolist()
+            ):
+                scores[str(candidate_id)] = log_probability
+        scores[str(selected_id)] = row[selected_id].log().item()
+        payload.append(scores)
+    return payload
+
+
+def _append_logprobs_parameter(
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: GenerateOutput,
+    generated_ids: list[int],
+    top_logprobs: int,
+) -> None:
+    payload = _token_logprobs_payload(out_py, generated_ids, top_logprobs)
+    if payload is None:
+        raise RuntimeError(
+            "all_probs is missing or cannot be aligned while logprobs is requested"
+        )
+    infer.parameters["logprobs"].string_param = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    )
+
+
 def _first_int(value: int | list[int] | tuple[int, ...] | None) -> int | None:
     if value is None:
         return None
@@ -1362,9 +1459,25 @@ def prepend_to_generated_ids_tensor(
         cur_len = shape[-1] if shape else 0
         if cur_len <= 0:
             return False
+        prefixed_logprobs = None
+        if "logprobs" in infer.parameters:
+            probability_rows = json.loads(infer.parameters["logprobs"].string_param)
+            if not isinstance(probability_rows, list) or len(probability_rows) != cur_len:
+                raise ValueError("logprobs rows must match generated_ids before echo")
+            # Echoed tokens belong to the prompt and have no model-generated
+            # probability. Preserve one row per generated_ids token without
+            # inventing a score for the echoed prefix.
+            prefixed_logprobs = json.dumps(
+                [{} for _ in token_ids] + probability_rows,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
         prefix_raw = struct.pack("<%di" % len(token_ids), *token_ids)
         infer.raw_output_contents[i] = prefix_raw + bytes(infer.raw_output_contents[i])
         out.shape[:] = [1, cur_len + len(token_ids)]
+        if prefixed_logprobs is not None:
+            infer.parameters["logprobs"].string_param = prefixed_logprobs
         return True
     return False
 
@@ -1490,6 +1603,8 @@ def build_stream_response_from_generate_outputs(
     *,
     stream_finished: bool | None = None,
     token_ids: list[int] | None = None,
+    top_logprobs: int = 0,
+    emit_logprobs: bool = True,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1529,6 +1644,8 @@ def build_stream_response_from_generate_outputs(
         out_py,
         prompt_token_fallback=len(request_input_ids or []),
     )
+    if emit_logprobs and bool(getattr(generate_config, "return_all_probs", False)):
+        _append_logprobs_parameter(infer, out_py, generated_ids, top_logprobs)
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
     _append_dashllm_limit_parameters(
         infer,
@@ -1568,6 +1685,7 @@ class StreamResponseBuilder:
         "_eos_token_id",
         "_max_token_id",
         "_prompt_token_offset",
+        "_top_logprobs",
         "_template",
         "_generated_index",
         "_finish_index",
@@ -1594,6 +1712,7 @@ class StreamResponseBuilder:
         eos_token_id: int | None = None,
         max_token_id: int | None = None,
         prompt_token_offset: int = 0,
+        top_logprobs: int = 0,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
@@ -1605,6 +1724,7 @@ class StreamResponseBuilder:
         self._eos_token_id = eos_token_id
         self._max_token_id = max_token_id
         self._prompt_token_offset = prompt_token_offset
+        self._top_logprobs = top_logprobs
         self._template: predict_v2_pb2.ModelStreamInferResponse | None = None
         self._generated_index = -1
         self._finish_index = -1
@@ -1625,6 +1745,7 @@ class StreamResponseBuilder:
         finish_reason_override: int | None = None,
         stream_finished: bool | None = None,
         token_ids: list[int] | None = None,
+        emit_logprobs: bool = True,
     ) -> predict_v2_pb2.ModelStreamInferResponse:
         if not go.generate_outputs:
             raise ValueError("StreamResponseBuilder.build expects non-empty outputs")
@@ -1669,6 +1790,12 @@ class StreamResponseBuilder:
                 prompt_token_fallback=len(self._request_input_ids or []),
                 prompt_token_offset=self._prompt_token_offset,
             )
+            if emit_logprobs and bool(
+                getattr(self._generate_config, "return_all_probs", False)
+            ):
+                _append_logprobs_parameter(
+                    infer, out_py, generated_ids, self._top_logprobs
+                )
             infer.parameters["incremental_output"].int64_param = (
                 1 if self._is_streaming else 0
             )
@@ -1712,6 +1839,15 @@ class StreamResponseBuilder:
         response = predict_v2_pb2.ModelStreamInferResponse()
         response.CopyFrom(self._template)
         infer = response.infer_response
+
+        # This parameter varies per frame; the cached template may contain an
+        # earlier frame's value or none at all.
+        if "logprobs" in infer.parameters:
+            del infer.parameters["logprobs"]
+        if emit_logprobs and bool(
+            getattr(self._generate_config, "return_all_probs", False)
+        ):
+            _append_logprobs_parameter(infer, out_py, generated_ids, self._top_logprobs)
 
         generated_raw = (
             struct.pack("<%di" % len(generated_ids), *generated_ids)
