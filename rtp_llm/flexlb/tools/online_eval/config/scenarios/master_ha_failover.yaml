@@ -4,18 +4,13 @@ profiles:
 - batch-window
 environment:
   backend: java_mock
-  n_prefill: 2
-  n_decode: 4
   master_layout: dual_standalone
   discovery: discovery_file
   perf_preset: glm_5_3_l20d
-  model_override:
-    baseline: glm_5_3_l20d
-    reason: 将真实配置与输入流量缩到 2P4D，以隔离双 Master 故障恢复和负载分布
 execution:
-  timeout_s: 600
-  stage_timeout_s: 60
-  cleanup_timeout_s: 120
+  timeout_s: 2400
+  stage_timeout_s: 180
+  cleanup_timeout_s: 300
 variants:
 - id: dual_master_cycle
   program: dual_master_cycle
@@ -24,14 +19,14 @@ metadata:
   category: master
 parameters:
   dual_master_cycle:
-    setup_timeout_s: 180
+    setup_timeout_s: 600
     flow:
       targets: [A, B]
-      duration_s: 150
-      timeout_ms: 3000
-      replay_speed: 0.2
-      max_concurrency: 128
-      max_requests: 2000
+      duration_s: 360
+      timeout_ms: 30000
+      replay_speed: 1
+      max_concurrency: 4096
+      max_requests: 10000
       fallback: false
       source:
         kind: trace
@@ -41,32 +36,36 @@ parameters:
           path: ../../data/traffic_trace/glm-5.3_20260921_1400_15m.xz
           sha256: ac2f8aad472e882de2c649f5e0507d76787655a66d53e0e7285bdcb8aae87cca
           count: 141113
-          output_tokens: 16
+          output_tokens: 8192
+          output_distribution:
+            kind: geometric
+            mean_tokens: 420
+            seed: 20260913
           priority: 50
-    baseline_wait: {wait_s: 12}
-    settle: {wait_s: 3}
-    survivor_wait: {wait_s: 18}
-    outage_wait: {wait_s: 12}
-    both_wait: {wait_s: 15}
+    baseline_wait: {wait_s: 20}
+    settle: {wait_s: 5}
+    survivor_wait: {wait_s: 30}
+    outage_wait: {wait_s: 45}
+    both_wait: {wait_s: 30}
     kill_a: {mode: kill, target: A}
     kill_b: {mode: kill, target: B}
     b_ready: {target: B, inflight_zero: false}
     a_ready: {target: A, inflight_zero: false}
-    restart_timeout_s: 180
-    finish_timeout_s: 180
+    restart_timeout_s: 300
+    finish_timeout_s: 360
     checks:
-      baseline_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 15}
-      b_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 15}
-      b_route: {metric: target_share, target: B, op: ge, expected: 0.95, min_samples: 15}
-      b_balance: {metric: prefill_max_share, op: le, expected: 0.9, min_samples: 15}
-      outage_failures: {metric: failed_count, op: ge, expected: 1, min_samples: 10}
-      outage_no_master: {metric: route_count, route: master, op: eq, expected: 0, min_samples: 10}
-      outage_terminal: {metric: visible_terminal_share, op: eq, expected: 1, min_samples: 10}
-      a_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 15}
-      a_route: {metric: target_share, target: A, op: ge, expected: 0.95, min_samples: 15}
-      a_balance: {metric: prefill_max_share, op: le, expected: 0.9, min_samples: 15}
-      both_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 15}
-      both_balance: {metric: prefill_max_share, op: le, expected: 0.9, min_samples: 15}
+      baseline_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
+      b_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
+      b_route: {metric: target_share, target: B, op: ge, expected: 0.95, min_samples: 100}
+      b_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      outage_failures: {metric: failed_count, op: ge, expected: 1, min_samples: 50}
+      outage_no_master: {metric: route_count, route: master, op: eq, expected: 0, min_samples: 50}
+      outage_terminal: {metric: visible_terminal_share, op: eq, expected: 1, min_samples: 50}
+      a_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
+      a_route: {metric: target_share, target: A, op: ge, expected: 0.95, min_samples: 100}
+      a_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      both_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
+      both_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
       unique_requests: {metric: duplicate_ids, op: eq, expected: 0, min_samples: 1}
 test:
   kind: workload

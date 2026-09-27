@@ -477,13 +477,14 @@ class MasterActionsTest(unittest.TestCase):
         )
 
         root = Path(__file__).resolve().parents[1] / "config/scenarios"
-        plans = compile_scenarios(
-            [document for name in ("master_lifecycle", "master_ha_failover")
-             for document in load_scenarios(root / (name + ".yaml"))],
-            handlers={
-                h.name: h for h in master.HANDLERS + observations + controls + faults
-            },
-        )
+        with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(
+                [document for name in ("master_lifecycle", "master_ha_failover")
+                 for document in load_scenarios(root / (name + ".yaml"))],
+                handlers={
+                    h.name: h for h in master.HANDLERS + observations + controls + faults
+                },
+            )
         self.assertEqual(5, len(plans))
         self.assertEqual(2, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
@@ -510,7 +511,9 @@ class MasterActionsTest(unittest.TestCase):
                 self.assertIn("both_balance", ids)
                 flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
                 self.assertEqual("prefix_lineage", flow["params"]["source"]["model"])
-                self.assertEqual(2000, flow["params"]["max_requests"])
+                self.assertEqual(10000, flow["params"]["max_requests"])
+                self.assertEqual(125, plan["environment"]["n_prefill"])
+                self.assertEqual(536, plan["environment"]["n_decode"])
 
     def test_ha_prefill_balance_uses_successful_requests_and_known_pool(self):
         rows = self.ctx.register_resource("ha_rows", [

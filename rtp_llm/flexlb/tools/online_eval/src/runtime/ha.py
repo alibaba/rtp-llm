@@ -70,7 +70,8 @@ class HaTrafficRunner:
         self.targets = list(targets)
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
-        self._client = ClientOps(manager, "1g", "1g")
+        heap = "8g" if source is not None else "1g"
+        self._client = ClientOps(manager, heap, heap)
         if source is None:
             trace = write_ha_trace(case_dir)
         else:
@@ -92,8 +93,8 @@ class HaTrafficRunner:
             "MAX_CONCURRENCY": str(max_concurrency),
             "TIMEOUT_MS": str(int(timeout_ms)),
             "LOOP": "true",
-            "N_CHANNELS": "2",
-            "EVENT_LOOP_THREADS": "4",
+            "N_CHANNELS": "8" if source is not None else "2",
+            "EVENT_LOOP_THREADS": "8" if source is not None else "4",
             "SKIP_SERVER_LATENCY": "true",
             "PRIORITY": "50",
         }
