@@ -2299,7 +2299,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
 }
 
-TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestFullGroupTokenCapacity) {
     auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -2315,9 +2315,12 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
 
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         ASSERT_NE(pools[gid], nullptr);
+        if (cache_config.group(cache_config.groupTags()[gid]).policy.group_type != CacheGroupType::FULL) {
+            continue;
+        }
         const size_t seq_size     = cache_config.seq_size_per_block;
         expected_total_tokens     = std::min(expected_total_tokens, pools[gid]->totalBlocksNum() * seq_size);
-        expected_available_tokens = std::min(expected_available_tokens, pools[gid]->freeBlocksNum() * seq_size);
+        expected_available_tokens = std::min(expected_available_tokens, pools[gid]->availableBlocksNum() * seq_size);
     }
 
     auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
@@ -2356,6 +2359,9 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
 
     EXPECT_EQ(kv_cache_manager->maxAvailableTokensNum(), expected_logical_capacity);
     EXPECT_GT(kv_cache_manager->maxAvailableTokensNum(), physical_capacity);
+    const auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
+    EXPECT_EQ(info.total_kv_cache, expected_logical_capacity);
+    EXPECT_EQ(info.available_kv_cache, expected_logical_capacity);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailable) {
