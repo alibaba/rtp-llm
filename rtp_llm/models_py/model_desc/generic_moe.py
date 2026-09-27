@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -77,9 +78,14 @@ class GenericMoeLayer(nn.Module):
             and float(config.routed_scaling_factor or 1.0) == 1.0
             and weights.get(W.e_score_correction_b) is None
         )
+        # Snapshot the switch with SelectTopk at construction time so routing
+        # and gate-pack cannot disagree, including during CUDA graph replay.
+        self._use_fused_topk_512 = os.environ.get("RTP_FUSED_TOPK_512", "1") == "1"
         if self._split_mega_moe_gate_pack:
             self.select_topk = SelectTopk(
-                config=config, use_fused_512=True, fuse_bf16_cast=True
+                config=config,
+                use_fused_512=self._use_fused_topk_512,
+                fuse_bf16_cast=True,
             )
         else:
             self.select_topk = SelectTopk(config=config)
@@ -254,7 +260,10 @@ class GenericMoeLayer(nn.Module):
 
         if self.fused_moe.supports_gate_pack and not (
             self._split_mega_moe_gate_pack
-            and num_tokens > _MEGA_MOE_GATE_PACK_MAX_TOKENS
+            and (
+                not self._use_fused_topk_512
+                or num_tokens > _MEGA_MOE_GATE_PACK_MAX_TOKENS
+            )
         ):
             experts_output = self.fused_moe.forward_gate_pack(
                 hidden_states=hidden_states,

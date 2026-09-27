@@ -1,4 +1,4 @@
-"""4096-token MegaMoE gate-pack boundary and real CUDA output equivalence."""
+"""MegaMoE routing opt-out, 4096-token boundary and CUDA output equivalence."""
 
 import os
 from types import SimpleNamespace
@@ -58,10 +58,10 @@ class _Backend(torch.nn.Module):
         self.calls.append("separate")
         if self.real_pack:
             from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
-                fused_pack_mega_moe_inputs_optimized,
+                fused_pack_mega_moe_inputs,
             )
 
-            fused_pack_mega_moe_inputs_optimized(
+            fused_pack_mega_moe_inputs(
                 hidden_states, topk_weights, topk_ids, *self._buffer(hidden_states)
             )
         return hidden_states
@@ -97,29 +97,51 @@ def make_layer(strategy="mega_moe_fp8", *, real_pack=False, **overrides):
 
 class GenericMoeGatePackRoutingTest(TestCase):
     def test_boundary_and_backend_scope(self):
-        for strategy in ("mega_moe_fp8", "mega_moe_fp8_se", "auto", "mega_moe"):
-            with self.subTest(strategy=strategy), patch.object(
-                generic_moe, "SelectTopk"
-            ) as select:
-                layer, backend = make_layer(strategy)
-                split = strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
-                self.assertEqual(
-                    select.call_args.kwargs.get("use_fused_512"),
-                    True if split else None,
-                )
-                self.assertEqual(
-                    select.call_args.kwargs.get("fuse_bf16_cast"),
-                    True if split else None,
-                )
-                for n in (0, 1, 4095, 4096, 4097, 8192):
-                    x = torch.zeros(n, 1)
-                    layer.gate = Mock(
-                        return_value=torch.zeros(n, 512, dtype=torch.bfloat16)
-                    )
-                    layer(x)
+        for env in (None, "1", "0"):
+            for strategy in ("mega_moe_fp8", "mega_moe_fp8_se", "auto", "mega_moe"):
+                with self.subTest(env=env, strategy=strategy), patch.dict(
+                    os.environ
+                ), patch.object(generic_moe, "SelectTopk") as select:
+                    if env is None:
+                        os.environ.pop("RTP_FUSED_TOPK_512", None)
+                    else:
+                        os.environ["RTP_FUSED_TOPK_512"] = env
+                    layer, backend = make_layer(strategy)
+                    split = strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
+                    enabled = env != "0"
                     self.assertEqual(
-                        backend.calls[-1], "separate" if split and n > 4096 else "fused"
+                        select.call_args.kwargs.get("use_fused_512"),
+                        enabled if split else None,
                     )
+                    self.assertEqual(
+                        select.call_args.kwargs.get("fuse_bf16_cast"),
+                        True if split else None,
+                    )
+                    # Both branches must keep their construction-time choice.
+                    os.environ["RTP_FUSED_TOPK_512"] = "0" if enabled else "1"
+                    for n in (0, 1, 4095, 4096, 4097, 8192):
+                        x = torch.zeros(n, 1)
+                        layer.gate = Mock(
+                            return_value=torch.zeros(n, 512, dtype=torch.bfloat16)
+                        )
+                        select.return_value.reset_mock()
+                        layer(x)
+                        separate = split and (not enabled or n > 4096)
+                        self.assertEqual(
+                            backend.calls[-1], "separate" if separate else "fused"
+                        )
+                        self.assertEqual(select.return_value.call_count, int(separate))
+
+    def test_opt_out_disables_topk_and_bf16_cast_fusion(self):
+        for strategy in ("mega_moe_fp8", "mega_moe_fp8_se"):
+            with self.subTest(strategy=strategy), patch.dict(
+                os.environ, {"RTP_FUSED_TOPK_512": "0"}
+            ), patch(
+                "rtp_llm.models_py.modules.base.cuda.select_topk.compute_ops.SelectTopkOp"
+            ) as op:
+                layer, _ = make_layer(strategy)
+                self.assertFalse(op.call_args.kwargs["use_fused_512"])
+                self.assertFalse(layer.select_topk.fuse_bf16_cast)
 
     def test_other_routing_semantics_keep_existing_path(self):
         for overrides in (
@@ -155,35 +177,59 @@ class GenericMoeGatePackRoutingTest(TestCase):
             fused_pack_mega_moe_gate_inputs,
         )
 
-        # The production branch must force topk512 even if the environment opts out.
-        with patch.dict(os.environ, {"RTP_FUSED_TOPK_512": "0"}):
-            layer, backend = make_layer(real_pack=True)
         torch.manual_seed(20260920)
-        for n in (4096, 4097, 8192, 4096):
-            with self.subTest(tokens=n):
-                x = torch.randn(n, 4096, device="cuda", dtype=torch.bfloat16) * 0.3
-                scores = torch.randn(n, 512, device="cuda", dtype=torch.bfloat16)
-                layer.gate = Mock(return_value=scores)
-                with patch.object(
-                    layer.select_topk, "forward", wraps=layer.select_topk.forward
-                ) as topk:
-                    output = layer(x)
-                    self.assertEqual(topk.call_count, int(n > 4096))
-                self.assertIs(output, x)
-                self.assertEqual(
-                    backend.calls[-1], "fused" if n <= 4096 else "separate"
-                )
-                got = backend.buffer
-                ref = tuple(torch.empty_like(t) for t in got)
-                fused_pack_mega_moe_gate_inputs(
-                    x, scores, *ref, topk=10, score_func="softmax", route_scale=1.0
-                )
-                self.assertTrue(
-                    torch.equal(got[0].view(torch.uint8), ref[0].view(torch.uint8))
-                )
-                self.assertTrue(torch.equal(got[1], ref[1]))
-                self.assertTrue(torch.equal(got[2], ref[2]))
-                torch.testing.assert_close(got[3], ref[3], rtol=1e-4, atol=1e-6)
+        for strategy in ("mega_moe_fp8", "mega_moe_fp8_se"):
+            for env in ("0", "1"):
+                with patch.dict(os.environ, {"RTP_FUSED_TOPK_512": env}):
+                    layer, backend = make_layer(strategy, real_pack=True)
+                for impl in ("legacy", "optimized"):
+                    for n in (0, 1, 4095, 4096, 4097, 8192):
+                        with self.subTest(
+                            strategy=strategy, env=env, impl=impl, tokens=n
+                        ), patch.dict(os.environ, {"MEGA_MOE_INPUT_PACKER_IMPL": impl}):
+                            x = (
+                                torch.randn(
+                                    n, 4096, device="cuda", dtype=torch.bfloat16
+                                )
+                                * 0.3
+                            )
+                            scores = torch.randn(
+                                n, 512, device="cuda", dtype=torch.bfloat16
+                            )
+                            layer.gate = Mock(return_value=scores)
+                            separate = env == "0" or n > 4096
+                            with patch.object(
+                                layer.select_topk,
+                                "forward",
+                                wraps=layer.select_topk.forward,
+                            ) as topk:
+                                output = layer(x)
+                                self.assertEqual(topk.call_count, int(separate))
+                            self.assertIs(output, x)
+                            self.assertEqual(
+                                backend.calls[-1],
+                                "separate" if separate else "fused",
+                            )
+                            got = backend.buffer
+                            ref = tuple(torch.empty_like(t) for t in got)
+                            fused_pack_mega_moe_gate_inputs(
+                                x,
+                                scores,
+                                *ref,
+                                topk=10,
+                                score_func="softmax",
+                                route_scale=1.0,
+                            )
+                            self.assertTrue(
+                                torch.equal(
+                                    got[0].view(torch.uint8), ref[0].view(torch.uint8)
+                                )
+                            )
+                            self.assertTrue(torch.equal(got[1], ref[1]))
+                            self.assertTrue(torch.equal(got[2], ref[2]))
+                            torch.testing.assert_close(
+                                got[3], ref[3], rtol=1e-4, atol=1e-6
+                            )
 
 
 if __name__ == "__main__":
