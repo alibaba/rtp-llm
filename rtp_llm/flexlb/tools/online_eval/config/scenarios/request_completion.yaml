@@ -1,4 +1,3 @@
-# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: request_completion
 environment:
@@ -28,24 +27,12 @@ parameters:
     setup_timeout_s: 180
     step_5:
       op: eq
-    deferred_consume: deferred
     expected:
       completed: true
       no_errors: 0
-  client_no_fetch:
-    setup_timeout_s: 180
-    automatic_environment_timeout_s: 240
-    automatic_environment:
-      config_overrides: {}
-      mock_auto_fetch: true
-    automatic:
-      mode: automatic
-    automatic_timeout_s: 30
-    step_5_timeout_s: 30
   input_len: 2048
   output_len: 2
   count: 1
-  observe_s: 0.2
 parameter_schema:
   input_len:
     minimum: 1
@@ -59,11 +46,6 @@ parameter_schema:
     minimum: 1
     maximum: 10000
     integer: true
-  observe_s:
-    minimum: 0.01
-    maximum: 10
-    integer: false
-
 test:
   kind: functional
   description: Bounded protocol, state or admission contract

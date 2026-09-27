@@ -28,39 +28,6 @@ class Clock:
 
 
 class WraparoundTests(unittest.TestCase):
-    def test_formal_loader_compiler_retains_independent_clocks_all_profiles(self):
-        root = Path(__file__).resolve().parents[1]
-        plans = compile_scenarios(
-            load_scenarios(root / "config/scenarios/client_fallback_failback.yaml"), handlers=handlers()
-        )
-        selected = [p for p in plans if p["variant_id"] == "wraparound"]
-        self.assertEqual(4, len(selected))
-        for p in selected:
-            stages = {s["id"]: s for s in p["stages"]}
-            order = list(stages)
-            self.assertEqual("master_topology_ready", stages["ready_a"]["action"])
-            self.assertEqual(60, stages["ready_a"]["timeout_s"])
-            self.assertEqual({"target": "A"}, stages["ready_a"]["params"])
-            self.assertEqual("master_inflight_clean", stages["clean_a"]["action"])
-            self.assertEqual(35, stages["clean_a"]["timeout_s"])
-            self.assertLess(order.index("baseline_a"), order.index("kill_a"))
-            for event, checkpoint in (
-                ("kill_a", "switch_to_b"),
-                ("kill_b", "switch_to_a"),
-            ):
-                self.assertEqual(order.index(event) + 1, order.index(checkpoint))
-                self.assertEqual(
-                    "master_client_checkpoint", stages[checkpoint]["action"]
-                )
-            self.assertLess(order.index("recovery_distribution"), order.index("idle_a"))
-            self.assertEqual(10, stages["recovery_a"]["params"]["concurrency"])
-            self.assertLess(order.index("idle_a"), order.index("kill_b"))
-            self.assertLess(order.index("coexist_sticky_b"), order.index("kill_b"))
-            self.assertGreater(order.index("clean_a"), order.index("finish"))
-            self.assertTrue(stages["flow"]["params"]["live_events"])
-            for stage in ("steady_b", "coexist_sticky_b", "steady_a"):
-                self.assertEqual(1, stages[stage]["params"]["min_target_share"])
-                self.assertEqual(0.75, stages[stage]["params"]["max_prefill_share"])
 
     def run_gate(self, fn, response, budget):
         tmp = tempfile.TemporaryDirectory()

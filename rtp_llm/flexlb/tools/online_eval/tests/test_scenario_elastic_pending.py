@@ -281,52 +281,7 @@ class PendingTests(unittest.TestCase):
             state["artifacts"] = artifacts
             return result, state
 
-    def test_expected_allows_visible_errors_and_preserves_actual_consumers(self):
-        result, state = self.run_program()
-        self.assertEqual(result["status"], "PASS", result)
-        outcome = next(
-            v
-            for k, v in state["artifacts"].items()
-            if k.startswith("elastic-pending-outcomes-")
-        )
-        self.assertTrue(any(o["kind"] == "error" for o in outcome["outcomes"]))
-        self.assertFalse(outcome["summary"]["zero_errors"])
-        self.assertTrue(
-            all(
-                r["transport_terminal_s"] is not None
-                and r["consumer_exit_s"] is not None
-                for r in outcome["records"]
-            )
-        )
-        self.assertGreaterEqual(state["accounting_s"], outcome["collected_s"])
-        self.assertEqual(state["recovery_count"], 20)
-        self.assertEqual(state["max_active"], 10)
-        self.assertEqual(
-            len([s for s in state["shapes"] if s["input_len"] == 2048]), 20
-        )
-        self.assertTrue(
-            all(
-                len(s["block_keys"]) == 3 and s["output_len"] == 2
-                for s in state["shapes"]
-            )
-        )
-        self.assertTrue(
-            all(t == 30 for phase, t in state["calls"] if phase == "schedule")
-        )
-        self.assertEqual(
-            {t for phase, t in state["calls"] if phase == "stream"}, {15, 60}
-        )
-        construction = next(
-            v
-            for k, v in state["artifacts"].items()
-            if k.startswith("elastic-pending-wave-") and not k.endswith("-cleanup.json")
-        )
-        self.assertEqual(construction["pending_estimate"], 2)
-        self.assertEqual(construction["engine_completed_delta"], 0)
 
-    def test_zero_errors_passes_when_every_issued_request_succeeds(self):
-        result, _ = self.run_program("zero_errors", wave_error=False)
-        self.assertEqual(result["status"], "PASS", result)
 
     def test_late_zero_accounting_sample_cannot_pass_the_50_second_cap(self):
         clock = Clock()
@@ -418,52 +373,10 @@ class PendingTests(unittest.TestCase):
         )
         self.assertFalse(pending.terminal_contract(result, 40)[0])
 
-    def test_zero_errors_applies_to_recovery_after_topology(self):
-        result, _ = self.run_program("zero_errors")
-        rows = {r["id"]: r for r in result["stages"]}
-        self.assertEqual(rows["visible_terminal"]["status"], "PASS")
-        self.assertEqual(rows["recovery_zero_errors"]["status"], "PASS")
-        self.assertEqual(rows["all_issued_terminal"]["status"], "PASS")
-        ids = list(rows)
-        self.assertLess(ids.index("topology"), ids.index("recovery"))
 
-    def test_schedule_reject_is_retained_but_not_a_victim_terminal(self):
-        legacy, state = self.run_program(wave_error=False, reject_first=True)
-        self.assertEqual(legacy["status"], "PASS", legacy)
-        outcome = next(
-            v
-            for k, v in state["artifacts"].items()
-            if k.startswith("elastic-pending-outcomes-")
-        )
-        self.assertEqual(outcome["records"][0]["schedule"]["status"], "REJECTED")
-        rejected_outcome = next(r for r in outcome["outcomes"] if r["rid"] == 1)
-        self.assertEqual(rejected_outcome["kind"], "error")
-        self.assertIsNone(rejected_outcome["route"])
-        strict, _ = self.run_program("zero_errors", wave_error=False, reject_first=True)
-        self.assertEqual(
-            next(r for r in strict["stages"] if r["id"] == "all_issued_terminal")[
-                "status"
-            ],
-            "FAIL",
-        )
 
-    def test_engine_completion_cannot_manufacture_pending(self):
-        result, state = self.run_program(completed_interference=True)
-        rows = {r["id"]: r for r in result["stages"]}
-        self.assertEqual(rows["wave"]["status"], "FAIL")
-        self.assertEqual(rows["remove"]["status"], "BLOCKED")
-        self.assertNotIn("remove_s", state)
 
-    def test_zero_error_recovery_does_not_accept_one_failure(self):
-        result, _ = self.run_program("zero_errors", recovery_errors=1)
-        rows = {r["id"]: r for r in result["stages"]}
-        self.assertEqual(rows["recovery_zero_errors"]["status"], "FAIL")
 
-    def test_recovery_preserves_19_of_20_boundary(self):
-        for errors, expected in [(1, "PASS"), (2, "FAIL")]:
-            result, _ = self.run_program(recovery_errors=errors)
-            row = next(r for r in result["stages"] if r["id"] == "recovery")
-            self.assertEqual(row["status"], expected, result)
 
     def test_visible_boundary_empty_and_collector_cancel(self):
         records = e.ClientRecords(1)

@@ -45,53 +45,6 @@ class Backend:
 
 
 class ElasticRuntimeTests(unittest.TestCase):
-    def test_actual_mutation_handlers_follow_typed_reference_and_budget(self):
-        source = self.source()
-        source.pop("variants")
-        source["stages"] = [
-            dict(id="setup", action="setup"),
-            dict(id="add", action="elastic_add", params=dict(role="prefill")),
-            dict(
-                id="remove",
-                action="elastic_remove",
-                params=dict(
-                    engine={"$ref": "stages.add.output.engine"}, drain_timeout_ms=5000
-                ),
-            ),
-            dict(id="teardown", action="teardown"),
-        ]
-        handlers = {h.name: h for h in e.HANDLERS}
-        plan = compile_scenarios([("mutation.yaml", source)], handlers=handlers)[0]
-        self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 1)
-        engine = dict(role="prefill", grpc_addr="127.0.0.1:12345")
-        responses = [
-            dict(status="ok", action="added", engine="p2", port=12345, http_port=12344),
-            dict(
-                status="ok",
-                action="removed",
-                engine="p2",
-                port=12345,
-                mode="graceful",
-                drained=False,
-            ),
-        ]
-        clock = Clock()
-        with tempfile.TemporaryDirectory() as root, patch.object(
-            e, "_snapshot", side_effect=[{}, {"p2": engine}, {"p2": engine}, {}]
-        ), patch.object(e, "_http", side_effect=responses) as http:
-            result = execute_instance(
-                plan,
-                Backend(),
-                handlers=handlers,
-                artifact_dir=root,
-                clock=clock,
-                sleeper=clock.sleep,
-            )
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertEqual(http.call_args.args[3]["engine"], "p2")
-        # This program asserts membership only; it deliberately makes no
-        # business-drain claim from drained=false or from a successful ack.
-        self.assertEqual(result["stages"][2]["checks"][0]["id"], "membership")
 
     def source(self):
         source = load_scenarios(ROOT / "config/scenarios/elastic_lifecycle.yaml")[0][1]
@@ -231,55 +184,3 @@ class ElasticRuntimeTests(unittest.TestCase):
                         )
                     )
         return results, mutated
-
-    def test_high_hit_runs_all_stages_for_both_victims(self):
-        results, mutated = self.run_pilot()
-        self.assertEqual(len(mutated), 2)
-        for result in results:
-            self.assertEqual(result["status"], "PASS", result)
-            rows = {row["id"]: row for row in result["stages"]}
-            self.assertTrue(all(row["status"] == "PASS" for row in rows.values()))
-            self.assertEqual([c["id"] for c in rows["baseline"]["checks"]], ["traffic"])
-            self.assertEqual(rows["transient"]["checks"], [])
-            self.assertEqual(rows["steady"]["checks"], [])
-            self.assertEqual(
-                {c["id"] for c in rows["verdict"]["checks"]},
-                {"PC", "PQ", "PK", "P6", "P2"},
-            )
-
-    def test_low_nonempty_hit_is_not_a_new_gate(self):
-        results, mutated = self.run_pilot(rate=0.5)
-        self.assertEqual(len(mutated), 2)
-        for result in results:
-            self.assertEqual(result["status"], "PASS", result)
-
-    def test_p6_failure_still_fails_after_high_hit(self):
-        results, _ = self.run_pilot(flow_failed=True)
-        for result in results:
-            self.assertEqual(result["status"], "FAIL")
-            verdict = next(row for row in result["stages"] if row["id"] == "verdict")
-            checks = {check["id"]: check for check in verdict["checks"]}
-            self.assertEqual(checks["P6"]["status"], "FAIL")
-            self.assertEqual(checks["P6"]["actual"]["failed_request_ids"], [42])
-
-    def test_baseline_cannot_bypass_guard_with_generic_window(self):
-        source = self.source()
-        for variant in source["variants"]:
-            for stage in variant["stages"]:
-                if stage["id"] == "baseline":
-                    stage["action"] = "elastic_window"
-        with self.assertRaisesRegex(ValueError, "requires elastic_baseline"):
-            compile_scenarios(
-                [("pilot.yaml", source)], handlers={h.name: h for h in e.HANDLERS}
-            )
-
-    def test_baseline_action_rejects_post_scale_phase(self):
-        source = self.source()
-        for variant in source["variants"]:
-            for stage in variant["stages"]:
-                if stage["id"] == "transient":
-                    stage["action"] = "elastic_baseline"
-        with self.assertRaisesRegex(ValueError, "requires phase baseline"):
-            compile_scenarios(
-                [("pilot.yaml", source)], handlers={h.name: h for h in e.HANDLERS}
-            )

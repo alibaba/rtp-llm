@@ -15,7 +15,7 @@ python3 rtp_llm/flexlb/tools/online_eval/scripts/commands/list_cases.py \
   --profile batch-window --suite core --list-json
 ```
 
-`run_cases.py` 默认读取 `config/suites.yaml` 的 `default_suite`；当前 `core` 清单包含 5 个实例。
+`run_cases.py` 默认读取 `config/suites.yaml` 的 `default_suite`；当前 `core` 在每个 profile 下包含 2 个实例。
 `--suite functional` / `workload` 按实例自己的 `test.kind` 筛选，`--suite all` 选择全部实例。
 文件顶层 `test` 提供公共默认值；`variants[].test` 可以覆盖 kind、description、collection 和 monitoring。
 workload case 的 `reports` 列出 `config/report_views/` 下的视图文件；运行前查看这个列表即可知道会生成哪些报告。每个列表都包含 `workload.yaml` 默认全量视图，复杂场景可追加专属视图；functional variant 不生成报告。

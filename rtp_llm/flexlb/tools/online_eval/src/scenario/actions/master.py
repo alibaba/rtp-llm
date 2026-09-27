@@ -10,6 +10,7 @@ import subprocess
 import time
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 
@@ -518,6 +519,8 @@ def _ha_validate(params, plan):
             "live_events",
             "max_concurrency",
             "replay_speed",
+            "source",
+            "max_requests",
         },
     )
     environment = getattr(plan, "environment", {})
@@ -543,6 +546,21 @@ def _ha_validate(params, plan):
         type(p["max_concurrency"]) is not int or p["max_concurrency"] < 1
     ):
         raise ValueError("invalid HA max_concurrency")
+    if "source" in p:
+        source = p["source"]
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"kind", "model", "version", "parameters"}
+            or (source["kind"], source["model"], source["version"])
+            not in {("trace", "prefix_lineage", "2"), ("trace", "prefix_lineage", "3")}
+        ):
+            raise ValueError("HA source must be a pinned real prefix lineage trace")
+    if "max_requests" in p and (
+        "source" not in p
+        or type(p["max_requests"]) is not int
+        or not 1 <= p["max_requests"] <= 10000
+    ):
+        raise ValueError("HA max_requests requires a bounded real trace")
     p.setdefault("live_events", False)
     if type(p["live_events"]) is not bool:
         raise ValueError("live_events must be boolean")
@@ -674,6 +692,11 @@ def _ha_start(ctx, params, deadline):
         timeout_ms=params["timeout_ms"],
         enable_fallback=params["fallback"],
         live_events=params["live_events"],
+        source=params.get("source"),
+        source_dir=(
+            Path(ctx.instance["source_path"]).parent if params.get("source") else None
+        ),
+        max_requests=params.get("max_requests"),
         **(
             {"replay_speed": params["replay_speed"]} if "replay_speed" in params else {}
         ),
@@ -815,6 +838,7 @@ HA_METRICS = {
     "business_rate_above_one",
     "visible_terminal_count",
     "visible_terminal_share",
+    "prefill_max_share",
 }
 
 
@@ -889,6 +913,16 @@ def _client_check(ctx, params, deadline):
         actual = count / n if metric == "route_share" and n else count
     elif metric == "failover_count":
         actual = sum(r["failover"] is True for r in rows)
+    elif metric == "prefill_max_share":
+        from collections import Counter
+
+        from scenario.actions.master_observation import _pools
+
+        pool = set(_pools(ctx, deadline)["prefill"])
+        addresses = [r.get("prefill") for r in rows if r["status"] == "ok"]
+        if not addresses or any(address not in pool for address in addresses):
+            raise ValueError("successful HA requests lack known Prefill endpoints")
+        actual = max(Counter(addresses).values()) / len(addresses)
     elif metric == "duplicate_ids":
         actual = sum(count > 1 for count in Counter(r["rid"] for r in rows).values())
     elif metric == "error_kind_count":

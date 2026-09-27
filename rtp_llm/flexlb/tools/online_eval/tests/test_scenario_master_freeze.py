@@ -110,34 +110,6 @@ class FreezeTests(unittest.TestCase):
                 )
                 self.assertEqual(expected, result.checks[0].status)
 
-    def test_formal_program_places_three_observations_on_old_boundaries(self):
-        path = Path(__file__).resolve().parents[1] / "config/scenarios/master_lifecycle.yaml"
-        plans = compile_scenarios(load_scenarios(path), handlers=handlers())
-        selected = [p for p in plans if p["variant_id"] == "freeze_short_long"]
-        self.assertEqual(4, len(selected))
-        for p in selected:
-            stages = {s["id"]: s for s in p["stages"]}
-            order = list(stages)
-            self.assertLess(order.index("long_freeze"), order.index("deadline_probe"))
-            self.assertLess(order.index("deadline_probe"), order.index("long_restore"))
-            self.assertFalse(stages["deadline_probe"]["params"]["sample_topology"])
-            self.assertEqual("B", stages["deadline_probe"]["params"]["target"])
-            self.assertEqual(
-                {"$ref": "stages.deadline_straddle.output.rows"},
-                stages["retry_seen"]["params"]["rows"],
-            )
-            self.assertEqual(-0.5, stages["short_post"]["params"]["until_offset_s"])
-            self.assertEqual(-0.5, stages["short_burst"]["params"]["until_offset_s"])
-            self.assertEqual("master_scheduler_state", stages["after"]["action"])
-            self.assertEqual(order.index("long_restore") + 1, order.index("after"))
-            self.assertEqual(order.index("after") + 1, order.index("post_long_end"))
-            self.assertEqual(10, stages["post_long_end"]["params"]["wait_s"])
-            self.assertEqual(order.index("post_long_end") + 1, order.index("ready_b"))
-            self.assertEqual("master_topology_state", stages["ready_b"]["action"])
-            self.assertEqual(
-                {"$ref": "stages.ready_b.output.state"},
-                stages["continuity"]["params"]["settled"],
-            )
 
     def test_settled_sample_only_calls_info_once(self):
         raw = {

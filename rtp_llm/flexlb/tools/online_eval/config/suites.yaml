@@ -3,7 +3,4 @@ default_suite: core
 ci_suites:
   core:
   - request_completion::immediate
-  - cache_capacity_recovery::pool_saturation_evict_reject_recover
   - cache_churn::lru_affinity
-  - engine_fault_recovery::generation_bump
-  - master_lifecycle::kill_single

@@ -417,5 +417,5 @@ class PerformanceGateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         plan = json.loads(result.stdout[result.stdout.index("\n{") + 1:])
-        self.assertEqual(len(plan["instances"]), 5)
+        self.assertEqual(len(plan["instances"]), 2)
         self.assertNotIn("master_performance::", result.stdout)

@@ -13,14 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SuiteOwnershipTest(unittest.TestCase):
-    def test_mixed_file_filters_variants_before_compilation(self):
+    def test_retained_functional_variant_is_selected_without_mutation(self):
         docs = load_scenarios(ROOT / 'config/scenarios/master_lifecycle.yaml')
         original = copy.deepcopy(docs)
         functional = preselect_documents(docs, 'functional')
         workload = preselect_documents(docs, 'workload')
         self.assertEqual(['kill_single'], [v['id'] for v in functional[0][1]['variants']])
-        self.assertEqual({'freeze_short_long', 'kill_dual_b_to_a'},
-                         {v['id'] for v in workload[0][1]['variants']})
+        self.assertEqual([], workload)
         self.assertEqual(docs, original)
         self.assertEqual(functional[0][1].implementation, docs[0][1].implementation)
 

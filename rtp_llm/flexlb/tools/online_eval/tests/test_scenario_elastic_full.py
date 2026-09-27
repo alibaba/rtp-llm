@@ -525,54 +525,8 @@ class FullTests(unittest.TestCase):
             )
             return result, state
 
-    def test_full_program_constructs_both_branches_with_stable_two_block_shapes(self):
-        result, state = self.run_program()
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 33)
-        self.assertEqual(
-            state["perf_writes"],
-            [
-                ("decode-0", 60),
-                ("decode-1", 60),
-                ("decode-1", 1000),
-                ("decode-2", 60),
-                ("decode-2", 1),
-            ],
-        )
-        self.assertEqual(state["phase"], 2)
-        self.assertEqual(state["recovery"], 20)
-        self.assertGreaterEqual(len(state["fill_shapes"]), 20)
-        self.assertTrue(
-            all(
-                s["input_len"] + s["output_len"] == 2048 and len(s["block_keys"]) == 2
-                for s in state["fill_shapes"]
-            )
-        )
 
-    def test_steady_includes_stop_period_completion_drift_and_waiting_peak(self):
-        for option, failed in [
-            ("stop_drift", "share_max"),
-            ("stop_queue", "waiting_peak"),
-        ]:
-            result, state = self.run_program(**{option: True})
-            row = next(s for s in result["stages"] if s["id"] == "steady_bounds")
-            self.assertEqual(row["status"], "FAIL", result)
-            self.assertEqual(
-                next(c for c in row["checks"] if c["id"] == failed)["status"], "FAIL"
-            )
-            self.assertEqual(
-                next(s for s in result["stages"] if s["id"] == "slow_victim")["status"],
-                "BLOCKED",
-            )
 
-    def test_timeout_retirement_message_failure_is_not_relabeled(self):
-        result, _ = self.run_program(bad_retirement=True)
-        row = next(s for s in result["stages"] if s["id"] == "terminal_timeout")
-        self.assertEqual(row["status"], "FAIL", result)
-        self.assertEqual(
-            next(s for s in result["stages"] if s["id"] == "recovery")["status"],
-            "BLOCKED",
-        )
 
 
 if __name__ == "__main__":

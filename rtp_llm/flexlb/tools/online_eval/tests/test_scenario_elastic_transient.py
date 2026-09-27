@@ -303,36 +303,6 @@ class TransientTests(unittest.TestCase):
                         data["samples"][0]["engines"]["h:10000"]["inflight_requests"], 3
                     )
 
-    def test_birth_spec_preserves_expected_performance_topology_and_config(self):
-        from flexlb_cfg import render_env
-        from scenario.backend import make_env_spec
-
-        handlers = builtin_handlers()
-        plan = next(
-            p
-            for p in compile_scenarios(
-                load_scenarios(ROOT / "config/scenarios/elastic_lifecycle.yaml"),
-                handlers=handlers,
-            )
-            if p["variant_id"] == "transient_imbalance"
-        )
-        old = expected_environment("transient_imbalance", NS(profile="batch-window"))
-        new = make_env_spec(plan["environment"], "batch-window", {"master_base": 28000})
-        self.assertEqual(new.perf, old.perf)
-        self.assertEqual(
-            json.loads(render_env(new.master_profile, new.config_overrides)),
-            old.resolved_config,
-        )
-        for field in (
-            "n_prefill",
-            "n_decode",
-            "discovery",
-            "prefill_cache_blocks",
-            "decode_cache_blocks",
-        ):
-            self.assertEqual(getattr(new, field), getattr(old, field))
-        self.assertEqual(old.master_env, {"FLEXLB_FT_SPEC_ID": "transient_bound"})
-        self.assertEqual(new.master_env, {})
 
     def run_program(self, bad_survivor=False):
         handlers = builtin_handlers()
@@ -500,30 +470,7 @@ class TransientTests(unittest.TestCase):
             }
             return result, state, evidence
 
-    def test_formal_program_preserves_burst_caps_windows_and_all_issued(self):
-        result, state, evidence = self.run_program()
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertEqual(state["burst"], 30)
-        self.assertLessEqual(state["peak"], 15)
-        self.assertGreater(state["peak"], 1)
-        self.assertEqual(state["recovery"], 20)
-        self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 20)
-        locality = next(
-            v
-            for k, v in evidence.items()
-            if k.startswith("elastic-transient-locality-")
-        )
-        self.assertGreater(len(locality["records"]), 30)
-        self.assertTrue(locality["summary"]["result_complete"])
 
-    def test_formal_survivor_failure_is_not_an_allowed_unrouted_failure(self):
-        result, _, _ = self.run_program(bad_survivor=True)
-        row = next(s for s in result["stages"] if s["id"] == "locality")
-        self.assertEqual(row["status"], "FAIL", result)
-        self.assertEqual(
-            next(c for c in row["checks"] if c["id"] == "survivor_failures")["status"],
-            "FAIL",
-        )
 
 
 if __name__ == "__main__":

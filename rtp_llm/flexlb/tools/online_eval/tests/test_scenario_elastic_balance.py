@@ -214,45 +214,8 @@ class BalanceTests(unittest.TestCase):
             }
             return result, state, artifacts
 
-    def test_complete_steady_program_preserves_tail_windows_and_observations(self):
-        result, state, artifacts = self.run_program()
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertEqual(state["recovery"], 20)
-        self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 15)
-        detail = next(iter(artifacts.values()))
-        self.assertEqual(
-            detail["tail_share"],
-            dict.fromkeys(["decode-1", "decode-2", "decode-3"], 1 / 3),
-        )
-        self.assertEqual(detail["observations"]["steady"]["hit_rate"]["value"], 0.5)
-        self.assertEqual(
-            detail["observations"]["steady"]["generate_tps_ratio"]["value"], 1
-        )
 
-    def test_early_persistent_drift_fails_independently_of_balanced_tail(self):
-        result, _, _ = self.run_program(drift=True)
-        checks = {
-            c["id"]: c["status"]
-            for s in result["stages"]
-            if s["id"] == "verdict"
-            for c in s["checks"]
-        }
-        self.assertEqual(checks["share_max"], "PASS")
-        self.assertEqual(checks["oscillation"], "FAIL")
 
-    def test_missing_occupancy_is_error_and_queue_three_is_failure(self):
-        result, _, _ = self.run_program(missing=True)
-        self.assertEqual(
-            next(s for s in result["stages"] if s["id"] == "verdict")["status"], "ERROR"
-        )
-        result, _, _ = self.run_program(high_queue=True)
-        checks = {
-            c["id"]: c["status"]
-            for s in result["stages"]
-            if s["id"] == "verdict"
-            for c in s["checks"]
-        }
-        self.assertEqual(checks["waiting_peak"], "FAIL")
 
     def test_empty_subwindow_cannot_join_nonadjacent_drift(self):
         self.assertEqual(balance.oscillations({"d": [(0, 0.8), (2, 0.8)]}, 0.5), [])

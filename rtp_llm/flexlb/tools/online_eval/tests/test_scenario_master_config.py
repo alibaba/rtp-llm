@@ -10,13 +10,13 @@ from scenario.catalog import handlers
 
 
 class MasterConfigTests(unittest.TestCase):
-    def test_all_lifecycle_variants_match_expected_rendered_configuration(self):
+    def test_retained_lifecycle_variant_matches_expected_rendered_configuration(self):
         path = (
             Path(__file__).resolve().parents[1]
             / "config/scenarios/master_lifecycle.yaml"
         )
         plans = compile_scenarios(load_scenarios(path), handlers=handlers())
-        self.assertEqual(9, len(plans))
+        self.assertEqual(4, len(plans))
         for plan in plans:
             with self.subTest(variant=plan["variant_id"], profile=plan["profile"]):
                 if plan["variant_id"] == "kill_single":
@@ -27,19 +27,3 @@ class MasterConfigTests(unittest.TestCase):
                     override = None
                 expected = json.loads(render_env(plan["profile"], override))
                 self.assertEqual(expected, plan["environment"]["resolved_config"])
-
-    def test_single_nonbatch_freeze_retains_fifo_and_queue_deadline(self):
-        path = (
-            Path(__file__).resolve().parents[1]
-            / "config/scenarios/master_lifecycle.yaml"
-        )
-        plans = compile_scenarios(load_scenarios(path), handlers=handlers())
-        freeze = next(
-            p
-            for p in plans
-            if p["variant_id"] == "freeze_short_long"
-            and p["profile"] == "single-nonbatch"
-        )
-        scheduler = freeze["environment"]["resolved_config"]["scheduler"]
-        self.assertEqual("FIFO", scheduler["ordering"]["type"])
-        self.assertEqual(60000, scheduler["queueTimeoutMs"])

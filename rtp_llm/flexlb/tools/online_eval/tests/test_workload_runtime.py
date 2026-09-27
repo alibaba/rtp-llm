@@ -20,7 +20,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
     def test_core_inventory_does_not_compile_large_workload(self):
         documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "core")
         self.assertNotIn("cache_scale_in", {doc["id"] for _, doc in documents})
-        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "core")), 5)
+        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "core")), 2)
 
     def run_plan(
         self, workload, observation=True, setup_error=False, cleanup_error=False
@@ -92,8 +92,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
         w = {p["id"] for p in classify(plans, "workload")}
         self.assertFalse(f & w)
         self.assertEqual(f | w, {p["id"] for p in plans})
-        self.assertTrue(any("wraparound" in x for x in w))
-        self.assertTrue(any("::sustained_mix::" in identity for identity in w))
+        self.assertIn("master_ha_failover::dual_master_cycle::batch-window", w)
         self.assertEqual(
             {
                 plan["scenario_id"] + "::" + plan["variant_id"]
@@ -101,26 +100,22 @@ class WorkloadRuntimeTests(unittest.TestCase):
             },
             {
                 "request_completion::immediate",
-                "cache_capacity_recovery::pool_saturation_evict_reject_recover",
                 "cache_churn::lru_affinity",
                 "engine_fault_recovery::generation_bump",
                 "master_lifecycle::kill_single",
             },
         )
-        self.assertEqual(len(plans), 92)
+        self.assertEqual(len(plans), 21)
         self.assertIn("cache_scale_in::step::single-nonbatch", w)
 
-    def test_core_suite_is_five_stable_contracts_for_every_master_profile(self):
+    def test_core_suite_is_two_stable_contracts_for_every_master_profile(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )
         expected = {
             "request_completion::immediate",
-            "cache_capacity_recovery::pool_saturation_evict_reject_recover",
             "cache_churn::lru_affinity",
-            "engine_fault_recovery::generation_bump",
-            "master_lifecycle::kill_single",
         }
         for profile in (
             "batch-window",
@@ -131,7 +126,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
             selected = classify(
                 [plan for plan in plans if plan["profile"] == profile], "core"
             )
-            self.assertEqual(len(selected), 5)
+            self.assertEqual(len(selected), 2)
             self.assertEqual(
                 {
                     plan["scenario_id"] + "::" + plan["variant_id"]

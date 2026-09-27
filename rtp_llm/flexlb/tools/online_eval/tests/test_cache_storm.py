@@ -203,25 +203,6 @@ class StormTest(unittest.TestCase):
         self.assertEqual(recovery_window(rows, 1, 2), 3)
         self.assertIsNone(recovery_window(rows[:3], 1, 2))
 
-    def test_topologies_share_one_python_program_with_distinct_environments(self):
-        plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/cache_affinity.yaml"),
-            handlers=handlers(),
-        )
-        selected = [
-            p
-            for p in plans
-            if p["variant_id"]
-            in {"leader_spill_p2", "leader_spill_p3", "leader_spill_p4"}
-        ]
-        self.assertEqual({p["environment"]["n_prefill"] for p in selected}, {2, 3, 4})
-        self.assertEqual(len({p["implementation"]["path"] for p in selected}), 1)
-        for plan in selected:
-            self.assertEqual(
-                set(plan["findings"]),
-                {"healthy.hit", "healthy.eviction", "healthy.holders"},
-            )
-            self.assertNotIn("validity.recovery", plan["findings"])
 
     def execute_probe(self, healthy, hard_failure=False):
         clock = Clock()

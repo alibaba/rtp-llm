@@ -60,6 +60,9 @@ class HaTrafficRunner:
         replay_speed: float = 2.0,
         max_concurrency: int = 8,
         live_events: bool = False,
+        source: dict | None = None,
+        source_dir: Path | None = None,
+        max_requests: int | None = None,
     ):
         self.manager = manager
         self.env = env
@@ -68,8 +71,20 @@ class HaTrafficRunner:
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
         self._client = ClientOps(manager, "1g", "1g")
+        if source is None:
+            trace = write_ha_trace(case_dir)
+        else:
+            from traffic.traffic_source import materialize
+
+            trace = materialize(
+                case_dir / "ha_trace.jsonl",
+                source,
+                name,
+                source_dir,
+                max_requests=max_requests,
+            )
         overrides = {
-            "TRACE_FILE": str(write_ha_trace(case_dir)),
+            "TRACE_FILE": str(trace),
             "LIVE_CLIENT_EVENTS": str(live_events).lower(),
             "GRPC_TARGETS": ",".join(self.targets),
             "DURATION_S": str(int(duration_s)),

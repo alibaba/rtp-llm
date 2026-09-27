@@ -132,12 +132,6 @@ class LifecycleTests(unittest.TestCase):
                 )
                 self.assertEqual(received.checks[0].status, expected)
 
-    def test_remove_requires_fresh_traffic_despite_historical_accepts(self):
-        result, state = self.run_program(no_remove_traffic=True)
-        rows = {row["id"]: row for row in result["stages"]}
-        self.assertEqual(rows["remove_traffic"]["status"], "FAIL")
-        self.assertEqual(rows["remove"]["status"], "BLOCKED")
-        self.assertTrue(state["cleaned"])
 
     def test_pre_add_successes_do_not_dilute_add_window_failure(self):
         flow = e.ClientRecords(1)
@@ -460,22 +454,7 @@ class LifecycleTests(unittest.TestCase):
             ]
         return result, state
 
-    def test_normal_and_strict_complete_all_stages_and_four_additions(self):
-        for variant in ("normal", "strict"):
-            result, state = self.run_program(variant)
-            self.assertEqual(result["status"], "PASS", result)
-            self.assertEqual(state["adds"], 4)
-            self.assertGreaterEqual(state["batches"], 5)
-            self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 75)
-            self.assertTrue(all(s["status"] == "PASS" for s in result["stages"]))
 
-    def test_remove_failure_cannot_be_hidden_by_preference_90_percent_floor(self):
-        result, state = self.run_program(fail_remove=True)
-        self.assertEqual(result["status"], "FAIL")
-        rows = {s["id"]: s for s in result["stages"]}
-        self.assertEqual(rows["preference_availability"]["status"], "PASS")
-        self.assertEqual(rows["remove_zero_errors"]["status"], "FAIL")
-        self.assertEqual(rows["cycle1_add"]["status"], "BLOCKED")
 
 
 

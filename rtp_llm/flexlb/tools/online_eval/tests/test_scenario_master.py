@@ -478,23 +478,19 @@ class MasterActionsTest(unittest.TestCase):
 
         root = Path(__file__).resolve().parents[1] / "config/scenarios"
         plans = compile_scenarios(
-            [document for name in ("master_lifecycle", "master_ha_failover", "client_fallback_failback")
+            [document for name in ("master_lifecycle", "master_ha_failover")
              for document in load_scenarios(root / (name + ".yaml"))],
             handlers={
                 h.name: h for h in master.HANDLERS + observations + controls + faults
             },
         )
-        self.assertEqual(18, len(plans))
-        self.assertEqual(3, len({p["scenario_id"] for p in plans}))
+        self.assertEqual(5, len(plans))
+        self.assertEqual(2, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
-            if plan["variant_id"] in {"kill_single", "kill_dual_b_to_a"}:
+            if plan["variant_id"] == "kill_single":
                 ids = [s["id"] for s in plan["stages"]]
-                ready, clean = (
-                    ("restored_topology", "restored_inflight")
-                    if plan["variant_id"] == "kill_single"
-                    else ("ready_b", "clean_b")
-                )
+                ready, clean = ("restored_topology", "restored_inflight")
                 index = ids.index(ready)
                 self.assertEqual(clean, ids[index + 1])
                 self.assertEqual(60, plan["stages"][index]["timeout_s"])
@@ -502,19 +498,37 @@ class MasterActionsTest(unittest.TestCase):
                 self.assertEqual(10, plan["stages"][index + 1]["timeout_s"])
                 self.assertTrue(plan["stages"][index + 1]["params"]["inflight_zero"])
             self.assertEqual(0, plan["resource_budget"]["max_dynamic_additions"])
-            if plan["scenario_id"] == "master_coldstart":
-                self.assertEqual(0, plan["environment"]["master_stable_window_s"])
-            if (
-                plan["scenario_id"]
-                in {
-                    "master_ha_failover",
-                    "client_fallback_failback",
-                }
-                and plan["variant_id"] != "direct_generate_error"
-            ):
+            if plan["scenario_id"] == "master_ha_failover":
                 self.assertEqual(
                     "dual_standalone", plan["environment"]["master_layout"]
                 )
+                ids = [stage["id"] for stage in plan["stages"]]
+                self.assertLess(ids.index("kill_a"), ids.index("kill_b"))
+                self.assertLess(ids.index("kill_b"), ids.index("restart_a"))
+                self.assertLess(ids.index("restart_a"), ids.index("restart_b"))
+                self.assertIn("outage_failures", ids)
+                self.assertIn("both_balance", ids)
+                flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
+                self.assertEqual("prefix_lineage", flow["params"]["source"]["model"])
+                self.assertEqual(2000, flow["params"]["max_requests"])
+
+    def test_ha_prefill_balance_uses_successful_requests_and_known_pool(self):
+        rows = self.ctx.register_resource("ha_rows", [
+            {"status": "ok", "prefill": "P0"},
+            {"status": "ok", "prefill": "P1"},
+            {"status": "schedule_error", "prefill": None},
+        ])
+        params = dict(rows=rows, metric="prefill_max_share", op="le",
+                      expected=0.75, min_samples=3)
+        with patch("scenario.actions.master_observation._pools",
+                   return_value={"prefill": ["P0", "P1"]}):
+            result = master._client_check(self.ctx, params, self.deadline)
+        self.assertEqual("PASS", result.checks[0].status)
+        self.assertEqual(0.5, result.output["actual"])
+        with patch("scenario.actions.master_observation._pools",
+                   return_value={"prefill": ["P1", "P2"]}), self.assertRaisesRegex(
+                       ValueError, "known Prefill"):
+            master._client_check(self.ctx, params, self.deadline)
 
     def test_short_hang_empty_send_window_still_requires_real_recovery_burst(self):
         self.manager.master_instance_target.return_value = "B:18085"

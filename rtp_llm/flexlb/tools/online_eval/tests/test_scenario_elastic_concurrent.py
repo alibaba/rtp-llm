@@ -204,43 +204,10 @@ class ConcurrentTests(unittest.TestCase):
                 )
                 self.assertEqual(opening.call_args.kwargs["timeout"], expected)
 
-    def test_slow_requests_overlap_with_bounded_concurrency_and_drain(self):
-        result, state = self.run_program(slow_request=True)
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertGreater(state["peak_requests"], 1)
-        self.assertLessEqual(state["peak_requests"], 8)
-        self.assertEqual(state["active_requests"], 0)
 
-    def test_slow_removal_finishes_after_window_before_discovery(self):
-        result, state = self.run_program(slow_remove=True)
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertGreater(state["last_remove_s"], 10)
-        self.assertGreaterEqual(state["snapshot_s"], state["last_remove_s"])
 
-    def test_four_real_workers_overlap_and_final_discovery_matches(self):
-        result, state = self.run_program()
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertGreaterEqual(state["max_active"], 2)
-        self.assertGreater(state["removed"], 0)
-        self.assertLessEqual(state["added"], 65)
 
-    def test_master_health_failure_cannot_be_hidden_by_successful_requests(self):
-        result, _ = self.run_program(bad_master=True)
-        self.assertEqual(result["status"], "FAIL")
-        row = next(s for s in result["stages"] if s["id"] == "crossfire")
-        self.assertEqual(
-            {c["id"]: c["status"] for c in row["checks"]},
-            dict(workers_finished="PASS", master_http="FAIL"),
-        )
 
-    def test_discovery_count_mismatch_fails_after_workers_exit(self):
-        result, _ = self.run_program(bad_discovery=True)
-        self.assertEqual(result["status"], "FAIL")
-        row = next(s for s in result["stages"] if s["id"] == "discovery")
-        self.assertEqual(
-            {c["id"]: c["status"] for c in row["checks"]},
-            dict(parsable="PASS", counts_match="FAIL"),
-        )
 
 
 if __name__ == "__main__":

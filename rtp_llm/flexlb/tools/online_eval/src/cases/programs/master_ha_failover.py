@@ -1,116 +1,65 @@
-"""Actual dual standalone masters: sticky A to B through same-request failover, with per-request route evidence."""
+"""One continuous real-trace replay across the complete dual-master failure cycle."""
 
 from cases.config import output
 
 
-def standalone_a_to_b(case):
-    case.step(
-        "setup", "setup", timeout_s=case.value("standalone_a_to_b.setup_timeout_s")
-    )
-    case.step(
-        "flow", "master_client_start", params=case.value("standalone_a_to_b.flow")
-    )
-    case.step(
-        "lookback", "master_mark", params=case.value("standalone_a_to_b.lookback")
-    )
-    case.step(
-        "kill_time", "master_mark", params=case.value("standalone_a_to_b.kill_time")
-    )
-    case.step("kill_a", "master_fault", params=case.value("standalone_a_to_b.kill_a"))
-    case.step(
-        "switched", "master_mark", params=case.value("standalone_a_to_b.switched")
-    )
-    case.step("b_ready", "master_ready", params=case.value("standalone_a_to_b.b_ready"))
-    case.step(
-        "finish",
-        "master_client_finish",
-        timeout_s=case.value("standalone_a_to_b.finish_timeout_s"),
-        params={"client": output("flow", "client")},
-    )
-    case.step(
-        "steady",
-        "master_client_window",
-        params=case.params(
-            "standalone_a_to_b.steady",
-            {
-                "rows": output("finish", "rows"),
-                "until": output("kill_time", "epoch_s"),
-            },
-        ),
-    )
-    case.step(
-        "switch",
-        "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("kill_time", "epoch_s"),
-            "until": output("switched", "epoch_s"),
-        },
-    )
-    case.step(
-        "straddle",
-        "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("lookback", "epoch_s"),
-            "until": output("switched", "epoch_s"),
-        },
-    )
-    case.step(
-        "after",
-        "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("switched", "epoch_s"),
-        },
-    )
-    case.observe(
-        "steady_a",
-        "master_client_check",
-        params=case.params(
-            "standalone_a_to_b.steady_a", {"rows": output("steady", "rows")}
-        ),
-    )
-    case.observe(
-        "failover_seen",
-        "master_client_check",
-        params=case.params(
-            "standalone_a_to_b.failover_seen", {"rows": output("straddle", "rows")}
-        ),
-    )
-    case.observe(
-        "switch_to_b",
-        "master_client_check",
-        params=case.params(
-            "standalone_a_to_b.switch_to_b", {"rows": output("switch", "rows")}
-        ),
-    )
-    case.observe(
-        "switch_errors",
-        "master_client_check",
-        params=case.params(
-            "standalone_a_to_b.switch_errors", {"rows": output("switch", "rows")}
-        ),
-    )
-    case.observe(
-        "after_b",
-        "master_client_check",
-        params=case.params(
-            "standalone_a_to_b.after_b", {"rows": output("after", "rows")}
-        ),
-    )
-    case.observe(
-        "after_success",
-        "master_client_check",
-        params=case.params(
-            "standalone_a_to_b.after_success", {"rows": output("after", "rows")}
-        ),
-    )
-    case.observe(
-        "unique_requests",
-        "master_client_check",
-        params=case.params(
-            "standalone_a_to_b.unique_requests", {"rows": output("finish", "rows")}
-        ),
-    )
+def dual_master_cycle(case):
+    root = "dual_master_cycle"
+    case.step("setup", "setup", timeout_s=case.value(f"{root}.setup_timeout_s"))
+    case.step("flow", "master_client_start", params=case.value(f"{root}.flow"))
+
+    # The producer keeps running while A and B are killed and restarted in order.
+    case.step("baseline_end", "master_mark", params=case.value(f"{root}.baseline_wait"))
+    case.step("kill_a", "master_fault", params=case.value(f"{root}.kill_a"))
+    case.step("b_ready", "master_ready", params=case.value(f"{root}.b_ready"))
+    case.step("b_start", "master_mark", params=case.value(f"{root}.settle"))
+    case.step("b_end", "master_mark", params=case.value(f"{root}.survivor_wait"))
+    case.step("kill_b", "master_fault", params=case.value(f"{root}.kill_b"))
+    case.step("outage_start", "master_mark", params=case.value(f"{root}.settle"))
+    case.step("outage_end", "master_mark", params=case.value(f"{root}.outage_wait"))
+    case.step("restart_a", "master_restore", timeout_s=case.value(f"{root}.restart_timeout_s"),
+              params={"fault": output("kill_a", "fault")})
+    case.step("a_ready", "master_ready", params=case.value(f"{root}.a_ready"))
+    case.step("a_start", "master_mark", params=case.value(f"{root}.settle"))
+    case.step("a_end", "master_mark", params=case.value(f"{root}.survivor_wait"))
+    case.step("restart_b", "master_restore", timeout_s=case.value(f"{root}.restart_timeout_s"),
+              params={"fault": output("kill_b", "fault")})
+    case.step("a_ready_final", "master_ready", params=case.value(f"{root}.a_ready"))
+    case.step("b_ready_final", "master_ready", params=case.value(f"{root}.b_ready"))
+    case.step("both_start", "master_mark", params=case.value(f"{root}.settle"))
+    case.step("both_end", "master_mark", params=case.value(f"{root}.both_wait"))
+    case.step("finish", "master_client_finish", timeout_s=case.value(f"{root}.finish_timeout_s"),
+              params={"client": output("flow", "client")})
+
+    windows = {
+        "baseline": {"until": output("baseline_end", "epoch_s"), "until_offset_s": -2},
+        "b_only": {"from": output("b_start", "epoch_s"), "until": output("b_end", "epoch_s")},
+        "outage": {"from": output("outage_start", "epoch_s"), "until": output("outage_end", "epoch_s")},
+        "a_only": {"from": output("a_start", "epoch_s"), "until": output("a_end", "epoch_s")},
+        "both": {"from": output("both_start", "epoch_s"), "until": output("both_end", "epoch_s")},
+    }
+    for name, boundaries in windows.items():
+        case.step(name, "master_client_window", params={"rows": output("finish", "rows"), **boundaries})
+
+    checks = {
+        "baseline_success": "baseline",
+        "b_success": "b_only",
+        "b_route": "b_only",
+        "b_balance": "b_only",
+        "outage_failures": "outage",
+        "outage_no_master": "outage",
+        "outage_terminal": "outage",
+        "a_success": "a_only",
+        "a_route": "a_only",
+        "a_balance": "a_only",
+        "both_success": "both",
+        "both_balance": "both",
+    }
+    for name, window in checks.items():
+        case.observe(name, "master_client_check", params=case.params(
+            f"{root}.checks.{name}", {"rows": output(window, "rows")}))
+    case.observe("unique_requests", "master_client_check", params=case.params(
+        f"{root}.checks.unique_requests", {"rows": output("finish", "rows")}))
+    case.step("clean_a", "master_inflight_clean", params={"target": "A"})
+    case.step("clean_b", "master_inflight_clean", params={"target": "B"})
     case.step("cleanup", "teardown")

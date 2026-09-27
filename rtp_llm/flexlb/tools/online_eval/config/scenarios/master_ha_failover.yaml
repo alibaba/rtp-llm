@@ -1,4 +1,3 @@
-# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: master_ha_failover
 profiles:
@@ -8,78 +7,70 @@ environment:
   n_prefill: 2
   n_decode: 4
   master_layout: dual_standalone
+  discovery: discovery_file
+  perf_preset: glm_5_3_l20d
+  model_override:
+    baseline: glm_5_3_l20d
+    reason: 将真实配置与输入流量缩到 2P4D，以隔离双 Master 故障恢复和负载分布
 execution:
-  timeout_s: 480
+  timeout_s: 600
   stage_timeout_s: 60
   cleanup_timeout_s: 120
 variants:
-- id: standalone_a_to_b
-  program: standalone_a_to_b
+- id: dual_master_cycle
+  program: dual_master_cycle
 metadata:
-  description: 'Actual dual standalone masters: sticky A to B through same-request failover, with per-request
-    route evidence.'
+  description: One real frontend prefix-lineage replay across A kill, B kill, A restart and B restart.
   category: master
 parameters:
-  standalone_a_to_b:
+  dual_master_cycle:
     setup_timeout_s: 180
     flow:
-      targets:
-      - A
-      - B
-      duration_s: 60
-    lookback:
-      wait_s: 2
-    kill_time:
-      wait_s: 10
-    kill_a:
-      mode: kill
-      target: A
-    switched:
-      wait_s: 10
-    b_ready:
-      target: B
-      inflight_zero: false
-    finish_timeout_s: 90
-    steady:
-      until_offset_s: -1
-    steady_a:
-      metric: target_share
-      op: eq
-      expected: 1
-      target: A
-      min_samples: 10
-    failover_seen:
-      metric: failover_count
-      op: ge
-      expected: 1
-    switch_to_b:
-      metric: target_count
-      op: ge
-      expected: 1
-      target: B
-    switch_errors:
-      metric: failed_rate_above_one
-      op: le
-      expected: 0.05
-    after_b:
-      metric: target_share
-      op: ge
-      expected: 0.95
-      target: B
-      min_samples: 20
-    after_success:
-      metric: success_rate
-      op: ge
-      expected: 0.9
-      min_samples: 20
-    unique_requests:
-      metric: duplicate_ids
-      op: eq
-      expected: 0
-
+      targets: [A, B]
+      duration_s: 150
+      timeout_ms: 3000
+      replay_speed: 0.2
+      max_concurrency: 128
+      max_requests: 2000
+      fallback: false
+      source:
+        kind: trace
+        model: prefix_lineage
+        version: '2'
+        parameters:
+          path: ../../data/traffic_trace/glm-5.3_20260921_1400_15m.xz
+          sha256: ac2f8aad472e882de2c649f5e0507d76787655a66d53e0e7285bdcb8aae87cca
+          count: 141113
+          output_tokens: 16
+          priority: 50
+    baseline_wait: {wait_s: 12}
+    settle: {wait_s: 3}
+    survivor_wait: {wait_s: 18}
+    outage_wait: {wait_s: 12}
+    both_wait: {wait_s: 15}
+    kill_a: {mode: kill, target: A}
+    kill_b: {mode: kill, target: B}
+    b_ready: {target: B, inflight_zero: false}
+    a_ready: {target: A, inflight_zero: false}
+    restart_timeout_s: 180
+    finish_timeout_s: 180
+    checks:
+      baseline_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 15}
+      b_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 15}
+      b_route: {metric: target_share, target: B, op: ge, expected: 0.95, min_samples: 15}
+      b_balance: {metric: prefill_max_share, op: le, expected: 0.9, min_samples: 15}
+      outage_failures: {metric: failed_count, op: ge, expected: 1, min_samples: 10}
+      outage_no_master: {metric: route_count, route: master, op: eq, expected: 0, min_samples: 10}
+      outage_terminal: {metric: visible_terminal_share, op: eq, expected: 1, min_samples: 10}
+      a_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 15}
+      a_route: {metric: target_share, target: A, op: ge, expected: 0.95, min_samples: 15}
+      a_balance: {metric: prefill_max_share, op: le, expected: 0.9, min_samples: 15}
+      both_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 15}
+      both_balance: {metric: prefill_max_share, op: le, expected: 0.9, min_samples: 15}
+      unique_requests: {metric: duplicate_ids, op: eq, expected: 0, min_samples: 1}
 test:
   kind: workload
-  description: Multi-window load, topology or recovery lifecycle
+  description: Continuous request outcomes, owner state and Prefill distribution during a full dual-master cycle
   collection: request
 reports:
 - workload.yaml
