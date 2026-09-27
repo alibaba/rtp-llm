@@ -180,7 +180,7 @@ class PreemptionPhasesE2ETest {
                 AutoTpmE2EHarness.await(() -> {
                     AutoTpmE2EHarness.workerStatus(prefillEngine, 0L).getFinishedTaskListList().stream()
                             // Prefill may also retain the earlier successful P-to-D handoff.
-                            .filter(task -> task.getRequestId() == 301L && task.hasErrorInfo())
+                            .filter(task -> task.getRequestId().equals("301") && task.hasErrorInfo())
                             .findFirst().ifPresent(engineTerminal::set);
                     return engineTerminal.get() != null;
                 }, 2_000L, "Mock Engine must publish the authoritative victim terminal");

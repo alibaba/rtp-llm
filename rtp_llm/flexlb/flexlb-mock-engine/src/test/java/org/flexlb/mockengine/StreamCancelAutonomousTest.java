@@ -468,11 +468,10 @@ class StreamCancelAutonomousTest {
     }
 
     /** Typed CANCELLED terminals for {@code rid} visible in the next WorkerStatus poll. */
-    private static long countCancelTerminals(JavaMockEngineCluster.FastRpcService service,
-                                             long rid) {
+    private static long countCancelTerminals(JavaMockEngineCluster.FastRpcService service, long rid) {
         return MockEngineTestSupport.workerStatus(service, 0)
                 .getFinishedTaskListList().stream()
-                .filter(task -> task.getRequestId() == rid)
+                .filter(task -> task.getRequestId().equals(Long.toString(rid)))
                 .filter(task -> task.hasErrorInfo()
                         && task.getErrorInfo().getErrorCode()
                                 == EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
