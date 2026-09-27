@@ -22,10 +22,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * frontend's vipserver discovery layer): the client holds a static list of
  * flexlb gRPC addresses ({@code GRPC_TARGETS=A,B}), sticks to one "current"
  * target, and only reacts to <b>transport-layer</b> failures. The production
- * pull-mode equivalent — polling {@code master/info} every second for
- * {@code real_master_host} — is not implemented; the two are semantically
- * equivalent for the master-side HA contract because a request that lands on
- * the backup is forwarded by it (hop=1) and stays transparent to the client.
+ * frontend instead polls {@code master/info} every second for
+ * {@code real_master_host}. The mock HA harness runs two independent masters
+ * with consistency disabled, so this router exercises client-side transport
+ * failover, not master election or follower forwarding.
  *
  * <p>Per-request decision flow (brief p1 decision tree — event ① "A
  * unreachable" is decoupled from event ② "B became master"; the client never

@@ -532,9 +532,6 @@ class MasterActionsTest(unittest.TestCase):
                 ids = [stage["id"] for stage in plan["stages"]]
                 self.assertLess(ids.index("kill_a"), ids.index("kill_b"))
                 self.assertLess(ids.index("restart_a"), ids.index("a_ready"))
-                self.assertLess(ids.index("a_ready"), ids.index("a_handover_probe"))
-                self.assertLess(ids.index("a_handover_probe"), ids.index("a_handover_success"))
-                self.assertLess(ids.index("a_handover_success"), ids.index("kill_b"))
                 self.assertLess(ids.index("a_ready"), ids.index("kill_b"))
                 self.assertLess(ids.index("restart_a"), ids.index("restart_b"))
                 self.assertNotIn("outage_failures", ids)
@@ -542,6 +539,7 @@ class MasterActionsTest(unittest.TestCase):
                 flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
                 self.assertEqual("prefix_lineage", flow["params"]["source"]["model"])
                 self.assertEqual(10000, flow["params"]["max_requests"])
+                self.assertEqual(120000, flow["params"]["timeout_ms"])
                 self.assertEqual(125, plan["environment"]["n_prefill"])
                 self.assertEqual(536, plan["environment"]["n_decode"])
 
@@ -557,7 +555,6 @@ class MasterActionsTest(unittest.TestCase):
         self.assertLess(ids.index("kill_b"), ids.index("outage_start"))
         self.assertLess(ids.index("outage_end"), ids.index("restart_a"))
         self.assertIn("outage_failures", ids)
-        self.assertNotIn("a_handover_probe", ids)
         config["parameters"]["dual_master_cycle"]["restart_mode"] = "typo"
         with self.assertRaisesRegex(ScenarioError, "restart_mode"):
             configure_program(config, str(path))

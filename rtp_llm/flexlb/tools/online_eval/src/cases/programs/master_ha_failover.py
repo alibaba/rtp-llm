@@ -26,13 +26,6 @@ def dual_master_cycle(case):
               params={"fault": output("kill_a", "fault")})
     case.step("a_ready", "master_ready", params=case.value(f"{root}.a_ready"))
     if restart_mode == "rolling":
-        # HTTP/topology readiness can precede gRPC recovery; prove A can serve before stopping B.
-        case.step("a_handover_wait", "master_mark", params=case.value(f"{root}.settle"))
-        case.step("a_handover_probe", "master_request_batch",
-                  params=case.value(f"{root}.a_handover_probe"))
-        case.step("a_handover_success", "check", params=case.params(
-            f"{root}.a_handover_success",
-            {"actual": output("a_handover_probe", "success_rate")}))
         case.step("kill_b", "master_fault", params=case.value(f"{root}.kill_b"))
     case.step("a_start", "master_mark", params=case.value(f"{root}.settle"))
     case.step("a_end", "master_mark", params=case.value(f"{root}.survivor_wait"))

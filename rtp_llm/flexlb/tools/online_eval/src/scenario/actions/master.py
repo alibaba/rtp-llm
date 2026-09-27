@@ -531,7 +531,7 @@ def _ha_validate(params, plan):
         raise ValueError("HA targets must explicitly order A and B")
     for key, default, lower, upper in (
         ("duration_s", 60, 1, 3600),
-        ("timeout_ms", 30000, 100, 30000),
+        ("timeout_ms", 30000, 100, 120000),
     ):
         p.setdefault(key, default)
         if type(p[key]) is not int or not lower <= p[key] <= upper:

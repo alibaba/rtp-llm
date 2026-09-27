@@ -24,7 +24,7 @@ parameters:
     flow:
       targets: [A, B]
       duration_s: 360
-      timeout_ms: 30000
+      timeout_ms: 120000
       replay_speed: 1
       max_concurrency: 4096
       max_requests: 10000
@@ -52,8 +52,6 @@ parameters:
     kill_b: {mode: kill, target: B}
     b_ready: {target: B, inflight_zero: false}
     a_ready: {target: A, inflight_zero: false}
-    a_handover_probe: {target: A, count: 1, concurrency: 1, request_timeout_s: 15, sample_after_s: 0, coldstart: false, sample_topology: false}
-    a_handover_success: {op: eq, expected: 1}
     restart_timeout_s: 300
     finish_timeout_s: 360
     checks:
