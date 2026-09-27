@@ -71,9 +71,10 @@ private:
 };
 
 struct GroupSpec {
-    std::string tag;
-    size_t      tokens_per_block;
-    size_t      stride_bytes;
+    std::string    tag;
+    size_t         tokens_per_block;
+    size_t         stride_bytes;
+    CacheGroupType group_type{CacheGroupType::FULL};
 };
 
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
@@ -97,7 +98,7 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         GroupBase group;
         group.tag    = spec.tag;
         group.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
-        group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.policy = defaultCacheGroupPolicy(spec.group_type);
         group.policy.explicit_block_num = kPhysicalBlocks;
         group.layer_ids                 = {kLayerId};
         group.block_num                 = kPhysicalBlocks;
@@ -411,6 +412,31 @@ Scenario makeContextParallelScenario() {
     return scenario;
 }
 
+Scenario makeTaggedContextParallelScenario(int cp_size) {
+    // The primary group is SWA; Python consumes copies in the tag map. The
+    // physical IDs intentionally differ across groups, including retired slots.
+    auto     config = makeCacheConfig({{"swa_kv", 2, 24, CacheGroupType::SWA},
+                                       {"csa_kv", 2, 16, CacheGroupType::FULL},
+                                       {"hca_state", 2, 32, CacheGroupType::SWA}});
+    auto     layout = makeLayout(config);
+    auto     inputs = makeInputs(/*input_lengths=*/{6},
+                             /*request_ids=*/{501},
+                             /*cache_keys=*/{5101, 5102, 5103},
+                             /*cache_keys_width=*/3,
+                             /*block_ids=*/{-1, 6, 7, 1, 2, 3, -1, 4, 5},
+                             /*group_count=*/3,
+                             /*block_table_width=*/3,
+                             /*global_tokens_per_block=*/2,
+                             /*global_stride_bytes=*/32);
+    Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+    scenario.parallelism.tp_size                            = cp_size;
+    scenario.parallelism.tp_rank                            = cp_size - 1;
+    scenario.parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    scenario.parallelism.prefill_cp_config.kv_cache_sharded = false;
+    scenario.replace_cp_processor                           = true;
+    return scenario;
+}
+
 Scenario makeMtpScenario() {
     auto main_config  = makeCacheConfig({{"main", 4, 16}});
     auto draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
@@ -441,6 +467,12 @@ Scenario makeScenario(const std::string& name) {
     }
     if (name == "cp_actual_lengths") {
         return makeContextParallelScenario();
+    }
+    if (name == "cp2_tagged_actual_lengths") {
+        return makeTaggedContextParallelScenario(2);
+    }
+    if (name == "cp4_tagged_actual_lengths") {
+        return makeTaggedContextParallelScenario(4);
     }
     if (name == "mtp_sub_config") {
         return makeMtpScenario();
@@ -548,6 +580,14 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
+    // Production deliberately keeps these fields opaque to Python. Inspect
+    // them here without extending the public binding just for a regression.
+    m.def("cache_store_inputs_snapshot", [](const torch_ext::PyCacheStoreInputs& inputs) {
+        py::dict result;
+        result["lengths"] = inputs.input_lengths_host.clone();
+        result["blocks"]  = inputs.host_kv_cache_offset.clone();
+        return result;
+    });
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),

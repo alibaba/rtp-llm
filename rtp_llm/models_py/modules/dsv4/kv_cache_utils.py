@@ -120,9 +120,11 @@ def primary_attention_inputs(
     (``PyWrappedModel::setupKVCacheForAttentionInputs`` clones it per group and
     only overwrites the block-table fields), so any entry is a valid source for
     ``cu_seqlens`` / ``input_lengths`` / ``sequence_lengths`` /
-    ``prefix_lengths`` / ``cache_store_inputs`` / ``context_parallel_info``.
-    Only block tables are group-local — read those through
-    :func:`build_block_tables` / :func:`build_block_tables_batched`.
+    ``prefix_lengths`` / ``context_parallel_info``.
+    Block tables and ``cache_store_inputs.host_kv_cache_offset`` are group-local.
+    Read attention tables through :func:`build_block_tables` /
+    :func:`build_block_tables_batched`, and construct cache-store writers from
+    each tag's own attention inputs rather than this primary entry.
     """
     if attention_inputs is None:
         return None

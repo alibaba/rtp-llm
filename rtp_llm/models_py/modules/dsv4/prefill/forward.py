@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -113,6 +114,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     clear_prefill_meta_shared_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    as_attention_inputs_by_tag,
     build_block_tables_batched,
     primary_attention_inputs,
 )
@@ -316,6 +318,7 @@ def forward_layers(
     block_tables_by_type: Optional[Dict[str, torch.Tensor]],
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
+    attn_inputs_by_tag: Optional[Dict[str, PyAttentionInputs]] = None,
 ) -> torch.Tensor:
     """Run stage-local layers over flat tokens with per-request cu_seqlens.
 
@@ -419,13 +422,47 @@ def forward_layers(
         if _rt._get_buf() is None:
             _rt_on = False
 
-    # Build the per-layer cache_store writer once per forward. Active
-    # only on prefill calls with cache_store_inputs bound; otherwise
-    # ``write_cache_store_impl`` is None and the per-layer call site is
-    # a cheap None check.
+    # Each cache-store writer must retain its tag's physical block table.
+    # The primary attention inputs are suitable only for a single-group cache.
     write_cache_store_impl = None
+    writers_by_tag: Optional[Dict[str, Any]] = None
     if kv_cache is not None and attn_inputs is not None:
-        write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
+        if attn_inputs_by_tag is not None:
+            writers_by_tag = {}
+            for tag, tag_inputs in attn_inputs_by_tag.items():
+                writer = create_write_cache_store_impl(tag_inputs, kv_cache)
+                if writer is not None:
+                    writers_by_tag[tag] = writer
+            if (
+                not writers_by_tag
+                and attn_inputs.is_prefill
+                and getattr(attn_inputs, "cache_store_inputs", None) is not None
+                and getattr(attn_inputs, "cache_store_writer", None) is not None
+            ):
+                raise RuntimeError(
+                    "DSV4 prefill cache-store: active primary inputs have no tagged writers"
+                )
+            if writers_by_tag:
+                missing_tags = set(getattr(kv_cache, "group_tags", ())) - set(
+                    writers_by_tag
+                )
+                if missing_tags:
+                    raise RuntimeError(
+                        "DSV4 prefill cache-store: no writer for cache tags "
+                        f"{sorted(missing_tags)}"
+                    )
+        else:
+            write_cache_store_impl = create_write_cache_store_impl(
+                attn_inputs, kv_cache
+            )
+            if (
+                write_cache_store_impl is not None
+                and len(getattr(kv_cache, "group_tags", ())) > 1
+            ):
+                raise RuntimeError(
+                    "DSV4 prefill cache-store: tagged attention inputs are required "
+                    "for a multi-group cache"
+                )
 
     if prepare_hidden_fn is None:
         h = v4.embed_full(input_ids)  # [T_total, dim]
@@ -600,9 +637,21 @@ def forward_layers(
                         v4.capture_aux_hidden(global_layer_id, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
-                if write_cache_store_impl is not None:
+                if writers_by_tag:
                     # Cache surfaces stay LOCAL on purpose: the C++ layout is
                     # projected to this stage and numbered 0..len(layers)-1.
+                    for layer_kv in kv_cache.get_layer_cache_groups(layer_idx):
+                        tag = getattr(layer_kv, "tag", None)
+                        writer = writers_by_tag.get(tag)
+                        if writer is None:
+                            raise RuntimeError(
+                                "DSV4 prefill cache-store: no writer for group "
+                                f"tag {tag!r} (layer {layer_idx}); every active "
+                                "cache group must publish from its own block table"
+                            )
+                        writer(layer_kv)
+                elif write_cache_store_impl is not None:
+                    # Single-group callers retain the original writer contract.
                     write_cache_store_impl(kv_cache.get_layer_cache_groups(layer_idx))
                 if _rt_on:
                     _rt.record(f"layer{layer_idx:02d}_out", h)
@@ -794,6 +843,13 @@ def forward_prefill(
     attn = primary_attention_inputs(attn_inputs, kv_cache)
     if attn is None:
         raise RuntimeError("DSV4 prefill: PyModelInputs carries no attention inputs")
+    # Preserve even a one-entry map: it must not serve as a fallback for other
+    # cache groups if an active PD caller supplies an incomplete mapping.
+    attn_inputs_by_tag = (
+        as_attention_inputs_by_tag(attn_inputs, kv_cache)
+        if isinstance(attn_inputs, Mapping)
+        else None
+    )
 
     # Context-Parallel setup must precede the per-layer loop because
     # forward_layers reads v4._cp_info to build the CP context.
@@ -881,6 +937,7 @@ def forward_prefill(
         block_tables_by_type,
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
+        attn_inputs_by_tag=attn_inputs_by_tag,
     )  # [T_total, dim], or [T_total, hc, dim] on a non-last PP stage
     outputs = PyModelOutputs(hidden)
     if v4.norm is None:

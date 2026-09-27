@@ -456,6 +456,12 @@ py_test(
 )
 
 py_test(
+    name = "test_pd_transfer_geometry",
+    srcs = ["test_pd_transfer_geometry.py"],
+    data = ["//rtp_llm:dsv4_kv_cache_source"],
+)
+
+py_test(
     name = "test_prefill_scale_cpu",
     srcs = ["test_prefill_scale_cpu.py", "test_prefill_integration_policy.py"],
     main = "test_prefill_scale_cpu.py",

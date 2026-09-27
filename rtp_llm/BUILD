@@ -362,6 +362,16 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Source artifact for the PD transfer-geometry fixture: the test reads the
+# DSv4 spec constants from the real module via AST so the contract cannot
+# drift from product values (//rtp_llm/models_py/modules/dsv4/test:
+# test_pd_transfer_geometry).
+filegroup(
+    name = "dsv4_kv_cache_source",
+    srcs = ["models/dsv4_kv_cache.py"],
+    visibility = ["//visibility:public"],
+)
+
 # The canonical, runnable settings of every release profile are packaged as data (see
 # //rtp_llm/config/release_profiles): a runfiles-only deployment must ship the settings artifact it
 # validated against, or `profile_json_path()` resolves beside the module to a file that is not there.

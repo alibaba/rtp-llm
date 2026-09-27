@@ -139,6 +139,11 @@ class _FakeV4:
     def _propagate_cp_ctx(self, cp_ctx) -> None:
         self.events.append(("propagate_cp", cp_ctx))
 
+    def set_cp_info(self, cp_info, cp_size, cp_rank, **kwargs) -> None:
+        self._cp_info = cp_info
+        self._cp_size = cp_size
+        self._cp_rank = cp_rank
+
     def embed(self, input_ids):
         base = input_ids.to(torch.float32).unsqueeze(-1)
         return base.repeat(1, 4)
@@ -273,6 +278,174 @@ class CacheStoreCPMetadataTest(unittest.TestCase):
         self.assertIs(writer.prefix_lengths, prefix_host)
         self.assertIs(writer.kv_cache_block_id_host, block_ids)
         self.assertIs(writer.cache_store_inputs, cache_store_inputs)
+
+
+class _RecordingWriter:
+    def __init__(self, events):
+        self.events = events
+
+    def write(self, params, layer_cache):
+        self.events.append(
+            ("native_write", layer_cache.layer_id, layer_cache.tag, params)
+        )
+
+
+class _TaggedKVCache:
+    def __init__(self, tags, events):
+        self.group_tags = list(tags)
+        self.events = events
+
+    def get_layer_cache_groups(self, layer_idx):
+        self.events.append(("get_cache", layer_idx))
+        return [SimpleNamespace(tag=tag, layer_id=layer_idx) for tag in self.group_tags]
+
+
+class TaggedCacheStoreForwardTest(unittest.TestCase):
+    """Exercise the real caller, layer loop, factory and writer dispatch.
+
+    Attention arithmetic and the native receiver are test doubles; routing
+    itself is not mocked. Native CP preparation and physical-address checks
+    live in pywrapped_model_cache_store_integration_test.
+    """
+
+    TAGS = (
+        "swa_kv",
+        "hca_state",
+        "indexer_state",
+        "csa_state",
+        "hca_kv",
+        "indexer_kv",
+        "csa_kv",
+    )
+
+    def _inputs(self, events, tags=None, active=True):
+        result = {}
+        writer = _RecordingWriter(events)
+        for i, tag in enumerate(self.TAGS if tags is None else tags):
+            table = torch.tensor([[10 * i + 1, -1, 10 * i + 3]], dtype=torch.int32)
+            params = SimpleNamespace(
+                input_lengths_host=torch.tensor([4], dtype=torch.int32),
+                prefix_lengths_host=torch.tensor([0], dtype=torch.int32),
+                host_kv_cache_offset=table,
+            )
+            result[tag] = SimpleNamespace(
+                is_prefill=True,
+                input_lengths=torch.tensor([4], dtype=torch.int32),
+                prefix_lengths=torch.tensor([0], dtype=torch.int32),
+                cu_seqlens=torch.tensor([0, 4], dtype=torch.int32),
+                combo_position_ids=torch.arange(4, dtype=torch.long),
+                kv_cache_block_id=table,
+                kv_cache_kernel_block_id_device=table,
+                cache_store_inputs=params if active else None,
+                cache_store_writer=writer if active else None,
+            )
+        return result
+
+    def _run(self, attention_inputs, kv_cache, events, direct=False):
+        v4 = _FakeV4([0, 4, 128], events)
+        workspace_cls = prefill_forward.PrefillWorkspace
+
+        def small_workspace(device, **kwargs):
+            return workspace_cls(device, align_bytes=1, **kwargs)
+
+        with patch.object(prefill_forward, "PrefillWorkspace", small_workspace):
+            if direct:
+                out = prefill_forward.forward_layers(
+                    v4,
+                    kv_cache,
+                    torch.arange(4),
+                    torch.arange(4),
+                    torch.tensor([0, 4], dtype=torch.int32),
+                    {},
+                    attn_inputs=attention_inputs,
+                )
+                self.assertEqual(tuple(out.shape), (4, 4))
+            else:
+                model_inputs = SimpleNamespace(
+                    attention_inputs=attention_inputs,
+                    input_ids=torch.arange(4),
+                    pp_intermediates={},
+                )
+                prefill_forward.forward_prefill(v4, kv_cache, None, model_inputs)
+
+    def test_actual_forward_routes_all_groups_to_their_own_metadata(self):
+        events = []
+        by_tag = self._inputs(events)
+        kv_cache = _TaggedKVCache(self.TAGS, events)
+        self._run(by_tag, kv_cache, events)
+
+        writes = [event for event in events if event[0] == "native_write"]
+        self.assertEqual(len(writes), 3 * len(self.TAGS))
+        for _, layer_id, tag, params in writes:
+            self.assertIn(layer_id, (0, 1, 2))
+            self.assertIs(params, by_tag[tag].cache_store_inputs)
+            self.assertIs(params.host_kv_cache_offset, by_tag[tag].kv_cache_block_id)
+
+        # Both the tag and the stage-local layer number survive dispatch, and
+        # publication follows the producing layer (not the next layer).
+        flow = [event[:3] for event in events if event[0] in ("layer", "native_write")]
+        expected = []
+        for layer_id, ratio in enumerate((0, 4, 128)):
+            expected.append(("layer", layer_id, ratio))
+            expected.extend(("native_write", layer_id, tag) for tag in self.TAGS)
+        self.assertEqual(flow, expected)
+
+    def test_mapping_order_does_not_change_metadata_selection(self):
+        for tags in (self.TAGS, tuple(reversed(self.TAGS))):
+            with self.subTest(tags=tags):
+                events = []
+                by_tag = self._inputs(events, tags=tags)
+                self._run(by_tag, _TaggedKVCache(self.TAGS, events), events)
+                for event in events:
+                    if event[0] == "native_write":
+                        self.assertIs(event[3], by_tag[event[2]].cache_store_inputs)
+
+    def test_incomplete_one_entry_map_fails_before_any_publication(self):
+        events = []
+        by_tag = self._inputs(events, tags=("csa_kv",))
+        with self.assertRaisesRegex(RuntimeError, "no writer for cache tags"):
+            self._run(by_tag, _TaggedKVCache(self.TAGS, events), events)
+        self.assertFalse(any(event[0] == "native_write" for event in events))
+
+    def test_missing_writer_on_one_active_tag_is_not_silently_skipped(self):
+        events = []
+        by_tag = self._inputs(events)
+        by_tag["hca_state"].cache_store_writer = None
+        with self.assertRaisesRegex(RuntimeError, "hca_state"):
+            self._run(by_tag, _TaggedKVCache(self.TAGS, events), events)
+        self.assertFalse(any(event[0] == "native_write" for event in events))
+
+    def test_pd_off_keeps_forward_without_cache_store_work(self):
+        events = []
+        by_tag = self._inputs(events, active=False)
+        self._run(by_tag, _TaggedKVCache(self.TAGS, events), events)
+        self.assertEqual(sum(event[0] == "layer" for event in events), 3)
+        self.assertFalse(any(event[0] == "native_write" for event in events))
+
+    def test_single_group_object_and_map_are_supported(self):
+        for tagged in (False, True):
+            with self.subTest(tagged=tagged):
+                events = []
+                by_tag = self._inputs(events, tags=("default",))
+                inputs = by_tag if tagged else by_tag["default"]
+                self._run(inputs, _TaggedKVCache(["default"], events), events)
+                writes = [event for event in events if event[0] == "native_write"]
+                self.assertEqual(len(writes), 3)
+                self.assertTrue(
+                    all(
+                        event[3] is by_tag["default"].cache_store_inputs
+                        for event in writes
+                    )
+                )
+
+    def test_direct_multigroup_call_cannot_fall_back_to_primary_writer(self):
+        events = []
+        primary = self._inputs(events)["csa_kv"]
+        with self.assertRaisesRegex(
+            RuntimeError, "tagged attention inputs are required"
+        ):
+            self._run(primary, _TaggedKVCache(self.TAGS, events), events, direct=True)
+        self.assertFalse(any(event[0] == "native_write" for event in events))
 
 
 if __name__ == "__main__":

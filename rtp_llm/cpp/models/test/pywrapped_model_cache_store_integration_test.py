@@ -5,6 +5,7 @@ import torch
 from rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test import (
     PyModelInputs,
     PyModelOutputs,
+    cache_store_inputs_snapshot,
     run_scenario,
 )
 
@@ -17,6 +18,7 @@ class CacheStoreForwardModel:
         self.forward_calls = 0
         self.micro_batch_calls = 0
         self.seen_input_lengths: list[list[int]] = []
+        self.seen_cache_store_inputs: list[dict] = []
 
     def initialize(self, resources) -> bool:
         self.kv_cache = resources.kv_cache
@@ -45,6 +47,14 @@ class CacheStoreForwardModel:
                 tag_inputs.cache_store_inputs is not None
                 and tag_inputs.cache_store_writer is not None
             ):
+                params = cache_store_inputs_snapshot(tag_inputs.cache_store_inputs)
+                self.seen_cache_store_inputs.append(
+                    {
+                        "tag": layer_cache.tag,
+                        "lengths": params["lengths"].tolist(),
+                        "blocks": params["blocks"].tolist(),
+                    }
+                )
                 tag_inputs.cache_store_writer.write(
                     tag_inputs.cache_store_inputs, layer_cache
                 )
@@ -192,6 +202,44 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             all("model_id_7_" in block["key"] for block in record["blocks"])
         )
         self.assertTrue(all("_tag_draft" in block["key"] for block in record["blocks"]))
+
+    def test_cp2_cp4_restore_every_tag_without_replacing_physical_tables(self) -> None:
+        for cp_size, local_length in ((2, 4), (4, 2)):
+            with self.subTest(cp_size=cp_size):
+                model = CacheStoreForwardModel()
+                result = run_scenario(model, f"cp{cp_size}_tagged_actual_lengths")
+
+                self.assertEqual(model.seen_input_lengths, [[local_length]])
+                seen = {entry["tag"]: entry for entry in model.seen_cache_store_inputs}
+                tables = {
+                    "swa_kv": [[-1, 6, 7]],
+                    "csa_kv": [[1, 2, 3]],
+                    "hca_state": [[-1, 4, 5]],
+                }
+                self.assertEqual(set(seen), set(tables))
+                for tag, table in tables.items():
+                    self.assertEqual(seen[tag]["lengths"], [6], tag)
+                    self.assertEqual(seen[tag]["blocks"], table, tag)
+
+                # Actual async writer -> runtimeWriteCacheStore -> CacheStore
+                # records: all FULL pages, but only each state/window tail.
+                self.assertEqual(len(result["records"]), 3)
+                blocks = _blocks_by_key(result)
+                expected = {
+                    "swa_kv": (24, {5102: 6, 5103: 7}),
+                    "csa_kv": (16, {5101: 1, 5102: 2, 5103: 3}),
+                    "hca_state": (32, {5102: 4, 5103: 5}),
+                }
+                self.assertEqual(len(blocks), 7)
+                for tag, (stride, key_ids) in expected.items():
+                    for token_key, physical_id in key_ids.items():
+                        key = f"kv_model_id_0_token_id_str_{token_key}_layer_id_0_tag_{tag}"
+                        self.assertIn(key, blocks)
+                        self.assertEqual(blocks[key]["length"], stride)
+                        self.assertEqual(
+                            blocks[key]["address"] - result["base_addresses"][tag],
+                            physical_id * stride,
+                        )
 
 
 if __name__ == "__main__":
