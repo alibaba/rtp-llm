@@ -92,7 +92,7 @@ class QueuedDecodeWithdrawalTest {
     }
 
     @Test
-    void lateDecodeFinishedAfterAbsentStatusDrainsAcknowledgedRequest() {
+    void lateDecodeFinishedAfterEmptyWorkerReportDrainsAcknowledgedRequest() {
         decode.close();
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.DECODE, null,
                 "127.0.0.1", 8000, 8001, null);
