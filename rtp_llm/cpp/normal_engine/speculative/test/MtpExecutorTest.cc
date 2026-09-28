@@ -2254,6 +2254,10 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.10f})
             .reshape({(int64_t)(propose_step + 1), 2});
+    target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+    // Replay returns the current features above even if the model's Python
+    // attribute still refers to rows from graph capture.
+    components.fake_target_model->setMtpTargetHiddenStates(torch::full_like(target_output.all_hidden_states, -1));
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
 
