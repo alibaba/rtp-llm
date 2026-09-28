@@ -1,0 +1,131 @@
+{
+  "passed": true,
+  "checked": 11,
+  "runner_cases": 11,
+  "semantic_answer_claim": false,
+  "replacement_characters_observed": 0,
+  "errors": [],
+  "cases": [
+    {
+      "name": "chunkwise_rdma_flow_miss",
+      "file": "0001-d154e083ef42.json",
+      "passed": true,
+      "elapsed_s": 71.182,
+      "input_len": 65537,
+      "output_len": 16,
+      "decode_handoff_len": 65536,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_hit_owner_0",
+      "file": "0002-729a70259fa2.json",
+      "passed": true,
+      "elapsed_s": 4.215,
+      "input_len": 65537,
+      "output_len": 16,
+      "decode_handoff_len": 65536,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_uneven_0",
+      "file": "0003-40806b6fb6a6.json",
+      "passed": true,
+      "elapsed_s": 12.578,
+      "input_len": 8192,
+      "output_len": 16,
+      "decode_handoff_len": 4096,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_uneven_1",
+      "file": "0004-5028ec8a0fcc.json",
+      "passed": true,
+      "elapsed_s": 13.1,
+      "input_len": 12288,
+      "output_len": 16,
+      "decode_handoff_len": 8192,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_uneven_2",
+      "file": "0005-fb421973d7bf.json",
+      "passed": true,
+      "elapsed_s": 13.109,
+      "input_len": 16384,
+      "output_len": 16,
+      "decode_handoff_len": 12288,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_uneven_3",
+      "file": "0006-489171149484.json",
+      "passed": true,
+      "elapsed_s": 13.105,
+      "input_len": 20480,
+      "output_len": 16,
+      "decode_handoff_len": 16384,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_uneven_3_hit",
+      "file": "0007-bc2b9f3331c4.json",
+      "passed": true,
+      "elapsed_s": 16.228,
+      "input_len": 20480,
+      "output_len": 16,
+      "decode_handoff_len": 16384,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_uneven_2_hit",
+      "file": "0008-9e4bdf8eaac8.json",
+      "passed": true,
+      "elapsed_s": 16.226,
+      "input_len": 16384,
+      "output_len": 16,
+      "decode_handoff_len": 12288,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_uneven_1_hit",
+      "file": "0009-ee5272a7e45f.json",
+      "passed": true,
+      "elapsed_s": 16.222,
+      "input_len": 12288,
+      "output_len": 16,
+      "decode_handoff_len": 8192,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_uneven_0_hit",
+      "file": "0010-d9e1e48be978.json",
+      "passed": true,
+      "elapsed_s": 12.219,
+      "input_len": 8192,
+      "output_len": 16,
+      "decode_handoff_len": 4096,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    },
+    {
+      "name": "flow_mtp_draft",
+      "file": "0011-1f799d823476.json",
+      "passed": true,
+      "elapsed_s": 12.216,
+      "input_len": 58,
+      "output_len": 16,
+      "decode_handoff_len": 0,
+      "mtp_draft_rounds": 15,
+      "replacement_characters": 0
+    }
+  ]
+}

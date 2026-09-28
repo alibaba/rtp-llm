@@ -27,3 +27,9 @@
 同一套启动参数的 `--print-config` 显示 target 从 `/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers` 直接读取，`LOAD_METHOD=fastsafetensors`；MTP 视图在各自主机个人数据盘，shard 指向已核实的 3FS 权重。启动前 guard 结果见四份 `weight-*.txt`：每端 target 为 7 个 shard、16,402 个 tensor、54.47 GiB；MTP 为 9 个 shard、5,404 个 tensor、20.00 GiB；索引和 Safetensors header 均通过。111/112 各 8 个 RDMA bond 都是 `ACTIVE`，两端互 ping 无丢包。3FS 挂载可读。这里仅证明启动前条件，服务实际加载日志仍需在切换后核查。
 
 `host-selection-build-complete.json` 是旧 `d733` 服务仍占用 111/112 显存时的只读快照：110 可用，113 显存不足，114/115 没有运行中、同镜像的个人容器，因此当时没有可直接再加载一套 TP8/EP8 PD 的双机组合。旧服务属于本任务；完成证据留存并确认不再承接请求后，才能按准确进程组停止它们，重新执行双机选择。
+
+## 四层 FP8+MTP 双机 flow
+
+停止旧服务后，111/112 的本任务进程组分别启动固定候选提交 `3d7fe34a7`。两端 8 个 rank 的实际日志均显示 `finally choose load method: fastsafetensors`，guard 的 `verify-log` 全部通过；111 Prefill 和 112 Decode 的 `/health` 均返回 200。启动参数为 target FP8 per-block、FP8 KV cache、draft BF16、NCCL TP8/EP8，Decode 启用 CUDA Graph；Prefill MLA 日志显示 TokenSpeed 路径。`host-selection-flow.json` 是请求前的双机占用快照：只豁免这两个已核实的本任务服务进程组，没有外部 GPU 计算进程。
+
+11 条 flow 的 runner 全部通过、没有跳过；独立复核结果在 `flow-11-independent-audit.json`。复核逐条检查 HTTP 200、非空 UTF-8 响应、PD 状态交接长度、Decode 路由、Native MTP draft 实际轮次及 300 秒上限。最慢的首个 65,537-token 请求为 71.18 秒，其余请求均在 17 秒内；11 条响应没有 Unicode replacement character。含逐请求原始响应和 token fixture 的归档为 `flow-11-raw.tar.gz`，校验值在 `flow-11-raw.sha256`。四层权重是随机裁剪模型，这些结果只证明运行链路和格式，不能作为完整模型语义准确性的证据。
