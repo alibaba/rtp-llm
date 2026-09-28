@@ -1,3 +1,13 @@
+py_test(
+    name = "tp_fp8_all_reduce_unit_test",
+    srcs = ["tp_fp8_all_reduce_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],

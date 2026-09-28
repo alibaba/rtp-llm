@@ -38,6 +38,7 @@ _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
 _flashinfer_allreduce = None
+_tp_fp8_allreduce = None
 
 
 def _get_rocm_rccl():
@@ -71,6 +72,27 @@ def _get_flashinfer_allreduce():
 
         _flashinfer_allreduce = flashinfer_all_reduce
     return _flashinfer_allreduce
+
+
+def _get_tp_fp8_allreduce():
+    global _tp_fp8_allreduce
+    if _tp_fp8_allreduce is None:
+        from rtp_llm.models_py.distributed import tp_fp8_all_reduce
+
+        _tp_fp8_allreduce = tp_fp8_all_reduce
+    return _tp_fp8_allreduce
+
+
+def _init_tp_fp8_allreduce(parallelism_config: ParallelismConfig) -> None:
+    if parallelism_config.tp_size <= 1:
+        if os.environ.get("RTP_LLM_TP_FP8_ALLREDUCE", "0").strip() != "0":
+            raise ValueError("TP FP8 all-reduce requires tp_size=2")
+        return
+    # Independent of FT_DISABLE_CUSTOM_AR: this experimental, lossy path must
+    # be requested with its own explicit toggle. All TP ranks validate config.
+    _get_tp_fp8_allreduce().init_tp_fp8_allreduce(
+        _get_group(Group.TP), torch.device("cuda", parallelism_config.local_rank)
+    )
 
 
 def _init_flashinfer_allreduce(
@@ -217,6 +239,7 @@ def init_distributed_environment(
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _validate_tp_moe_chunking_config(parallelism_config)
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+        _init_tp_fp8_allreduce(parallelism_config)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -253,6 +276,7 @@ def init_distributed_environment(
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _validate_tp_moe_chunking_config(parallelism_config)
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+        _init_tp_fp8_allreduce(parallelism_config)
         return
 
     logging.info(
@@ -295,6 +319,7 @@ def init_distributed_environment(
     init_user_buffers_environment(parallelism_config)
     _validate_tp_moe_chunking_config(parallelism_config)
     _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+    _init_tp_fp8_allreduce(parallelism_config)
 
 
 def _create_process_groups(
@@ -669,6 +694,7 @@ def destroy_distributed_environment():
         )
 
         destroy_user_buffers_communicator()
+        _get_tp_fp8_allreduce().destroy_tp_fp8_allreduce()
         _get_flashinfer_allreduce().destroy_flashinfer_allreduce()
 
     try:
@@ -814,12 +840,11 @@ class PendingAllReduce:
 def all_reduce_async(
     tensor: torch.Tensor, group: Group, *, inplace: bool = True
 ) -> PendingAllReduce:
-    """Enqueue an eager CUDA NCCL reduction without fencing the producer stream.
+    """Enqueue a CUDA reduction without fencing the producer stream.
 
-    This deliberately bypasses custom all-reduce implementations, whose shared
-    workspaces do not expose an asynchronous ownership contract. The caller must
-    retain the handle and wait on the consumer stream before reading/reusing the
-    output. No device-wide synchronization or host completion wait is inserted.
+    The opt-in TP FP8 path owns a serial communication stream and completion
+    events; other custom implementations still use NCCL here. The caller must
+    wait on the consumer stream before reading/reusing the output.
     """
     if not tensor.is_cuda or torch.version.hip is not None:
         raise ValueError("Asynchronous all-reduce requires a CUDA tensor and NCCL")
@@ -828,6 +853,10 @@ def all_reduce_async(
     process_group = _get_group(group)
     if torch.distributed.get_backend(process_group) != "nccl":
         raise ValueError("Asynchronous all-reduce requires an NCCL process group")
+    if group == Group.TP:
+        fp8_ar = _get_tp_fp8_allreduce().get_tp_fp8_allreduce()
+        if fp8_ar is not None and fp8_ar.should_use(tensor):
+            return fp8_ar.all_reduce_async(tensor, out=tensor if inplace else None)
     target = tensor if inplace else tensor.clone()
     work = torch.distributed.all_reduce(
         target,
@@ -860,6 +889,9 @@ def all_reduce(
             return rocm_rccl.capture_all_reduce(target, _get_group(group))
 
     if group == Group.TP:
+        fp8_ar = _get_tp_fp8_allreduce().get_tp_fp8_allreduce()
+        if fp8_ar is not None and fp8_ar.should_use(tensor):
+            return fp8_ar.all_reduce(tensor, out=tensor if inplace else None)
         flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
         if flashinfer_ar is not None and flashinfer_ar.should_use(tensor):
             result = flashinfer_ar.all_reduce(tensor)
