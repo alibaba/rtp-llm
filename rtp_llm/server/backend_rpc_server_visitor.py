@@ -19,7 +19,10 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
-from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
+from rtp_llm.server.cache_key_routing import (
+    route_cache_key_seed_from_env,
+    route_cache_keys_for_page_rr,
+)
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
@@ -99,6 +102,7 @@ class BackendRPCServerVisitor:
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
+        self.cache_key_seed = route_cache_key_seed_from_env()
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
         self.source_role = source_role
@@ -153,6 +157,15 @@ class BackendRPCServerVisitor:
             if kv_cache_sharded and tp_size > 1:
                 self._page_rr_route_cache_keys = True
                 self._page_rr_cp_size = tp_size
+        route_logger.info(
+            "Routing cache layout=%s seed=0x%016x hash_block_size=%s "
+            "route_block_size=%s page_rr_cp_size=%s",
+            "dsv41_swa_bounded_replay_v1" if self.cache_key_seed else "legacy",
+            self.cache_key_seed,
+            self.seq_size_per_block,
+            self._cache_key_block_size(),
+            self._page_rr_cp_size,
+        )
         self.master_client = MasterClient(
             host_service=self.host_service,
             server_config=server_config,
@@ -378,6 +391,7 @@ class BackendRPCServerVisitor:
                 token_ids,
                 self.seq_size_per_block,
                 v41_inputs=getattr(input, "v41_inputs", None),
+                cache_key_seed=self.cache_key_seed,
             )
             block_cache_keys = self._route_cache_keys(full_block_cache_keys)
             self._report_recent_cache_key_metrics(block_cache_keys)

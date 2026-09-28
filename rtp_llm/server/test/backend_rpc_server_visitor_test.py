@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import os
 import unittest
 import weakref
 from dataclasses import dataclass, field
@@ -22,9 +23,16 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
-from rtp_llm.ops import PDSepConfig, SpecialTokens, VitSeparation
+from rtp_llm.ops import (
+    DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED,
+    PDSepConfig,
+    SpecialTokens,
+    VitSeparation,
+)
+from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
+    create_backend_rpc_server_visitor,
     get_role_names,
 )
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
@@ -155,6 +163,78 @@ class _FakeMasterClient:
         return FlexlbResponse.ok(["prefill-role"], enqueued_by_master=True)
 
 
+class BackendRPCServerVisitorCacheLayoutTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pipeline_selects_layout_once_at_startup(self):
+        for bounded, seed in (("0", 0), ("1", DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED)):
+            with self.subTest(bounded=bounded), patch.dict(
+                os.environ, {"DSV41_CED": "1", "DSV41_SWA_BOUNDED_REPLAY": bounded}
+            ), self.assertLogs("route_logger", level="INFO") as logs:
+                pipeline = Pipeline(
+                    special_tokens=SpecialTokens(),
+                    pd_sep_config=PDSepConfig(),
+                    addresses=[],
+                    max_seq_len=8192,
+                    seq_size_per_block=512,
+                    tokenizer=None,
+                )
+                try:
+                    visitor = pipeline.backend_rpc_server_visitor
+                    self.assertEqual(visitor.cache_key_seed, seed)
+                    self.assertTrue(
+                        any(f"seed=0x{seed:016x}" in line for line in logs.output)
+                    )
+                    os.environ["DSV41_SWA_BOUNDED_REPLAY"] = "0"
+                    self.assertEqual(visitor.cache_key_seed, seed)
+                finally:
+                    await pipeline.close()
+
+    async def test_factory_selects_layout_independently_of_local_tp(self):
+        for bounded, seed in (("0", 0), ("1", DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED)):
+            for tp_size in (1, 4):
+                cp_config = SimpleNamespace(
+                    kv_cache_sharded=True,
+                    is_enabled=lambda: False,
+                    is_prefill_enabled=lambda: False,
+                )
+                parallelism = SimpleNamespace(tp_size=tp_size)
+                env = SimpleNamespace(
+                    server_config=None,
+                    distribute_config=None,
+                    parallelism_config=parallelism,
+                    prefill_cp_config=cp_config,
+                    sp_config=None,
+                    grpc_config=None,
+                    vit_config=None,
+                    master_config=None,
+                )
+                config = SimpleNamespace(
+                    model_type="deepseek_v41",
+                    max_seq_len=8192,
+                    attn_config=SimpleNamespace(tokens_per_block=512 // tp_size),
+                    mm_model_config=SimpleNamespace(mm_padding_size=0),
+                )
+                with self.subTest(bounded=bounded, tp_size=tp_size), patch.dict(
+                    os.environ,
+                    {"DSV41_CED": "1", "DSV41_SWA_BOUNDED_REPLAY": bounded},
+                ), patch(
+                    "rtp_llm.config.engine_config.EngineConfig.create",
+                    return_value=SimpleNamespace(
+                        pd_sep_config=PDSepConfig(), parallelism_config=parallelism
+                    ),
+                ), patch(
+                    "rtp_llm.distribute.distributed_server.get_world_info"
+                ), patch(
+                    "rtp_llm.distribute.distributed_server.get_dp_addrs_from_world_info",
+                    return_value=[],
+                ):
+                    visitor = create_backend_rpc_server_visitor(env, config)
+                    try:
+                        self.assertEqual(visitor.cache_key_seed, seed)
+                        self.assertEqual(visitor._cache_key_block_size(), 512)
+                    finally:
+                        await visitor.close()
+
+
 class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
     def test_get_role_names(self):
         role_addrs = [
@@ -197,6 +277,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     def _master_route_visitor(master_client):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16
+        visitor.cache_key_seed = 0
         visitor.master_client = master_client
         visitor._route_cache_keys = lambda keys: keys
         visitor._report_recent_cache_key_metrics = lambda keys: None
@@ -920,6 +1001,7 @@ class DeepSeekVisionMasterRoutingTest(unittest.IsolatedAsyncioTestCase):
         visitor.mm_padding_size = 4
         visitor.max_seq_len = 100
         visitor.seq_size_per_block = 4
+        visitor.cache_key_seed = 0
         visitor._page_rr_route_cache_keys = False
         visitor._page_rr_cp_size = 1
         visitor._report_recent_cache_key_metrics = Mock()
@@ -1155,6 +1237,7 @@ class V41PreparedRoutingTest(unittest.IsolatedAsyncioTestCase):
                 visitor.dsv4_image_token_id = None
                 visitor.mm_padding_size = 0
                 visitor.seq_size_per_block = 4
+                visitor.cache_key_seed = DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED
                 visitor._page_rr_route_cache_keys = False
                 visitor._page_rr_cp_size = 1
                 visitor._report_recent_cache_key_metrics = Mock()
@@ -1183,7 +1266,7 @@ class V41PreparedRoutingTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(last["input"].prompt_length, len(tokens))
                 self.assertEqual(
                     last["block_cache_keys"],
-                    get_block_cache_keys(list(tokens), 4, prepared),
+                    get_block_cache_keys(list(tokens), 4, prepared, visitor.cache_key_seed),
                 )
                 self.assertEqual(list(last["input_pb"].token_ids), list(tokens))
                 self.assertEqual(

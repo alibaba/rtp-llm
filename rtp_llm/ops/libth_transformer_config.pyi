@@ -4,7 +4,9 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED: int
+
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
@@ -2074,7 +2076,7 @@ def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     """
 
 
-def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
+def get_block_cache_keys(token_ids_list: list[list[int]], initial_hash: int = 0) -> list[int]:
     ...
 
 

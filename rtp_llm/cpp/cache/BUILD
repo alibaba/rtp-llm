@@ -19,6 +19,13 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_key_config",
+    hdrs = ["CacheKeyConfig.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "block_info",
     hdrs = [
         "BlockInfo.h",
@@ -51,6 +58,7 @@ cc_library(
         ":block_info",
         ":batch_kv_cache_resource",
         ":cache_group_type",
+        ":cache_key_config",
         ":cp_slot_mapper",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",

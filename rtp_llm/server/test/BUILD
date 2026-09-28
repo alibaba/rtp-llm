@@ -27,6 +27,15 @@ py_test(
 )
 
 py_test(
+    name = "cache_key_routing_test",
+    srcs = ["cache_key_routing_test.py"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
     name = "master_client_test",
     srcs = ["master_client_test.py"],
     deps = [

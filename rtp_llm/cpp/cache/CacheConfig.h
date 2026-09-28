@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheKeyConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -111,9 +112,7 @@ struct CacheConfig {
     }
 
     int64_t cacheKeySeed() const {
-        // Versioned layout identity: encoder through L20, decoder/draft live
-        // SWA only, 128-token replay. P and D use the same canonical seed.
-        return swaBoundedReplay() ? INT64_C(0x4453563431525031) : 0;
+        return swaBoundedReplay() ? DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED : 0;
     }
 
     int groupNums() const {

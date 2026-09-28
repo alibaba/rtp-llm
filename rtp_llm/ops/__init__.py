@@ -167,6 +167,7 @@ try:
 
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
+    from libth_transformer_config import DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )
@@ -177,7 +178,7 @@ except BaseException as e:
 
 
 def get_block_cache_keys(
-    token_ids: List[int], block_size: int, v41_inputs=None
+    token_ids: List[int], block_size: int, v41_inputs=None, cache_key_seed: int = 0
 ) -> List[int]:
     try:
         identities = []
@@ -205,7 +206,7 @@ def get_block_cache_keys(
                 for start, end, words in identities:
                     if end > i and start < i + block_size:
                         chunk.extend(words)
-        return cpp_get_block_cache_keys(token_ids_list)  # type: ignore
+        return cpp_get_block_cache_keys(token_ids_list, cache_key_seed)  # type: ignore
     except Exception as e:
         logging.error(f"get block ids error: {e}")
         # If an error occurs, return an empty list
