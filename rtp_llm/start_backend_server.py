@@ -1,4 +1,3 @@
-import glob
 import logging
 import logging.config
 import multiprocessing
@@ -37,6 +36,7 @@ from rtp_llm.utils.process_manager import (
 )
 
 setup_logging()
+
 
 class BackendStartupInterrupted(Exception):
     pass
@@ -390,6 +390,7 @@ def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    cleanup=None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -402,6 +403,7 @@ def multi_rank_start(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
         allow_defer_first_sigterm=True,
+        pre_exit_cleanup=cleanup,
     )
     processes, rank_pipe_readers = _create_rank_processes(
         global_controller, py_env_configs
@@ -475,6 +477,11 @@ def multi_rank_start(
             logging.error(
                 f"{len(alive_procs)} processes still alive after kill, using os._exit to avoid atexit deadlock"
             )
+            if cleanup:
+                try:
+                    cleanup()
+                except Exception:
+                    logging.exception("JIT cache cleanup failed before hard exit")
             os._exit(1)
         else:
             raise Exception("Multi-rank startup failed")
@@ -532,14 +539,6 @@ def load_gpu_nic_affinity():
         return False
 
 
-def clear_jit_filelock():
-    # check whether exists jit dir
-    if os.path.exists("deep_gemm_runtime"):
-        files = glob.glob("./deep_gemm_runtime/**/*_lock", recursive=True)
-        for file in files:
-            os.remove(file)
-
-
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -550,8 +549,6 @@ def start_backend_server(
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
-
-    clear_jit_filelock()
 
     if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
         from rtp_llm.server.vit_rpc_server import vit_start_server
@@ -577,10 +574,39 @@ def start_backend_server(
             not support WORLD_SIZE {pc.world_size} for {torch.cuda.device_count()} local gpu"
         )
 
-    if torch.cuda.device_count() > 1 and pc.world_size > 1:
-        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
-    else:
+    # During snapshot restore there is not yet a ProcessManager/local-rank signal
+    # handler. Convert the first termination signal into normal stack unwinding so
+    # the manager's FUSE mount and background workers are cleaned up in finally.
+    def abort_startup(signum, frame):
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        raise KeyboardInterrupt(f"signal {signum} during backend startup")
+
+    signal.signal(signal.SIGTERM, abort_startup)
+    signal.signal(signal.SIGINT, abort_startup)
+
+    jit_cache_manager = None
+    try:
+        try:
+            from rtp_llm.utils.jit_cache_manager import start_from_config
+
+            jit_cache_manager = start_from_config(py_env_configs.jit_config)
+        except Exception:
+            logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
+
+        if torch.cuda.device_count() > 1 and pc.world_size > 1:
+            return multi_rank_start(
+                global_controller,
+                py_env_configs,
+                pipe_writer,
+                cleanup=(
+                    jit_cache_manager.stop if jit_cache_manager is not None else None
+                ),
+            )
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+    finally:
+        if jit_cache_manager is not None:
+            jit_cache_manager.stop()
 
 
 def main():

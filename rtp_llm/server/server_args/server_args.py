@@ -353,6 +353,8 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 try:
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
+                                except argparse.ArgumentTypeError as error:
+                                    self.error(f"{env_name} ({dest}): {error}")
                                 except (ValueError, TypeError):
                                     # If conversion fails, skip this value
                                     pass

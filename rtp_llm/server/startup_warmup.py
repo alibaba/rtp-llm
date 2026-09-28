@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import threading
 import time
 import traceback
 from typing import TYPE_CHECKING
@@ -435,51 +434,11 @@ def maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         return False
 
 
-def start_post_startup_jit_cache_writer(
-    py_env_configs: PyEnvConfigs,
-    startup_warmup_succeeded: bool,
-) -> None:
-    remote_write_dir = (
-        py_env_configs.jit_config.warm_up_jit_and_write_remote or ""
-    ).strip()
-    if not remote_write_dir:
-        return
-
-    def _write_remote_jit_cache():
-        try:
-            from rtp_llm.config.server_config_setup import (
-                maybe_write_jit_cache_to_remote,
-            )
-
-            maybe_write_jit_cache_to_remote(
-                py_env_configs,
-                startup_warmup_succeeded,
-            )
-        except Exception:
-            logging.error(
-                "post-startup remote JIT cache publishing failed, trace=%s",
-                traceback.format_exc(),
-            )
-
-    writer = threading.Thread(
-        target=_write_remote_jit_cache,
-        name="post_startup_jit_cache_writer",
-        daemon=True,
-    )
-    writer.start()
-    logging.info(
-        "post-startup remote JIT cache writer started for "
-        "WARM_UP_JIT_AND_WRITE_REMOTE=%s",
-        remote_write_dir,
-    )
-
-
 __all__ = [
     "STARTUP_REAL_WARMUP_ENV",
     "STARTUP_REAL_WARMUP_TIMEOUT_ENV",
     "mark_startup_warmup_health_gate_ready",
     "maybe_run_startup_real_warmup",
     "setup_startup_warmup_health_gate",
-    "start_post_startup_jit_cache_writer",
     "startup_real_warmup_enabled",
 ]

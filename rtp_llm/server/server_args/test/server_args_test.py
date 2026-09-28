@@ -88,8 +88,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
-        os.environ["REMOTE_JIT_READ_DIR"] = "dfs://bucket/jit/baseline"
-        os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
+        os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
+        os.environ["JIT_CACHE_SETUP_TIMEOUT_S"] = "60"
+        os.environ["MANAGE_JIT_CACHE"] = "0"
         os.environ["MM_IMAGE_MIN_DIMENSION"] = "12"
         os.environ["MM_IMAGE_MAX_ASPECT_RATIO"] = "150.5"
         os.environ["VIT_CONCURRENCY"] = "12"
@@ -131,13 +132,11 @@ class ServerArgsSetTest(TestCase):
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(
-            py_env_configs.jit_config.remote_jit_read_dir,
-            "dfs://bucket/jit/baseline",
+            py_env_configs.jit_config.remote_jit_dir,
+            "dfs://bucket/jit/cache",
         )
-        self.assertEqual(
-            py_env_configs.jit_config.warm_up_jit_and_write_remote,
-            "dfs://bucket/jit/writer",
-        )
+        self.assertEqual(py_env_configs.jit_config.jit_cache_setup_timeout_s, 60)
+        self.assertFalse(py_env_configs.jit_config.manage_jit_cache)
         self.assertEqual(py_env_configs.vit_config.mm_image_min_dimension, 12)
         self.assertEqual(py_env_configs.vit_config.mm_image_max_aspect_ratio, 150.5)
         self.assertEqual(py_env_configs.vit_config.vit_concurrency, 12)

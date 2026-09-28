@@ -9,6 +9,20 @@ filegroup(
 )
 
 py_test(
+    name = "jit_cache_manager_test",
+    size = "large",
+    srcs = ["jit_cache_manager_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:sdk",
+        "//rtp_llm:torch",
+        "//rtp_llm/model_loader/tipc",
+    ],
+)
+
+py_test(
     name = "kimi_k3_mtp_checkpoint_test",
     srcs = ["kimi_k3_mtp_checkpoint_test.py", "//rtp_llm:utils/kimi_k3_mtp_checkpoint.py"],
     timeout = "short",

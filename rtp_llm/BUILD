@@ -130,6 +130,8 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
+    "watchdog",
+    "zstandard",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -140,10 +142,18 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+_JIT_CACHE_SRCS = [
+    "utils/jit_cache_manager.py",
+    "utils/jit_cache_store.py",
+]
+
 py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
+    ], exclude = _JIT_CACHE_SRCS + [
+        "utils/test/*.py",
+        "utils/test/**/*.py",
     ]),
     deps = [
         ":torch",
@@ -155,6 +165,17 @@ py_library(
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + internal_deps()
+)
+
+py_library(
+    name = "jit_cache_manager_lib",
+    srcs = _JIT_CACHE_SRCS,
+    deps = [
+        ":utils",
+        ":watchdog",
+        ":zstandard",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -447,6 +468,7 @@ py_library(
         ":concurrent_log_handler",
         ":blobfile",
         ":partial_json_parser",
+        ":jit_cache_manager_lib",
     ],
     data = jit_deps(),
     imports = ["."],
@@ -641,6 +663,8 @@ whl_reqs = [
     "oss2",
     "orjson",
     "aiohttp",
+    "watchdog==6.0.0",
+    "zstandard==0.25.0",
     "json5",
     "dashscope>=1.11.0",
     "jieba",

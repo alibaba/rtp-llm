@@ -22,7 +22,6 @@ from rtp_llm.server.startup_warmup import (
     mark_startup_warmup_health_gate_ready,
     maybe_run_startup_real_warmup,
     setup_startup_warmup_health_gate,
-    start_post_startup_jit_cache_writer,
 )
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import (
@@ -586,12 +585,8 @@ def start_server(py_env_configs: PyEnvConfigs):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
-        startup_warmup_succeeded = maybe_run_startup_real_warmup(py_env_configs)
+        maybe_run_startup_real_warmup(py_env_configs)
         mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
-        start_post_startup_jit_cache_writer(
-            py_env_configs,
-            startup_warmup_succeeded,
-        )
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"

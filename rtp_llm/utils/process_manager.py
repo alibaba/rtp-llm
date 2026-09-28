@@ -39,6 +39,7 @@ class ProcessManager:
         shutdown_timeout: int = 600,
         monitor_interval: int = 1,
         allow_defer_first_sigterm: bool = False,
+        pre_exit_cleanup: Optional[Callable[[], None]] = None,
     ):
         if shutdown_timeout <= 0:
             logging.warning(
@@ -50,6 +51,7 @@ class ProcessManager:
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.failure_detected = False
+        self.pre_exit_cleanup = pre_exit_cleanup
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
         self.process_groups: Dict[str, List[Process]] = {}
@@ -752,6 +754,11 @@ class ProcessManager:
 
         if self.failure_detected:
             logging.error("Child process failure cleanup completed, exiting parent")
+            if self.pre_exit_cleanup:
+                try:
+                    self.pre_exit_cleanup()
+                except Exception:
+                    logging.exception("Pre-exit cleanup failed")
             os._exit(1)
         logging.info("Process monitoring completed")
 
