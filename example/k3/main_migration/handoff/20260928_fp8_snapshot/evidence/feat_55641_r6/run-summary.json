@@ -117,6 +117,14 @@
     "timeline-decode-mtp-feat-55641-r6-allrank.tar.gz": {
       "sha256": "3c3bc2b15ff5f61b7b30373a356c4dd6f3096d0e7962890779fbf9529df45c4b",
       "bytes": 7351309
+    },
+    "requests-64k-feat-55641-r6.tar.gz": {
+      "sha256": "0625c009c41413bbb6b1c614bb1597decea5cd588111129384973a1e0e5ed841",
+      "bytes": 87250
+    },
+    "feat-flow-r6-evidence.tar.gz": {
+      "sha256": "d6ed9cf8374a3595784d94c2a06f44a1ab89566f74f3062c7a3aa759e5059626",
+      "bytes": 63293
     }
   },
   "measurement_limits": [
@@ -125,5 +133,6 @@
     "Fixed feat FP8 all-gather transmits FP8 values and scales; do not migrate this path under BF16 NCCL requirement.",
     "Only clean post-initialization full-rank requests are matched; 6 feat and 2 integrated.",
     "Flow suite has no MTP acceptance assertion; traces prove execution, while the decode diagnostic accepted no additional token."
-  ]
+  ],
+  "later_matched_comparator": "../integrated_0a36_r44c/run-summary.json; same-host 10-warmup 16-profile run supersedes integrated r43 comparator below"
 }

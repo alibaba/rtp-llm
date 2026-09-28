@@ -1,0 +1,362 @@
+{
+  "input_tokens": 65536,
+  "model_layers": 4,
+  "world_size": 8,
+  "kernel_family_classifier": "v2: symbol-level only; fused AttnRes FP8 producer has its own family, generic GEMMs remain unattributed",
+  "family_timing_caveat": "cumulative kernel durations can overlap across streams and are not wall time",
+  "same_request_match": "nearest target CPU scope timestamp within 2000us",
+  "trace_dir": "/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/integrated-0a36-111112-r44c/traces",
+  "trace_template": "k3_64k_prefill_opt_0a36_r44c_wr{rank}_1.json",
+  "matched_requests": [
+    {
+      "rank_trace_indices": [
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "target_timestamp_us": 7620761807991.613,
+      "phases": {
+        "prefill": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 137.6928017578125,
+          "max_rank_gpu_union_ms": 130.3757578125,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 9.866511000000001,
+            "PD.fused_copy": 13.359881999999999,
+            "NCCL": 35.211767,
+            "Tensor.copy": 3.045561,
+            "AttnRes": 0.585347,
+            "FP8.producer_or_quant": 1.7994059999999998,
+            "GEMM.DeepGEMM_unattributed": 7.248569000000001,
+            "KDA.short_conv": 1.423692,
+            "KDA.other": 3.528221,
+            "KDA.cuLA_delta": 3.138104,
+            "GEMM.NVJet_unattributed": 16.148192,
+            "MoE.MegaMoE": 19.844061999999997,
+            "MLA.TokenSpeed": 15.218649000000001
+          }
+        },
+        "target": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 74.061609375,
+          "max_rank_gpu_union_ms": 69.473078125,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 5.796493000000001,
+            "PD.fused_copy": 0.021537,
+            "NCCL": 13.963055,
+            "Tensor.copy": 1.4398210000000002,
+            "AttnRes": 0.585347,
+            "FP8.producer_or_quant": 1.7994059999999998,
+            "GEMM.DeepGEMM_unattributed": 7.248569000000001,
+            "KDA.short_conv": 1.423692,
+            "KDA.other": 3.528221,
+            "KDA.cuLA_delta": 3.138104,
+            "GEMM.NVJet_unattributed": 10.725653,
+            "MoE.MegaMoE": 14.404467,
+            "MLA.TokenSpeed": 5.378539
+          }
+        },
+        "draft": {
+          "worst_rank": 5,
+          "max_rank_gpu_span_ms": 63.63067578125,
+          "max_rank_gpu_union_ms": 60.9990009765625,
+          "worst_rank_family_cumulative_ms": {
+            "NCCL": 20.791683999999997,
+            "PD.fused_copy": 13.470913000000001,
+            "Other_unattributed": 4.073049,
+            "Tensor.copy": 1.605993,
+            "GEMM.NVJet_unattributed": 5.403288,
+            "MLA.TokenSpeed": 9.872176,
+            "MoE.MegaMoE": 5.473562
+          }
+        }
+      }
+    },
+    {
+      "rank_trace_indices": [
+        3,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "target_timestamp_us": 7620763878906.647,
+      "phases": {
+        "prefill": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 138.278984375,
+          "max_rank_gpu_union_ms": 131.0311337890625,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 9.869802,
+            "PD.fused_copy": 13.346089,
+            "NCCL": 35.822078000000005,
+            "Tensor.copy": 3.045016,
+            "AttnRes": 0.588324,
+            "FP8.producer_or_quant": 1.799759,
+            "GEMM.DeepGEMM_unattributed": 7.232182,
+            "KDA.short_conv": 1.424075,
+            "KDA.other": 3.541341,
+            "KDA.cuLA_delta": 3.138938,
+            "GEMM.NVJet_unattributed": 16.152704,
+            "MoE.MegaMoE": 19.835773,
+            "MLA.TokenSpeed": 15.222520000000001
+          }
+        },
+        "target": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 74.8988330078125,
+          "max_rank_gpu_union_ms": 70.3116826171875,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 5.7998829999999995,
+            "PD.fused_copy": 0.029376000000000003,
+            "NCCL": 14.804886,
+            "Tensor.copy": 1.439531,
+            "AttnRes": 0.588324,
+            "FP8.producer_or_quant": 1.799759,
+            "GEMM.DeepGEMM_unattributed": 7.232182,
+            "KDA.short_conv": 1.424075,
+            "KDA.other": 3.541341,
+            "KDA.cuLA_delta": 3.138938,
+            "GEMM.NVJet_unattributed": 10.751380999999999,
+            "MoE.MegaMoE": 14.396754,
+            "MLA.TokenSpeed": 5.375338
+          }
+        },
+        "draft": {
+          "worst_rank": 2,
+          "max_rank_gpu_span_ms": 63.381654296875,
+          "max_rank_gpu_union_ms": 60.7357041015625,
+          "worst_rank_family_cumulative_ms": {
+            "NCCL": 20.354304,
+            "PD.fused_copy": 13.476426,
+            "Other_unattributed": 4.1117799999999995,
+            "Tensor.copy": 1.620588,
+            "GEMM.NVJet_unattributed": 5.478539,
+            "MLA.TokenSpeed": 9.941679,
+            "MoE.MegaMoE": 5.416715
+          }
+        }
+      }
+    },
+    {
+      "rank_trace_indices": [
+        4,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "target_timestamp_us": 7620765908505.706,
+      "phases": {
+        "prefill": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 139.4489169921875,
+          "max_rank_gpu_union_ms": 132.05384375,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 9.874313,
+            "PD.fused_copy": 13.353899000000002,
+            "NCCL": 36.938116,
+            "Tensor.copy": 3.04604,
+            "AttnRes": 0.586915,
+            "FP8.producer_or_quant": 1.7995329999999998,
+            "GEMM.DeepGEMM_unattributed": 7.244600999999999,
+            "KDA.short_conv": 1.422828,
+            "KDA.other": 3.5414980000000003,
+            "KDA.cuLA_delta": 3.1373029999999997,
+            "GEMM.NVJet_unattributed": 15.965308,
+            "MoE.MegaMoE": 19.876669,
+            "MLA.TokenSpeed": 15.214105
+          }
+        },
+        "target": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 74.4929130859375,
+          "max_rank_gpu_union_ms": 69.822474609375,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 5.802764,
+            "PD.fused_copy": 0.021152,
+            "NCCL": 14.444851,
+            "Tensor.copy": 1.439691,
+            "AttnRes": 0.586915,
+            "FP8.producer_or_quant": 1.7995329999999998,
+            "GEMM.DeepGEMM_unattributed": 7.244600999999999,
+            "KDA.short_conv": 1.422828,
+            "KDA.other": 3.5414980000000003,
+            "KDA.cuLA_delta": 3.1373029999999997,
+            "GEMM.NVJet_unattributed": 10.556914,
+            "MoE.MegaMoE": 14.429427,
+            "MLA.TokenSpeed": 5.376459
+          }
+        },
+        "draft": {
+          "worst_rank": 3,
+          "max_rank_gpu_span_ms": 64.9541669921875,
+          "max_rank_gpu_union_ms": 62.274310546875,
+          "worst_rank_family_cumulative_ms": {
+            "NCCL": 22.580407,
+            "PD.fused_copy": 13.37191,
+            "Other_unattributed": 4.079735,
+            "Tensor.copy": 1.6088410000000002,
+            "GEMM.NVJet_unattributed": 5.325469,
+            "MLA.TokenSpeed": 9.823666999999999,
+            "MoE.MegaMoE": 5.454237
+          }
+        }
+      }
+    },
+    {
+      "rank_trace_indices": [
+        6,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5
+      ],
+      "target_timestamp_us": 7620770050236.875,
+      "phases": {
+        "prefill": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 138.1421240234375,
+          "max_rank_gpu_union_ms": 130.939892578125,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 9.873833000000001,
+            "PD.fused_copy": 13.362442,
+            "NCCL": 35.759036,
+            "Tensor.copy": 3.046327,
+            "AttnRes": 0.586823,
+            "FP8.producer_or_quant": 1.7998230000000002,
+            "GEMM.DeepGEMM_unattributed": 7.248666,
+            "KDA.short_conv": 1.422892,
+            "KDA.other": 3.5408269999999997,
+            "KDA.cuLA_delta": 3.138009,
+            "GEMM.NVJet_unattributed": 15.960353,
+            "MoE.MegaMoE": 19.875582,
+            "MLA.TokenSpeed": 15.212698
+          }
+        },
+        "target": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 73.872619140625,
+          "max_rank_gpu_union_ms": 69.3302001953125,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 5.80382,
+            "PD.fused_copy": 0.02368,
+            "NCCL": 13.90075,
+            "Tensor.copy": 1.439466,
+            "AttnRes": 0.586823,
+            "FP8.producer_or_quant": 1.7998230000000002,
+            "GEMM.DeepGEMM_unattributed": 7.248666,
+            "KDA.short_conv": 1.422892,
+            "KDA.other": 3.5408269999999997,
+            "KDA.cuLA_delta": 3.138009,
+            "GEMM.NVJet_unattributed": 10.582837,
+            "MoE.MegaMoE": 14.433587,
+            "MLA.TokenSpeed": 5.372363
+          }
+        },
+        "draft": {
+          "worst_rank": 4,
+          "max_rank_gpu_span_ms": 64.27036328125,
+          "max_rank_gpu_union_ms": 61.6096923828125,
+          "worst_rank_family_cumulative_ms": {
+            "NCCL": 21.590732,
+            "PD.fused_copy": 13.562204,
+            "Other_unattributed": 4.092309,
+            "Tensor.copy": 1.614038,
+            "GEMM.NVJet_unattributed": 5.356938,
+            "MLA.TokenSpeed": 9.817897,
+            "MoE.MegaMoE": 5.453932
+          }
+        }
+      }
+    },
+    {
+      "rank_trace_indices": [
+        7,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "target_timestamp_us": 7620772149065.127,
+      "phases": {
+        "prefill": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 138.3948291015625,
+          "max_rank_gpu_union_ms": 131.0161474609375,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 9.871888,
+            "PD.fused_copy": 13.371210000000001,
+            "NCCL": 35.595258,
+            "Tensor.copy": 3.0489210000000004,
+            "AttnRes": 0.585539,
+            "FP8.producer_or_quant": 1.797775,
+            "GEMM.DeepGEMM_unattributed": 7.243257000000001,
+            "KDA.short_conv": 1.423243,
+            "KDA.other": 3.5384,
+            "KDA.cuLA_delta": 3.138777,
+            "GEMM.NVJet_unattributed": 16.10899,
+            "MoE.MegaMoE": 19.804157,
+            "MLA.TokenSpeed": 15.222520999999999
+          }
+        },
+        "target": {
+          "worst_rank": 3,
+          "max_rank_gpu_span_ms": 74.5455791015625,
+          "max_rank_gpu_union_ms": 69.9407880859375,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 5.79866,
+            "PD.fused_copy": 0.026143999999999997,
+            "NCCL": 14.613805000000001,
+            "Tensor.copy": 1.4429820000000002,
+            "AttnRes": 0.5877469999999999,
+            "FP8.producer_or_quant": 1.802537,
+            "GEMM.DeepGEMM_unattributed": 7.180391999999999,
+            "KDA.short_conv": 1.4242940000000002,
+            "KDA.other": 3.526545,
+            "KDA.cuLA_delta": 3.1321149999999998,
+            "GEMM.NVJet_unattributed": 10.653688,
+            "MoE.MegaMoE": 14.394605,
+            "MLA.TokenSpeed": 5.385725000000001
+          }
+        },
+        "draft": {
+          "worst_rank": 7,
+          "max_rank_gpu_span_ms": 63.8479482421875,
+          "max_rank_gpu_union_ms": 61.1308544921875,
+          "worst_rank_family_cumulative_ms": {
+            "NCCL": 20.972174,
+            "PD.fused_copy": 13.377774,
+            "Other_unattributed": 4.074431,
+            "Tensor.copy": 1.605359,
+            "GEMM.NVJet_unattributed": 5.46734,
+            "MLA.TokenSpeed": 9.935858,
+            "MoE.MegaMoE": 5.480621
+          }
+        }
+      }
+    }
+  ],
+  "median_max_rank_gpu_span_ms": {
+    "prefill": 138.278984375,
+    "target": 74.4929130859375,
+    "draft": 63.8479482421875
+  }
+}
