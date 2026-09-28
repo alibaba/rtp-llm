@@ -93,3 +93,11 @@
 本轮相较于上一轮固定 feat r7 的 target 71.556 ms、完整 Prefill 135.266 ms 略快。集成版 `b24b6cd88` 两轮 target 为 71.607 / 71.914 ms，完整 Prefill 为 134.950 / 135.262 ms。当前差距在 0.2–0.9 ms，且各轮匹配请求数不同；这些数据仍不足以证明集成版四层 Prefill 稳定优于 feat。feat 的 FP8 融合通信路径也不满足最终 BF16 NCCL 契约，不能直接迁入。此处只记录可比现状，不据此提交性能锚点。
 
 原始数据：`feat-a9bf-r8-allrank-traces.tar.gz` SHA256 `ef7d06639be74a7f1c340d2ded494150f62da3bdd9474caac4c78987c919d4fd`；`feat-a9bf-r8-timeline-requests.tar.gz` SHA256 `c32bf83962d7a736daed1a8f7fb946674ae9ca7773dbe8ecde1fd403d7dfabc0`；Prefill 与 Decode 启动记录归档的 SHA256 分别为 `90835b5a5fc3ce1c8f8a5ed227bd261b19a51e2c0a3dfdecb0b77d450e9134c1`、`6599459bcc9f24b2ff40ee7d46d1cd3ef407f972bf547c408c04199faffe46b4`。`feat-a9bf-r8-timeline-independent-audit.json` 保存逐请求复核和旧 aux 的证据边界。启动阶段没有观察到明显的 3FS 读取阻塞，本轮未改变机器级并发配置。
+
+### KV 写入核的配置差异
+
+r8 的 `concat_and_cache_mla_kernel` 在固定 feat trace 中每 rank 约 0.074 ms，集成版 b24 r2 约 0.212 ms；两边 kernel 符号、65,536 个 CTA、512 线程配置相同。启动日志显示一个不能忽略的差别：feat Prefill 的 `kv_cache_sharded=true`、`local_kv_page_rr_shard_count=8`、`enable_sp=0`；集成版 Prefill 的 `kv_cache_sharded=0`、`enable_sp=1`、`ffn_sp_size=8`。因此两边虽同为四层、TP8/EP8、FP8+MTP PD，KV 写入和 SP 的实际执行配置并不相同。现有每算子时间不能直接归因于 kernel 实现优劣。
+
+在独占的 112 GPU 1 上，用集成版 b24 构建产物单独测同一个普通 E4M3 写入核。每组先完成惰性初始化及至少 10 次稳定预热，再采 50 组、每组 10 次调用。64K token 全部有有效槽位时，128-token page、4096-token page 和四倍物理 page 间距分别为 0.2031、0.2031、0.2006 ms；仅 1/8 token 有有效槽位的诊断组为 0.0557 ms。原始样本、预热和输入布局见 `bench-mla-cache-writer-layout-112.json`，脚本为 `bench_mla_cache_writer_layout.py`，GPU 筛选记录在 `host-selection-mla-cache-writer-*.json`。该结果说明 page 大小和物理间距没有解释 0.14 ms 差距；有效槽位比例能明显改变耗时。它**不能**证明固定 feat 的真实 slot mapping 恰好只有 1/8 有效，需要结合 CP 映射及 PD 正确性继续核查。当前不能把同名 kernel 当作“feat 更快的实现”直接迁移。
+
+保留 r8 原始数据后，我只停止了本任务在 111/112 的两个已核实进程组；服务管理器逐个退出 rank 后还有本任务孤儿 rank，复查 PID/UID/进程组后清理完毕。两端端口已关闭，GPU 无活动计算进程。保留服务模式的外层控制器因这次主动退出返回 1，原始输出在 `feat-a9bf-r8-controller-after-intentional-teardown.log.gz`；flow runner 自身及 64K 采集 runner 均退出 0，控制器返回值不能用于否定已归档的请求结果。
