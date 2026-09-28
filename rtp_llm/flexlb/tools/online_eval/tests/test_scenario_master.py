@@ -574,6 +574,8 @@ class MasterActionsTest(unittest.TestCase):
                 self.assertIn("handover_errors", ids)
                 self.assertIn("late_errors", ids)
                 self.assertIn("rolling_errors", ids)
+                self.assertIn("to_b_balance", ids)
+                self.assertIn("to_a_balance", ids)
                 flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
                 self.assertEqual("prefix_lineage", flow["params"]["source"]["model"])
                 self.assertEqual(10000, flow["params"]["max_requests"])
@@ -615,6 +617,22 @@ class MasterActionsTest(unittest.TestCase):
                    return_value={"prefill": ["P1", "P2"]}), self.assertRaisesRegex(
                        ValueError, "known Prefill"):
             master._client_check(self.ctx, params, self.deadline)
+
+    def test_ha_handover_peak_balance_counts_failed_assigned_requests(self):
+        rows = self.ctx.register_resource("ha_rows", [
+            {"send_start_epoch_ms": 11_000 + i, "status": "exception" if i < 5 else "ok",
+             "prefill": "P0" if i < 6 else "P1"}
+            for i in range(8)
+        ] + [{"send_start_epoch_ms": 11_020, "status": "schedule_error", "prefill": None}])
+        params = dict(rows=rows, metric="prefill_peak_skew", op="le",
+                      expected=2.0, min_samples=5)
+        with patch("scenario.actions.master_observation._pools",
+                   return_value={"prefill": ["P0", "P1", "P2", "P3"]}):
+            result = master._client_check(self.ctx, params, self.deadline)
+            self.assertEqual("FAIL", result.checks[0].status)
+            self.assertEqual(3.0, result.output["actual"])
+            with self.assertRaisesRegex(ValueError, "enough assigned"):
+                master._client_check(self.ctx, {**params, "min_samples": 10}, self.deadline)
 
     def test_short_hang_empty_send_window_still_requires_real_recovery_burst(self):
         self.manager.master_instance_target.return_value = "B:18085"

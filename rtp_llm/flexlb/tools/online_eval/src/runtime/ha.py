@@ -246,6 +246,22 @@ def rows_between(rows: list, lo_s: Optional[float], hi_s: Optional[float]) -> li
     return out
 
 
+def prefill_assignment_buckets(rows: list) -> dict:
+    """Count assigned Prefill endpoints by send second, including failed requests."""
+    from collections import Counter, defaultdict
+
+    buckets = defaultdict(Counter)
+    for row in rows:
+        address = row.get("prefill")
+        if not address:
+            continue
+        timestamp = row_ts_ms(row)
+        if timestamp is None:
+            raise ValueError("assigned HA request lacks send timestamp")
+        buckets[int(timestamp // 1000)][address] += 1
+    return dict(buckets)
+
+
 class LiveClientEvents:
     """Incremental journal reader; incomplete trailing writes are retried, not lost."""
 

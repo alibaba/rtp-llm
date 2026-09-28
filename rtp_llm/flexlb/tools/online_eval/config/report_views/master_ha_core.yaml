@@ -15,3 +15,7 @@ panels:
   title: 两台 FlexLB 的 inflight 状态量 · Master HTTP 状态
   fields: [scheduler_inflight, prefill_inflight_requests, decode_master_queued, decode_confirmed_running, http_up]
   caption: 每秒回读两台 Master；P/D 数量为对应端点求和。HTTP 状态用右轴；采集不到时断线，不补零。
+- id: prefill_balance
+  title: Prefill 秒级分配均衡性
+  fields: [prefill_peak_qps, prefill_mean_qps, prefill_skew]
+  caption: 按请求发出秒统计已分配 Prefill 的请求，包含之后失败的请求；未选出 Prefill 的错误不计入。最热 P / 全体 P 平均值为右轴倍数，竖线标出 Master 事件。

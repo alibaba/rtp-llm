@@ -60,7 +60,8 @@ def view(name):
             _fail(path, "invalid HA event labels")
         allowed = {"sent", "success", "failed", "http_up", "scheduler_inflight",
                    "prefill_inflight_requests", "decode_master_queued",
-                   "decode_confirmed_running"}
+                   "decode_confirmed_running", "prefill_peak_qps",
+                   "prefill_mean_qps", "prefill_skew"}
         panels = data["panels"]
         if not isinstance(panels, list) or not panels or len({
             panel.get("id") for panel in panels if isinstance(panel, dict)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from reporting import bundle_path, details, links, table, write_bundle
 from reporting.catalog import PALETTE
+from runtime.ha import prefill_assignment_buckets
 
 
 COLORS = {
@@ -74,6 +75,22 @@ def _state_series(rows, anchor):
     return samples
 
 
+def _prefill_balance_series(rows, anchor, fleet_size):
+    buckets = prefill_assignment_buckets(rows)
+    values = {field: [] for field in ("prefill_peak_qps", "prefill_mean_qps", "prefill_skew")}
+    for second, counts in sorted(buckets.items()):
+        total = sum(counts.values())
+        peak = max(counts.values())
+        current = {
+            "prefill_peak_qps": peak,
+            "prefill_mean_qps": total / fleet_size,
+            "prefill_skew": peak * fleet_size / total,
+        }
+        for field, value in current.items():
+            values[field].append(dict(x=second - anchor, y=value))
+    return values
+
+
 def build_spec(payload, presentation, default_path):
     anchor = payload["clock_anchor"]["epoch_s"]
     request_path, state_path = _artifacts(payload)
@@ -81,6 +98,10 @@ def build_spec(payload, presentation, default_path):
     states = _read_rows(state_path)
     qps = _request_series(requests, anchor)
     inflight = _state_series(states, anchor)
+    configured_size = (payload.get("configuration") or {}).get("environment", {}).get("n_prefill")
+    observed_size = len({row.get("prefill") for row in requests if row.get("prefill")})
+    fleet_size = configured_size if type(configured_size) is int and configured_size > 0 else observed_size
+    balance = _prefill_balance_series(requests, anchor, fleet_size) if fleet_size else {}
     events = [dict(t=phase["epoch_s"] - anchor, name=presentation["events"][phase["stage"]])
               for phase in payload["phases"]
               if phase["event"] == "end" and phase["stage"] in presentation["events"]]
@@ -95,6 +116,19 @@ def build_spec(payload, presentation, default_path):
                     points=qps[field],
                     provenance=dict(kind="derived", source=str(request_path) if request_path else None,
                                     calculation="terminal outcome counted by send_start_epoch_ms second"),
+                ))
+            elif field in balance:
+                name, axis, color = {
+                    "prefill_peak_qps": ("最热 Prefill", "qps", PALETTE[3]),
+                    "prefill_mean_qps": ("全体 Prefill 平均", "qps", PALETTE[1]),
+                    "prefill_skew": ("最热 / 平均", "skew", PALETTE[5]),
+                }[field]
+                curves.append(dict(
+                    name=name, group="Prefill 分配", axis=axis, color=color,
+                    points=balance[field],
+                    provenance=dict(kind="derived", source=str(request_path) if request_path else None,
+                                    calculation="assigned requests by send second; includes failed requests",
+                                    fleet_size=fleet_size),
                 ))
             else:
                 for master in ("A", "B"):
@@ -114,6 +148,7 @@ def build_spec(payload, presentation, default_path):
                 "qps": {"title": "requests / s", "position": "left"},
                 "count": {"title": "requests", "position": "left"},
                 "up": {"title": "HTTP 状态 (0/1)", "position": "right", "min": 0, "max": 1},
+                "skew": {"title": "最热 / 平均 (倍)", "position": "right", "min": 0},
             }, series=curves, events=events,
         ))
     sections = [
@@ -124,6 +159,8 @@ def build_spec(payload, presentation, default_path):
         details("数据来源与完整性", dict(
             request_events=str(request_path) if request_path else None,
             request_count=len(requests),
+            prefill_fleet_size=fleet_size or None,
+            prefill_fleet_size_source="declared configuration" if configured_size else "observed endpoints",
             master_states=str(state_path) if state_path else None,
             state_samples=len(states),
             monitoring=payload["workload"].get("telemetry_completeness"),

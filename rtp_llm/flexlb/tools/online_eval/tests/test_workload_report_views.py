@@ -30,9 +30,9 @@ class WorkloadReportViewsTest(unittest.TestCase):
             root = Path(d)
             requests = root / "client_events.jsonl"
             requests.write_text("\n".join(json.dumps(row) for row in [
-                {"send_start_epoch_ms": 11_100, "status": "ok"},
-                {"send_start_epoch_ms": 11_800, "status": "exception"},
-                {"send_start_epoch_ms": 12_100, "status": "ok"},
+                {"send_start_epoch_ms": 11_100, "status": "ok", "prefill": "P0"},
+                {"send_start_epoch_ms": 11_800, "status": "exception", "prefill": "P0"},
+                {"send_start_epoch_ms": 12_100, "status": "ok", "prefill": "P1"},
             ]) + "\n")
             state = root / "master_states.jsonl"
             state.write_text("\n".join(json.dumps(row) for row in [
@@ -45,17 +45,22 @@ class WorkloadReportViewsTest(unittest.TestCase):
             analysis = payload()
             analysis["id"] = "ha"
             analysis["status"] = "FAIL"
+            analysis["configuration"] = {"environment": {"n_prefill": 2}}
             analysis["stages"] = [dict(id="finish", artifacts=[str(requests), str(state)])]
             analysis["phases"] = [dict(stage="kill_a", event="end", epoch_s=11)]
             paths = write_views(root, analysis, ["workload.yaml", "master_ha_core.yaml"])
             path = paths["master_ha_core.yaml"]
             spec = json.loads((path.parent / "report-spec.json").read_text())
             panels = {panel["id"]: panel for panel in spec["panels"]}
-            self.assertEqual({"request_qps", "inflight"}, set(panels))
+            self.assertEqual({"request_qps", "inflight", "prefill_balance"}, set(panels))
             self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][2]["points"]])
             self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][3]["points"]])
             self.assertEqual([3, None], [point["y"] for point in panels["inflight"]["series"][0]["points"]])
             self.assertEqual([1, 0], [point["y"] for point in panels["inflight"]["series"][-2]["points"]])
+            balance = panels["prefill_balance"]["series"]
+            self.assertEqual([2, 1], [point["y"] for point in balance[0]["points"]])
+            self.assertEqual([1, 0.5], [point["y"] for point in balance[1]["points"]])
+            self.assertEqual([2, 2], [point["y"] for point in balance[2]["points"]])
             self.assertTrue(all(panel["axes"]["up"]["position"] == "right"
                                 and panel["events"] for panel in panels.values()))
             self.assertEqual(1, panels["request_qps"]["events"][0]["t"])

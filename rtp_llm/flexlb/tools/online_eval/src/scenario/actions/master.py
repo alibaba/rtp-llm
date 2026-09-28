@@ -101,7 +101,8 @@ def _fault(ctx, params, deadline):
         _invalidate_master_channel(ctx, fault.target)
     deadline.check()
     return StageOutput(
-        {"fault": handle, "pid": process.pid, "started_s": fault.started_s}
+        {"fault": handle, "pid": process.pid, "started_s": fault.started_s,
+         "epoch_s": fault.started_epoch_s}
     )
 
 
@@ -383,7 +384,8 @@ HANDLERS = [
         "master_fault",
         _fault_validate,
         _fault,
-        {"fault": "master_fault", "pid": "integer", "started_s": "number"},
+        {"fault": "master_fault", "pid": "integer", "started_s": "number",
+         "epoch_s": "number"},
     ),
     StageHandler(
         "master_restore",
@@ -847,6 +849,7 @@ HA_METRICS = {
     "visible_terminal_count",
     "visible_terminal_share",
     "prefill_max_share",
+    "prefill_peak_skew",
 }
 
 
@@ -933,6 +936,21 @@ def _client_check(ctx, params, deadline):
         if not addresses or any(address not in pool for address in addresses):
             raise ValueError("successful HA requests lack known Prefill endpoints")
         actual = max(Counter(addresses).values()) / len(addresses)
+    elif metric == "prefill_peak_skew":
+        from runtime.ha import prefill_assignment_buckets
+        from scenario.actions.master_observation import _pools
+
+        pool = set(_pools(ctx, deadline)["prefill"])
+        buckets = prefill_assignment_buckets(rows)
+        assigned = {address for counts in buckets.values() for address in counts}
+        if not pool or not assigned <= pool:
+            raise ValueError("HA requests reference unknown Prefill endpoints")
+        eligible = [counts for counts in buckets.values()
+                    if sum(counts.values()) >= params["min_samples"]]
+        if not eligible:
+            raise ValueError("no HA send-second has enough assigned Prefill samples")
+        actual = max(max(counts.values()) * len(pool) / sum(counts.values())
+                     for counts in eligible)
     elif metric == "duplicate_ids":
         actual = sum(count > 1 for count in Counter(r["rid"] for r in rows).values())
     elif metric == "error_kind_count":
