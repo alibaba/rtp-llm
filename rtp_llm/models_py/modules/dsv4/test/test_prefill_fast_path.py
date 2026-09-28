@@ -3,15 +3,17 @@ import unittest
 from collections import namedtuple
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.model_desc.hidden_state_capture import CaptureContext
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
+from rtp_llm.models_py.modules.dsv4.prefill.forward import _resolve_prefill_cu_seqlens
 from rtp_llm.models_py.modules.factory.fused_moe.utils import profiler as moe_profiler
 
 _FakePrefillMeta = namedtuple("_FakePrefillMeta", ["workspace"])
@@ -121,6 +123,8 @@ class _FakeV4:
         self._prefill_ws_idx_w = 0
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
+        self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
+        self.aux_captures: list[tuple[int, torch.Tensor]] = []
         self.norm = lambda h: h + 100
 
     def _propagate_cp_ctx(self, cp_ctx):
@@ -133,19 +137,24 @@ class _FakeV4:
         self.calls.append(("head_reduce", h.clone()))
         return h.squeeze(-2)
 
+    def capture_aux_hidden(self, layer_id, hidden):
+        self.aux_captures.append((layer_id, hidden.clone()))
+
 
 class _PrefillForwardTestBase(unittest.TestCase):
-    def _run_forward_prefill_with(self, attn):
+    def _run_forward_prefill_with(self, attn, device="cpu"):
         inputs = SimpleNamespace(
             attention_inputs=attn,
-            input_ids=torch.tensor([3, 4, 5, 6], dtype=torch.long),
+            input_ids=torch.tensor([3, 4, 5, 6], dtype=torch.long, device=device),
         )
         with patch.object(prefill_forward, "set_cp_info"), patch.object(
             prefill_forward, "primary_attention_inputs", return_value=attn
         ), patch.object(
             prefill_forward, "build_block_tables_batched", return_value={}
         ), patch.object(
-            prefill_forward, "forward_layers", return_value=torch.zeros(4, 2)
+            prefill_forward,
+            "forward_layers",
+            return_value=torch.zeros(4, 2, device=device),
         ) as forward_layers:
             prefill_forward.forward_prefill(
                 _FakeV4(),
@@ -160,6 +169,47 @@ class _PrefillForwardTestBase(unittest.TestCase):
             *forward_layers.call_args.args, **forward_layers.call_args.kwargs
         )
         return bound.arguments["cu_seqlens"]
+
+    def _forward_prefill_cu_seqlens(self, attn):
+        input_ids = torch.arange(attn.combo_position_ids.numel(), dtype=torch.long)
+        inputs = SimpleNamespace(input_ids=input_ids, attention_inputs=attn)
+
+        with patch.object(
+            prefill_forward, "primary_attention_inputs", return_value=attn
+        ), patch.object(prefill_forward, "set_cp_info"), patch.object(
+            prefill_forward, "build_block_tables_batched", return_value=None
+        ), patch.object(
+            prefill_forward,
+            "forward_layers",
+            return_value=torch.zeros(input_ids.numel(), 2),
+        ) as forward_layers:
+            prefill_forward.forward_prefill(
+                _FakeV4(),
+                None,
+                None,
+                inputs,
+            )
+
+        return forward_layers.call_args.args[4]
+
+    def test_last_hidden_by_request_handles_empty_flat_input(self):
+        flat = torch.empty((0, 2))
+        result = prefill_forward._last_hidden_by_request(flat, torch.tensor([0]), None)
+        self.assertEqual(tuple(result.shape), (0, 2))
+
+    def test_cu_seqlens_device_fallback_keeps_cpu_boundaries(self):
+        attn = SimpleNamespace(
+            cu_seqlens=torch.empty(0, dtype=torch.int32),
+            cu_seqlens_device=torch.tensor([0, 2], dtype=torch.int32),
+            input_lengths=torch.tensor([2], dtype=torch.int32),
+            input_lengths_device=torch.tensor([2], dtype=torch.int32),
+            combo_position_ids=torch.tensor([0, 1], dtype=torch.long),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            prefix_lengths_device=torch.tensor([0], dtype=torch.int32),
+        )
+        cu_seqlens = self._forward_prefill_cu_seqlens(attn)
+        self.assertEqual(cu_seqlens.device, torch.device("cpu"))
+        self.assertEqual(cu_seqlens.tolist(), [0, 2])
 
 
 class PrefillFastPathTest(_PrefillForwardTestBase):
@@ -243,9 +293,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         existing = torch.tensor([0, 2, 5], dtype=torch.int32)
 
         resolved = prefill_forward._resolve_prefill_cu_seqlens(
-            existing,
-            torch.tensor([9], dtype=torch.int32),
-            torch.device("cpu"),
+            existing, input_lengths=None, device=torch.device("cpu")
         )
 
         self.assertIs(resolved, existing)
@@ -254,8 +302,8 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
     def test_prefill_cu_seqlens_uses_requested_device(self):
         resolved = prefill_forward._resolve_prefill_cu_seqlens(
             torch.tensor([0, 2, 5], dtype=torch.int32),
-            None,
-            torch.device("meta"),
+            input_lengths=None,
+            device=torch.device("meta"),
         )
 
         self.assertEqual(resolved.device.type, "meta")
@@ -263,56 +311,44 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
     def test_prefill_cu_seqlens_normalizes_existing_int64_metadata(self):
         resolved = prefill_forward._resolve_prefill_cu_seqlens(
             torch.tensor([0, 2, 5], dtype=torch.int64),
-            None,
-            torch.device("cpu"),
+            input_lengths=None,
+            device=torch.device("cpu"),
         )
 
         self.assertEqual(resolved.dtype, torch.int32)
         self.assertTrue(resolved.is_contiguous())
         torch.testing.assert_close(resolved, torch.tensor([0, 2, 5], dtype=torch.int32))
 
-    def test_prefill_cu_seqlens_rebuilt_for_startup_warmup(self):
-        resolved = prefill_forward._resolve_prefill_cu_seqlens(
+    def test_prefill_cu_seqlens_rejects_missing_or_short_metadata(self):
+        for cu_seqlens in (
+            None,
             torch.empty(0, dtype=torch.int32),
-            torch.tensor([2, 3], dtype=torch.int32),
-            torch.device("cpu"),
-        )
-
-        self.assertEqual(resolved.dtype, torch.int32)
-        self.assertTrue(resolved.is_contiguous())
-        torch.testing.assert_close(resolved, torch.tensor([0, 2, 5], dtype=torch.int32))
-
-    def test_prefill_cu_seqlens_rebuilt_when_metadata_is_missing(self):
-        resolved = prefill_forward._resolve_prefill_cu_seqlens(
-            None,
-            torch.tensor([2, 3], dtype=torch.int32),
-        )
-
-        self.assertEqual(resolved.dtype, torch.int32)
-        self.assertTrue(resolved.is_contiguous())
-        torch.testing.assert_close(resolved, torch.tensor([0, 2, 5], dtype=torch.int32))
-
-    def test_prefill_cu_seqlens_single_sentinel_is_rebuilt_as_int32(self):
-        resolved = prefill_forward._resolve_prefill_cu_seqlens(
             torch.tensor([0], dtype=torch.int64),
-            torch.tensor([2, 3], dtype=torch.int64),
-            torch.device("cpu"),
-        )
+        ):
+            for input_lengths in (None, torch.empty(0, dtype=torch.int32)):
+                with self.subTest(
+                    cu_seqlens=cu_seqlens, input_lengths=input_lengths
+                ), self.assertRaisesRegex(RuntimeError, "no usable cu_seqlens"):
+                    prefill_forward._resolve_prefill_cu_seqlens(
+                        cu_seqlens, input_lengths=input_lengths
+                    )
 
-        self.assertEqual(resolved.dtype, torch.int32)
-        self.assertTrue(resolved.is_contiguous())
-        torch.testing.assert_close(resolved, torch.tensor([0, 2, 5], dtype=torch.int32))
-
-    def test_prefill_cu_seqlens_requires_request_lengths(self):
-        for input_lengths in (None, torch.empty(0, dtype=torch.int32)):
-            with self.subTest(input_lengths=input_lengths), self.assertRaisesRegex(
-                RuntimeError, "non-empty input_lengths"
-            ):
-                prefill_forward._resolve_prefill_cu_seqlens(
-                    None,
-                    input_lengths,
-                    torch.device("cpu"),
-                )
+    def test_prefill_cu_seqlens_rebuilds_placeholders_from_input_lengths(self):
+        for cu_seqlens in (
+            None,
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int64),
+        ):
+            for lengths, expected in (([2, 0, 3], [0, 2, 2, 5]), ([0], [0, 0])):
+                with self.subTest(cu_seqlens=cu_seqlens, lengths=lengths):
+                    input_lengths = torch.tensor(lengths, dtype=torch.int64)
+                    resolved = _resolve_prefill_cu_seqlens(cu_seqlens, input_lengths)
+                    self.assertEqual(resolved.device, input_lengths.device)
+                    self.assertEqual(resolved.dtype, torch.int32)
+                    self.assertTrue(resolved.is_contiguous())
+                    torch.testing.assert_close(
+                        resolved, torch.tensor(expected, dtype=torch.int32)
+                    )
 
     def test_disable_record_function_ranges_is_scoped(self):
         calls = []
@@ -557,6 +593,278 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         )
         build_meta.assert_called_once()
         clear_meta.assert_called_once_with(v4)
+
+    def test_forward_prefill_passes_capture_context_and_prefers_host_cu_seqlens(
+        self,
+    ):
+        v4 = _FakeV4()
+        host_cu_seqlens = torch.tensor([0, 2], dtype=torch.int32)
+        attn = SimpleNamespace(
+            cu_seqlens=host_cu_seqlens,
+            cu_seqlens_device=torch.tensor([0, 1], dtype=torch.int32),
+            combo_position_ids=torch.tensor([0, 1], dtype=torch.long),
+            input_lengths=torch.tensor([2], dtype=torch.int32),
+            input_lengths_device=torch.tensor([2], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+        )
+        inputs = SimpleNamespace(
+            input_ids=torch.tensor([3, 4], dtype=torch.long),
+            attention_inputs=attn,
+        )
+
+        with patch.object(
+            prefill_forward, "primary_attention_inputs", return_value=attn
+        ), patch.object(prefill_forward, "set_cp_info"), patch.object(
+            prefill_forward, "build_block_tables_batched", return_value=None
+        ), patch.object(
+            prefill_forward,
+            "forward_layers",
+            return_value=torch.zeros(2, 2),
+        ) as forward_layers:
+            for capture_context in (None, object()):
+                prefill_forward.forward_prefill(
+                    v4,
+                    None,
+                    None,
+                    inputs,
+                    capture_context=capture_context,
+                )
+                self.assertIs(
+                    forward_layers.call_args.kwargs["capture_context"],
+                    capture_context,
+                )
+                self.assertIs(forward_layers.call_args.args[4], host_cu_seqlens)
+
+    def test_forward_prefill_falls_back_to_device_cu_seqlens(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_cu_seqlens = torch.tensor([0, 2], dtype=torch.int32, device=device)
+        attn = SimpleNamespace(
+            cu_seqlens=torch.empty(0, dtype=torch.int32),
+            cu_seqlens_device=device_cu_seqlens,
+            combo_position_ids=torch.tensor([0, 1], dtype=torch.long),
+            input_lengths=torch.tensor([2], dtype=torch.int32),
+            input_lengths_device=torch.tensor([2], dtype=torch.int32, device=device),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            prefix_lengths_device=torch.tensor([0], dtype=torch.int32, device=device),
+        )
+
+        selected = self._forward_prefill_cu_seqlens(attn)
+
+        torch.testing.assert_close(
+            selected, device_cu_seqlens.to(device=torch.device("cpu"))
+        )
+        self.assertEqual(selected.device.type, "cpu")
+
+    def test_forward_prefill_slices_device_cu_seqlens_for_batch(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_cu_seqlens = torch.tensor(
+            [0, 2, 5, 99], dtype=torch.int32, device=device
+        )
+        attn = SimpleNamespace(
+            cu_seqlens=None,
+            cu_seqlens_device=device_cu_seqlens,
+            combo_position_ids=torch.arange(5, dtype=torch.long),
+            input_lengths=torch.tensor([2, 3], dtype=torch.int32),
+            input_lengths_device=torch.tensor([2, 3], dtype=torch.int32, device=device),
+            prefix_lengths=torch.tensor([0, 0], dtype=torch.int32),
+            prefix_lengths_device=torch.tensor(
+                [0, 0], dtype=torch.int32, device=device
+            ),
+        )
+
+        selected = self._forward_prefill_cu_seqlens(attn)
+
+        torch.testing.assert_close(selected, torch.tensor([0, 2, 5], dtype=torch.int32))
+        self.assertEqual(selected.device.type, "cpu")
+
+    def test_forward_prefill_rejects_missing_cu_seqlens(self):
+        attn = SimpleNamespace(
+            cu_seqlens=None,
+            cu_seqlens_device=None,
+            combo_position_ids=torch.tensor([0, 1], dtype=torch.long),
+            input_lengths=torch.tensor([2], dtype=torch.int32),
+            input_lengths_device=None,
+            prefix_lengths=None,
+            prefix_lengths_device=None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "no usable cu_seqlens"):
+            self._forward_prefill_cu_seqlens(attn)
+
+    def test_forward_prefill_rejects_short_device_cu_seqlens(self):
+        attn = SimpleNamespace(
+            cu_seqlens=torch.empty(0, dtype=torch.int32),
+            cu_seqlens_device=torch.tensor([0, 2], dtype=torch.int32),
+            combo_position_ids=torch.arange(5, dtype=torch.long),
+            input_lengths=torch.tensor([2, 3], dtype=torch.int32),
+            input_lengths_device=torch.tensor([2, 3], dtype=torch.int32),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requires at least 3"):
+            self._forward_prefill_cu_seqlens(attn)
+
+    def test_forward_layers_hc_mult_one_returns_normalized_hidden(self):
+        v4 = _FakeV4()
+        v4.fp8_kv_cache = False
+        v4.hc_mult = 1
+        v4.layers = []
+        input_ids = torch.tensor([3, 4], dtype=torch.long)
+
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(prefill_forward._fwd_dbg, "enabled", lambda: False):
+            out = prefill_forward.forward_layers(
+                v4,
+                kv_cache=None,
+                input_ids=input_ids,
+                positions=torch.tensor([7, 8], dtype=torch.long),
+                cu_seqlens=torch.tensor([0, 2], dtype=torch.long),
+                block_tables_by_type=None,
+            )
+
+        expected = v4.embed(input_ids)
+        torch.testing.assert_close(out, expected + 100)
+        self.assertEqual(tuple(out.shape), (2, 2))
+
+    def test_forward_layers_capture_context_final_norm_paths(self):
+        input_ids = torch.tensor([3, 4], dtype=torch.long)
+        positions = torch.tensor([7, 8], dtype=torch.long)
+        cu_seqlens = torch.tensor([0, 2], dtype=torch.long)
+
+        def run(capture_context):
+            v4 = _FakeV4()
+            v4.fp8_kv_cache = False
+            v4.hc_mult = 1
+            v4.layers = [_FakeLayer(0, v4.calls)]
+            with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+                prefill_forward._rt, "ENABLED", False
+            ), patch.object(
+                prefill_forward._fwd_dbg, "enabled", lambda: False
+            ), patch.object(
+                v4, "norm", wraps=v4.norm
+            ) as norm:
+                out = prefill_forward.forward_layers(
+                    v4,
+                    kv_cache=None,
+                    input_ids=input_ids,
+                    positions=positions,
+                    cu_seqlens=cu_seqlens,
+                    block_tables_by_type=None,
+                    capture_context=capture_context,
+                )
+                return out, norm.call_count
+
+        canonical_layer = Mock(
+            side_effect=lambda hidden_states, residual: hidden_states.mean(dim=-2)
+        )
+        canonical_final = Mock(
+            side_effect=lambda hidden_states, residual: hidden_states + 200
+        )
+        empty = CaptureContext.configured((), canonical_layer, canonical_final)
+        configured = CaptureContext.configured((0,), canonical_layer, canonical_final)
+        self.assertIs(empty.for_forward(True), empty)
+        expected = _FakeV4().embed(input_ids) + 10
+
+        for name, context, enabled in (
+            ("ordinary", None, False),
+            ("unsupported", CaptureContext.unsupported(), False),
+            ("empty_disabled", empty.for_forward(False), False),
+            ("empty_requested", empty.for_forward(True), False),
+            ("configured_disabled", configured.for_forward(False), False),
+            ("configured_active", configured.for_forward(True), True),
+        ):
+            with self.subTest(context=name):
+                canonical_layer.reset_mock()
+                canonical_final.reset_mock()
+                if context is not None:
+                    self.assertEqual(context.enabled, enabled)
+                out, norm_calls = run(context)
+                self.assertEqual(norm_calls, 0 if enabled else 1)
+                self.assertEqual(canonical_layer.call_count, int(enabled))
+                self.assertEqual(canonical_final.call_count, int(enabled))
+                if enabled:
+                    torch.testing.assert_close(
+                        out, torch.cat((expected, expected + 200), dim=-1)
+                    )
+                    self.assertEqual(tuple(out.shape), (2, 4))
+                else:
+                    torch.testing.assert_close(out, expected + 100)
+                    self.assertEqual(tuple(out.shape), (2, 2))
+
+    def test_forward_layers_keeps_aux_and_output_capture_independent(self):
+        class LaneAwareLayer:
+            def __init__(self, lane_increments):
+                self.lane_increments = torch.tensor(lane_increments).reshape(1, -1, 1)
+
+            def __call__(
+                self,
+                h,
+                input_ids,
+                positions,
+                cu_seqlens,
+                kv_cache=None,
+                block_tables_by_type=None,
+            ):
+                del input_ids, positions, cu_seqlens, kv_cache, block_tables_by_type
+                return h + self.lane_increments.to(h)
+
+        v4 = _FakeV4()
+        v4.fp8_kv_cache = False
+        v4.hc_mult = 2
+        v4.layers = [LaneAwareLayer((1, 3)), LaneAwareLayer((10, 14))]
+        v4._hc_head_reduce = lambda h: h.sum(dim=-2)
+        v4.capture_aux_hidden_layer_ids = (0,)
+        capture_layer_ids = (1, 0)
+        capture_context = CaptureContext.configured(
+            capture_layer_ids,
+            lambda hidden_states, residual: hidden_states.mean(dim=-2),
+            lambda hidden_states, residual: v4.norm(hidden_states),
+        ).for_forward(True)
+        input_ids = torch.tensor([3, 4], dtype=torch.long)
+        positions = torch.tensor([7, 8], dtype=torch.long)
+        cu_seqlens = torch.tensor([0, 2], dtype=torch.long)
+        attn_inputs = SimpleNamespace(
+            input_lengths=torch.tensor([2], dtype=torch.int32),
+            prefix_lengths=torch.tensor([7], dtype=torch.int32),
+        )
+
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(prefill_forward._fwd_dbg, "enabled", lambda: False):
+            out = prefill_forward.forward_layers(
+                v4,
+                kv_cache=None,
+                input_ids=input_ids,
+                positions=positions,
+                cu_seqlens=cu_seqlens,
+                block_tables_by_type=None,
+                attn_inputs=attn_inputs,
+                capture_context=capture_context,
+            )
+
+        # Layer 0 intentionally overlaps both capture mechanisms. The DSpARK
+        # aux hook receives the complete mHC tensor for its own reduction/write,
+        # while TorchSpec mean-reduces and packs in its independent configured
+        # order (layer 1 before layer 0).
+        self.assertEqual([layer_id for layer_id, _ in v4.aux_captures], [0])
+        expected_aux = v4.embed(input_ids).unsqueeze(-2).repeat(1, v4.hc_mult, 1)
+        expected_aux = expected_aux + torch.tensor([1, 3]).reshape(1, -1, 1)
+        torch.testing.assert_close(v4.aux_captures[0][1], expected_aux)
+        hidden_size = v4.embed(input_ids).shape[-1]
+        self.assertEqual(out.shape[-1], (len(capture_layer_ids) + 1) * hidden_size)
+        torch.testing.assert_close(out[:, 2:4], expected_aux.mean(dim=-2))
+
+        # Final hidden uses the model's distinct learned-head stand-in, proving
+        # hc_mult>1 cannot hide a wrong reducer or cross-capture interference.
+        torch.testing.assert_close(
+            out,
+            torch.tensor(
+                [
+                    [17.0, 17.5, 5.0, 5.5, 134.0, 135.0],
+                    [18.0, 18.5, 6.0, 6.5, 136.0, 137.0],
+                ]
+            ),
+        )
 
     def test_forward_layers_fast_path_preserves_varlen_batch_metadata(self):
         v4 = _FakeV4()

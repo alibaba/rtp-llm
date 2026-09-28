@@ -140,6 +140,7 @@ protected:
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
@@ -238,6 +239,15 @@ protected:
 private:
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
 
+    static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size, bool enable_ffn_disaggregate);
+    static bool shouldSkipEmptyDecode(bool streams_empty, bool enable_ffn_disaggregate);
+    static bool shouldSyncDecodeInputOnRank0(bool alignment_only);
+
+    void collectPrefillMetrics(const StreamGroups&  stream_groups,
+                               MtpMetricsCollector& metrics_collector,
+                               int64_t              schedule_time_us,
+                               int64_t              model_forward_us);
+
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
     std::unique_ptr<ModelBase>                                               model_;
@@ -310,8 +320,8 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

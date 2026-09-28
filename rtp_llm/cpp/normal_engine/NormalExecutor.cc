@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -166,6 +167,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
+        is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
+        role_type_,
+        warm_up_,
+        params.model_config_.hidden_state_capture_layer_ids);
+    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_fail_open = params.model_config_.hidden_state_capture_fail_open;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -348,6 +356,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
+        cudaSyncAndCheck();
+        model_->releaseBuffers();
+        for (const auto& stream : streams) {
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
+        }
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
+        return absl::OkStatus();
+    }
+
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
@@ -357,7 +377,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         return absl::OkStatus();
     }
 
-    {
+    // Gather selects the execution mode from non-errored streams in model order.
+    // Use that same decision: streams.front() may already have failed or be reordered.
+    const bool zero_token_batch = model_input.skip_lm_head;
+    if (!zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -389,7 +412,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
     }
-    if (useStreamAsync() && is_decode_only) {
+    if (useStreamAsync() && is_decode_only && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -417,11 +440,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
-        if (useDeviceInput()) {
-            publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+        absl::Status result;
+        if (zero_token_batch) {
+            cudaSyncAndCheck();
+            result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
+                                                                  model_output.generation_prefill_cuda_graph_status);
+        } else {
+            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
+            if (useDeviceInput()) {
+                publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+            }
+            result = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         }
-        auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {

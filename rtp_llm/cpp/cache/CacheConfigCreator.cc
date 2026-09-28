@@ -217,7 +217,8 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
 void populateGroups(CacheConfig&                 config,
                     const LayerKVCacheSpecDescs& descs_by_layer,
                     const LayerKVCacheSpecs&     specs_by_layer,
-                    const ModelConfig&           model_config) {
+                    const ModelConfig&           model_config,
+                    const KVCacheConfig&         kv_cache_config) {
     struct BuildState {
         KVCacheSpecPtr   spec;
         std::string      fingerprint;
@@ -279,7 +280,16 @@ void populateGroups(CacheConfig&                 config,
         group.tag    = tag;
         group.spec   = state.spec;
         group.policy = state.policy;
+        // Descriptor sizing owns the policy; the legacy config knob only fills an unspecified capacity.
+        if (tag == "hca_state" && group.policy.explicit_block_num == 0) {
+            group.policy.explicit_block_num = kv_cache_config.dsv4_hca_state_pool_blocks;
+        }
         groups.push_back(std::move(group));
+    }
+    if (kv_cache_config.dsv4_hca_state_pool_blocks > 0 && groups_by_tag.count("hca_state") == 0) {
+        RTP_LLM_LOG_WARNING(
+            "dsv4_hca_state_pool_blocks=%u requested, but no hca_state cache group exists; keeping default allocation",
+            kv_cache_config.dsv4_hca_state_pool_blocks);
     }
     config.setTopology(std::move(groups), std::move(layers));
 }
@@ -303,7 +313,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
-    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
+    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config, kv_cache_config);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
