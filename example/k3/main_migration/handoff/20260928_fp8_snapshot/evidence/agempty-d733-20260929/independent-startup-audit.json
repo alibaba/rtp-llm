@@ -1,0 +1,159 @@
+{
+  "source_commit": "d733278ac1f87420afacd930f1da9b5d3284fe9a",
+  "hosts": {
+    "111": {
+      "ranks": [
+        {
+          "rank": 0,
+          "target_load_s": 13.48,
+          "draft_load_s": 4.47,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 1,
+          "target_load_s": 11.84,
+          "draft_load_s": 9.08,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 2,
+          "target_load_s": 14.68,
+          "draft_load_s": 8.12,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 3,
+          "target_load_s": 13.98,
+          "draft_load_s": 6.62,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 4,
+          "target_load_s": 8.33,
+          "draft_load_s": 7.32,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 5,
+          "target_load_s": 11.33,
+          "draft_load_s": 5.89,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 6,
+          "target_load_s": 7.76,
+          "draft_load_s": 8.87,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 7,
+          "target_load_s": 10.61,
+          "draft_load_s": 10.41,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        }
+      ],
+      "preflights": {
+        "target": true,
+        "draft": true
+      },
+      "build_exit": 0,
+      "checkpoint_identity": [
+        "8754ec8b41ae59791aa6370386276467bde6e8ce8502915dcfb9769ba9990da8  /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/config.json",
+        "eb064b56fc8a782b97594d9888314a430450128d1fe4a7da66662f6d641122b5  /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/model.safetensors.index.json"
+      ]
+    },
+    "112": {
+      "ranks": [
+        {
+          "rank": 0,
+          "target_load_s": 40.85,
+          "draft_load_s": 15.8,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 1,
+          "target_load_s": 47.85,
+          "draft_load_s": 16.0,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 2,
+          "target_load_s": 48.87,
+          "draft_load_s": 13.66,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 3,
+          "target_load_s": 44.8,
+          "draft_load_s": 16.77,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 4,
+          "target_load_s": 45.47,
+          "draft_load_s": 12.08,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 5,
+          "target_load_s": 41.56,
+          "draft_load_s": 13.13,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 6,
+          "target_load_s": 43.16,
+          "draft_load_s": 18.08,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        },
+        {
+          "rank": 7,
+          "target_load_s": 42.26,
+          "draft_load_s": 17.94,
+          "fastsafetensors_mentions": 2,
+          "target_fp8": true,
+          "draft_bf16": true
+        }
+      ],
+      "preflights": {
+        "target": true,
+        "draft": true
+      },
+      "build_exit": 0,
+      "checkpoint_identity": [
+        "8754ec8b41ae59791aa6370386276467bde6e8ce8502915dcfb9769ba9990da8  /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/config.json",
+        "eb064b56fc8a782b97594d9888314a430450128d1fe4a7da66662f6d641122b5  /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/model.safetensors.index.json"
+      ]
+    }
+  }
+}

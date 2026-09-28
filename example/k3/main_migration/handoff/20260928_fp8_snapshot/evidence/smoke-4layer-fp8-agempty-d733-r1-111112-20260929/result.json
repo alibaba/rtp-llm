@@ -1,0 +1,862 @@
+{
+  "suite": "flow",
+  "source_reference": "64c6aff3666402228950f1f09031e228c3734277",
+  "profile": "tp8-ep8-sp-no-dcp-text",
+  "deferred_by_user": [],
+  "single_prefill_input_limit": null,
+  "formal_request_deadline_s": 300,
+  "full_original_suite_passed": false,
+  "not_applicable": [
+    "DCP",
+    "PageRR owner",
+    "DP multi-owner",
+    "multimodal",
+    "KTP",
+    "EAGLE3/DSpark"
+  ],
+  "runtime_evidence_gate": "separate; this result alone does not certify RDMA, graph replay or precision",
+  "formal_request_retries": 0,
+  "namespace": "main-k3-fp8-agempty-d733-r1-3fs-111112-20260929",
+  "passed": true,
+  "error": null,
+  "block_size": 4096,
+  "chunk_tokens": 65536,
+  "reuse_unit_tokens": 4096,
+  "batch_size": 4,
+  "decode_role_addrs": [
+    {
+      "role": "DECODE",
+      "ip": "11.163.39.112",
+      "http_port": 28200,
+      "grpc_port": 28201
+    }
+  ],
+  "max_tokens": 16,
+  "identity_max_tokens": 256,
+  "single_exact_max_tokens": 128,
+  "mtp_chunk_max_tokens": 128,
+  "rdma_prewarm": {
+    "enabled": false,
+    "target_decode_owners": 1,
+    "request_timeout_s": 300,
+    "attempts": []
+  },
+  "elapsed_s": 115.616,
+  "summary": {
+    "case_count": 11,
+    "skipped_case_count": 0,
+    "cache_block_boundary_case_count": 0,
+    "decode_crossing_case_count": 0,
+    "hit_count": 5,
+    "miss_count": 6,
+    "reasoning_count": 0,
+    "mtp_case_count": 0,
+    "mtp_draft_case_count": 1,
+    "multimodal_case_count": 0,
+    "concurrent_stages": 2
+  },
+  "stages": [
+    {
+      "name": "chunkwise_rdma_flow_miss",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "chunkwise_rdma_flow_miss"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 74.292
+    },
+    {
+      "name": "flow_hit_owner_0",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "flow_hit_owner_0"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 4.221
+    },
+    {
+      "name": "flow_uneven_miss",
+      "concurrent": true,
+      "passed": true,
+      "case_names": [
+        "flow_uneven_0",
+        "flow_uneven_1",
+        "flow_uneven_2",
+        "flow_uneven_3"
+      ],
+      "decode_owner_ranks": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "elapsed_s": 5.1
+    },
+    {
+      "name": "flow_uneven_hit_rotated",
+      "concurrent": true,
+      "passed": true,
+      "case_names": [
+        "flow_uneven_3_hit",
+        "flow_uneven_2_hit",
+        "flow_uneven_1_hit",
+        "flow_uneven_0_hit"
+      ],
+      "decode_owner_ranks": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "elapsed_s": 18.466
+    },
+    {
+      "name": "flow_mtp_draft",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "flow_mtp_draft"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 12.218
+    }
+  ],
+  "cases": [
+    {
+      "name": "chunkwise_rdma_flow_miss",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 65536,
+      "prefill_total_reuse_len": 0,
+      "input_len": 65537,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 65537,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 65537,
+      "decode_kv_last_position": 65551,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 74.288,
+      "content": " Bain用完了位的座上建设单位都是被一卷orden蠡不致Ms爱不爱戴 brieflyodor Walton",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          15262,
+          114483,
+          83190,
+          131076,
+          111826,
+          85762,
+          100110,
+          130880,
+          19904,
+          79204,
+          135472,
+          47602,
+          66300,
+          114161
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_hit_owner_0",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 65536,
+      "reuse_len": 65536,
+      "prefill_total_reuse_len": 65536,
+      "input_len": 65537,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 65537,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 65537,
+      "decode_kv_last_position": 65551,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 4.216,
+      "content": " Bain用完了位的座上建设单位都是被一卷orden蠡不致Ms爱不爱戴 brieflyodor Walton",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          15262,
+          114483,
+          83190,
+          131076,
+          111826,
+          85762,
+          100110,
+          130880,
+          19904,
+          79204,
+          135472,
+          47602,
+          66300,
+          114161
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_3",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 16384,
+      "prefill_total_reuse_len": 0,
+      "input_len": 20480,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 20480,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 20480,
+      "decode_kv_last_position": 20494,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 4.535,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly不中而合Newtonさい sympath",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          114996,
+          115566,
+          120717,
+          69675,
+          122572
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_1",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 8192,
+      "prefill_total_reuse_len": 0,
+      "input_len": 12288,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 12288,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 12288,
+      "decode_kv_last_position": 12302,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 5.09,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly上边 recognbolt corpor爸爸说",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          105895,
+          7374,
+          80868,
+          31495,
+          95724
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_2",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 12288,
+      "prefill_total_reuse_len": 0,
+      "input_len": 16384,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 16384,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 16384,
+      "decode_kv_last_position": 16398,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 5.094,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly上边 recognbolt corporMom",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          105895,
+          7374,
+          80868,
+          31495,
+          84347
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_0",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 4096,
+      "prefill_total_reuse_len": 0,
+      "input_len": 8192,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 8192,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 8192,
+      "decode_kv_last_position": 8206,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 5.095,
+      "content": " Bain用完了 itself新月尔或小odonántuin指日aml不作 GermadaluveFine",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          138298,
+          10414,
+          49670,
+          9405,
+          117781,
+          156538,
+          99463
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_0_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 4096,
+      "reuse_len": 4096,
+      "prefill_total_reuse_len": 4096,
+      "input_len": 8192,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 8192,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 8192,
+      "decode_kv_last_position": 8206,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 14.22,
+      "content": " Bain用完了 itself新月尔或小odonuveLW不透 gravity辕爱不之象怎么想而走",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          156538,
+          92137,
+          66456,
+          43458,
+          72367,
+          79204,
+          84634,
+          121778,
+          96465
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_1_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 8192,
+      "reuse_len": 8192,
+      "prefill_total_reuse_len": 8192,
+      "input_len": 12288,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 12288,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 12288,
+      "decode_kv_last_position": 12302,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 18.225,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly上边 recognbolt corporMom",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          105895,
+          7374,
+          80868,
+          31495,
+          84347
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_2_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 12288,
+      "reuse_len": 12288,
+      "prefill_total_reuse_len": 12288,
+      "input_len": 16384,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 16384,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 16384,
+      "decode_kv_last_position": 16398,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 18.458,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly上边 recognbolt corpor爸爸说",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          105895,
+          7374,
+          80868,
+          31495,
+          95724
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_3_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 16384,
+      "reuse_len": 16384,
+      "prefill_total_reuse_len": 16384,
+      "input_len": 20480,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 20480,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 20480,
+      "decode_kv_last_position": 20494,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 18.463,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly上边 paramouiums后生",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          105895,
+          3012,
+          280,
+          79621,
+          156551
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_mtp_draft",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 0,
+      "prefill_total_reuse_len": 0,
+      "input_len": 56,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": true,
+      "expected_json": null,
+      "expected_input_len": null,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 56,
+      "decode_kv_last_position": 70,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 12.217,
+      "content": "_magic换位ingu schematic健康管理原位而归冰 professionallyisz Period在基层Associpieces Merit泰然",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          71679,
+          73424,
+          18601,
+          103450,
+          70804,
+          161321,
+          70001,
+          4491,
+          41908,
+          149910,
+          42348,
+          145446,
+          29720,
+          65181,
+          125363,
+          128624
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    }
+  ],
+  "failures": [],
+  "skipped_cases": []
+}
