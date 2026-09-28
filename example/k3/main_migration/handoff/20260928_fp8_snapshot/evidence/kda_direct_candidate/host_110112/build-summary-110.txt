@@ -1,0 +1,5 @@
+Target //rtp_llm:rtp_llm_server up-to-date:
+  bazel-bin/rtp_llm/rtp_llm_server
+INFO: Elapsed time: 752.586s, Critical Path: 174.06s
+INFO: 23714 processes: 17567 internal, 6147 local.
+INFO: Build completed successfully, 23714 total actions
