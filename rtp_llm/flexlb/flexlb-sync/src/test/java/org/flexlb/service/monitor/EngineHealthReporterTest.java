@@ -9,6 +9,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -151,7 +152,7 @@ class EngineHealthReporterTest {
     void shouldRegisterRequestPayloadMetrics() {
         reporter.init();
 
-        verify(monitor).register("app.request.input.ids.count",
+        verify(monitor).register("app.request.seq.len",
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         verify(monitor).register("app.request.message.bytes",
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
@@ -163,14 +164,16 @@ class EngineHealthReporterTest {
     void shouldReportRequestPayloadMetricsWithoutResponse() {
         BalanceContext context = new BalanceContext();
         context.setSuccess(false);
-        context.setInputIdsCount(512L);
+        Request request = new Request();
+        request.setSeqLen(512L);
+        context.setRequest(request);
         context.setRequestMessageBytes(8192L);
         context.setRequestBodyBytes(5_242_881L);
 
         reporter.reportRequestPayload(context);
 
         FlexMetricTags expectedTags = FlexMetricTags.of("success", "false");
-        verify(monitor).report("app.request.input.ids.count", expectedTags, 512.0);
+        verify(monitor).report("app.request.seq.len", expectedTags, 512.0);
         verify(monitor).report("app.request.body.bytes", expectedTags, 5_242_881.0);
         verify(monitor).report("app.request.message.bytes", expectedTags, 8192.0);
     }
@@ -212,7 +215,7 @@ class EngineHealthReporterTest {
     void shouldSkipUnknownRequestPayloadMetrics() {
         reporter.reportRequestPayload(new BalanceContext());
 
-        verify(monitor, never()).report(eq("app.request.input.ids.count"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq("app.request.seq.len"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.request.message.bytes"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.request.body.bytes"), any(FlexMetricTags.class), anyDouble());
     }

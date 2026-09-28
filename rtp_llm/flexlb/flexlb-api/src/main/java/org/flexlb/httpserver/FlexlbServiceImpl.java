@@ -901,7 +901,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
         var config = configService.loadBalanceConfig();
         BalanceContext ctx = new BalanceContext(config);
-        ctx.setInputIdsCount((long) pb.getInputIdsCount());
         ctx.setRequestMessageBytes((long) pb.getSerializedSize());
         ctx.recordRequestTiming(pb.getRequestTimeMs(), null);
         ctx.setTraceContext(entryTraceContext());
