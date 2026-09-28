@@ -13,11 +13,6 @@ public class MetricConstant {
      */
     public static final String ENGINE_STATUS_CHECK_SUCCESS_PERIOD = "app.engine.health.check.success.period";
 
-    /**
-     * Engine worker count
-     */
-    public static final String ENGINE_WORKER_NUMBER = "app.engine.health.check.engine.worker.number";
-
     public static final String ENGINE_PREFILL_WORKER_NUMBER = "app.engine.health.check.engine.prefill.worker.number";
 
     public static final String ENGINE_DECODE_WORKER_NUMBER = "app.engine.health.check.engine.decode.worker.number";
