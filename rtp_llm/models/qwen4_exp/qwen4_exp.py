@@ -69,6 +69,13 @@ class Qwen4Exp(Qwen35Moe):
         # change which model implementation is loaded.
         config = getattr(self, "model_config", None)
         if getattr(config, "enable_qwen4_qsa", False):
+            gamma = int(getattr(config, "gen_num_per_cycle", 0))
+            ratio = int(getattr(config, "_qwen4_indexer_compress_ratio", 0))
+            if gamma > 0 and ratio > 0 and gamma + 1 > ratio:
+                raise RuntimeError(
+                    "qwen4_exp QSA target verify requires gen_num_per_cycle + 1 "
+                    f"<= indexer_compress_ratio; got {gamma} + 1 > {ratio}"
+                )
             if getattr(config, "data_type", None) != DataType.TYPE_BF16:
                 raise RuntimeError(
                     "qwen4_exp QSA currently requires act_type=BF16; refusing "

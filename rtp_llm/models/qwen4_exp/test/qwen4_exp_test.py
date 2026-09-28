@@ -167,6 +167,28 @@ class Qwen4ExpTest(unittest.TestCase):
             self.assertEqual(model.load(skip_python_model=True), "loaded")
         parent_load.assert_called_once_with(skip_python_model=True)
 
+    def test_qsa_mtp_draft_width_checked_before_weight_loading(self):
+        for gamma, valid in ((3, True), (4, False)):
+            with self.subTest(gamma=gamma):
+                model = self._qsa_enabled_model(
+                    gen_num_per_cycle=gamma, _qwen4_indexer_compress_ratio=4
+                )
+                with mock.patch.dict(
+                    os.environ,
+                    {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"},
+                ), mock.patch.object(
+                    Qwen35Moe, "load", return_value="loaded"
+                ) as parent_load:
+                    if valid:
+                        self.assertEqual(model.load(), "loaded")
+                        parent_load.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "gen_num_per_cycle.*indexer_compress_ratio"
+                        ):
+                            model.load()
+                        parent_load.assert_not_called()
+
     def test_qsa_rejects_unsupported_modes_before_weight_loading(self):
         cases = (
             (
