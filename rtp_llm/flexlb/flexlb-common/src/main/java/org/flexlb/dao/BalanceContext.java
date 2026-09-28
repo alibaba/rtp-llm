@@ -59,7 +59,6 @@ public class BalanceContext {
     private long totalTimeUs;
     private Long requestArrivalDelayMs;
     private Long requestBodyReadAndDeserializeTimeUs;
-    private Long inputIdsCount;
     private Long requestBodyBytes;
     private Long requestMessageBytes;
 
