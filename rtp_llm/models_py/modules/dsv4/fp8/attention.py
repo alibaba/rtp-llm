@@ -3938,10 +3938,9 @@ class AttentionFP8(nn.Module):
         attention via :meth:`_set_prefill_meta_shared`. Standalone path
         falls back to running this per-layer.
 
-        ``positions`` accepts either a ``[T]`` int64 tensor (from the
-        normal call path) or a pre-synced int (used by upper-layer
-        broadcast meta builders that already paid the sync once for
-        the whole batch). When a tensor is passed we sync once here.
+        ``positions`` accepts either a ``[T]`` int64 tensor or a host scalar.
+        CP metadata carries the matching host position so tensor callers
+        also avoid reading a CUDA scalar.
 
         ``reuse_common_meta`` is supplied only by the upper-layer broadcast
         builder. It reuses the first ratio's top-k/continuation tensors and
@@ -3963,12 +3962,13 @@ class AttentionFP8(nn.Module):
         cp_ctx = getattr(self, "_cp_ctx", None)
         cp_on = cp_ctx is not None and cp_ctx.cp_size > 1
 
-        # Sync ``positions[0]`` -> int once. Tensor input pays the sync here
-        # exactly once per (forward, ratio bucket); int input has already
-        # been synced by the upper-layer broadcast builder. Used by the
-        # kept for metadata consumers that still need the scalar absolute start.
         if isinstance(positions, torch.Tensor):
-            sp_int = int(positions.reshape(-1)[0].item())
+            first_position_host = getattr(cp_ctx, "first_position_host", None)
+            sp_int = (
+                first_position_host
+                if first_position_host is not None
+                else int(positions.reshape(-1)[0].item())
+            )
         else:
             sp_int = int(positions)
 
@@ -4028,7 +4028,12 @@ class AttentionFP8(nn.Module):
                         req_id_per_token,
                     )
                 )
-                any_cont = bool((prefix_lengths > 0).any().item())
+                host_prefixes = getattr(cp_ctx, "prefix_lengths_host", None)
+                any_cont = (
+                    any(prefix > 0 for prefix in host_prefixes)
+                    if host_prefixes is not None
+                    else bool((prefix_lengths > 0).any().item())
+                )
 
             with record_function_range("dsv4.fp8.meta.swa_varlen"):
                 swa_meta = self._build_swa_prefill_meta_varlen(

@@ -69,6 +69,12 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
     shape_hints[GptModelInputIndex::engramTokenWindowRows] =
         inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(0) : 0;
+    shape_hints[GptModelInputIndex::cpHostComboTokens] =
+        inputs.combo_tokens_host.defined() ? inputs.combo_tokens_host.numel() : 0;
+    shape_hints[GptModelInputIndex::cpHostInputLengths] =
+        inputs.input_lengths_host.defined() ? inputs.input_lengths_host.numel() : 0;
+    shape_hints[GptModelInputIndex::cpHostPrefixLengths] =
+        inputs.prefix_lengths_host.defined() ? inputs.prefix_lengths_host.numel() : 0;
 
     uint32_t device_bits = 0;
     if (inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()) {
@@ -218,6 +224,25 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         return tensor;
     };
 
+    const bool sync_cp_host_inputs = parallelism_config.prefill_cp_config.is_enabled();
+    auto       syncHostInput       = [&](torch::Tensor& host, const torch::Tensor& device, GptModelInputIndex index) {
+        const auto count = sync_cp_host_inputs ? checkedHint(index, "CP host input") : 0;
+        if (count == 0) {
+            if (parallelism_config.tp_rank != 0) {
+                host = torch::Tensor();
+            }
+            return;
+        }
+        RTP_LLM_CHECK_WITH_INFO(device.defined() && device.dim() == 1 && device.numel() == count,
+                                "CP host input must match its model input shape");
+        if (parallelism_config.tp_rank != 0) {
+            host = allocBuf(rtp_llm::DataType::TYPE_INT32, {count});
+        }
+        RTP_LLM_CHECK_WITH_INFO(host.defined() && !host.is_cuda() && host.scalar_type() == torch::kInt32
+                                   && host.is_contiguous() && host.dim() == 1 && host.numel() == count,
+                                "CP host input must be a contiguous CPU int32 tensor");
+    };
+
     bool is_non_root = parallelism_config.tp_rank != 0;
     if (is_non_root) {
         const auto context_batch_size = checkedHint(GptModelInputIndex::prefixLengths, "prefixLengths");
@@ -327,6 +352,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
+    syncHostInput(inputs.combo_tokens_host, inputs.combo_tokens, GptModelInputIndex::cpHostComboTokens);
+    syncHostInput(inputs.input_lengths_host, inputs.input_lengths, GptModelInputIndex::cpHostInputLengths);
+    syncHostInput(inputs.prefix_lengths_host, inputs.prefix_lengths, GptModelInputIndex::cpHostPrefixLengths);
+
     // Collect all tensors that participate in broadcast.
     // The collect order must be deterministic and identical across all ranks.
     std::vector<torch::Tensor*> tensor_ptrs;
@@ -341,6 +370,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
+    if (sync_cp_host_inputs) {
+        collect(inputs.combo_tokens_host);
+        collect(inputs.input_lengths_host);
+        collect(inputs.prefix_lengths_host);
+    }
     if (max_kernel_blocks || max_blocks) {
         collect(inputs.kv_cache_kernel_block_id);
         collect(inputs.kv_cache_block_id);

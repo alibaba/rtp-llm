@@ -476,7 +476,12 @@ def forward_layers(
     # own forward.
     with record_range_ctx():
         if v4.fp8_kv_cache:
-            sp_int_for_meta = int(positions[0].item())
+            first_position_host = getattr(cp_ctx, "first_position_host", None)
+            sp_int_for_meta = (
+                first_position_host
+                if first_position_host is not None
+                else int(positions[0].item())
+            )
             sp_per_req: Optional[torch.Tensor] = None
             req_id_per_token: Optional[torch.Tensor] = None
             if cp_ctx is not None:
@@ -499,7 +504,7 @@ def forward_layers(
                     torch.searchsorted(
                         cu_seqlens.to(device=positions.device, dtype=torch.int64),
                         torch.arange(
-                            int(cu_seqlens[-1].item()),
+                            positions.numel(),
                             device=positions.device,
                             dtype=torch.int64,
                         ),
@@ -521,7 +526,12 @@ def forward_layers(
                     input_lengths = il.to(
                         device=positions.device, dtype=torch.int32
                     ).contiguous()
-                    max_seqlen_q = int(input_lengths.max().item())
+                    max_seqlen_q = (
+                        max(cp_ctx.chunk_lengths_per_req)
+                        if cp_ctx is not None
+                        and cp_ctx.chunk_lengths_per_req is not None
+                        else int(input_lengths.max().item())
+                    )
                 pl = getattr(attn_inputs, "prefix_lengths", None)
                 if pl is not None and pl.numel() > 0:
                     prefix_lengths = pl.to(

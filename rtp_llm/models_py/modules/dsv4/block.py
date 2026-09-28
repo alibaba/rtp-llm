@@ -209,7 +209,7 @@ class Block(nn.Module):
     def _sync_after_first_cp_prefill_attention(self) -> None:
         if self._cp_sync_after_attn_done:
             return
-        if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
+        if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "0") == "0":
             return
         if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
             "mega",

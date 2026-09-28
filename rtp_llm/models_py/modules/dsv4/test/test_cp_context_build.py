@@ -536,6 +536,43 @@ def test_cp_full_prefill_positions_preserve_request_ids() -> None:
     assert torch.equal(cu_seq, torch.tensor([0, 8, 22], dtype=torch.long))
 
 
+def test_host_metadata_avoids_device_reads_on_all_ranks() -> None:
+    for lengths, prefixes in (
+        ([1], [0]),
+        ([65], [16387]),
+        ([1, 7, 65], [0, 0, 0]),
+        ([1, 7, 65], [128, 0, 16387]),
+    ):
+        chunks = [((length + 7) // 8) * 2 for length in lengths]
+        mask = _padding_mask_multi(chunks, lengths, 4)
+        restore = _zigzag_restore_multi(chunks, 4)
+        info = _CpInfo(
+            mask.to("meta"),
+            restore.to("meta"),
+            torch.tensor(lengths, dtype=torch.int32),
+            torch.tensor(chunks, dtype=torch.int32, device="meta"),
+        )
+        info.prefill_qkv_padding_mask_cpu = mask
+        info.prefill_qkv_restore_indice_cpu = restore
+        for rank in range(4):
+            ctx = build_cp_context(
+                info,
+                cp_size=4,
+                cp_rank=rank,
+                chunk_length=sum(chunks),
+                device=torch.device("meta"),
+                position_offset=torch.tensor(prefixes, device="meta"),
+                position_offset_host=torch.tensor(prefixes),
+            )
+            assert ctx.first_position_host == prefixes[0] + min(
+                rank * (chunks[0] // 2), lengths[0] - 1
+            )
+            assert ctx.chunk_lengths_per_req == tuple(chunks)
+            assert ctx.prefix_lengths_host == tuple(prefixes)
+            assert ctx.unpad_restore.shape == (sum(lengths),)
+            assert ctx.global_positions.shape == (sum(chunks),)
+
+
 if __name__ == "__main__":
     test_cp1_noop_collapses_to_local()
     test_cp2_zigzag_two_ranks_cover_full_sequence()
@@ -548,4 +585,5 @@ if __name__ == "__main__":
     test_b_gt_1_positions_match_cpp_per_stream_zigzag()
     test_b_gt_1_global_positions_are_per_request_not_padded_concat()
     test_cp_full_prefill_positions_preserve_request_ids()
+    test_host_metadata_avoids_device_reads_on_all_ranks()
     print("OK")

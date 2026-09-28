@@ -637,7 +637,17 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     auto& model_input            = model_input_status.value();
     model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
 
+    // Simulate retained prefill mirrors before rebuilding the decode inputs.
+    model_input.combo_tokens_host   = torch::tensor({1, 1, 2}, torch::kInt32);
+    model_input.input_lengths_host  = torch::tensor({1, 2}, torch::kInt32);
+    model_input.prefix_lengths_host = torch::tensor({0, 0}, torch::kInt32);
+    ASSERT_TRUE(model_input.combo_tokens_host.defined());
+    ASSERT_TRUE(model_input.input_lengths_host.defined());
+    ASSERT_TRUE(model_input.prefix_lengths_host.defined());
     processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input, holder);
+    EXPECT_FALSE(model_input.combo_tokens_host.defined());
+    EXPECT_FALSE(model_input.input_lengths_host.defined());
+    EXPECT_FALSE(model_input.prefix_lengths_host.defined());
 
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {2, 3, 3, 1};
@@ -932,8 +942,15 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     // head; feed equivalent values here.
     torch::Tensor anchors        = torch::tensor({101, 202}, torch::kInt32);
     torch::Tensor committed_ends = torch::tensor({10, 6}, torch::kInt32);
+    model_input.combo_tokens      = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    model_input.combo_tokens_host = model_input.combo_tokens;
+    model_input.input_lengths_host = model_input.input_lengths;
+    model_input.prefix_lengths_host = model_input.prefix_lengths;
     processor.buildDSparkProposeInput(model_input, anchors, committed_ends, host_holder);
 
+    EXPECT_FALSE(model_input.combo_tokens_host.defined());
+    EXPECT_FALSE(model_input.input_lengths_host.defined());
+    EXPECT_FALSE(model_input.prefix_lengths_host.defined());
     EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, 202, mask_id, mask_id}),
               toVec<int32_t>(model_input.combo_tokens));
     EXPECT_FALSE(model_input.last_hidden_states.defined());
@@ -1281,6 +1298,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
 
+    profiling_debug_logging_config.enable_model_inputs_log = false;
+
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 4;
     model_config.num_layers     = 1;
@@ -1325,11 +1344,26 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     SamplerOutput sampler_output;
     sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3}, torch::kInt32).reshape({2, 3});
 
+    ASSERT_FALSE(profiling_debug_logging_config.enable_model_inputs_log);
+    ASSERT_TRUE(model_input.combo_tokens_host.defined());
+    ASSERT_TRUE(model_input.input_lengths_host.defined());
+    ASSERT_TRUE(model_input.prefix_lengths_host.defined());
+    EXPECT_TRUE(model_input.combo_tokens_host.is_pinned());
+    EXPECT_TRUE(model_input.input_lengths_host.is_pinned());
+    EXPECT_EQ(toVec<int>(model_input.combo_tokens_host), (vector<int>{1, 1, 2}));
+    EXPECT_EQ(toVec<int>(model_input.input_lengths_host), (vector<int>{1, 2}));
+    const auto original_tokens  = model_input.combo_tokens_host;
+    const auto original_lengths = model_input.input_lengths_host;
+
     processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output, holder);
 
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {2, 2, 3};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
+    EXPECT_EQ(expect_combo_tokens, toVec<int>(model_input.combo_tokens_host));
+    EXPECT_EQ(toVec<int>(model_input.input_lengths_host), (vector<int>{1, 2}));
+    EXPECT_EQ(toVec<int>(original_tokens), (vector<int>{1, 1, 2}));
+    EXPECT_EQ(toVec<int>(original_lengths), (vector<int>{1, 2}));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDraftShiftsImagesWithinEachRequest) {

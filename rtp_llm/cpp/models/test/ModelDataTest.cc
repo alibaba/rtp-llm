@@ -127,4 +127,28 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
 }
 
+TEST_F(ModelDataTest, testCPHostInputShapeHintsTrackPresence) {
+    GptModelInputs inputs;
+    auto hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostComboTokens], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostInputLengths], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostPrefixLengths], 0);
+
+    inputs.combo_tokens_host = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    inputs.input_lengths_host = torch::tensor({2, 3}, torch::kInt32);
+    inputs.prefix_lengths_host = torch::tensor({512, 1024}, torch::kInt32);
+    hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostComboTokens], 5);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostInputLengths], 2);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostPrefixLengths], 2);
+
+    inputs.combo_tokens_host = torch::Tensor();
+    inputs.input_lengths_host = torch::Tensor();
+    inputs.prefix_lengths_host = torch::empty({0}, torch::kInt32);
+    hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostComboTokens], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostInputLengths], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::cpHostPrefixLengths], 0);
+}
+
 }  // namespace rtp_llm

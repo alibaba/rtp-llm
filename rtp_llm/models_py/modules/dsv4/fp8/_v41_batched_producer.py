@@ -385,7 +385,9 @@ def prepare(plan, device):
             (start, first, stop - first, phase, reduction_width(stop - first))
             for start, _, first, stop, phase in plan.segments
         ]
-        descriptors_device = torch.tensor(descriptors, dtype=torch.int64, device=device)
+        descriptors_device = torch.tensor(descriptors, dtype=torch.int64).to(
+            device, non_blocking=True
+        )
         maximum = max(stop - first for _, _, first, stop, _ in plan.segments)
         _prepare_kernel[(triton.cdiv(maximum, 256), len(plan.segments))](
             descriptors_device, boundaries, widths, plan.ratio, 256

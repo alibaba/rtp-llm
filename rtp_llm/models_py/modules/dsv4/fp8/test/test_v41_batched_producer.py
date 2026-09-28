@@ -16,7 +16,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -105,6 +105,39 @@ def _state_mapping():
 
 
 class BatchedProducerCPU(unittest.TestCase):
+    def test_prepare_uploads_host_descriptors_without_blocking(self):
+        plan = CPU.GroupPlan(0, 24, 0, 12, 2, ((0, 8, 0, 4, 1), (8, 24, 4, 12, 0)))
+        uploads = []
+        original_to = torch.Tensor.to
+        kernel = MagicMock()
+
+        def upload(tensor, device, **kwargs):
+            self.assertEqual(tensor.device.type, "cpu")
+            self.assertEqual(kwargs, {"non_blocking": True})
+            uploads.append(tensor.clone())
+            return original_to(tensor, device, **kwargs)
+
+        with patch.object(CPU, "is_supported", return_value=True), patch.object(
+            CPU,
+            "triton",
+            SimpleNamespace(cdiv=lambda n, d: (n + d - 1) // d),
+            create=True,
+        ), patch.object(CPU, "_prepare_kernel", kernel, create=True), patch.object(
+            torch.Tensor, "to", upload
+        ):
+            prepared = CPU.prepare(plan, "meta")
+
+        self.assertEqual(len(uploads), 1)
+        torch.testing.assert_close(
+            uploads[0], torch.tensor([[0, 0, 4, 1, 128], [8, 4, 8, 0, 64]])
+        )
+        self.assertEqual(prepared.boundaries.shape, (12,))
+        self.assertEqual(prepared.widths.shape, (12,))
+        kernel.__getitem__.assert_called_once_with((1, 2))
+        self.assertEqual(
+            kernel.__getitem__.return_value.call_args.args[0].device.type, "meta"
+        )
+
     def test_transport_cpu_and_host_validation_fallback(self):
         send = torch.zeros((8, 512))
         self.assertFalse(CPU.pack_projected_group(send, [], [], []))

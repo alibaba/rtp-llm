@@ -370,14 +370,17 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 
     // Convert combo_position_ids from Buffer to torch::Tensor
     if (inputs.combo_position_ids.defined()) {
-        bert_embedding_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
+        buffer_holder_.hold_host(inputs.combo_position_ids);
+        bert_embedding_inputs.combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
     }
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
     if (inputs.combo_tokens_type_ids.defined()) {
         {
             DevicePerfWrapper wrapper(enable_device_perf_, "py model combo_tokens.cuda()");
-            bert_embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
+            buffer_holder_.hold_host(inputs.combo_tokens_type_ids);
+            bert_embedding_inputs.combo_tokens_type_ids =
+                inputs.combo_tokens_type_ids.to(torch::kCUDA, /*non_blocking=*/true);
         }
     }
 
@@ -442,8 +445,10 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             buffer_holder_.hold_host(host);
             return host;
         };
-        auto input_lengths_host  = async_to_pinned_host(inputs.input_lengths);
-        auto prefix_lengths_host = async_to_pinned_host(inputs.prefix_lengths);
+        auto input_lengths_host = async_to_pinned_host(
+            inputs.input_lengths_host.defined() ? inputs.input_lengths_host : inputs.input_lengths);
+        auto prefix_lengths_host = async_to_pinned_host(
+            inputs.prefix_lengths_host.defined() ? inputs.prefix_lengths_host : inputs.prefix_lengths);
 
         torch::Tensor kv_cache_layer_to_group =
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
@@ -716,6 +721,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (enable_prefill_cp_) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
             buffer_holder_.hold_host(inputs.engram_token_windows);
+            buffer_holder_.hold_host(inputs.combo_tokens_host);
+            buffer_holder_.hold_host(inputs.input_lengths_host);
+            buffer_holder_.hold_host(inputs.prefix_lengths_host);
         }
 
         // Direct async H2D for combo_tokens (the only tensorHoldHostAndToCuda call site that
@@ -1171,6 +1179,9 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
 
             if (d_micro_batch_size && p_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
+                micro_model_inputs.combo_tokens_host   = torch::Tensor();
+                micro_model_inputs.input_lengths_host  = torch::Tensor();
+                micro_model_inputs.prefix_lengths_host = torch::Tensor();
                 size_t         total_batch_size   = d_micro_batch_size + p_micro_batch_size;
                 RTP_LLM_LOG_DEBUG("d and p slice from %ld %ld %ld %ld",
                                   sliced_token_idx,
@@ -1231,6 +1242,9 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     decode_batch_idx);
             } else if (d_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
+                micro_model_inputs.combo_tokens_host   = torch::Tensor();
+                micro_model_inputs.input_lengths_host  = torch::Tensor();
+                micro_model_inputs.prefix_lengths_host = torch::Tensor();
                 RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
                 if (inputs.engram_token_windows.defined()) {
@@ -1267,6 +1281,9 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                                   sliced_token_idx);
             } else {
                 GptModelInputs micro_model_inputs = inputs;
+                micro_model_inputs.combo_tokens_host   = torch::Tensor();
+                micro_model_inputs.input_lengths_host  = torch::Tensor();
+                micro_model_inputs.prefix_lengths_host = torch::Tensor();
                 RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.kv_cache_block_id =

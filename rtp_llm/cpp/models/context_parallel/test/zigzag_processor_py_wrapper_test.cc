@@ -62,7 +62,8 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                              const torch::Tensor& hidden_states,
                              int                  cp_rank,
                              int                  cp_size,
-                             bool                 split_hidden_states) {
+                             bool                 split_hidden_states,
+                             bool                 use_host_mirrors) {
     ParallelismConfig parallelism_config;
     parallelism_config.tp_rank = cp_rank;
     parallelism_config.tp_size = cp_size;
@@ -73,9 +74,30 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
     model_input.input_lengths      = input_lengths.contiguous().clone();
     model_input.sequence_lengths   = sequence_lengths.contiguous().clone();
     model_input.last_hidden_states = hidden_states.contiguous().clone();
+    torch::Tensor global_tokens_host;
+    torch::Tensor global_lengths_host;
+    if (use_host_mirrors) {
+        global_tokens_host = model_input.combo_tokens.pin_memory();
+        global_lengths_host = model_input.input_lengths.pin_memory();
+        model_input.combo_tokens_host = global_tokens_host;
+        model_input.input_lengths_host = global_lengths_host;
+        model_input.combo_tokens = global_tokens_host.to(torch::kCUDA, /*non_blocking=*/true);
+        model_input.input_lengths = global_lengths_host.to(torch::kCUDA, /*non_blocking=*/true);
+        model_input.prefix_lengths_host = torch::zeros(
+            {input_lengths.numel() - sequence_lengths.numel()}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        model_input.prefix_lengths = model_input.prefix_lengths_host.to(torch::kCUDA, /*non_blocking=*/true);
+    }
 
     torch_ext::PyContextParallelParams cp_params;
     processor.handleInputs(model_input, cp_params);
+
+    if (use_host_mirrors) {
+        RTP_LLM_CHECK(torch::equal(global_tokens_host, total_input_tokens));
+        RTP_LLM_CHECK(torch::equal(global_lengths_host, input_lengths));
+        RTP_LLM_CHECK(torch::equal(cp_params.prefill_actual_input_lengths_cpu, input_lengths));
+        RTP_LLM_CHECK(torch::equal(model_input.combo_tokens_host, model_input.combo_tokens.cpu()));
+        RTP_LLM_CHECK(torch::equal(model_input.input_lengths_host, model_input.input_lengths.cpu()));
+    }
 
     return std::make_tuple(model_input.combo_tokens.cpu().clone(),
                            model_input.input_lengths.cpu().clone(),
@@ -194,6 +216,7 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_rank"),
           py::arg("cp_size"),
           py::arg("split_hidden_states") = true,
+          py::arg("use_host_mirrors") = false,
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
 
     m.def("handle_multimodal_inputs",

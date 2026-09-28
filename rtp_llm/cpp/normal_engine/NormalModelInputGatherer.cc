@@ -621,6 +621,15 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups, host_holder));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    if (!stream_groups.contextStreams().empty()) {
+        if (model_input.combo_tokens.defined() && !model_input.combo_tokens.is_cuda()) {
+            model_input.combo_tokens_host = model_input.combo_tokens;
+        }
+        if (model_input.input_lengths.defined() && !model_input.input_lengths.is_cuda()) {
+            model_input.input_lengths_host = model_input.input_lengths;
+        }
+        model_input.prefix_lengths_host = model_input.prefix_lengths_host_for_log;
+    }
     if (config_.enable_model_inputs_log) {
         if (model_input.combo_tokens.defined() && !model_input.combo_tokens.is_cuda()) {
             model_input.combo_tokens_host_for_log = model_input.combo_tokens;

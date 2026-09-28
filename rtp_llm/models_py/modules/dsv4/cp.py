@@ -125,6 +125,7 @@ class CPContext:
     # gates should use these instead of synchronizing CUDA length tensors.
     input_lengths_global_host: Optional[Tuple[int, ...]] = None
     prefix_lengths_host: Optional[Tuple[int, ...]] = None
+    first_position_host: Optional[int] = None
     # CED only: gathered selected query rows scatter into the original fresh
     # KV view before cache writes. None retains ordinary full CP execution.
     gather_restore_positions: Optional[torch.Tensor] = None
@@ -381,9 +382,9 @@ def build_cp_context(
     padding_mask = cp_info.prefill_qkv_padding_mask
     restore_indices = cp_info.prefill_qkv_restore_indice
     if padding_mask.device != device:
-        padding_mask = padding_mask.to(device)
+        padding_mask = padding_mask.to(device, non_blocking=True)
     if restore_indices.device != device:
-        restore_indices = restore_indices.to(device)
+        restore_indices = restore_indices.to(device, non_blocking=True)
     padded_seq_len = int(padding_mask.shape[0])
 
     if cp_size * chunk_length != padded_seq_len:
@@ -414,7 +415,7 @@ def build_cp_context(
         input_lengths_global_host = _host_int_tuple(actual_input_lengths_cpu)
 
     chunk_lengths_obj = getattr(cp_info, "prefill_cp_chunk_lengths", None)
-    if prepare_fusion_requested and input_lengths_global_host is not None:
+    if input_lengths_global_host is not None:
         alignment = 2 * int(cp_size)
         chunk_lengths = [
             ((length + alignment - 1) // alignment) * 2
@@ -422,8 +423,6 @@ def build_cp_context(
         ]
     elif chunk_lengths_obj is not None and chunk_lengths_obj.numel() > 0:
         chunk_lengths = [int(v) for v in chunk_lengths_obj.detach().cpu().tolist()]
-    elif input_lengths_global_host is not None and len(input_lengths_global_host) == 1:
-        chunk_lengths = [chunk_length]
     else:
         # Test/legacy fallback: a single stream with the caller-provided
         # aggregate rank-local chunk length.
@@ -437,15 +436,16 @@ def build_cp_context(
     if isinstance(position_offset, torch.Tensor):
         host_source = (
             position_offset_host
-            if prepare_fusion_requested
-            and position_offset_host is not None
+            if position_offset_host is not None
             and int(position_offset_host.numel()) > 0
             else position_offset
         )
         prefix_lengths_host_list = list(_host_int_tuple(host_source))
         if len(prefix_lengths_host_list) == 1 and B > 1:
             prefix_lengths_host_list *= B
-        prefix_lengths = position_offset.to(device=device).contiguous()
+        prefix_lengths = position_offset.to(
+            device=device, non_blocking=True
+        ).contiguous()
         if prefix_lengths.numel() == 1 and B > 1:
             prefix_lengths = prefix_lengths.expand(B).contiguous()
     else:
@@ -455,12 +455,24 @@ def build_cp_context(
         )
     prefix_lengths = prefix_lengths[:B].contiguous()
     prefix_lengths_host = tuple(prefix_lengths_host_list[:B])
+    first_position_host = None
+    if input_lengths_global_host is not None:
+        first_position_host = next(
+            (
+                prefix + min(cp_rank * (chunk // 2), max(length - 1, 0))
+                for prefix, length, chunk in zip(
+                    prefix_lengths_host, input_lengths_global_host, chunk_lengths
+                )
+                if chunk > 0
+            ),
+            0,
+        )
 
     if input_lengths_global_host is not None:
         input_lengths_global = actual_input_lengths_cpu.to(
             device=device,
             dtype=torch.int32,
-            non_blocking=prepare_fusion_requested,
+            non_blocking=True,
         ).contiguous()
 
     seq_len_full_host = (
@@ -544,6 +556,7 @@ def build_cp_context(
             kv_cache_sharded=bool(kv_cache_sharded),
             input_lengths_global_host=input_lengths_global_host,
             prefix_lengths_host=prefix_lengths_host,
+            first_position_host=first_position_host,
         )
 
     prefix_lengths = prefix_lengths.to(device=device, dtype=torch.long).contiguous()
@@ -619,7 +632,19 @@ def build_cp_context(
     else:
         # Multi-request CP has padding after each request's real-token prefix,
         # so restore rows must be selected with the full concat padding mask.
-        unpad_restore = restore_indices[padding_mask == 1].to(torch.long)
+        restore_host = getattr(cp_info, "prefill_qkv_restore_indice_cpu", None)
+        mask_host = getattr(cp_info, "prefill_qkv_padding_mask_cpu", None)
+        if (
+            isinstance(restore_host, torch.Tensor)
+            and isinstance(mask_host, torch.Tensor)
+            and restore_host.numel() == padded_seq_len
+            and mask_host.numel() == padded_seq_len
+        ):
+            unpad_restore = restore_host[mask_host == 1].to(
+                device=device, dtype=torch.long, non_blocking=True
+            )
+        else:
+            unpad_restore = restore_indices[padding_mask == 1].to(torch.long)
         seq_len_full = int(unpad_restore.shape[0])
     prefix_per_token = prefix_lengths.gather(0, req_id_per_token.to(torch.long))
     global_positions = (prefix_per_token + local_positions).contiguous()
@@ -659,6 +684,7 @@ def build_cp_context(
         kv_cache_sharded=bool(kv_cache_sharded),
         input_lengths_global_host=input_lengths_global_host,
         prefix_lengths_host=prefix_lengths_host,
+        first_position_host=first_position_host,
     )
 
 

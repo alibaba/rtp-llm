@@ -1029,6 +1029,39 @@ class CedBatchedBoundedReplayTest(_SingleThreadTest):
 
 
 class CedLayoutTest(_SingleThreadTest):
+    def test_query_layout_uses_cpu_mirrors_without_reading_device_maps(self):
+        selected = torch.tensor([0, 9, 18, 27, 36, 45, 54, 63, 64])
+        for rank in range(4):
+            original, _ = _context(65, rank, 16387, permuted=True)
+            expected, expected_exchange, _ = _CED._query_layout(
+                original, selected, None
+            )
+            info = original.cp_info
+            info.prefill_qkv_restore_indice_cpu = info.prefill_qkv_restore_indice
+            info.prefill_qkv_padding_mask_cpu = info.prefill_qkv_padding_mask
+            info.prefill_qkv_restore_indice = info.prefill_qkv_restore_indice.to("meta")
+            info.prefill_qkv_padding_mask = info.prefill_qkv_padding_mask.to("meta")
+            actual, exchange, _ = _CED._query_layout(original, selected, None)
+            self.assertEqual(exchange.send_sizes, expected_exchange.send_sizes)
+            self.assertEqual(exchange.receive_sizes, expected_exchange.receive_sizes)
+            torch.testing.assert_close(
+                exchange.send_indices, expected_exchange.send_indices
+            )
+            torch.testing.assert_close(
+                actual.global_positions, expected.global_positions
+            )
+            self.assertEqual(
+                actual.first_position_host, int(actual.global_positions[0])
+            )
+
+    def test_query_layout_requires_host_maps_for_device_metadata(self):
+        original, _ = _context(65, 0)
+        original.cp_info.prefill_qkv_restore_indice = (
+            original.cp_info.prefill_qkv_restore_indice.to("meta")
+        )
+        with self.assertRaisesRegex(ValueError, "CPU prefill_qkv_restore_indice"):
+            _CED._query_layout(original, torch.arange(64), None)
+
     def test_identity_receives_reuse_owned_storage_and_ragged_or_reordered_scatter(
         self,
     ):

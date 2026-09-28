@@ -152,6 +152,40 @@ class TestContextParallelLoadBalanceSplit(unittest.TestCase):
 
 
 class TestHandleInputsWithHidden(unittest.TestCase):
+    def test_host_mirrors_preserve_global_inputs_on_every_cp_rank(self):
+        tokens = torch.arange(9, dtype=torch.int32)
+        lengths = torch.tensor([5, 4], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        hidden = torch.arange(18, dtype=torch.float32).reshape(9, 2)
+        for rank in range(4):
+            with self.subTest(rank=rank):
+                expected = cp_test.handle_inputs_with_hidden(
+                    tokens, lengths, sequence_lengths, hidden, rank, 4
+                )
+                actual = cp_test.handle_inputs_with_hidden(
+                    tokens,
+                    lengths,
+                    sequence_lengths,
+                    hidden,
+                    rank,
+                    4,
+                    use_host_mirrors=True,
+                )
+                for expected_tensor, actual_tensor in zip(expected, actual):
+                    self.assertTrue(torch.equal(expected_tensor, actual_tensor))
+                draft = cp_test.handle_inputs_with_hidden(
+                    tokens,
+                    lengths,
+                    sequence_lengths,
+                    actual[2],
+                    rank,
+                    4,
+                    split_hidden_states=False,
+                    use_host_mirrors=True,
+                )
+                for target_tensor, draft_tensor in zip(actual, draft):
+                    self.assertTrue(torch.equal(target_tensor, draft_tensor))
+
     def test_hidden_states_split_with_input_tokens(self):
         total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
         input_lengths = torch.tensor([6], dtype=torch.int32)

@@ -107,6 +107,155 @@ class _FakeV4:
 
 
 class PrefillFastPathTest(unittest.TestCase):
+    def test_cp_freqs_topk_uses_host_continuation_and_position_metadata(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton
+
+        for prefixes in ((0,), (128,), (0, 0), (0, 1024)):
+            positions = torch.empty(4, dtype=torch.long, device="meta")
+            cu_seqlens = torch.empty(
+                len(prefixes) + 1, dtype=torch.int32, device="meta"
+            )
+            cp_ctx = SimpleNamespace(
+                cp_size=4,
+                seq_len_full=16,
+                first_position_host=prefixes[0] + 2,
+                global_positions=positions,
+                prefix_lengths_host=prefixes,
+                cu_seqlens_global=cu_seqlens,
+            )
+            owner = SimpleNamespace(
+                _cp_ctx=cp_ctx,
+                rope_head_dim=8,
+                window_size=128,
+                compress_ratio=0,
+                freqs_cis=torch.empty((2048, 4), device="meta"),
+                _build_swa_prefill_meta_varlen=Mock(return_value=None),
+                _ensure_freqs_cis_bound=Mock(),
+            )
+            with patch.object(
+                _swa_ops_triton,
+                "compute_window_topk_and_length_varlen",
+                return_value=(positions, positions),
+            ), patch.object(
+                torch.Tensor, "item", side_effect=AssertionError("device scalar read")
+            ):
+                meta = AttentionFP8._build_shared_prefill_meta(
+                    owner,
+                    torch.empty((4, 16), device="meta"),
+                    positions,
+                    batch_size=len(prefixes),
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=torch.empty(
+                        len(prefixes), dtype=torch.int32, device="meta"
+                    ),
+                    prefix_lengths=torch.tensor(prefixes, device="meta"),
+                    sp_per_req=torch.tensor(prefixes, device="meta"),
+                    position_ids=positions,
+                    req_id_per_token=positions,
+                )
+            self.assertEqual(meta.sp_int, prefixes[0] + 2)
+            self.assertEqual(meta.any_cont, any(prefix > 0 for prefix in prefixes))
+            self.assertEqual(
+                owner._build_swa_prefill_meta_varlen.call_args.kwargs["any_cont"],
+                meta.any_cont,
+            )
+
+    def test_cp_attention_sync_is_explicit_debug_opt_in(self):
+        block = SimpleNamespace(
+            _cp_sync_after_attn_done=False,
+            ffn=SimpleNamespace(_strategy=SimpleNamespace(name="mega")),
+            attn=SimpleNamespace(_cp_ctx=object()),
+            layer_id=0,
+        )
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            torch.cuda, "synchronize"
+        ) as synchronize, patch.object(
+            torch.distributed, "barrier"
+        ) as barrier, patch.object(
+            torch.distributed, "is_available", return_value=True
+        ), patch.object(
+            torch.distributed, "is_initialized", return_value=True
+        ), patch.object(
+            torch.distributed, "get_world_size", return_value=4
+        ), patch.object(
+            torch.cuda, "current_device", return_value=0
+        ):
+            Block._sync_after_first_cp_prefill_attention(block)
+            synchronize.assert_not_called()
+            barrier.assert_not_called()
+            with patch.dict(
+                prefill_forward.os.environ, {"DSV4_CP_SYNC_AFTER_ATTN_ONCE": "1"}
+            ):
+                Block._sync_after_first_cp_prefill_attention(block)
+                Block._sync_after_first_cp_prefill_attention(block)
+            synchronize.assert_called_once_with()
+            barrier.assert_called_once_with(device_ids=[0])
+
+    def test_cp_forward_metadata_does_not_read_device_scalars(self):
+        for chunks, prefixes in (((2,), (0,)), ((2, 4), (128, 0))):
+            for rank in range(4):
+                with self.subTest(chunks=chunks, rank=rank):
+                    v4 = _FakeV4()
+                    v4._cp_info = object()
+                    v4._cp_size = 4
+                    v4._cp_rank = rank
+                    rows = sum(chunks)
+                    inputs = torch.empty(rows, dtype=torch.long, device="meta")
+                    lengths = torch.tensor(chunks, dtype=torch.int32, device="meta")
+                    cp_ctx = SimpleNamespace(
+                        global_positions=inputs,
+                        first_position_host=prefixes[0] + rank,
+                        prefix_lengths=torch.tensor(prefixes, device="meta"),
+                        req_id_per_token=torch.empty(
+                            rows, dtype=torch.int32, device="meta"
+                        ),
+                        chunk_lengths_per_req=chunks,
+                    )
+                    with patch.dict(
+                        prefill_forward.os.environ, {}, clear=True
+                    ), patch.object(
+                        prefill_forward._rt, "ENABLED", False
+                    ), patch.object(
+                        prefill_forward._fwd_dbg, "enabled", return_value=False
+                    ), patch.object(
+                        prefill_forward,
+                        "build_cp_context_for_forward",
+                        return_value=cp_ctx,
+                    ), patch.object(
+                        prefill_forward, "build_and_propagate_prefill_meta_fp8"
+                    ) as build_meta, patch.object(
+                        prefill_forward, "clear_prefill_meta_shared_fp8"
+                    ), patch.object(
+                        torch.Tensor,
+                        "item",
+                        side_effect=AssertionError("device scalar read"),
+                    ), patch.object(
+                        torch.Tensor, "cpu", side_effect=AssertionError("device copy")
+                    ), patch.object(
+                        torch.Tensor,
+                        "tolist",
+                        side_effect=AssertionError("device list read"),
+                    ):
+                        out = prefill_forward.forward_layers(
+                            v4,
+                            None,
+                            inputs,
+                            inputs,
+                            torch.empty(
+                                len(chunks) + 1, dtype=torch.int32, device="meta"
+                            ),
+                            None,
+                            attn_inputs=SimpleNamespace(
+                                input_lengths=lengths,
+                                prefix_lengths=cp_ctx.prefix_lengths,
+                            ),
+                        )
+                    self.assertEqual(out.shape, (rows, 2))
+                    self.assertEqual(build_meta.call_args.args[2], prefixes[0] + rank)
+                    self.assertEqual(
+                        build_meta.call_args.kwargs["max_seqlen_q"], max(chunks)
+                    )
+
     def test_workspace_capacity_is_dynamic_only_for_v41_without_tensor_reads(self):
         from rtp_llm.models_py.modules.dsv4 import chunk_env
 

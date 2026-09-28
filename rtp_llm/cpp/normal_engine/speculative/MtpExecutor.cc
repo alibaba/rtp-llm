@@ -887,6 +887,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     const bool                                cp_enabled = enable_prefill_cp_;
     torch::Tensor                             saved_combo_tokens;
     torch::Tensor                             saved_input_lengths;
+    torch::Tensor                             saved_combo_tokens_host;
+    torch::Tensor                             saved_input_lengths_host;
     torch::Tensor                             saved_text_tokens_mask;
     torch::Tensor                             saved_combo_tokens_type_ids;
     torch::Tensor                             saved_combo_position_ids;
@@ -897,6 +899,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (cp_enabled && isTpRank0()) {
         saved_combo_tokens          = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
         saved_input_lengths         = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_tokens_host     = model_input.combo_tokens_host;
+        saved_input_lengths_host    = model_input.input_lengths_host;
         saved_text_tokens_mask      = model_input.text_tokens_mask;
         saved_combo_tokens_type_ids = model_input.combo_tokens_type_ids;
         saved_combo_position_ids    = model_input.combo_position_ids;
@@ -942,6 +946,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (cp_enabled) {
             model_input.combo_tokens          = saved_combo_tokens;
             model_input.input_lengths         = saved_input_lengths;
+            model_input.combo_tokens_host     = saved_combo_tokens_host;
+            model_input.input_lengths_host    = saved_input_lengths_host;
             model_input.text_tokens_mask      = saved_text_tokens_mask;
             model_input.combo_tokens_type_ids = saved_combo_tokens_type_ids;
             model_input.combo_position_ids    = saved_combo_position_ids;

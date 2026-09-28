@@ -42,6 +42,10 @@ struct GptModelInputs {
     torch::Tensor         lm_output_indexes;     // selected output rows
     torch::Tensor         prefix_lengths;        // [context_batch_size]
     torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    // CPU originals for CP planning; updated with the corresponding model inputs.
+    torch::Tensor         combo_tokens_host;
+    torch::Tensor         input_lengths_host;
+    torch::Tensor         prefix_lengths_host;
     torch::Tensor         combo_tokens_host_for_log;
     torch::Tensor         input_lengths_host_for_log;
     torch::Tensor         sequence_lengths_host_for_log;

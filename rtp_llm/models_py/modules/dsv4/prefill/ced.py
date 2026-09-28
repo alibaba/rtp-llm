@@ -179,6 +179,15 @@ class _RowExchange:
         return out.index_copy_(0, self.send_indices, received)
 
 
+def _host_cp_metadata(info, name):
+    host = getattr(info, name + "_cpu", None)
+    if not isinstance(host, torch.Tensor) or host.numel() == 0:
+        host = getattr(info, name)
+    if host.device.type != "cpu":
+        raise ValueError(f"CED requires the engine's CPU {name} metadata")
+    return host.detach()
+
+
 def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     """Derive transport from the actual engine inverse map, not rank0 ownership."""
     device = original.global_positions.device
@@ -234,8 +243,8 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     rows = sum(chunks)
     padded = rows * cp
     info = original.cp_info
-    restore = info.prefill_qkv_restore_indice.detach().cpu().long()
-    mask = info.prefill_qkv_padding_mask.detach().cpu().bool()
+    restore = _host_cp_metadata(info, "prefill_qkv_restore_indice").long()
+    mask = _host_cp_metadata(info, "prefill_qkv_padding_mask").bool()
     if restore.shape != mask.shape or int(mask.sum()) != original.seq_len_full:
         raise ValueError("CED requires the engine's complete CP inverse map")
     source_flat = restore[mask].index_select(0, selected)
@@ -253,7 +262,10 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
         receive_sizes.append(int(incoming.sum()))
         if incoming.any():
             indexer_groups.append(
-                (local[incoming].to(device), source_rows[incoming].to(device))
+                (
+                    local[incoming].to(device, non_blocking=True),
+                    source_rows[incoming].to(device, non_blocking=True),
+                )
             )
             if keep_candidate_rows:
                 projection_groups_host.append(
@@ -266,8 +278,8 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     exchange = _RowExchange(
         original.chunk_length,
         rows,
-        torch.cat(sends).to(device),
-        receive_positions_host.to(device),
+        torch.cat(sends).to(device, non_blocking=True),
+        receive_positions_host.to(device, non_blocking=True),
         tuple(send_sizes),
         tuple(receive_sizes),
         group,
@@ -290,14 +302,15 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
         original,
         chunk_length=rows,
         padded_seq_len=padded,
-        relative_positions=torch.cat(local_positions).to(device),
-        global_positions=torch.cat(absolute_positions).to(device),
-        local_is_real=torch.cat(local_real).to(device),
-        unpad_restore=(owners * rows + local).to(device),
+        relative_positions=torch.cat(local_positions).to(device, non_blocking=True),
+        global_positions=torch.cat(absolute_positions).to(device, non_blocking=True),
+        first_position_host=int(torch.cat(absolute_positions)[0]),
+        local_is_real=torch.cat(local_real).to(device, non_blocking=True),
+        unpad_restore=(owners * rows + local).to(device, non_blocking=True),
         unpad_restore_is_prefix=False,
         chunk_lengths_per_req=tuple(chunks),
-        req_id_per_token=torch.cat(request_ids).to(device),
-        gather_restore_positions=selected.to(device),
+        req_id_per_token=torch.cat(request_ids).to(device, non_blocking=True),
+        gather_restore_positions=selected.to(device, non_blocking=True),
     )
     return context, exchange, tuple(indexer_groups)
 
@@ -443,8 +456,7 @@ class CEDPlan:
             torch.tensor(
                 cumulative,
                 dtype=torch.int32,
-                device=cp_ctx.global_positions.device,
-            ),
+            ).to(cp_ctx.global_positions.device, non_blocking=True),
             exchange,
             indexer_groups,
             tuple(v4.capture_aux_hidden_layer_ids),
@@ -656,8 +668,12 @@ class CEDPlan:
             for (start, stop), (destinations, sources) in chunks.items():
                 groups.append(
                     (
-                        torch.tensor(destinations, dtype=torch.long, device=device),
-                        torch.tensor(sources, dtype=torch.long, device=device),
+                        torch.tensor(destinations, dtype=torch.long).to(
+                            device, non_blocking=True
+                        ),
+                        torch.tensor(sources, dtype=torch.long).to(
+                            device, non_blocking=True
+                        ),
                         stop - start,
                     )
                 )

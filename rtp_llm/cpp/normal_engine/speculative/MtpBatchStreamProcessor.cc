@@ -238,11 +238,18 @@ torch::Tensor normalDecodePositionToDraftDecodePosition(const torch::Tensor& nor
     return (position + 1).to(torch::kInt32);
 }
 
+void clearModelInputHostMirrors(GptModelInputs& model_input) {
+    model_input.combo_tokens_host   = torch::Tensor();
+    model_input.input_lengths_host  = torch::Tensor();
+    model_input.prefix_lengths_host = torch::Tensor();
+}
+
 void setVerifyPairInputs(GptModelInputs& model_input,
                          torch::Tensor   combo_tokens,
                          size_t          batch_size,
                          size_t          score_len,
                          TensorHolder&   host_holder) {
+    clearModelInputHostMirrors(model_input);
     model_input.combo_tokens       = std::move(combo_tokens);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.last_hidden_states = torch::Tensor();
@@ -583,6 +590,7 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
 void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                                            GptModelInputs&     model_input,
                                                            TensorHolder&       host_holder) {
+    clearModelInputHostMirrors(model_input);
     const size_t batch_size = stream_groups.size();
     if (batch_size == 0) {
         model_input.combo_tokens      = emptyInt32OnCuda({0});
@@ -740,6 +748,7 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
                                                           const GptModelOutputs& model_output,
                                                           const torch::Tensor&   draft_token_ids,
                                                           TensorHolder&          host_holder) {
+    clearModelInputHostMirrors(model_input);
     int batch_size                 = model_input.combo_tokens.size(0);
     model_input.last_hidden_states = model_output.all_hidden_states;
 
@@ -775,10 +784,24 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     // conversions explicit, then republish model-bound tensors to CUDA.
     const torch::Tensor new_all_token_ids_cpu =
         new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
-    torch::Tensor input_lengths_cpu =
-        model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
-    torch::Tensor combo_tokens_cpu =
-        model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
+    torch::Tensor input_lengths_cpu = model_input.input_lengths_host.defined() ?
+                                          model_input.input_lengths_host :
+                                          (model_input.input_lengths.is_cuda() ?
+                                               model_input.input_lengths.cpu().pin_memory() :
+                                               model_input.input_lengths);
+    torch::Tensor combo_tokens_cpu = model_input.combo_tokens_host.defined() ?
+                                         model_input.combo_tokens_host.clone().pin_memory() :
+                                         (model_input.combo_tokens.is_cuda() ?
+                                              model_input.combo_tokens.cpu().pin_memory() :
+                                              model_input.combo_tokens);
+    RTP_LLM_CHECK_WITH_INFO(!input_lengths_cpu.is_cuda() && input_lengths_cpu.scalar_type() == torch::kInt32
+                               && input_lengths_cpu.is_contiguous()
+                               && input_lengths_cpu.sizes() == model_input.input_lengths.sizes(),
+                            "MTP prefill host input lengths must match the model input");
+    RTP_LLM_CHECK_WITH_INFO(!combo_tokens_cpu.is_cuda() && combo_tokens_cpu.scalar_type() == torch::kInt32
+                               && combo_tokens_cpu.is_contiguous()
+                               && combo_tokens_cpu.sizes() == model_input.combo_tokens.sizes(),
+                            "MTP prefill host tokens must match the model input");
 
     int* input_lengths = input_lengths_cpu.data_ptr<int>();
     int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
@@ -823,8 +846,10 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
         offset += input_length;
     }
 
-    model_input.input_lengths = toCudaInt32(input_lengths_cpu, host_holder);
-    model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
+    model_input.input_lengths_host = input_lengths_cpu;
+    model_input.combo_tokens_host  = combo_tokens_cpu;
+    model_input.input_lengths      = toCudaInt32(input_lengths_cpu, host_holder);
+    model_input.combo_tokens       = toCudaInt32(combo_tokens_cpu, host_holder);
     if (mask_data) {
         model_input.text_tokens_mask = text_mask;
     }
@@ -881,6 +906,7 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
                                                       const torch::Tensor& anchors,
                                                       const torch::Tensor& committed_ends,
                                                       TensorHolder&        host_holder) {
+    clearModelInputHostMirrors(model_input);
     const int64_t batch_size = anchors.numel();
     RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark draft width must be positive");
     RTP_LLM_CHECK_WITH_INFO(
@@ -1037,6 +1063,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const size_t                                 batch_size,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
+    clearModelInputHostMirrors(model_input);
     // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.

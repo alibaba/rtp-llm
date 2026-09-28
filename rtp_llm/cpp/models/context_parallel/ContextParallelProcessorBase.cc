@@ -223,20 +223,28 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 
     static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
 
-    // TODO(async): CP planning is CPU-vector based today. Keep explicit host
-    // mirrors here, then publish mutated model inputs back to CUDA.
-    auto total_input_tokens =
-        model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
-    auto& total_hidden_states = model_input.last_hidden_states;
-    auto  input_lengths =
-        model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
-    auto& sequence_lengths         = model_input.sequence_lengths;
-    auto  input_lengths_cpu_tensor = input_lengths.clone().pin_memory();
+    auto hostInput = [&](const torch::Tensor& input, const torch::Tensor& host) {
+        if (host.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(!host.is_cuda() && host.scalar_type() == torch::kInt32 && host.is_contiguous()
+                                       && host.sizes() == input.sizes(),
+                                    "CP host input must match its model input");
+            return host;
+        }
+        return input.is_cuda() ? input.cpu().pin_memory() : input;
+    };
+    auto  total_input_tokens       = hostInput(model_input.combo_tokens, model_input.combo_tokens_host);
+    auto& total_hidden_states      = model_input.last_hidden_states;
+    auto  input_lengths_cpu_tensor = hostInput(model_input.input_lengths, model_input.input_lengths_host);
+    // CP rewrites lengths in place; preserve the global original for draft restore.
+    auto  input_lengths    = input_lengths_cpu_tensor.clone().pin_memory();
+    auto& sequence_lengths = model_input.sequence_lengths;
 
     size_t num_decode_stream  = sequence_lengths.size(0);
     size_t num_prefill_stream = input_lengths.size(0) - num_decode_stream;
 
-    auto prefix_lengths_host = model_input.prefix_lengths_host_for_log;
+    auto prefix_lengths_host = model_input.prefix_lengths_host.defined() ?
+                                   hostInput(model_input.prefix_lengths, model_input.prefix_lengths_host) :
+                                   model_input.prefix_lengths_host_for_log;
     if ((!prefix_lengths_host.defined() || prefix_lengths_host.numel() == 0) && model_input.prefix_lengths.defined()
         && model_input.prefix_lengths.numel() > 0) {
         prefix_lengths_host =
@@ -462,11 +470,14 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         model_input.last_hidden_states = split_hidden;
     }
 
-    model_input.combo_tokens = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.combo_tokens_host = cp_split_input_tokens;
+    model_input.combo_tokens      = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
     if (has_engram) {
         model_input.engram_token_windows = std::move(cp_engram_windows);
     }
-    model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.input_lengths_host  = input_lengths;
+    model_input.prefix_lengths_host = prefix_lengths_host;
+    model_input.input_lengths       = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
     model_input.sequence_lengths =
         sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);
 
@@ -482,6 +493,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     cp_params.prefill_shuffle_indices          = shuffle_indices.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.to(torch::kCUDA, /*non_blocking=*/true);
+    cp_params.prefill_qkv_restore_indice_cpu   = qkv_restore_indice;
+    cp_params.prefill_qkv_padding_mask_cpu     = qkv_padding_mask;
     cp_params.prefill_actual_input_lengths_cpu = input_lengths_cpu_tensor;
     cp_params.prefill_prefix_lengths_cpu       = prefix_lengths_host;
 #endif
