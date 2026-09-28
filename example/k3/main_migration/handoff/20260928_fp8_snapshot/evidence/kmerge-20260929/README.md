@@ -101,3 +101,11 @@ r8 的 `concat_and_cache_mla_kernel` 在固定 feat trace 中每 rank 约 0.074 
 在独占的 112 GPU 1 上，用集成版 b24 构建产物单独测同一个普通 E4M3 写入核。每组先完成惰性初始化及至少 10 次稳定预热，再采 50 组、每组 10 次调用。64K token 全部有有效槽位时，128-token page、4096-token page 和四倍物理 page 间距分别为 0.2031、0.2031、0.2006 ms；仅 1/8 token 有有效槽位的诊断组为 0.0557 ms。原始样本、预热和输入布局见 `bench-mla-cache-writer-layout-112.json`，脚本为 `bench_mla_cache_writer_layout.py`，GPU 筛选记录在 `host-selection-mla-cache-writer-*.json`。该结果说明 page 大小和物理间距没有解释 0.14 ms 差距；有效槽位比例能明显改变耗时。它**不能**证明固定 feat 的真实 slot mapping 恰好只有 1/8 有效，需要结合 CP 映射及 PD 正确性继续核查。当前不能把同名 kernel 当作“feat 更快的实现”直接迁移。
 
 保留 r8 原始数据后，我只停止了本任务在 111/112 的两个已核实进程组；服务管理器逐个退出 rank 后还有本任务孤儿 rank，复查 PID/UID/进程组后清理完毕。两端端口已关闭，GPU 无活动计算进程。保留服务模式的外层控制器因这次主动退出返回 1，原始输出在 `feat-a9bf-r8-controller-after-intentional-teardown.log.gz`；flow runner 自身及 64K 采集 runner 均退出 0，控制器返回值不能用于否定已归档的请求结果。
+
+## 集成版 CP8 诊断 r1：首条 flow 失败
+
+为了核查上面的 KV 写入差异，我用已编译的集成版 `b24b6cd88` 在 111/112 单独启动了四层 FP8 + Native MTP PD 服务。111 的 Prefill 设置 `prefill_cp_kv_cache_sharded=1`、`prefill_cp_size=8`；112 的 Decode 设置 `prefill_cp_kv_cache_sharded=0`、`prefill_cp_size=8`。两端均保留 `ffn_sp_size=8`，Prefill 的 `cp_rotate_method` 仍为 `DISABLED`。启动后两个端口健康检查返回 200，8 个 rank 的日志都显示 FastSafetensors 实际加载。启动前的机器筛选记录在 `host-selection-cp8-fleet-before-launch.json` 和 `host-selection-cp8-111112-immediate.json`。
+
+首条 65,537-token flow 请求返回 HTTP 500，runner 退出 1，没有发送其余十条。Prefill 日志显示它进入 65,536-token 和 1-token 两轮处理，随后 rank 7 在 06:10:35 意外退出，服务管理器停止了其余 rank。111 的内核日志另有同一批 rank 的 GPU MMU Xid 31，时间标记为 06:09:03；这一记录早于 HTTP 请求，现有证据不足以把 Xid 直接归因于哪一个算子或 CP 设置。原始失败请求、逐 rank 日志、启动配置及 Xid 摘录保存在 `cp8-r1-failure/`。该目录四份文件的 SHA256 依次为：`111-nvrm-xid.log` `c3be0fba4845a5bf64ededf4ddde7f872d53a2b49a07aef5843660daa7b642a4`、`111-prefill-startup.tar.gz` `a62da92c14b6da46fee07c8c85da31eaf459353743c876ece03533697722c3ad`、`112-decode-startup.tar.gz` `8590c3eefa63ed07fd9d5c5d6b79490de8b4dc19426409de892cb73d940c704c`、`flow-failed-raw.tar.gz` `8b12261b59e9da5b9ea6d32c49f764a2ca4fb6283e2dc88c35c0a147b9854e95`。
+
+源码检查还发现 Decode 的 `prefill_cp_kv_cache_sharded=0` 会让 `DecodeRpcServer::prepareGenerateContext()` 把 `prefill_cp_size` 设为 1，即使命令行另外传入 8。因此 r1 的 PD 参数本身也不匹配分片 Prefill，不能拿这轮结果判断 CP8 性能或正确性。`cp_rotate_method=DISABLED` 与分片缓存并存的行为仍需核对。失败后我只停止了本任务在 112 的 Decode 进程组；111 已由服务管理器自行退出。没有继续发请求或采集 timeline，也没有修改集群级 3FS 配置。
