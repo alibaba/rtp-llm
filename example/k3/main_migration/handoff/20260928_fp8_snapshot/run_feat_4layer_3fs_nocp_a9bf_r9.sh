@@ -4,28 +4,28 @@ umask 077
 
 task=/data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-export PREFILL_SSH_TARGET=L20-dev-111
+export PREFILL_SSH_TARGET=L20-dev-110
 export DECODE_SSH_TARGET=L20-dev-112
-export PREFILL_REPO_ROOT=/data6/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928
+export PREFILL_REPO_ROOT=/data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9
 export DECODE_REPO_ROOT=/data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928
 export PREFILL_CHECKPOINT_PATH=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
 export DECODE_CHECKPOINT_PATH=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
-export PREFILL_SP_CHECKPOINT_PATH=/data6/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
+export PREFILL_SP_CHECKPOINT_PATH=/data7/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
 export DECODE_SP_CHECKPOINT_PATH=/data1/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
-export PREFILL_ENDPOINT=11.163.39.111:26500
+export PREFILL_ENDPOINT=11.163.39.110:26500
 export DECODE_ENDPOINT=11.163.39.112:26600
-export SMOKE_RUN_ID=feat-nocp-a9bf-4layer-3fs-111112-r9-20260929
+export SMOKE_RUN_ID=feat-nocp-a9bf-4layer-3fs-110112-r9-20260929
 export SMOKE_SUITE=flow
-export PREFILL_SMOKE_CONTAINER=lhc_GPU_k3_3fs_20260928
+export PREFILL_SMOKE_CONTAINER=lhc_GPU_k3_3fs_20260927
 export DECODE_SMOKE_CONTAINER=lhc_GPU_k3_3fs_20260927
 export SMOKE_CONTAINER_USER=luohaocheng.lhc
-export PREFILL_SMOKE_ARTIFACT_ROOT=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-nocp-r9
-export DECODE_SMOKE_ARTIFACT_ROOT=/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-nocp-r9
+export PREFILL_SMOKE_ARTIFACT_ROOT=/data7/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-110112-nocp-r9
+export DECODE_SMOKE_ARTIFACT_ROOT=/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-110112-nocp-r9
 export SMOKE_ALLOW_HF3FS_ROOT=/mnt/hf3fs/3fs/models/kimi
-export PREFILL_SMOKE_CHECKPOINT_GUARD=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/weight_loader_guard.py
+export PREFILL_SMOKE_CHECKPOINT_GUARD=/data7/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/weight_loader_guard.py
 export DECODE_SMOKE_CHECKPOINT_GUARD=/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/weight_loader_guard.py
-export PREFILL_SMOKE_ROLE_SCRIPT=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat_role_3fs_nocp_111112.sh
-export DECODE_SMOKE_ROLE_SCRIPT=/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat_role_3fs_nocp_111112.sh
+export PREFILL_SMOKE_ROLE_SCRIPT=/data7/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat_role_3fs_nocp_r9.sh
+export DECODE_SMOKE_ROLE_SCRIPT=/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat_role_3fs_nocp_r9.sh
 export PREFILL_RTP_LLM_SERVER_BINARY="$PREFILL_REPO_ROOT/bazel-bin/rtp_llm/rtp_llm_server"
 export DECODE_RTP_LLM_SERVER_BINARY="$DECODE_REPO_ROOT/bazel-bin/rtp_llm/rtp_llm_server"
 export RTP_LLM_SKIP_BUILD=1
@@ -68,4 +68,4 @@ done
 
 exec python3 "$script_dir/feat_smoke_driver_3fs.py" --parallel-start --remote-detached \
   --remote-control-root /tmp/k3feat-nocp-r9-control \
-  --artifact-root "$task/feat-flow-111112-nocp-r9-controller" "$@"
+  --artifact-root "$task/feat-flow-110112-nocp-r9-controller" "$@"

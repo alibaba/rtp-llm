@@ -6,11 +6,12 @@ umask 077
 
 role=${1:-}
 case "$role" in
-  prefill) base=/data6/luohaocheng.lhc ;;
-  decode) base=/data1/luohaocheng.lhc ;;
-  *) echo 'usage: feat_role_3fs_nocp_111112.sh prefill|decode' >&2; exit 2 ;;
+  prefill|decode) ;;
+  *) echo 'usage: feat_role_3fs_nocp_r9.sh prefill|decode' >&2; exit 2 ;;
 esac
-task="$base/artifacts/k3-fp8-opt-20260927"
+task=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+base=${task%/artifacts/k3-fp8-opt-20260927}
+test "$base" != "$task"
 source_role="$task/feat_smoke_role_3fs.sh"
 patched_role="$task/feat_smoke_role_3fs_nocp_r9.sh"
 
