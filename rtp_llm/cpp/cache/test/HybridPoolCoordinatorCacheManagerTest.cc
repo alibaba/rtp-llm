@@ -758,9 +758,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AvailableCapacityAggregatesCanonic
     const size_t total_available             = allocator->availableBlocksNum();
     const size_t tokens_before               = allocator->availableTokensNum();
     const auto   capacity_before             = allocator->tokenCapacity(config.seq_size_per_block);
-    auto         expected_available_capacity = [&]() {
-        return std::min(pools[0]->availableBlocksNum() * config.group("linear").seqSizePerBlock(),
-                        pools[1]->availableBlocksNum() * config.group("full").seqSizePerBlock());
+    auto expected_available_capacity = [&]() {
+        return pools[1]->availableBlocksNum() * config.group("full").seqSizePerBlock();
     };
 
     const std::optional<BlockIdxType> block = full_pool->malloc();
@@ -786,7 +785,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AvailableCapacityAggregatesCanonic
     const DeviceBlockPoolPtr&         linear_pool  = pools[0];
     const std::optional<BlockIdxType> linear_block = linear_pool->malloc();
     ASSERT_TRUE(linear_block.has_value());
-    EXPECT_LT(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
     EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, expected_available_capacity());
     linear_pool->incTreeRef(*linear_block, BlockTreeRefType::CACHE);
     EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
@@ -796,7 +795,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AvailableCapacityAggregatesCanonic
     EXPECT_EQ(allocator->availableBlocksNum(), total_available);
 }
 
-TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsUseDifferentCapacityScopes) {
+TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsUseFullGroupCapacity) {
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     // Token capacity aggregators use FULL groups first: 7 blocks * 4 tokens.
     auto allocator = makeAllocator(config);
@@ -805,6 +804,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsUseDifferentCapaci
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 28u);
     EXPECT_EQ(allocator->availableTokensNum(), 28u);
     EXPECT_EQ(allocator->totalTokensNum(), 28u);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).total_tokens, 28u);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, 28u);
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
@@ -819,6 +820,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsUseCPVirtualBlockS
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).total_tokens, 7u * 8u);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, 7u * 8u);
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsFallBackToGlobalSeqSize) {
