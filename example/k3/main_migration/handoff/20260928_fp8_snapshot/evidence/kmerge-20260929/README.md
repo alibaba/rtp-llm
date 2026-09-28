@@ -59,3 +59,9 @@
 候选版的稳定大空隙集中在 embedding 前及首层 AttnRes 前。trace 中该阶段有一次 `aten::copy_`，输入为 8,192 个 `int32`，其中一个匹配请求耗时 2.460 ms。源码的 `prepare_causal_conv1d_metadata` 正好为 65,536 token 生成 8,192 项传统 convolution 索引；当前 FP8 cuLA paged convolution 的对齐无前缀路径读取的是另一份 1,024 项 paged 索引。因此我增加了一个保守的条件：所有 KDA 层都走 paged convolution、每层有 cache 且每层 prefix 按 64 token 对齐时，不再准备传统索引；任一条件不满足仍保留原来的 fallback。这个源码与 trace 的对应关系是性能假设，需由重启后的双机 flow 和热态 timeline 确认收益。
 
 111 的 CPU Bazel 测试先按旧代码运行，3 条中对齐 paged 路径的 1 条按预期失败；修改后 3 条通过。测试覆盖无前缀 paged 路径、未对齐 prefix 的传统 fallback 和缺失 cache 的 fallback。命令使用个人账号、容器内本地 ext4 源码和输出目录，以及 `--config=cuda13 --config=sm10x`。原始 red/green 日志在 `test-paged-conv-bazel-111.tar.gz`；`host-selection-unit-111.json` 记录测试前服务占用。此时尚未重启服务，也没有新候选的 GPU 性能或完整模型正确性结论。
+
+## Paged metadata 候选的双机构建与权重预检
+
+111/112 各自在新建的个人 ext4 工作树上使用同一 `b24b6cd88` modeling 源码和同一远端开发分支；旧的 `3d7` 工作树与 trace 原文件保留。两端容器内均以 `luohaocheng.lhc`、`--config=cuda13 --config=sm10x` 编译，Bazel 各完成 23,714 个动作并报告成功。构建日志和哈希保存在 `pagedmeta-b24-build-logs-111112.*`。`host-selection-pagedmeta-before-restart.json` 记录旧服务仍在时的占用，`host-selection-pagedmeta-launch.json` 记录新服务启动前 111/112 的 GPU 选择和占用。
+
+两端启动前的 FastSafetensors guard 均通过：target 从 3FS 读取，7 个 shard、16,402 个 tensor、54.47 GiB；MTP 视图在个人数据盘，9 个 shard、5,404 个 tensor、20.00 GiB，实际 shard 指向已核实的 3FS。启动配置显式为 `fastsafetensors`。四份 guard 输出及两份启动配置在 `pagedmeta-b24-preflight-111.tar.gz`、`pagedmeta-b24-preflight-112.tar.gz`，哈希见 `pagedmeta-b24-preflight-111112.sha256`。111/112 的 8 个 RDMA bond 都是 ACTIVE，互 ping 各 3 包、0% 丢包。这些预检和构建结果本身不证明新服务的 smoke 或性能。
