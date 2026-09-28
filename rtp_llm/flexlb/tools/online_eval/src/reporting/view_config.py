@@ -73,7 +73,7 @@ def view(name):
                 _fail(path, "invalid HA panel")
     else:
         required = {"kind", "report", "producer", "title", "subtitle", "panel", "sections"}
-        if not required <= set(data) or set(data) - required - {"time_origin", "kpis", "meta", "audit_columns", "criteria_columns", "comparison"} or data["kind"] != "produced":
+        if not required <= set(data) or set(data) - required - {"time_origin", "kpis", "meta", "audit_columns", "criteria_columns"} or data["kind"] != "produced":
             _fail(path, "invalid produced report view")
         for field in ("report", "producer"):
             if type(data[field]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]*", data[field]):
@@ -124,27 +124,6 @@ def view(name):
         if "criteria_columns" in data and (not isinstance(data["criteria_columns"], list)
             or any(type(value) is not str for value in data["criteria_columns"])):
             _fail(path, "invalid criteria_columns")
-        if "comparison" in data:
-            comparison = data["comparison"]
-            required_comparison = {"title", "subtitle", "overlay_title", "overlay_caption", "sections"}
-            if not isinstance(comparison, dict) or not required_comparison <= set(comparison) or set(comparison) - required_comparison - {
-                "core_metrics", "kpi_label_suffix", "metrics_columns"
-            } or any(
-                type(comparison[key]) is not str or not comparison[key]
-                for key in ("title", "subtitle", "overlay_title", "overlay_caption")
-            ) or not isinstance(comparison["sections"], dict) or any(
-                type(key) is not str or type(value) is not str or not value
-                for key, value in comparison["sections"].items()
-            ) or "core_metrics" in comparison and (
-                not isinstance(comparison["core_metrics"], list) or any(
-                    type(name) is not str for name in comparison["core_metrics"]
-                )
-            ) or "metrics_columns" in comparison and (
-                not isinstance(comparison["metrics_columns"], list) or any(
-                    type(name) is not str for name in comparison["metrics_columns"]
-                )
-            ) or "kpi_label_suffix" in comparison and type(comparison["kpi_label_suffix"]) is not str:
-                _fail(path, "invalid comparison view")
     if any(type(data[key]) is not str or not data[key].strip() for key in ("title", "subtitle")):
         _fail(path, "title and subtitle are required")
     if data["kind"] == "produced":

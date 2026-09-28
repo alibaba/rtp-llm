@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from scenario.actions.master import OwnedHaClient
-from workload.compare import main
 from workload.evidence_analysis import analyze_report
 
 
@@ -223,39 +222,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertEqual(r["workload"]["missing_telemetry"], ["1/master-B"])
             self.assertEqual(r["workload"]["runtime_validity"], "INVALID")
 
-    def test_async_curves_keep_own_points_and_numeric_axis(self):
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d)
-            for name, times in [("a", [1, 2, 12]), ("b", [1.2, 2.2, 12.2])]:
-                r = dict(
-                    id="test",
-                    configuration_sha256="same",
-                    workload={"runtime_validity": "VALID"},
-                    clock_anchor={"monotonic_s": 0},
-                    stages=[dict(id="load", started_s=0, finished_s=15, status="PASS")],
-                    series={"metric": [[t, 3] for t in times]},
-                )
-                (p / (name + ".json")).write_text(json.dumps(r))
-            main(
-                [
-                    "--baseline",
-                    str(p / "a.json"),
-                    "--candidate",
-                    str(p / "b.json"),
-                    "--out",
-                    str(p / "out"),
-                ]
-            )
-            html = (p / "out/reports/comparison/test/report.html").read_text()
-            spec = json.loads(html.split("const SPEC = ", 1)[1].split(";\n", 1)[0])
-            self.assertEqual(spec["timeAxis"], {"min": 0, "max": 12.2})
-            self.assertEqual(spec["timeOriginLabel"], "t=0 = 当前阶段开始")
-            series = spec["panels"][0]["series"]
-            self.assertEqual([x["x"] for x in series[0]["points"]], [1, 2, 12])
-            self.assertEqual([x["x"] for x in series[1]["points"]], [1.2, 2.2, 12.2])
-
-    def test_failed_sample_breaks_curve_and_disables_window_comparison(self):
-        from workload.compare import compare
+    def test_failed_sample_breaks_curve(self):
         from workload.evidence_analysis import read_series
 
         with tempfile.TemporaryDirectory() as d:
@@ -267,17 +234,6 @@ class EvidenceIntegrityTest(unittest.TestCase):
             )
             series = read_series(d, 0)
             self.assertEqual(next(iter(series.values())), [[1, 3], [2, None], [3, 4]])
-            report = dict(
-                id="same",
-                configuration_sha256="same",
-                workload={"runtime_validity": "INVALID"},
-                clock_anchor={"monotonic_s": 0},
-                stages=[dict(id="load", status="PASS", started_s=0, finished_s=4)],
-                series=series,
-            )
-            row = compare(report, report)["changes"][0]
-            self.assertEqual(row["status"], "MISSING_DATA")
-            self.assertIsNone(row["rank_score"])
 
     def test_outage_exemption_is_source_and_window_specific(self):
         from workload.evidence_analysis import classify_gaps
@@ -339,21 +295,6 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertEqual(audit_journals(d, ["1/mock"]), [])
             journal.write_text("{broken\n")
             self.assertTrue(audit_journals(d, ["1/mock"]))
-
-    def test_invalid_evidence_is_not_ranked_even_with_visible_samples(self):
-        from workload.compare import compare
-
-        report = dict(
-            id="same",
-            configuration_sha256="same",
-            workload={"runtime_validity": "INVALID"},
-            clock_anchor={"monotonic_s": 0},
-            stages=[dict(id="load", started_s=0, finished_s=4, status="PASS")],
-            series={"metric": [[1, 3], [2, 4]]},
-        )
-        row = compare(report, report)["changes"][0]
-        self.assertEqual(row["status"], "INVALID_EVIDENCE")
-        self.assertIsNone(row["rank_score"])
 
     def test_silent_sampling_pause_breaks_curve_without_fabricating_zero(self):
         from workload.evidence_analysis import (

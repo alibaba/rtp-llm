@@ -18,7 +18,7 @@ no longer read; old runs cannot be re-aggregated):
   * legacy keys ignored — a run dir that still carries counters_timeseries /
     inflight_timeseries (old runs) rebuilds from the G3 timeline anyway.
 
-Output key names/structures are unchanged (downstream canvas/compare_twin
+Output key names/structures are unchanged (downstream canvas
 consume them as-is).
 """
 

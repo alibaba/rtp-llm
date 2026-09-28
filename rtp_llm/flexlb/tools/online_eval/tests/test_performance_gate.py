@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest import mock
 
 from workload.performance_gate import analyze, report, validate, trace_workload_sha
-from workload.performance_compare import compare
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 
@@ -153,11 +152,6 @@ class PerformanceGateTest(unittest.TestCase):
             # HTML must still exist for INVALID runs, with embedded plotting code.
             bundle = report(d, e)
             self.assertTrue((bundle / "report.html").is_file())
-            compare(e, e, Path(d)/"ab")
-            spec = json.loads((Path(d)/"ab/reports/comparison/master-performance/report-spec.json").read_text())
-            self.assertEqual([p["id"] for p in spec["panels"]], ["ab", "A", "B"])
-            self.assertTrue((Path(d)/"ab/left/reports/run/master-performance/report.html").is_file())
-            self.assertTrue((Path(d)/"ab/right/reports/run/master-performance/report.html").is_file())
 
     def test_observer_gap_retains_request_metrics_without_promoting_verdict(self):
         e = self.engine_evidence()
@@ -190,16 +184,6 @@ class PerformanceGateTest(unittest.TestCase):
         extra["metric"]["engine_incarnation"] = "restarted"
         e["engine_tps_samples"].append(extra)
         self.assertEqual(analyze(e)["verdict"], "INVALID")
-
-    def test_json_only_ab_preserves_failed_candidate_and_controls(self):
-        a, b = self.engine_evidence(), self.engine_evidence()
-        b["flow"]["records"][0]["status"] = "error"
-        with tempfile.TemporaryDirectory() as d:
-            r = compare(a, b, d, json_only=True)
-            self.assertTrue(r["controls"]["aligned"])
-            self.assertEqual(r["verdicts"], dict(left="PASS", right="FAIL"))
-            self.assertFalse(list(Path(d).rglob("*.html")))
-            self.assertTrue((Path(d) / "analysis.json").is_file())
 
     def test_absolute_success_and_renderer(self):
         e = evidence()
@@ -277,17 +261,6 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertEqual(
                 sum(p["y"] for p in by_name["完成输出 TPS"]["points"]), 792
             )
-            compare(e, e, root / "ab", left_directory=root, right_directory=root)
-            spec = json.loads(
-                (
-                    root / "ab/reports/comparison/master-performance/report-spec.json"
-                ).read_text()
-            )
-            self.assertEqual([p["id"] for p in spec["panels"]], ["ab", "A", "B"])
-            overlay = spec["panels"][0]
-            self.assertEqual(len(overlay["presets"]["规模"]), 4)
-            self.assertEqual(overlay["series"][0]["dash"], [6, 4])
-            self.assertTrue((root / "ab/left/telemetry/1/queries.json").is_file())
 
     def test_tail_cohort_and_actual_tokens_not_requested_budget(self):
         e = evidence()
@@ -365,25 +338,6 @@ class PerformanceGateTest(unittest.TestCase):
             next(x for x in r["checks"] if x["metric"] == "tpot_p99_ms")["status"],
             "NOT_APPLICABLE",
         )
-
-    def test_config_ab_same_binary_no_bad_version_required(self):
-        left = evidence()
-        right = copy.deepcopy(left)
-        right["provenance"]["actual_master_config"]["dispatcher"]["type"] = "NON_BATCH"
-        with tempfile.TemporaryDirectory() as d:
-            r = compare(
-                left, right, d, allowed=["/actual_master_config/dispatcher/type"]
-            )
-            self.assertTrue(r["controls"]["aligned"])
-            self.assertEqual(r["verdicts"], dict(left="PASS", right="PASS"))
-            right["criteria"]["min_output_tps"] = 10000
-            r = compare(
-                left, right, d, allowed=["/actual_master_config/dispatcher/type"]
-            )
-            self.assertFalse(r["controls"]["aligned"])
-            self.assertEqual(r["verdicts"]["right"], "FAIL")
-        with self.assertRaises(ValueError):
-            compare(left, right, "unused", allowed=["/performance"])
 
     def test_workload_checksum_preserves_everything_except_rid(self):
         with tempfile.TemporaryDirectory() as d:

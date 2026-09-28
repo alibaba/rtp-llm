@@ -42,13 +42,3 @@ sections:
   verdict: 专用门禁判据（非监控曲线）
   sources: 监控来源与缺采
 audit_columns: [曲线, 覆盖率, 状态, PromQL / 说明]
-comparison:
-  title: 缓存实验 · A/B
-  subtitle: 'A {a_verdict} / B {b_verdict} · controls {controls}'
-  overlay_title: A/B · 关键曲线同图
-  overlay_caption: 图例可选择和高亮。曲线仅来自归档监控。
-  core_metrics: [P Waiting / engine, P engine count, P cache hit ratio]
-  sections:
-    identity: 运行身份与制品证据
-    controls: 控制变量核对
-    alignment: 绘图时间对齐

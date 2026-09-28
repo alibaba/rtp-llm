@@ -58,7 +58,7 @@ v3 保存精确总长；`max_input_tokens` 是包含上界的播放过滤，不�
 Master `auto_tpm.schedule.latency_ms` 的 timer count 只表示调度响应 QPS。
 
 终态证据在分析前原子落盘，保留所有请求的判定字段、原始 journal 路径与 SHA256。
-完整实验生成单 run HTML；A/B 保留合图、A 图、B 图和各自报告。FAIL/INVALID 同样保留诊断证据，
+完整实验生成冻结的单 run 报告；对比复用其中的分析结果和曲线。FAIL/INVALID 同样保留诊断证据，
 `--json-only` 仅用于显式离线诊断。
 
 ## 口径与有效性
@@ -80,19 +80,20 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.performan
 
 退出码：PASS=0、FAIL=1、INVALID=2。场景框架中 INVALID 映射为 ERROR；顶层 workload 的采集、清理检查也必须通过，不把专用 PASS 当整轮通过。
 
-## 配置或版本 A/B
+## 配置或版本对照
 
 ```bash
-PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.performance_compare \
-  /path/to/A/performance-gate-evidence.json /path/to/B/performance-gate-evidence.json \
-  --output /path/to/ab \
-  --allow-master-change /actual_master_config/scheduler/decision \
-  --allow-master-change /actual_master_config/dispatcher/type
+python3 tools/online_eval/scripts/commands/compare_runs.py \
+  /path/to/A/reports/run/master-performance /path/to/B/reports/run/master-performance \
+  --output /path/to/comparison
 ```
 
-允许差异必须是实际归档配置中的明确 JSON Pointer 路径，可以声明配置字段或子树；报告保留该路径两侧完整值。decision 子树包含调度窗口参数。应先读归档配置，再声明，不按模式名猜路径。不允许豁免性能模型、流量或门禁阈值。
+对比展示归档时的独立 verdict、门禁检查、曲线与控制变量，不调用性能分析器，也不重新生成
+单 run 报告。配置和流量差异逐项展示，没有允许差异白名单。元数据缺失标为 UNKNOWN，
+不能因两侧同时缺失而认定一致。退出码 0 只表示报告生成成功。
 
-跨 profile 的 trace request ID 会带不同运行命名空间；另存 workload SHA，仅排除 `rid`，其余 token、顺序、长度、priority 全部参与校验，原始 SHA 仍保留。比较结果含各自 verdict 和控制变量状态。比较命令退出 0 只表示输入有效且差异已声明，**不是候选门禁通过**。
+跨 profile 的 trace request ID 会带不同运行命名空间；workload SHA 仅排除 `rid`，
+其余 token、顺序、长度、priority 全部参与校验，原始 SHA 仍保留。两种 SHA 随归档元数据展示。
 
 ## 边界
 
@@ -100,8 +101,8 @@ PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.performan
 
 ## 报告曲线
 
-报告沿用公共 multi_curve 组件：A/B 合图、A 图、B 图，分别支持核心、TPS、延迟、流量、队列、规模、KV、模拟执行视角及指标搜索。
+单 run 报告沿用公共 multi_curve 组件，提供核心、TPS、延迟、流量、队列、规模、KV、模拟执行视角及指标搜索。对比保留归档预设；同名且坐标轴、单位、指标集合一致的时间面板生成合图，其余独立展示。
 A 为第一个输入，B 为第二个输入；A 虚线，B 实线。同指标同色。单 run 各指标仍独立使用绝对标准。
 请求曲线按 1 秒分桶：TPS 按成功完成时刻，延迟/成功率按到达 cohort（包含窗口后终态），不能把桶 p99 当作整个测量窗口 p99。
 监控曲线从 evidence 同级 `telemetry/*/queries.json` 读取，保留 P、D 两种角色和缺采。
-离线比较会复制这些查询归档到 A/B 子目录；报告不会从日志伪造缺失的监控曲线。
+上述查询读取发生在单 run 报告生成时；对比只使用冻结曲线，保留缺失点。

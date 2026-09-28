@@ -48,16 +48,17 @@ python3 tools/online_eval/scripts/commands/run_cases.py \
 
 判定顺序是：证据完整性 → 合同检查 → 性能观察。`runtime_validity=INVALID` 时，即使某个业务检查显示 PASS，也不能作为成功结论。故障注入可能让压测聚合器的 `test_valid=false`，该字段需要结合场景预期解释，不能强改为 true。
 
-## 比较两次场景
+## 对照场景报告
 
 ```bash
-PYTHONPATH=tools/online_eval/src:tools/online_eval python3 -m workload.compare \
-  --baseline /path/to/A/analysis.json \
-  --candidate /path/to/B/analysis.json \
-  --out /path/to/comparison
+python3 tools/online_eval/scripts/commands/compare_runs.py \
+  /path/to/A/reports/run/<instance> /path/to/B/reports/run/<instance> \
+  --output /path/to/comparison
 ```
 
-只能比较相同实例和声明配置。阶段按同名步骤对齐；缺采样显示为 `MISSING_DATA`，不能当作零。变化排序是调查入口，不自动等于产品回归。
+对比保留冻结曲线和每个 run 的有效性；缺采点不补零。配置差异逐项展示，不阻止报告生成。
+默认保留归档的时间坐标；需要共同零点时，用 `--alignment-event` 显式指定归档事件。
+不按阶段重新计算均值或生成变化排名。参数与产物见[命令入口](entrypoints.md)。
 
 ## 干预与恢复取证
 

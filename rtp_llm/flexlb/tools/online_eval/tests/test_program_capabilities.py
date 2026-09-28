@@ -10,12 +10,12 @@ from unittest import mock
 
 import yaml
 
-from cases.config import configure_program
+from cases.config import configure_program, validate_analysis
 from cases.programs import PROGRAMS
 from reporting import discover_reports, write_bundle
 from scenario import ScenarioError, compile_scenarios
 from scenario.catalog import handlers
-from workload.cache_gate_ab import compare, load_comparison_policy
+from reporting.comparison import compare
 from workload.evidence_analysis import analyze_report
 from workload.report import build_spec
 import mode_profiles
@@ -39,7 +39,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             path = root / 'scenario.yaml'
             path.write_text(yaml.safe_dump(config))
             with mock.patch.dict(PROGRAMS, second_cache='second_cache'), mock.patch.dict(sys.modules, second_cache=module):
-                self.assertEqual(load_comparison_policy(path), original['analysis'])
+                self.assertEqual(validate_analysis(config, str(path)), original['analysis'])
                 with mock.patch('scenario.compiler.VICTIM_OFFSETS', (700, 701, 702)):
                     first = compile_scenarios([('first', configure_program(original, 'first'))], handlers=handlers())
                     second = compile_scenarios([('second', configure_program(config, 'second'))], handlers=handlers())
@@ -48,7 +48,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
                 with self.assertRaisesRegex(ScenarioError, 'does not support analysis'):
                     configure_program(config, 'second')
                 with self.assertRaisesRegex(ScenarioError, 'does not support analysis'):
-                    load_comparison_policy(path)
+                    configure_program(config, str(path))
                 config['analysis']['action'] = 'grant_permission'
                 with self.assertRaisesRegex(ScenarioError, 'cannot orchestrate'):
                     configure_program(config, 'second')
@@ -96,7 +96,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     mode_profiles.load_mode_tables(path)
 
-    def test_compare_validates_actual_event_before_reading_evidence(self):
+    def test_compare_validates_actual_event_before_reading_bundles(self):
         for event in ('', '  ', 12, False):
             with self.assertRaisesRegex(ValueError, 'alignment_event'):
-                compare('missing-a', 'missing-b', 'unused', alignment_event=event)
+                compare(['missing-a', 'missing-b'], 'unused', alignment_event=event)

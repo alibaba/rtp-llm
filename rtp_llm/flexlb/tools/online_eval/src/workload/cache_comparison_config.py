@@ -1,4 +1,4 @@
-"""Data-only cache experiment report configuration shared by loader and CLI."""
+"""Validate scenario-declared report alignment metadata."""
 
 
 def validate_policy(policy):

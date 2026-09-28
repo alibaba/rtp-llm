@@ -25,7 +25,7 @@ speed = target_qps × event_span_seconds / valid_request_count
 ```
 
 `--traffic-model` 与 `--traffic-source-spec` 互斥。换源后记录模型 SHA 和发送节奏，
-重新确认可比条件及门禁标定，不直接沿用其他来源的结论。
+重新确认采集口径和实验条件，不直接沿用其他来源的结论。
 
 `valid_request_count` 是模型事件数；实际 `--limit`、时长和发送拥塞会改变实发
 QPS，报告中的实发 QPS 才是结果口径。要使用参数化合成源，设置
@@ -65,15 +65,16 @@ python3 tools/online_eval/scripts/commands/render_stress_report.py \
   --out /path/to/report.html
 ```
 
-## A/B
+## 运行对照
 
-基线与候选必须使用同一 trace、拓扑、Master 配置、时长、Fetch 模式和稳态窗口，且两边都有效：
+先为每次运行生成报告 bundle，再使用统一入口：
 
 ```bash
 python3 tools/online_eval/scripts/commands/compare_runs.py \
-  --run-a /path/to/A/aggregate.json \
-  --run-b /path/to/B/aggregate.json \
-  --out /path/to/comparison.json --html
+  /path/to/A/reports/run/<report> /path/to/B/reports/run/<report> \
+  --output /path/to/comparison
 ```
 
-以 `compare_runs.py --help` 为当前参数契约。Prometheus 归档必须两边 `test_valid=true`、无采集错误或缺口，且流量 SHA、Master 配置、模式计划和有效客户端参数一致；该入口输出逐曲线稳态均值差及可选 HTML，结论固定为 `DESCRIPTIVE_ONLY`，不能当性能版本门禁。无效样本或 provenance 不一致时退出 2，需先修复采集并重跑。旧格式仍走原有门禁。指标单位、聚合和误判边界见[结果与指标](results.md)。
+对比读取冻结的分析结果与曲线，展示控制变量差异、采集错误和缺口；这些标注不阻止报告生成。
+对比入口不读取 `aggregate.json` 或重新选择统计窗。执行状态与各 run 独立判定分开，
+退出码 0 只表示报告已生成。指标单位和解释边界见[结果与指标](results.md)。

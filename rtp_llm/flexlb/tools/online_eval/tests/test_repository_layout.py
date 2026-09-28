@@ -48,7 +48,6 @@ class RepositoryLayoutTest(unittest.TestCase):
             ("scripts/commands/run_cases.py", ["--help"]),
             ("scripts/commands/list_cases.py", ["--help"]),
             ("scripts/commands/compare_runs.py", ["--help"]),
-            ("scripts/probes/check_mock_fidelity.py", ["--help"]),
             ("scripts/commands/render_stress_report.py", ["--help"]),
         ]
         with tempfile.TemporaryDirectory() as cwd:

@@ -25,15 +25,3 @@ sections:
   validity: 有效性
   metrics: 指标
 criteria_columns: [指标, 实际值, 标准, 结果]
-comparison:
-  title: Master 性能 A/B 观察
-  subtitle: 'A {a_verdict} / B {b_verdict} · controls {controls} · {topology} · {qps} QPS · {benchmark_id}'
-  overlay_title: A/B 合图
-  overlay_caption: A 虚线 / B 实线；同一指标同色，各自测量起点对齐。比较仅供观察，绝对门禁分别判定。
-  kpi_label_suffix: 整轮成功率（含预热/排空）
-  metrics_columns: [指标, left, right, 差值]
-  sections:
-    metrics: 指标差异（不改变单 run 门禁）
-    controls: 控制变量核对
-    declared: 声明配置变化
-    run: 曲线来源与门禁

@@ -1937,7 +1937,7 @@ if proc_entries:
 # master 预约未确认，running = 引擎确认运行中). SchedulerRuntime sets
 # those gauges every 2s, so the series naturally runs at the 2s cadence
 # the samples carry (vs the retired poller's 1s). Output keys unchanged
-# (canvas/compare_twin consume them as-is).
+# (canvas consumes them as-is).
 # no-backward-compat: the retired inflight_timeseries snapshots (old runs)
 # are no longer read — those runs cannot be re-aggregated.
 _inflight_gauges = (

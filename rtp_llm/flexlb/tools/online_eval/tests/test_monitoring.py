@@ -72,16 +72,6 @@ class ContractTest(unittest.TestCase):
                 "error": "monitor series absent",
             }])
 
-    def test_legacy_gate_rejects_monitor_contract(self):
-        from analysis.compare_ab import PrecheckError, resolve_run
-
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "aggregate.json").write_text(
-                json.dumps({"monitor_backend": "prometheus"})
-            )
-            with self.assertRaisesRegex(PrecheckError, "legacy stress gate"):
-                resolve_run(tmp)
-
     def test_missing_binary_has_no_private_fallback(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ, {"PROMETHEUS_BIN": ""}
