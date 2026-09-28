@@ -118,9 +118,6 @@ private:
     StreamGroupQueue waiting_group_queue_;
     StreamGroupQueue loading_cache_group_queue_;
 
-    // Context-parallel prefill can opt into single-request admission until
-    // the model-side path supports per-request layouts.
-    const bool cp_force_single_prefill_ = false;
     // Soft per-round quota on the tokens that are actually recomputed (prefix-cache hits
     // excluded). 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;

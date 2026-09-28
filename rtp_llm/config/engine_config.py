@@ -244,7 +244,20 @@ class EngineConfig:
             load_config=load_config,
         )
 
+        # Legacy default: the decode running-batch cap follows concurrency_limit.
+        # An explicit --max_generate_batch_size overrides it as a scheduler-side
+        # cap: excess streams queue in the scheduler instead of being rejected
+        # at the HTTP frontend.
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
+        if py_env_configs.max_generate_batch_size_override is not None:
+            if py_env_configs.max_generate_batch_size_override <= 0:
+                raise ValueError(
+                    "--max_generate_batch_size must be positive, got "
+                    f"{py_env_configs.max_generate_batch_size_override}"
+                )
+            runtime_config.max_generate_batch_size = (
+                py_env_configs.max_generate_batch_size_override
+            )
 
         # Setup PD separation config
         setup_pd_sep_config(
