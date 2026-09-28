@@ -1,10 +1,62 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha import sparse_paged_gqa_attn
+from rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha import (
+    _validate_sparse_paged_indices,
+    sparse_paged_gqa_attn,
+)
 
 _DEVICE = "cuda"
+
+
+class SparsePagedIndexValidationTest(unittest.TestCase):
+    def test_valid_indices_use_one_scalar_read(self):
+        table = torch.tensor([[1, 2]], dtype=torch.int32)
+        lengths = torch.tensor([[5]], dtype=torch.int32)
+        selected = torch.tensor([[[0, 4, -1]]], dtype=torch.int32)
+        original_item = torch.Tensor.item
+        calls = []
+
+        def count_item(tensor, *args, **kwargs):
+            calls.append(1)
+            return original_item(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "item", count_item):
+            _validate_sparse_paged_indices(
+                table, lengths, selected, page_size=4, cache_blocks=3
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_error_priority_and_safe_lookup_for_invalid_indices(self):
+        table = torch.tensor([[1, 0]], dtype=torch.int32)
+        lengths = torch.tensor([[5]], dtype=torch.int32)
+        cases = (
+            (torch.tensor([[9]], dtype=torch.int32), [[[0]]], "capacity"),
+            (lengths, [[[-2]]], "only use -1"),
+            (lengths, [[[5]]], "outside its row's kv_len"),
+            (lengths, [[[1000000]]], "outside its row's kv_len"),
+            (lengths, [[[4]]], "unallocated"),
+        )
+        for kv_lens, indices, message in cases:
+            with self.subTest(message=message, indices=indices):
+                with self.assertRaisesRegex(ValueError, message):
+                    _validate_sparse_paged_indices(
+                        table,
+                        kv_lens,
+                        torch.tensor(indices, dtype=torch.int32),
+                        page_size=4,
+                        cache_blocks=3,
+                    )
+        with self.assertRaisesRegex(ValueError, "exceeds cache blocks"):
+            _validate_sparse_paged_indices(
+                torch.tensor([[1, 3]], dtype=torch.int32),
+                lengths,
+                torch.tensor([[[0]]], dtype=torch.int32),
+                page_size=4,
+                cache_blocks=3,
+            )
 
 
 def _reference(q, cache, block_table, kv_lens, selected):
