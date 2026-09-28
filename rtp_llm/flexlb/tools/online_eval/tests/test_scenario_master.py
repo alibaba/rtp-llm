@@ -288,6 +288,21 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual(0, result.output["actual"])
         self.assertEqual("FAIL", result.checks[0].status)
 
+    def test_rolling_error_gate_counts_transport_and_worker_failures(self):
+        rows = self.ctx.register_resource("ha_rows", [
+            {"status": "ok", "route_path": "master"},
+            {"status": "exception", "route_path": "failed"},
+            {"status": "schedule_error", "route_path": "master"},
+        ])
+        result = master._client_check(
+            self.ctx,
+            dict(rows=rows, metric="non_ok_count", op="eq", expected=0,
+                 min_samples=3),
+            self.deadline,
+        )
+        self.assertEqual(2, result.output["actual"])
+        self.assertEqual("FAIL", result.checks[0].status)
+
     def test_client_nonzero_exit_and_malformed_rows_are_errors(self):
         root = Path(self.tmp.name)
         process = SimpleNamespace(proc=Mock())
@@ -556,6 +571,9 @@ class MasterActionsTest(unittest.TestCase):
                 self.assertLess(ids.index("restart_a"), ids.index("restart_b"))
                 self.assertNotIn("outage_failures", ids)
                 self.assertIn("both_balance", ids)
+                self.assertIn("handover_errors", ids)
+                self.assertIn("late_errors", ids)
+                self.assertIn("rolling_errors", ids)
                 flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
                 self.assertEqual("prefix_lineage", flow["params"]["source"]["model"])
                 self.assertEqual(10000, flow["params"]["max_requests"])
@@ -575,6 +593,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertLess(ids.index("kill_b"), ids.index("outage_start"))
         self.assertLess(ids.index("outage_end"), ids.index("restart_a"))
         self.assertIn("outage_failures", ids)
+        self.assertNotIn("rolling_errors", ids)
         config["parameters"]["dual_master_cycle"]["restart_mode"] = "typo"
         with self.assertRaisesRegex(ScenarioError, "restart_mode"):
             configure_program(config, str(path))

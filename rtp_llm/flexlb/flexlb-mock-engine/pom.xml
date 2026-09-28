@@ -53,6 +53,9 @@
     <build>
         <resources>
             <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
                 <directory>../tools/online_eval/data/performance</directory>
                 <includes><include>dsv4_l20_mock_calibration.json</include></includes>
             </resource>

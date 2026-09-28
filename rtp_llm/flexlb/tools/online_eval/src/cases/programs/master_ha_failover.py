@@ -47,6 +47,13 @@ def dual_master_cycle(case):
     if restart_mode == "non_rolling":
         windows["outage"] = {"from": output("outage_start", "epoch_s"),
                               "until": output("outage_end", "epoch_s")}
+    else:
+        # The existing steady windows intentionally skip restart seams and
+        # stop after 30 seconds of the final long-running traffic period.
+        windows["a_handover"] = {"from": output("b_end", "epoch_s"),
+                                  "until": output("a_start", "epoch_s")}
+        windows["post_recovery"] = {"from": output("both_start", "epoch_s")}
+        windows["all_requests"] = {}
     for name, boundaries in windows.items():
         case.step(name, "master_client_window", params={"rows": output("finish", "rows"), **boundaries})
 
@@ -64,6 +71,9 @@ def dual_master_cycle(case):
     if restart_mode == "non_rolling":
         checks.update(outage_failures="outage", outage_no_master="outage",
                       outage_terminal="outage")
+    else:
+        checks.update(handover_errors="a_handover", late_errors="post_recovery",
+                      rolling_errors="all_requests")
     for name, window in checks.items():
         case.observe(name, "master_client_check", params=case.params(
             f"{root}.checks.{name}", {"rows": output(window, "rows")}))

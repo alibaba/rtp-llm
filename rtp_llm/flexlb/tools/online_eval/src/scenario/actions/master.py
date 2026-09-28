@@ -832,6 +832,7 @@ def _window(ctx, params, deadline):
 HA_METRICS = {
     "sample_count",
     "success_rate",
+    "non_ok_count",
     "target_share",
     "target_count",
     "route_share",
@@ -911,6 +912,8 @@ def _client_check(ctx, params, deadline):
         actual = n
     elif metric == "success_rate":
         actual = sum(r["status"] == "ok" for r in rows) / n if n else 0
+    elif metric == "non_ok_count":
+        actual = sum(r["status"] != "ok" for r in rows)
     elif metric in {"target_share", "target_count"}:
         target = ctx.backend.manager.master_instance_target(ctx.env, params["target"])
         count = sum(r["master_target"] == target for r in rows)

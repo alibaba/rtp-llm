@@ -67,6 +67,9 @@ parameters:
       a_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
       both_success: {metric: success_rate, op: ge, expected: 0.95, min_samples: 100}
       both_balance: {metric: prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+      handover_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
+      late_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
+      rolling_errors: {metric: non_ok_count, op: eq, expected: 0, min_samples: 100}
       unique_requests: {metric: duplicate_ids, op: eq, expected: 0, min_samples: 1}
 test:
   kind: workload

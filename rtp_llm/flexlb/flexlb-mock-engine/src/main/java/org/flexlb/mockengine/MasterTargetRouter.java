@@ -272,13 +272,24 @@ final class MasterTargetRouter {
     private ScheduleOutcome scheduleDiscovered(
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
         MasterRouteDiscovery.Route route = discovery.route();
-        if (route.master() == null) {
-            return new ScheduleOutcome(null, "", false, ErrorKind.TRANSPORT, null, List.of());
-        }
         List<String> targets = new ArrayList<>();
-        targets.add(route.master());
+        if (route.master() != null) {
+            targets.add(route.master());
+        }
         if (route.slave() != null && !route.slave().equals(route.master())) {
             targets.add(route.slave());
+        }
+        // A node that left the healthy route must not keep its old gRPC
+        // channel's reconnect backoff when it becomes healthy again. The
+        // frontend closes a target channel on RPC failure and creates a fresh
+        // one for the next call; retire our pooled channels at the same edge.
+        for (Map.Entry<String, TargetPool> entry : discoveredPools.entrySet()) {
+            if (!targets.contains(entry.getKey())) {
+                retireDiscoveredPool(entry.getKey(), entry.getValue());
+            }
+        }
+        if (route.master() == null) {
+            return new ScheduleOutcome(null, "", false, ErrorKind.TRANSPORT, null, List.of());
         }
         List<ScheduleAttempt> attempts = new ArrayList<>();
         Exception lastFailure = null;
@@ -302,15 +313,28 @@ final class MasterTargetRouter {
                     return new ScheduleOutcome(null, target, attempts.size() > 1,
                             ErrorKind.DEADLINE, e, attempts);
                 }
+                retireDiscoveredPool(target, pool);
                 lastFailure = e;
             } catch (RuntimeException e) {
                 attempts.add(new ScheduleAttempt(target, startedEpochMs, startedNanos,
                         "EXCEPTION", null));
+                retireDiscoveredPool(target, pool);
                 lastFailure = e;
             }
         }
         return new ScheduleOutcome(null, targets.get(targets.size() - 1), attempts.size() > 1,
                 ErrorKind.TRANSPORT, lastFailure, attempts);
+    }
+
+    private void retireDiscoveredPool(String target, TargetPool pool) {
+        // Injected stubs have no channels. Keep them available across test
+        // calls; production pools are removed atomically and closed gently so
+        // already-running calls can finish.
+        if (pool.channels != null && discoveredPools.remove(target, pool)) {
+            for (ManagedChannel channel : pool.channels) {
+                channel.shutdown();
+            }
+        }
     }
 
     /** Shuts down every target pool's channels (no-op for test-constructed pools). */
