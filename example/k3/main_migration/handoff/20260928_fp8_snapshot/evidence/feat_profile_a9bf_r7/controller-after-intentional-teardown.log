@@ -1,0 +1,84 @@
+starting concurrent Decode and Prefill peers; prefill_start_delay_s=15; run_id=feat-profile-a9bf-4layer-3fs-111112-r7-20260928 suite=flow controller_artifacts=/data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7-controller/feat-profile-a9bf-4layer-3fs-111112-r7-20260928 remote_detached=True parallel_start=True
+Decode launch accepted; waiting 15s before launching Prefill
+FAIL: detached remote role exit codes={'decode': 2, 'prefill': 2}
+--- tail /data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7-controller/feat-profile-a9bf-4layer-3fs-111112-r7-20260928/decode.log ---
+[INFO] checkpoint requested=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
+[INFO] checkpoint realpath=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
+[INFO] mount target=/mnt/hf3fs/3fs source=hf3fs.three_node_dev_20260922 fstype=fuse.hf3fs stat_fstype=fuseblk options=rw,nosuid,nodev,relatime,user_id=0,group_id=0,default_permissions,allow_other,max_read=1048576
+[INFO] stat device=188 inode=2894675 kind=directory; df size=90703260549120 used=44157068378112 available=46546192171008 (42.33 TiB)
+[PASS] checkpoint resolves under allowed 3FS root /mnt/hf3fs/3fs/models/kimi
+[PASS] index metadata.total_size matches shard payloads: 58480464384 bytes
+[PASS] checkpoint structure: index=model.safetensors.index.json, shards=7, tensors=16402, bytes=58482942648 (54.47 GiB)
+[PASS] all Safetensors headers and index-to-tensor mappings are structurally valid
+[PASS] explicit load method from environment LOAD_METHOD: fastsafetensors
+[INFO] checkpoint tree bytes=58487884774 (54.47 GiB); weight shard bytes=58482942648 (54.47 GiB)
+[RESULT] PASS warnings=0
+[INFO] checkpoint requested=/data1/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
+[INFO] checkpoint realpath=/data1/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
+[INFO] mount target=/data1 source=/dev/nvme1n1 fstype=ext4 stat_fstype=ext2/ext3 options=rw,noatime
+[INFO] stat device=66312 inode=202804898 kind=directory; df size=3779302981632 used=945751023616 available=2833535180800 (2.58 TiB)
+[PASS] checkpoint resolves to an allowed local data-disk mount
+[PASS] index metadata.total_size matches shard payloads: 21469868544 bytes
+[PASS] checkpoint structure: index=model.safetensors.index.json, shards=9, tensors=5404, bytes=21470681944 (20.00 GiB)
+[PASS] all Safetensors headers and index-to-tensor mappings are structurally valid
+[PASS] explicit load method from environment LOAD_METHOD: fastsafetensors
+[INFO] checkpoint tree bytes=21474396410 (20.00 GiB); weight shard bytes=21470681944 (20.00 GiB)
+[RESULT] PASS warnings=0
+checkpoint layers=4
+using default-bond RDMA HCA allowlist: mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7
+[decode] artifacts=/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7/feat-profile-a9bf-4layer-3fs-111112-r7-20260928/decode
+[decode] checkpoint=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers (fuse.hf3fs:hf3fs.three_node_dev_20260922)
+[decode] sp_type=mtp sp_model_type=kimi_k3_mtp
+[decode] draft_checkpoint=/data1/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927 (ext4:/dev/nvme1n1)
+[decode] decode_topology=legacy decode_dp=1 draft_ktp=1
+[decode] source_cache=page-rr/8 destination_cache=page-rr/8
+[decode] decode_q_replicated=0
+[decode] endpoints prefill=11.163.39.111:26300 decode=11.163.39.112:26400
+[decode] READY; waiting for Prefill result at 11.163.39.112:26500
+PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy
+PASS: decode service remains live at /data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7/feat-profile-a9bf-4layer-3fs-111112-r7-20260928/decode; waiting for TERM
+error: decode service exited while the validated cluster was being retained
+--- tail /data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7-controller/feat-profile-a9bf-4layer-3fs-111112-r7-20260928/prefill.log ---
+[INFO] checkpoint requested=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
+[INFO] checkpoint realpath=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
+[INFO] mount target=/mnt/hf3fs/3fs source=hf3fs.three_node_dev_20260922 fstype=fuse.hf3fs stat_fstype=fuseblk options=ro,nosuid,nodev,relatime,user_id=0,group_id=0,default_permissions,allow_other,max_read=1048576
+[INFO] stat device=1048796 inode=2894675 kind=directory; df size=90703260549120 used=44157099835392 available=46546160713728 (42.33 TiB)
+[PASS] checkpoint resolves under allowed 3FS root /mnt/hf3fs/3fs/models/kimi
+[PASS] index metadata.total_size matches shard payloads: 58480464384 bytes
+[PASS] checkpoint structure: index=model.safetensors.index.json, shards=7, tensors=16402, bytes=58482942648 (54.47 GiB)
+[PASS] all Safetensors headers and index-to-tensor mappings are structurally valid
+[PASS] explicit load method from environment LOAD_METHOD: fastsafetensors
+[INFO] checkpoint tree bytes=58487884774 (54.47 GiB); weight shard bytes=58482942648 (54.47 GiB)
+[RESULT] PASS warnings=0
+[INFO] checkpoint requested=/data6/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
+[INFO] checkpoint realpath=/data6/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
+[INFO] mount target=/data6 source=/dev/nvme6n1 fstype=ext4 stat_fstype=ext2/ext3 options=rw,relatime
+[INFO] stat device=66312 inode=208804910 kind=directory; df size=3779302981632 used=3044642238464 available=734643965952 (684.19 GiB)
+[PASS] checkpoint resolves to an allowed local data-disk mount
+[PASS] index metadata.total_size matches shard payloads: 21469868544 bytes
+[PASS] checkpoint structure: index=model.safetensors.index.json, shards=9, tensors=5404, bytes=21470681944 (20.00 GiB)
+[PASS] all Safetensors headers and index-to-tensor mappings are structurally valid
+[PASS] explicit load method from environment LOAD_METHOD: fastsafetensors
+[INFO] checkpoint tree bytes=21474396410 (20.00 GiB); weight shard bytes=21470681944 (20.00 GiB)
+[RESULT] PASS warnings=0
+checkpoint layers=4
+using default-bond RDMA HCA allowlist: mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7
+[prefill] artifacts=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7/feat-profile-a9bf-4layer-3fs-111112-r7-20260928/prefill
+[prefill] checkpoint=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers (fuse.hf3fs:hf3fs.three_node_dev_20260922)
+[prefill] sp_type=mtp sp_model_type=kimi_k3_mtp
+[prefill] draft_checkpoint=/data6/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927 (ext4:/dev/nvme6n1)
+[prefill] decode_topology=legacy decode_dp=1 draft_ktp=1
+[prefill] source_cache=page-rr/8 destination_cache=page-rr/8
+[prefill] decode_q_replicated=0
+[prefill] endpoints prefill=11.163.39.111:26300 decode=11.163.39.112:26400
+stage=chunkwise_rdma_flow_miss passed=true owners=[0]
+stage=flow_hit_owner_0 passed=true owners=[0]
+stage=flow_uneven_miss passed=true owners=[0, 0, 0, 0]
+stage=flow_uneven_hit_rotated passed=true owners=[0, 0, 0, 0]
+PASS: suite=flow cases=10 artifacts=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7/feat-profile-a9bf-4layer-3fs-111112-r7-20260928/prefill/accuracy.json
+PASS: Prefill validated suite=flow; artifacts=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7/feat-profile-a9bf-4layer-3fs-111112-r7-20260928/prefill
+PASS: prefill service remains live at /data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-111112-profile-r7/feat-profile-a9bf-4layer-3fs-111112-r7-20260928/prefill; waiting for TERM
+error: prefill service exited while the validated cluster was being retained
+detached Decode and Prefill role scripts accepted; polling status files
+[decode] detached role completed rc=2
+[prefill] detached role completed rc=2
