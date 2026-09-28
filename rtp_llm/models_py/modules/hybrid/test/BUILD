@@ -32,6 +32,11 @@ py_test (
 py_test (
     name = "mla_reuse_cache_test",
     srcs = ["mla_reuse_cache_test.py", "mla_attention_ref.py"],
+    args = [
+        "MLATest.test_mlp",
+        "MLATest.test_chunked_forward",
+        "MLATest.test_chunked_batched_forward",
+    ],
     deps = py_test_deps + [
         "//rtp_llm:testlib",
     ] + select({
@@ -42,6 +47,26 @@ py_test (
     # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
     tags = ["open_skip"],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test (
+    name = "mla_reuse_cache_fp8_test",
+    main = "mla_reuse_cache_test.py",
+    srcs = ["mla_reuse_cache_test.py", "mla_attention_ref.py"],
+    args = [
+        "MLATest.test_fp8_weight_prefill_keeps_quantized_kv_projection",
+        "MLATest.test_fp8_kv_chunked_batched_gather",
+    ],
+    # Resolve the JIT cache under the execution user's home, not the client's.
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test (

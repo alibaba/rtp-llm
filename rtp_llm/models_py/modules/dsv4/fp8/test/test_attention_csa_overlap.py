@@ -38,6 +38,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 def _make_attention_stub() -> AttentionFP8:
     layer = AttentionFP8.__new__(AttentionFP8)
     torch.nn.Module.__init__(layer)
+    layer.layer_id = 0
     layer.compress_ratio = 4
     # IndexerFP8 isinstance() is enforced inside the orchestrator — we
     # need a real IndexerFP8 instance. Bypass __init__ on it too.

@@ -585,7 +585,7 @@ py::dict serializeResult(const RecordingCacheStore& store, const std::map<std::s
     return result;
 }
 
-py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name) {
+py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name, bool enable_graph) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
@@ -655,6 +655,13 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
         scenario.inputs.kv_cache_kernel_block_id = torch::Tensor();
     }
 
+    params.hw_kernel_config.enable_cuda_graph = enable_graph;
+    params.hw_kernel_config.decode_capture_batch_sizes = {1};
+    if (enable_graph && params.kv_cache_layer_layout.has_value()) {
+        // This fixture bypasses Executor, which normally supplies the capture width.
+        params.kernel_block_table_width = CudaGraphRunner::captureKernelBlockTableWidth(
+            scenario.layout.topology(), params.max_seq_len, params.sp_config.speculativeReserveStep());
+    }
     {
         PyWrappedModel model(params, std::move(py_model));
         if (inspect_split) {
@@ -946,7 +953,8 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),
-          py::arg("scenario_name"));
+          py::arg("scenario_name"),
+          py::arg("enable_graph") = false);
     m.def("run_dirty_generation_prefill_capture_scenario",
           &rtp_llm::test::runDirtyGenerationPrefillCaptureScenario,
           py::arg("py_model"));

@@ -9,7 +9,6 @@ from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
-
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
@@ -179,6 +178,7 @@ class FrontendServer(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
             vit_config=self.py_env_configs.vit_config,
+            module_dispatch_config=self.py_env_configs.module_dispatch,
         )
 
         # Create a temporary tokenizer to initialize special_tokens

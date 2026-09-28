@@ -19,6 +19,12 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v4_mtp_weight_test",
+    srcs = ["deepseek_v4_mtp_weight_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "moe_config_propagation_test",
     srcs = ["moe_config_propagation_test.py"],
     deps = ["//rtp_llm:testlib"],

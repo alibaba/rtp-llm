@@ -20,6 +20,9 @@ public:
                     CacheGroupPolicy             policy      = defaultCacheGroupPolicy(CacheGroupType::SWA)):
         SingleTypeCacheManager(layer_ids, kvcache_spec, block_pool, group_id, policy), linear_step_(linear_step) {}
 
+    bool preparePrefillChunk(BlockIds& block_ids, int chunk_end,
+                             std::vector<size_t>* backfilled_positions) override;
+    void releaseBeforePrefillChunk(BlockIds& block_ids, int chunk_start, bool enable_reuse_cache) override;
     bool malloc(BlockIds&                block_ids,
                 int                      seq_len,
                 bool                     enable_reuse_cache   = false,

@@ -45,6 +45,8 @@ ENABLED = _MOEDBG > 0
 LEVEL = _MOEDBG  # 1 = top-level only, 2 = top + per-layer detail
 
 _local = threading.local()
+_dump_seq = 0
+_dump_seq_lock = threading.Lock()
 
 
 def _get_buf() -> Optional[List[Tuple[str, torch.Tensor]]]:
@@ -153,7 +155,17 @@ def dump(*, step: int, extra: Optional[Dict[str, Any]] = None) -> None:
             save[name] = snap["tensor"]
 
     payload = {"tensors": save, "hashes": hashes, "stats": stats, "extra": extra or {}}
-    fpath = f"{out_dir}/rank{rank}_pid{os.getpid()}_step{step:03d}.pt"
+    # Target and draft models own independent step counters but share this
+    # process/module.  Include a process-local dump sequence so an MTP draft
+    # forward cannot overwrite the target dump for the same logical step.
+    global _dump_seq
+    with _dump_seq_lock:
+        dump_seq = _dump_seq
+        _dump_seq += 1
+    fpath = (
+        f"{out_dir}/rank{rank}_pid{os.getpid()}_step{step:03d}"
+        f"_dump{dump_seq:03d}.pt"
+    )
     torch.save(payload, fpath)
     print(f"[MOEDBG] dumped {fpath} tensors={len(buf)}", flush=True)
 

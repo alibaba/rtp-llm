@@ -599,9 +599,7 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
 
     auto fake_hidden_states = torch::zeros(
         {1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type)).device(torch::kCUDA));
-    auto fake_probs =
-        torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
-    sp_buffer->all_probs     = fake_probs;
+    sp_buffer->token_ids_are_point_mass = true;
     sp_buffer->tokens        = torch::zeros({1, 2}, torch::kInt32);
     sp_buffer->hidden_states = fake_hidden_states;
 
@@ -666,6 +664,7 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
         .draft_all_probs_gpu          = is_dspark ? torch::Tensor() : sp_buffer->all_probs,
         .previous_seq_len_upper_bound = seq_len,
         .next_seq_len_upper_bound     = seq_len,
+        .draft_token_ids_are_point_mass = sp_buffer->token_ids_are_point_mass,
     });
 
     return fake_stream;
@@ -971,7 +970,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     } else if (dspark_prefill_commit_only_) {
         RTP_LLM_LOG_INFO("[speculative decoding] DSpARK PREFILL commit-only worker: skipping proposal/Markov weights");
     }
-    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
+    const bool skip_greedy_rng = !is_dspark_
+        && readEnvFlagOnce("RTP_LLM_MTP_SKIP_GREEDY_RNG", "mtp-sampler", "skip_greedy_rng");
+    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_, skip_greedy_rng));
+    batch_stream_processor_->setDraftToTargetMap(d2t_map_);
     if (!is_dspark_) {
         fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
     }
@@ -1239,6 +1241,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         } else {
             fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
+            draft_sampler_output.token_ids_are_point_mass = fast_topk_sampler_output.token_ids_are_point_mass;
             draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
     }
@@ -1390,7 +1393,8 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
 
         const auto& propose_probs_t  = tensors_holder[0];
         const auto& propose_hidden_t = tensors_holder[1];
-        RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.numel() > 0,
+        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer->token_ids_are_point_mass
+                                    || (propose_probs_t.defined() && propose_probs_t.numel() > 0),
                                 "[mtp-grpc] propose_probs must be non-empty, stream=%ld",
                                 stream->streamId());
         if (propose_step_ > 1) {
@@ -1434,6 +1438,7 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
             .draft_all_probs_gpu          = sp_output_buffer->all_probs,
             .previous_seq_len_upper_bound = seq_length,
             .next_seq_len_upper_bound     = seq_length,
+            .draft_token_ids_are_point_mass = sp_output_buffer->token_ids_are_point_mass,
         });
 
         tensors_holder.clear();
@@ -1772,12 +1777,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    // DSpARK commit input was bound from the explicit target-forward output
-    // above. Re-reading mutable Python model state here is both redundant and
-    // invalid for CUDA graph replay, where Python is not executed.
-    if (!is_dspark_) {
-        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
-    }
+    // Both modes already bound the pre-HC rows from the target-forward output.
+    // Ordinary synchronous MTP has also compacted them by each stream's
+    // accept_len. Re-reading the dense model buffer here would replace those
+    // selected rows with a prefix and mix requests after a partial rejection.
+    // Preserve the compact (or device-state dense) layout prepared above.
     broadcastPostRejectionInputs(model_input);
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -1808,6 +1812,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         } else {
             auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
+            draft_prefill_sampler_output.token_ids_are_point_mass = fast_topk_sampler_output.token_ids_are_point_mass;
             draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
     }
@@ -2581,7 +2586,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // sample
         auto fast_topk_sampler_output = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);
         auto draft_probs              = fast_topk_sampler_output.all_probs;
-        auto draft_probs_reshape      = draft_probs.reshape({(int)batch_size, 1, -1});
         auto draft_token_ids          = fast_topk_sampler_output.token_ids;
 
         if (model_input.is_fake_stream) {
@@ -2591,7 +2595,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         draft_token_ids = to_cuda_i32_flat(draft_token_ids);
         draft_token_columns.push_back(draft_token_ids);
-        draft_probs_list.push_back(draft_probs_reshape);
+        if (!fast_topk_sampler_output.token_ids_are_point_mass) {
+            draft_probs_list.push_back(draft_probs.reshape({(int)batch_size, 1, -1}));
+        }
 
         // update model input
         if (i != propose_step_ - 2) {
@@ -2721,6 +2727,28 @@ torch::Tensor MtpExecutor::advanceDSparkPositionIds(const torch::Tensor& verify_
     return (verify_positions.select(1, 0) + accept_offsets).to(torch::kInt32).contiguous();
 }
 
+torch::Tensor MtpExecutor::selectAcceptedHiddenStates(const torch::Tensor& hidden_states,
+                                                      const torch::Tensor& hidden_indices,
+                                                      int64_t batch_size,
+                                                      int64_t verify_width) {
+    RTP_LLM_CHECK_WITH_INFO(hidden_states.defined() && hidden_states.dim() >= 2
+                                && batch_size > 0 && verify_width > 0
+                                && hidden_states.size(0) == batch_size * verify_width,
+                            "MTP hidden states must have batch*verify_width rows and retain all feature dimensions");
+    RTP_LLM_CHECK_WITH_INFO(hidden_indices.defined() && hidden_indices.numel() == batch_size
+                                && hidden_indices.scalar_type() == torch::kInt64
+                                && hidden_indices.device() == hidden_states.device(),
+                            "MTP hidden indices must be int64 [batch] on the hidden-state device");
+    // DSv4 retains pre-HC [rows, branches, hidden] states. Flatten only for
+    // the single batched gather, then restore the complete feature shape.
+    const int64_t feature_size = hidden_states.numel() / hidden_states.size(0);
+    auto rows = hidden_states.reshape({batch_size, verify_width, feature_size});
+    auto indices = hidden_indices.reshape({batch_size, 1, 1}).expand({batch_size, 1, feature_size});
+    auto output_shape = hidden_states.sizes().vec();
+    output_shape[0] = batch_size;
+    return rows.gather(1, indices).reshape(output_shape);
+}
+
 void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,
                                             const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                             const torch::Tensor&                         verify_position_ids,
@@ -2777,12 +2805,9 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (propose_step_ > 1 && !is_dspark_ && draft_all_hidden_full.defined()) {
-        const auto hidden_size = draft_all_hidden_full.size(1);
-        auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
-        auto       accept_i32  = accept_len_all.to(torch::kInt32);
-        auto       idx_long =
-            (accept_i32.to(torch::kInt64) - 1).reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
-        last_hidden_all = hidden_3d.gather(1, idx_long).squeeze(1);
+        auto idx_long = accept_len_all.to(torch::kInt64) - 1;
+        last_hidden_all = selectAcceptedHiddenStates(
+            draft_all_hidden_full, idx_long, batch_size, stream_hidden_len);
     }
 
     // One clone for all probs
@@ -2816,6 +2841,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
 
         state.previous_seq_len_upper_bound = stream->seqLength();
         state.next_seq_len_upper_bound     = state.previous_seq_len_upper_bound;
+        state.draft_token_ids_are_point_mass = draft_prefill_output.sampler_output.token_ids_are_point_mass;
         stream->setMtpAsyncDeviceState(std::move(state));
 
         probs_batch_off += next_batch_size;
@@ -2886,10 +2912,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (propose_step_ > 1 && !is_dspark_ && draft_all_hidden_full.defined()) {
-        const auto hidden_size  = draft_all_hidden_full.size(1);
-        auto       hidden_3d    = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
-        auto       idx_expanded = hidden_idx_all.reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
-        last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
+        last_hidden_all = selectAcceptedHiddenStates(
+            draft_all_hidden_full, hidden_idx_all, batch_size, stream_hidden_len);
     }
 
     // 3. One clone for all probs
@@ -2970,6 +2994,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         RTP_LLM_CHECK_WITH_INFO(state.previous_seq_len_upper_bound > 0,
                                 "pending MTP bookkeeping requires a published sequence-length upper bound");
         state.next_seq_len_upper_bound = state.previous_seq_len_upper_bound + static_cast<int>(propose_step_ + 1);
+        state.draft_token_ids_are_point_mass = draft_prefill_output.sampler_output.token_ids_are_point_mass;
         stream->setMtpAsyncDeviceState(std::move(state));
 
         probs_batch_off += next_batch_size;

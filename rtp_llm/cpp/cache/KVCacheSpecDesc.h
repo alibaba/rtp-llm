@@ -66,6 +66,8 @@ struct KVCacheSpecDesc {
     uint32_t                  compression_ratio                    = 1;
     uint32_t                  state_ring_overlap                   = 0;
     bool                      state_ring_include_gen_num_per_cycle = false;
+    // Native compressors may consume aligned groups of state rows.
+    uint32_t                  state_ring_entry_alignment = 2;
 
     // For KERNEL_BLOCK_COMPRESSED these describe each kernel page, before physical-block aggregation.
     size_t   block_stride_bytes_override        = 0;

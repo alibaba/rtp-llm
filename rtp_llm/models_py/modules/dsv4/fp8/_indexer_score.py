@@ -45,6 +45,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )
+from rtp_llm.models_py.modules.dsv4.platform_provider import run_dsv4_fp8_mqa_logits
 
 try:
     import deep_gemm as _deep_gemm
@@ -86,6 +87,8 @@ def fp8_paged_indexer_score(
     context_lens: torch.Tensor,  # [B, next_n] int32 — live K length per row
     block_size: int,  # tokens per cache block
     max_ctx_len: int,  # output T dim
+    *,
+    query_chunk_size: Optional[int] = None,
 ) -> torch.Tensor:
     """One-shot FP8 paged indexer logits via DeepGEMM.
 
@@ -103,6 +106,28 @@ def fp8_paged_indexer_score(
     assert kv_pool_uint8.shape[-1] == INDEXER_ENTRY_BYTES
     assert block_table.dtype == torch.int32 and block_table.dim() == 2
     assert context_lens.dtype == torch.int32 and context_lens.dim() == 2
+    if query_chunk_size is not None:
+        if query_chunk_size <= 0:
+            raise ValueError("query_chunk_size must be positive")
+        batch, next_n, heads, _ = q_fp8.shape
+        if next_n > query_chunk_size:
+            # Only providers with a bounded next_n ABI request this path.
+            # Preserve batch-major order across speculative query slices.
+            weights = w_fold.view(batch, next_n, heads)
+            parts = []
+            for start in range(0, next_n, query_chunk_size):
+                end = min(start + query_chunk_size, next_n)
+                part = fp8_paged_indexer_score(
+                    q_fp8[:, start:end].contiguous(),
+                    weights[:, start:end].contiguous().view(-1, heads),
+                    kv_pool_uint8,
+                    block_table,
+                    context_lens[:, start:end].contiguous(),
+                    block_size,
+                    max_ctx_len,
+                )
+                parts.append(part.view(batch, end - start, max_ctx_len))
+            return torch.cat(parts, dim=1).view(batch * next_n, max_ctx_len)
     # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
     # Our pool is a flat [total_slots, 132] view; reshape into the 4D
     # layout (no copy — just a metadata change).
@@ -156,6 +181,7 @@ def fp8_mqa_indexer_score(
     *,
     clean_logits: bool = False,
     max_seqlen_k: int = 0,
+    platform_provider=None,
 ) -> torch.Tensor:
     """One-shot non-paged FP8 indexer logits via DeepGEMM.
 
@@ -180,7 +206,8 @@ def fp8_mqa_indexer_score(
     assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
     assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
 
-    return _deep_gemm.fp8_mqa_logits(
+    return run_dsv4_fp8_mqa_logits(
+        _deep_gemm.fp8_mqa_logits,
         q_fp8.contiguous(),
         (k_quant.contiguous(), k_scale.contiguous()),
         w_fold.contiguous(),
@@ -188,4 +215,5 @@ def fp8_mqa_indexer_score(
         cu_seqlen_ke.contiguous(),
         clean_logits,
         max_seqlen_k,
+        platform_provider=platform_provider,
     )

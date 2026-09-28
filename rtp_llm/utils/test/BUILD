@@ -27,6 +27,18 @@ py_test(
 )
 
 py_test(
+    name = "python_shared_library_test",
+    srcs = ["python_shared_library_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "torch_patch_test",
+    srcs = ["torch_patch_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     size = "large",
     srcs = [

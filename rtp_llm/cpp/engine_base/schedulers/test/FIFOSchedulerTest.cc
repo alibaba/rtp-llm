@@ -1,9 +1,11 @@
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <algorithm>
 #include <memory>
 #include <numeric>
+#include <string>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -24,6 +26,31 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old = std::getenv(name);
+        if (old != nullptr) {
+            old_value_ = old;
+            had_value_ = true;
+        }
+        setenv(name, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::string old_value_;
+    bool        had_value_ = false;
+};
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
     return std::all_of(
@@ -47,6 +74,268 @@ static PDSepConfig makePDFusionPDSepConfig() {
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::PDFUSION;
     return pd_sep_config;
+}
+
+static StreamUpdateInfo makeSingleTokenUpdate(int token_id) {
+    auto new_tokens = torch::tensor(std::vector<int32_t>{token_id}, torch::kInt32).reshape({1, 1});
+    return {new_tokens,
+            1,
+            torch::Tensor(),
+            torch::Tensor(),
+            torch::Tensor(),
+            torch::Tensor(),
+            torch::Tensor(),
+            torch::Tensor(),
+            torch::Tensor(),
+            torch::Tensor(),
+            true,
+            false};
+}
+
+static std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids,
+                                                  const ModelConfig&      model_config,
+                                                  const RuntimeConfig&    runtime_config,
+                                                  const ResourceContext&  resource_context,
+                                                  int                     max_new_tokens       = 1,
+                                                  int                     num_return_sequences = 1,
+                                                  const std::vector<int>&  variable_num_beams   = {}) {
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids       = torch::tensor(ids, torch::kInt32);
+    query->generate_config = makeTestGenerateConfig(max_new_tokens);
+    query->generate_config->num_return_sequences = num_return_sequences;
+    query->generate_config->variable_num_beams   = variable_num_beams;
+    return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+}
+
+static void expireStream(const GenerateStreamPtr& stream) {
+    stream->generateConfig()->timeout_ms = 1;
+    stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 100 * 1000);
+}
+
+static testing::AssertionResult
+expectPrefillBatch(const absl::StatusOr<std::list<GenerateStreamPtr>>& batch_status,
+                   const std::vector<GenerateStreamPtr>&               expected_streams,
+                   const std::vector<int>&                             expected_chunk_lens) {
+    if (!batch_status.ok()) {
+        return testing::AssertionFailure() << "schedule failed: " << batch_status.status().ToString();
+    }
+    const auto& batch = batch_status.value();
+    if (batch.size() != expected_streams.size()) {
+        return testing::AssertionFailure() << "batch size " << batch.size() << ", expected "
+                                           << expected_streams.size();
+    }
+    if (expected_streams.size() != expected_chunk_lens.size()) {
+        return testing::AssertionFailure() << "expected stream/chunk size mismatch: " << expected_streams.size()
+                                           << " vs " << expected_chunk_lens.size();
+    }
+
+    auto it = batch.begin();
+    for (size_t i = 0; i < expected_streams.size(); ++i, ++it) {
+        if (it->get() != expected_streams[i].get()) {
+            return testing::AssertionFailure() << "stream mismatch at index " << i;
+        }
+        if ((*it)->currentChunkLen() != expected_chunk_lens[i]) {
+            return testing::AssertionFailure() << "chunk length at index " << i << " is "
+                                               << (*it)->currentChunkLen() << ", expected " << expected_chunk_lens[i];
+        }
+    }
+    return testing::AssertionSuccess();
+}
+
+struct ChunkSchedulerTestConfig {
+    RoleType    role_type             = RoleType::PREFILL;
+    int         block_num             = 64;
+    int         seq_size_per_block    = 4;
+    int         max_batch_tokens_size = 1024;
+    int         prefill_chunk_size    = 16;
+    int         prefill_chunk_batch_tokens = 0;
+    std::string decode_prefill_ratio;
+    bool        sparse_state = false;
+};
+
+static CacheConfig makeChunkSchedulerCacheConfig(const ChunkSchedulerTestConfig& config) {
+    if (config.sparse_state) {
+        auto spec = rtp_llm::test::makeResolvedOpaqueSpec(
+            true, "swa_kv", DataType::TYPE_UINT8, 32, config.seq_size_per_block);
+        return rtp_llm::test::makeSingleGroupCacheConfig(spec, CacheGroupType::SWA, 1, config.block_num);
+    }
+    return rtp_llm::test::makeSimpleMhaCacheConfig(
+        1, config.block_num, config.seq_size_per_block, DataType::TYPE_FP16, 1, 4);
+}
+
+template<typename SchedulerType>
+class ChunkSchedulerTestEnv {
+public:
+    explicit ChunkSchedulerTestEnv(const ChunkSchedulerTestConfig& config):
+        cache_manager(std::make_shared<KVCacheManager>(makeChunkSchedulerCacheConfig(config))) {
+        resource_context.cache_manager = cache_manager;
+        resource_context.role_type     = config.role_type;
+
+        model_config.max_seq_len = 128;
+        model_config.vocab_size  = 2048;
+
+        runtime_config.max_generate_batch_size                     = 16;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size = config.max_batch_tokens_size;
+        runtime_config.fifo_scheduler_config.prefill_chunk_size    = config.prefill_chunk_size;
+        runtime_config.fifo_scheduler_config.prefill_chunk_batch_tokens = config.prefill_chunk_batch_tokens;
+        if (!config.decode_prefill_ratio.empty()) {
+            runtime_config.fifo_scheduler_config.decode_prefill_ratio = config.decode_prefill_ratio;
+        }
+        pd_sep_config.role_type = config.role_type;
+    }
+
+    bool init() {
+        if (!cache_manager->init()) {
+            return false;
+        }
+        scheduler_ = std::make_unique<SchedulerType>(runtime_config,
+                                                     model_config,
+                                                     pd_sep_config,
+                                                     parallelism_config,
+                                                     model_specific_config,
+                                                     cache_manager);
+        return true;
+    }
+
+    SchedulerType& scheduler() {
+        return *scheduler_;
+    }
+
+    GenerateStreamPtr makeStream(const std::vector<int>& ids,
+                                 int                     max_new_tokens       = 8,
+                                 int                     num_return_sequences = 1) const {
+        return ::rtp_llm::makeStream(
+            ids, model_config, runtime_config, resource_context, max_new_tokens, num_return_sequences);
+    }
+
+    std::shared_ptr<KVCacheManager> cache_manager;
+    ResourceContext                 resource_context;
+    ModelConfig                     model_config;
+    RuntimeConfig                   runtime_config;
+
+private:
+    PDSepConfig                   pd_sep_config;
+    ParallelismConfig             parallelism_config;
+    ModelSpecificConfig           model_specific_config;
+    std::unique_ptr<SchedulerType> scheduler_;
+};
+
+TEST_F(FIFOSchedulerTest, ChunkGrantPreparesActualSparseTail) {
+    ChunkSchedulerTestConfig config;
+    config.sparse_state = true;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.resource_context.reuse_cache = false;
+    ASSERT_TRUE(env.init());
+    auto short_stream = env.makeStream(std::vector<int>(4, 1));
+    auto long_stream = env.makeStream(std::vector<int>(64, 2));
+    ASSERT_TRUE(env.scheduler().enqueue(short_stream).ok());
+    ASSERT_TRUE(env.scheduler().enqueue(long_stream).ok());
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {short_stream, long_stream}, {4, 12}));
+    const auto& blocks = long_stream->kvCache().blocks(0, "swa_kv");
+    ASSERT_EQ(blocks.size(), 16);
+    EXPECT_FALSE(isNullBlockIdx(blocks[1]));
+    EXPECT_FALSE(isNullBlockIdx(blocks[2]));
+    EXPECT_TRUE(isNullBlockIdx(blocks[3]));
+    ASSERT_TRUE(env.scheduler().stop().ok());
+}
+
+TEST_F(FIFOSchedulerTest, PDFusionPreparesEverySparseChunkAndRetainsPreviousTail) {
+    ChunkSchedulerTestConfig config;
+    config.role_type = RoleType::PDFUSION;
+    config.sparse_state = true;
+    ChunkSchedulerTestEnv<PDFusionRatioScheduler> env(config);
+    env.resource_context.reuse_cache = false;
+    ASSERT_TRUE(env.init());
+    auto stream = env.makeStream(std::vector<int>(64, 1));
+    ASSERT_TRUE(env.scheduler().enqueue(stream).ok());
+    for (int round = 0; round < 3; ++round) {
+        ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {stream}, {16}));
+        const auto& blocks = stream->kvCache().blocks(0, "swa_kv");
+        EXPECT_FALSE(isNullBlockIdx(blocks[round * 4 + 2]));
+        EXPECT_FALSE(isNullBlockIdx(blocks[round * 4 + 3]));
+        if (round > 0) {
+            EXPECT_FALSE(isNullBlockIdx(blocks[round * 4 - 1]));
+        }
+        stream->update(makeSingleTokenUpdate(100));
+    }
+    ASSERT_TRUE(env.scheduler().stop().ok());
+}
+
+TEST_F(FIFOSchedulerTest, SparseChunkAllocationFailureFinishesAndReleasesStream) {
+    ChunkSchedulerTestConfig config;
+    config.sparse_state = true;
+    config.block_num = 3;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.resource_context.reuse_cache = false;
+    ASSERT_TRUE(env.init());
+    const auto free_before = env.cache_manager->freeBlocksNum();
+    auto stream = env.makeStream(std::vector<int>(64, 1));
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    std::list<GenerateStreamPtr> active{stream};
+    EXPECT_TRUE(env.scheduler().selectPrefillPrefix(active).empty());
+    EXPECT_TRUE(active.empty());
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(env.cache_manager->freeBlocksNum(), free_before);
+}
+
+TEST_F(FIFOSchedulerTest, pdPrefillAdmissionInterleavesDecodeEndpoints) {
+    ScopedEnvVar balance_env("RTP_PD_PREFILL_BALANCE_DECODE_RANK", "1");
+
+    CacheConfig cache_config = makeMhaCacheConfig(1, 32, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = false;
+    resource_context.role_type     = RoleType::PREFILL;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 3;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PREFILL;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_pd_stream = [&](int decode_rank) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor({decode_rank + 1}, torch::kInt32);
+        query->generate_config = makeTestGenerateConfig();
+        query->generate_config->pd_separation = true;
+        query->generate_config->role_addrs.emplace_back(
+            RoleType::DECODE, "decode", 8000 + decode_rank, 9000 + decode_rank);
+        return std::make_shared<NormalGenerateStream>(
+            query, model_config, runtime_config, resource_context, nullptr);
+    };
+    std::vector<GenerateStreamPtr> streams = {
+        make_pd_stream(0), make_pd_stream(0), make_pd_stream(0),
+        make_pd_stream(1), make_pd_stream(1), make_pd_stream(2)};
+    ASSERT_TRUE(enqueueIndividually(scheduler, streams));
+
+    auto endpoint_rank = [](const GenerateStreamPtr& stream) {
+        return stream->generateConfig()->role_addrs.back().grpc_port - 9000;
+    };
+    std::vector<std::vector<int>> admitted;
+    for (int round = 0; round < 3; ++round) {
+        auto result = scheduler.schedule();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result->size(), 2);
+        std::vector<int> ranks;
+        for (const auto& stream : *result) {
+            ranks.push_back(endpoint_rank(stream));
+            stream->reportEvent(StreamEvents::GenerateDone);
+        }
+        admitted.push_back(std::move(ranks));
+    }
+
+    EXPECT_EQ(admitted, (std::vector<std::vector<int>>{{0, 1}, {2, 0}, {1, 0}}));
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
 TEST_F(FIFOSchedulerTest, testSimple) {
@@ -718,26 +1007,6 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
 
     ASSERT_EQ(schedule_two_prefills(true), 1);
     ASSERT_EQ(schedule_two_prefills(false), 2);
-}
-
-// ---------------------------------------------------------------------------
-// Helper used by the prefill-first cadence / KV-gate tests (Tasks 5–7)
-// ---------------------------------------------------------------------------
-
-static std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids,
-                                                  const ModelConfig&      model_config,
-                                                  const RuntimeConfig&    runtime_config,
-                                                  const ResourceContext&  resource_context,
-                                                  int                     max_new_tokens       = 1,
-                                                  int                     num_return_sequences = 1,
-                                                  const std::vector<int>& variable_num_beams   = {}) {
-    auto query                                   = std::make_shared<GenerateInput>();
-    query->input_ids                             = torch::tensor(ids, torch::kInt32);
-    query->generate_config                       = makeTestGenerateConfig();
-    query->generate_config->max_new_tokens       = max_new_tokens;
-    query->generate_config->num_return_sequences = num_return_sequences;
-    query->generate_config->variable_num_beams   = variable_num_beams;
-    return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -4287,6 +4556,407 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(result.value().size(), 4);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillSeparateBatchBudgetAdmitsFourShortStreams) {
+    for (const int batch_budget : {0, 16}) {
+        ChunkSchedulerTestConfig config;
+        config.prefill_chunk_size = 8;
+        config.prefill_chunk_batch_tokens = batch_budget;
+        ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+        ASSERT_TRUE(env.init());
+        auto a = env.makeStream({1, 2, 3, 4});
+        auto b = env.makeStream({5, 6, 7, 8});
+        auto c = env.makeStream({9, 10, 11, 12});
+        auto d = env.makeStream({13, 14, 15, 16});
+        ASSERT_TRUE(enqueueIndividually(env.scheduler(), {a, b, c, d}));
+        auto batch = env.scheduler().schedule();
+        if (batch_budget == 0) {
+            ASSERT_TRUE(expectPrefillBatch(batch, {a, b}, {4, 4}));
+        } else {
+            ASSERT_TRUE(expectPrefillBatch(batch, {a, b, c, d}, {4, 4, 4, 4}));
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillSeparateBatchBudgetRetainsChunkCapAndDecodeParking) {
+    ChunkSchedulerTestConfig config;
+    config.role_type = RoleType::PDFUSION;
+    config.seq_size_per_block = 2;
+    config.prefill_chunk_size = 4;
+    config.prefill_chunk_batch_tokens = 8;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto short_stream = env.makeStream({1, 2}, 4);
+    auto long_stream = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10}, 4);
+    ASSERT_TRUE(enqueueIndividually(env.scheduler(), {short_stream, long_stream}));
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {short_stream, long_stream}, {2, 4}));
+    short_stream->update(makeSingleTokenUpdate(101));
+    long_stream->update(makeSingleTokenUpdate(102));
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {long_stream}, {4}));
+    long_stream->update(makeSingleTokenUpdate(103));
+    auto decode = env.scheduler().schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 2);
+    for (const auto& stream : *decode) {
+        ASSERT_FALSE(stream->isContextStream());
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillSeparateBatchBudgetAlignsRemainder) {
+    ChunkSchedulerTestConfig config;
+    config.prefill_chunk_size = 8;
+    config.prefill_chunk_batch_tokens = 12;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto a = env.makeStream({1, 2, 3, 4, 5, 6});
+    auto b = env.makeStream({7, 8, 9, 10, 11, 12, 13, 14, 15});
+    ASSERT_TRUE(enqueueIndividually(env.scheduler(), {a, b}));
+    // The first final chunk uses six tokens. The six remaining tokens can
+    // grant only four aligned tokens to the second stream, never six or eight.
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {a, b}, {6, 4}));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillNeverReturnsMixedContextAndDecodeBatch) {
+    ChunkSchedulerTestConfig config;
+    config.role_type          = RoleType::PDFUSION;
+    config.seq_size_per_block = 2;
+    config.prefill_chunk_size = 4;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    auto short_stream = env.makeStream({1, 2}, 4);
+    auto long_stream  = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10}, 4);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {short_stream, long_stream}));
+
+    auto first = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(first, {short_stream, long_stream}, {2, 2}));
+    short_stream->update(makeSingleTokenUpdate(101));
+    long_stream->update(makeSingleTokenUpdate(102));
+    short_stream->setReserveStep(1);
+    const size_t short_blocks_before_park = short_stream->curBlocksNum();
+
+    auto second = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(second, {long_stream}, {4}));
+    ASSERT_EQ(short_stream->curBlocksNum(), short_blocks_before_park);
+    long_stream->update(makeSingleTokenUpdate(103));
+
+    auto third = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(third, {long_stream}, {2}));
+    ASSERT_EQ(short_stream->curBlocksNum(), short_blocks_before_park);
+    long_stream->update(makeSingleTokenUpdate(104));
+
+    auto decode = scheduler.schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 2);
+    ASSERT_EQ(short_stream->curBlocksNum(), short_blocks_before_park + 1);
+    for (const auto& stream : *decode) {
+        ASSERT_FALSE(stream->isContextStream());
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillReapsTerminalStreamsBeforeDeferredDecodePromotion) {
+    ChunkSchedulerTestConfig config;
+    config.role_type          = RoleType::PDFUSION;
+    config.block_num          = 8;
+    config.seq_size_per_block = 2;
+    config.prefill_chunk_size = 6;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    auto cancelled_stream = env.makeStream({1, 2}, 4);
+    auto parked_stream    = env.makeStream({3, 4}, 4);
+    auto final_stream     = env.makeStream({5, 6, 7, 8, 9, 10, 11, 12}, 1);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {cancelled_stream, parked_stream, final_stream}));
+
+    auto first = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(first, {cancelled_stream, parked_stream, final_stream}, {2, 2, 2}));
+    cancelled_stream->update(makeSingleTokenUpdate(101));
+    parked_stream->update(makeSingleTokenUpdate(102));
+    final_stream->update(makeSingleTokenUpdate(103));
+
+    parked_stream->setReserveStep(1);
+    const size_t free_blocks_while_parked = env.cache_manager->freeBlocksNum();
+    ASSERT_EQ(free_blocks_while_parked, 1);
+
+    auto second = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(second, {final_stream}, {6}));
+    ASSERT_EQ(env.cache_manager->freeBlocksNum(), free_blocks_while_parked);
+    final_stream->update(makeSingleTokenUpdate(104));
+
+    cancelled_stream->reportError(ErrorCode::CANCELLED, "cancelled while deferred");
+    auto decode = scheduler.schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 1);
+    ASSERT_EQ(decode->front().get(), parked_stream.get());
+    ASSERT_TRUE(cancelled_stream->isFinished());
+    ASSERT_TRUE(final_stream->isFinished());
+    ASSERT_FALSE(parked_stream->hasError());
+    ASSERT_GT(env.cache_manager->freeBlocksNum(), free_blocks_while_parked);
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillDeferredDecodeMallocFailureOccursOnPromotion) {
+    ChunkSchedulerTestConfig config;
+    config.role_type          = RoleType::PDFUSION;
+    config.block_num          = 5;
+    config.seq_size_per_block = 2;
+    config.prefill_chunk_size = 4;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    auto short_stream = env.makeStream({1, 2}, 4);
+    auto long_stream  = env.makeStream({3, 4, 5, 6, 7, 8}, 4);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {short_stream, long_stream}));
+
+    auto first = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(first, {short_stream, long_stream}, {2, 2}));
+    short_stream->update(makeSingleTokenUpdate(101));
+    long_stream->update(makeSingleTokenUpdate(102));
+    short_stream->setReserveStep(1);
+    ASSERT_EQ(env.cache_manager->freeBlocksNum(), 0);
+
+    auto second = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(second, {long_stream}, {4}));
+    ASSERT_FALSE(short_stream->hasError());
+    long_stream->update(makeSingleTokenUpdate(103));
+
+    auto decode = scheduler.schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 1);
+    ASSERT_EQ(decode->front().get(), long_stream.get());
+    ASSERT_TRUE(short_stream->isFinished());
+    ASSERT_TRUE(short_stream->hasError());
+    ASSERT_FALSE(long_stream->hasError());
+}
+
+TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutDecodeStreams) {
+    ChunkSchedulerTestConfig config;
+    config.role_type            = RoleType::PDFUSION;
+    config.decode_prefill_ratio = "1/2";
+    ChunkSchedulerTestEnv<PDFusionRatioScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    auto first = env.makeStream({1, 2});
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {2}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto second = env.makeStream({3, 4});
+    ASSERT_TRUE(scheduler.enqueue(second).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {second}, {2}));
+    second->update(makeSingleTokenUpdate(102));
+
+    expireStream(first);
+    auto decode = scheduler.schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 1);
+    ASSERT_EQ(decode->front().get(), second.get());
+    ASSERT_EQ(first->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+
+    auto next_prefill = env.makeStream({5, 6});
+    ASSERT_TRUE(scheduler.enqueue(next_prefill).ok());
+    expireStream(second);
+
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {next_prefill}, {2}));
+    ASSERT_EQ(second->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
+TEST_F(FIFOSchedulerTest, testPDFusionContinuationKeepsPrefillBatchBoundary) {
+    ChunkSchedulerTestConfig config;
+    config.role_type             = RoleType::PDFUSION;
+    config.seq_size_per_block    = 2;
+    config.max_batch_tokens_size = 8;
+    config.prefill_chunk_size    = 2;
+    config.decode_prefill_ratio  = "1/2";
+    ChunkSchedulerTestEnv<PDFusionRatioScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    auto decode_stream = env.makeStream({1});
+    ASSERT_TRUE(scheduler.enqueue(decode_stream).ok());
+    auto seed_prefill = scheduler.schedule();
+    ASSERT_TRUE(seed_prefill.ok());
+    decode_stream->update(makeSingleTokenUpdate(100));
+    auto seed_decode = scheduler.schedule();
+    ASSERT_TRUE(seed_decode.ok());
+    ASSERT_EQ(seed_decode->size(), 1);
+    decode_stream->update(makeSingleTokenUpdate(101));
+
+    auto first_long  = env.makeStream({2, 3, 4, 5, 6, 7});
+    auto second_long = env.makeStream({8, 9, 10, 11, 12, 13});
+    ASSERT_TRUE(scheduler.enqueue(first_long).ok());
+    ASSERT_TRUE(scheduler.enqueue(second_long).ok());
+
+    auto first_prefill = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(first_prefill, {first_long}, {2}));
+    first_long->update(makeSingleTokenUpdate(102));
+
+    auto continuation = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(continuation, {first_long}, {2}));
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    first_long->update(makeSingleTokenUpdate(103));
+
+    auto decode_round = scheduler.schedule();
+    ASSERT_TRUE(decode_round.ok());
+    ASSERT_EQ(decode_round->size(), 1);
+    ASSERT_EQ(decode_round->front().get(), decode_stream.get());
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testPDFusionMixedActiveBatchSeparatesFinalAndMiddleChunks) {
+    ChunkSchedulerTestConfig config;
+    config.role_type            = RoleType::PDFUSION;
+    config.seq_size_per_block   = 2;
+    config.prefill_chunk_size   = 4;
+    config.decode_prefill_ratio = "1/3";
+    ChunkSchedulerTestEnv<PDFusionRatioScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    auto short_stream = env.makeStream({1, 2});
+    auto long_stream  = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10});
+    ASSERT_TRUE(scheduler.enqueue(short_stream).ok());
+    ASSERT_TRUE(scheduler.enqueue(long_stream).ok());
+
+    auto first_prefill = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(first_prefill, {short_stream, long_stream}, {2, 2}));
+    short_stream->update(makeSingleTokenUpdate(101));
+    long_stream->update(makeSingleTokenUpdate(102));
+    ASSERT_FALSE(short_stream->isContextStream());
+    ASSERT_TRUE(long_stream->isContextStream());
+
+    short_stream->setReserveStep(1);
+    const size_t short_blocks_before_continuation = short_stream->curBlocksNum();
+
+    auto second_prefill = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(second_prefill, {long_stream}, {4}));
+    ASSERT_EQ(short_stream->curBlocksNum(), short_blocks_before_continuation);
+    long_stream->update(makeSingleTokenUpdate(103));
+
+    auto final_prefill = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(final_prefill, {long_stream}, {2}));
+    ASSERT_EQ(short_stream->curBlocksNum(), short_blocks_before_continuation);
+    long_stream->update(makeSingleTokenUpdate(104));
+
+    auto decode = scheduler.schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode->size(), 2);
+    auto decode_it = decode->begin();
+    ASSERT_EQ((decode_it++)->get(), short_stream.get());
+    ASSERT_EQ(decode_it->get(), long_stream.get());
+    ASSERT_EQ(short_stream->curBlocksNum(), short_blocks_before_continuation + 1);
+}
+
+template<typename SchedulerType>
+static void verifyGlobalChunkBudgetFourRoundPrefix(RoleType role_type, const std::string& decode_prefill_ratio = "") {
+    ChunkSchedulerTestConfig config;
+    config.role_type            = role_type;
+    config.decode_prefill_ratio = decode_prefill_ratio;
+    ChunkSchedulerTestEnv<SchedulerType> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    auto s1 = env.makeStream({1});
+    auto s2 = env.makeStream({2});
+    auto s3 = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21});
+    auto s4 = env.makeStream(
+        {20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+         36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50});
+    s3->setReuseLength(4);
+    ASSERT_TRUE(scheduler.enqueue(s1).ok());
+    ASSERT_TRUE(scheduler.enqueue(s2).ok());
+    ASSERT_TRUE(scheduler.enqueue(s3).ok());
+    ASSERT_TRUE(scheduler.enqueue(s4).ok());
+
+    auto round1 = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(round1, {s1, s2, s3}, {1, 1, 12}));
+    s1->update(makeSingleTokenUpdate(101));
+    s2->update(makeSingleTokenUpdate(102));
+    s3->update(makeSingleTokenUpdate(103));
+
+    auto round2 = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(round2, {s3, s4}, {7, 8}));
+    s3->update(makeSingleTokenUpdate(104));
+    s4->update(makeSingleTokenUpdate(105));
+
+    auto round3 = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(round3, {s4}, {16}));
+    s4->update(makeSingleTokenUpdate(106));
+
+    auto round4 = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(round4, {s4}, {7}));
+}
+
+TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetFIFOFourRoundPrefix) {
+    verifyGlobalChunkBudgetFourRoundPrefix<FIFOScheduler>(RoleType::PREFILL);
+}
+
+TEST_F(FIFOSchedulerTest, pdPrefillBalancePreservesChunkContinuation) {
+    ScopedEnvVar balance_env("RTP_PD_PREFILL_BALANCE_DECODE_RANK", "1");
+    ChunkSchedulerTestConfig config;
+    config.prefill_chunk_size = 4;
+    config.seq_size_per_block = 2;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto first = env.makeStream({1, 2, 3, 4, 5, 6, 7, 8});
+    auto second = env.makeStream({9, 10, 11, 12});
+    int rank = 0;
+    for (const auto& stream : {first, second}) {
+        stream->generateConfig()->pd_separation = true;
+        stream->generateConfig()->role_addrs.emplace_back(
+            RoleType::DECODE, "decode", 8000 + rank, 9000 + rank);
+        ++rank;
+    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {4}));
+    first->update(makeSingleTokenUpdate(101));
+    EXPECT_TRUE(first->isContextStream());
+    EXPECT_EQ(first->seqLength(), 8);
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {4}));
+    first->update(makeSingleTokenUpdate(102));
+    EXPECT_FALSE(first->isContextStream());
+    EXPECT_EQ(first->seqLength(), 9);
+    first->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {second}, {4}));
+}
+
+TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetPDFusionFourRoundPrefix) {
+    verifyGlobalChunkBudgetFourRoundPrefix<PDFusionRatioScheduler>(RoleType::PDFUSION, "1/100");
+}
+
+TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetDefersFanoutProgressCheckUntilReuseIsKnown) {
+    // budget=16, rows=8 and block=4 cannot advance this five-token prompt before
+    // cache reuse is known. A four-token cache hit leaves a legal one-token final chunk.
+    ASSERT_EQ(computeChunkGrant(16, 8, 5, 4), 0);
+    ASSERT_EQ(computeChunkGrant(16, 8, 1, 4), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetRejectsOversizedFanoutAndAdmitsShortFinal) {
+    ChunkSchedulerTestConfig config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    const size_t free_blocks_before = env.cache_manager->freeBlocksNum();
+    auto         long_stream        = env.makeStream({1, 2, 3, 4, 5}, 8, 8);
+    ASSERT_TRUE(scheduler.enqueue(long_stream).ok());
+    auto rejected_batch = scheduler.schedule();
+    ASSERT_TRUE(rejected_batch.ok());
+    ASSERT_TRUE(rejected_batch->empty());
+    ASSERT_TRUE(long_stream->hasError());
+    ASSERT_TRUE(long_stream->isFinished());
+    ASSERT_EQ(env.cache_manager->freeBlocksNum(), free_blocks_before);
+
+    auto short_stream = env.makeStream({15, 16}, 8, 8);
+    ASSERT_TRUE(scheduler.enqueue(short_stream).ok());
+    auto batch = scheduler.schedule();
+    ASSERT_TRUE(expectPrefillBatch(batch, {short_stream}, {2}));
+    ASSERT_EQ(short_stream->currentBatchSize(), 8);
 }
 
 }  // namespace rtp_llm
