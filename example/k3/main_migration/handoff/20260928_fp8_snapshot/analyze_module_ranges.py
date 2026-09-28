@@ -130,6 +130,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--phase", choices=("target", "draft"), default="target")
     parser.add_argument("--require-labeled", action="store_true")
+    parser.add_argument("--require-scope-fragment", action="append", default=[])
     args = parser.parse_args()
 
     audit = json.loads(args.audit.read_text())
@@ -159,6 +160,12 @@ def main():
         rank["labeled_kernel_count"] > 0 for row in rows for rank in row.values()
     ):
         raise ValueError("at least one matched rank/request has no module-labeled kernel")
+    for fragment in args.require_scope_fragment:
+        if not all(
+            any(fragment in name for name in rank["modules"])
+            for row in rows for rank in row.values()
+        ):
+            raise ValueError(f"module scope fragment {fragment!r} is absent on a rank/request")
     keys = sorted({
         module for row in rows for rank in row.values() for module in rank["modules"]
     })
