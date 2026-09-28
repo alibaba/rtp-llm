@@ -16,6 +16,7 @@
 - `build_fp8_profile_c7479de_111112.sh`：在 111/112 各自的个人 `lhc_GPU` 中构建带模块标签的集成版诊断提交；仅复用本机外部依赖源码，不复用跨机二进制。
 - `run_fp8_3fs_profile_c7479de_111112_r45.sh`：四层 FP8 + MTP 双机 PD 的模块标签采集启动脚本，启动前还须重新核对独占 GPU、RDMA、端口和 3FS 权重 guard。
 - `run_fourlayer_flow_profile_c7479de_r45_111112.sh`、`run_64k_integrated_profile_c7479de_r45_111112.sh`：先复核四层 PD flow，再完成同输入热态 64K 全 rank 模块 trace。所有计时仍按原始 CUDA launch correlation 归因。
+- `analyze_module_ranges.py`：把全 rank 压缩 trace 的 CUDA kernel 经 launch correlation 归到最近的 `RTP::` CPU 标记，并保留层号；已用固定 feat 的 target/draft trace 核对匹配方式。输出的累计 kernel 时间可能跨 stream 重叠。
 
 后续又在 113/114 测了更高读取并发：原始分片扫描在 256 线程最高，真实 FastSafetensors SHM 加载在 64、128、256 线程下的内部读取时间基本相同。记录和日志已附在本目录；任务进程仍选 64 线程。
 
