@@ -13,7 +13,9 @@ test "$(id -un)" = luohaocheng.lhc
 test -f /.dockerenv
 test -f "$task/libparallel_3fs_pread.so"
 test -x "$task/feat_smoke_role_3fs.sh"
+test -w "$base"
 
+export HOME="$base"
 export K3_3FS_PREAD_THREADS=64
 export FASTSAFETENSORS_DEBUG=true
 export LD_PRELOAD="$task/libparallel_3fs_pread.so${LD_PRELOAD:+:$LD_PRELOAD}"
