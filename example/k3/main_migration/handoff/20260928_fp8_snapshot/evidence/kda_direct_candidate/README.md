@@ -15,3 +15,5 @@
 八 rank trace 在 `timeline-kda47b-r1-allrank.tar.gz`，`kda47b-aligned-phase-audit.json` 匹配了 7 个完整请求。每请求取最慢 rank GPU span 再取中位，Prefill **138.338 ms**，target **73.925 ms**，draft **64.489 ms**。`kda47b-module-target.json` 显示 L0/L1/L2 KDA core 累计 GPU 时间分别为 **2.778/2.779/2.781 ms**；相同 110/112 机器上上一版 `928ad6a6d` 为 **2.832/2.834/2.834 ms**。单卡交错 A/B 的更严格局部证据见上一候选目录，KDA 直接输出在该形状下少约 2.92%。整段 Prefill GPU span 相比上一版下降约 16.8 ms，远大于 KDA 三层累计节省，不能把整段变化归因于此改动。固定 `feat/k3_dev` 的 KDA core 约 2.777 ms，测于 111/112；当前只可说该模块时间接近，仍缺同机三方完整路径对照。`kda47b-module-draft.json` 同时保留 draft 的模块归因，累计模块时间可能跨 stream 重叠。
 
 原始档案 SHA256：flow `ebb0abfb50cdda197aab6a29811a1165d8c9e41bd7bd88feac24ab6666d4629c`，请求 `26c07de75533b970c7b2b93370f098f514ba5fa0896fc916217d893c6c78ca72`，八 rank trace `521bc8260ef6b0355d229f038cc08a18bc9421240dda0fea11a4ecfaa9e10337`，110/112 启动档案分别为 `14632a2d7fd66c6be5ff7a87a6caabcd5db98b9f595aa20b806f7b5f6f75c0f8` 和 `0ef008f2144194e8f590a8cbd667add738354a2886d7d50ec8165ccdd39d0a24`。这仍是四层筛选结果；完整 93 层答案、三方全层性能和两次正式锚点均未完成。
+
+归档完成后，已核对 110/112 的服务进程组分别由本任务脚本持有，再向这两个进程组发送 TERM。复查两端均无本次 rank GPU 进程，27100/27200 端口空闲；该退出是主动释放资源，不作为 smoke 失败。
