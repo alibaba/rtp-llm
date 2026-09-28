@@ -71,7 +71,6 @@ import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
-import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_AVAILABLE_CONCURRENCY;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL;
@@ -164,7 +163,6 @@ public class EngineHealthReporter {
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
 
         this.monitor.register(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
-        this.monitor.register(ENGINE_STATUS_AVAILABLE_CONCURRENCY, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_STATUS_VISITOR_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_STATUS_VISITOR_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_PREFILL_WORKER_NUMBER, FlexMetricType.GAUGE);
@@ -527,10 +525,6 @@ public class EngineHealthReporter {
                 "engineIp", workerStatus.getMetricIpPort(),
                 "role", status.role().name());
 
-        Long availableConcurrency = status.availableConcurrency();
-        if (availableConcurrency != null) {
-            monitor.report(ENGINE_STATUS_AVAILABLE_CONCURRENCY, metricTags, availableConcurrency);
-        }
         long pollIntervalUs = pollHealth.successfulPollIntervalUs();
         if (pollIntervalUs > 0) {
             monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD,
