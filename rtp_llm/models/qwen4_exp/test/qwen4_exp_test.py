@@ -248,16 +248,23 @@ class Qwen4ExpTest(unittest.TestCase):
                         model.load()
                 parent_load.assert_not_called()
 
-    def test_cuda_graph_remains_disabled(self):
+    def test_cuda_graph_requires_side_regions_disabled(self):
         model = Qwen4Exp.__new__(Qwen4Exp)
-        model.model_config = mock.Mock(enable_qwen4_ple=False, enable_qwen4_qsa=False)
         self.assertFalse(model.support_cuda_graph())
+        model.model_config = mock.Mock(
+            enable_qwen4_ple=False, enable_qwen4_qsa=False, is_mtp=False
+        )
+        self.assertTrue(model.support_cuda_graph())
 
         model.model_config.enable_qwen4_ple = True
         self.assertFalse(model.support_cuda_graph())
 
         model.model_config.enable_qwen4_ple = False
         model.model_config.enable_qwen4_qsa = True
+        self.assertFalse(model.support_cuda_graph())
+
+        model.model_config.enable_qwen4_qsa = False
+        model.model_config.is_mtp = True
         self.assertFalse(model.support_cuda_graph())
 
     def test_ple_rejects_non_bf16_before_weight_loading(self):
