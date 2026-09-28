@@ -1,4 +1,4 @@
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "DSV4_CUDA13_ONLY", "dsv4_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "DSV4_CUDA13_ONLY", "dsv4_py_test", "dsv4_sm100_py_test")
 load("@arch_config//:arch_select.bzl", "cuda13_test_exec_properties")
 load("@rules_python//python:defs.bzl", "py_test")
 
@@ -64,6 +64,7 @@ _CONTRACT_TESTS = [
     "test_output_projection_all_reduce",
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
+    "test_mega_support",
     "test_prefill_mixed_layer_cache_store",
     "test_fp8_sparse_attn_decode_op",
     "test_compressor_cp_merged_gather",
@@ -160,3 +161,29 @@ test_suite(
         ":test_fused_decode_meta_comprehensive",
     ],
 )
+
+dsv4_sm100_py_test(
+    name = "test_mega_csa_rtp_eager",
+    extra_srcs = ["mega_attention_test_utils.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm:deep_gemm",
+    ],
+    timeout = "long",
+)
+
+dsv4_sm100_py_test(
+    name = "test_mega_hca_rtp_eager",
+    extra_srcs = ["mega_attention_test_utils.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm:deep_gemm",
+    ],
+    timeout = "long",
+)
+
+[
+    dsv4_sm100_py_test(
+        name = name,
+        deps = _DSV4_FP8_TEST_DEPS,
+    )
+    for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
+]

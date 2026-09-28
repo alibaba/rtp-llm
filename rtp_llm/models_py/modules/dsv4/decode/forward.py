@@ -105,8 +105,8 @@ def build_paged_pool_specs(
     Returns ``(entries_per_block, tokens_per_block, max_blocks_per_req)``.
 
     ``entries_per_block`` is derived from the framework pool tensor's
-    stride on layer 0 (all layers share the same allocator geometry per
-    cache tag).
+    stride on a layer owning the tag (all owning layers share the same
+    allocator geometry per cache tag).
 
     ``max_blocks_per_req`` MUST match the framework's runtime block_table
     width — the framework uniformly allocates
@@ -154,6 +154,11 @@ def build_paged_pool_specs(
         for tag in _DSV4_DECODE_POOL_TAGS:
             for layer in v4.layers:
                 attn = layer.attn
+                if not any(
+                    cache.tag == tag
+                    for cache in kv_cache.get_layer_cache_groups(attn.layer_id)
+                ):
+                    continue
                 if id(attn) not in saved_kv:
                     saved_kv[id(attn)] = (attn, attn._kv_cache)
                     attn._kv_cache = kv_cache
@@ -331,6 +336,9 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
+    begin_decode = getattr(v4, "begin_decode", None)
+    if begin_decode is not None:
+        begin_decode(attn_metadata)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):

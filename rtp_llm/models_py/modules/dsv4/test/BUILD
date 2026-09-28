@@ -139,3 +139,8 @@ test_suite(
         ":test_hc_impl",
     ] + [name + "_x86" for name in _PAIRED_GPU_TESTS],
 )
+
+dsv4_sm100_py_test(
+    name = "test_mega_inv_rope_fp8_quant",
+    deps = _DSV4_TEST_DEPS,
+)
