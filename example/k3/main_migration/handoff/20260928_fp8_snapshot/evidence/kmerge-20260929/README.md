@@ -49,3 +49,5 @@
 固定 feat 的 `kimi_k3.all_gather_gemm.fp8_fused` 将 E4M3 激活值和 UE8M0 scale 作为通信数据交给 PyTorch symmetric-memory pipeline；`kimi_k3.gemm_reduce_scatter.fp8_fused` 调用 DeepGEMM `fp8_gemm_rs_nt` 自带的归约/散发 workspace。这两个原实现的通信路径不符合本任务的 BF16 NCCL 约束，不能直接迁入。其 fused scope 的累计时间较短，但与集成版分开的 AllGather、投影和 ReduceScatter 范围也不是同一测量边界。下一步应在 BF16 NCCL 约束下定位剩余约 0.70 ms，再做针对性候选，而不是整包迁入 feat 的通信实现。
 
 111 的 target loader 选择 FastSafetensors 后约 25 秒进入 MTP loader，112 约 41 秒；这段时间同时包含权重处理，不能当作纯 3FS 吞吐。112 服务总启动约 342 秒，后续还进行了模型初始化和 Decode CUDA Graph 相关工作。实际使用的是本任务进程的 64 线程 3FS 预读辅助库，没有改动机器或集群级 3FS 配置；本轮没有观察到需要先调整并发才能继续测试的权重读取阻塞。
+
+为检查 BF16 NCCL AllGather 是否有简单的环境配置收益，我在独占的 110 上用 `bench_bf16_nccl_allgather.py` 单独测了 TP8、每 rank 8,192×7,168 的 BF16 输入；这与四层 64K attention 输入形状相同。每组单独建进程，先做一次初始化，再完成 20–40 次预热，末三次所有 rank 均在各自中位数 ±5% 内，随后测 30 次。输出的 rank 标记也逐个核对。结果是默认 NCCL 配置 1.410 ms、强制 `NCCL_ALGO=NVLS` 1.626 ms、强制 `NCCL_PROTO=LL128` 1.486 ms，均为每次最慢 rank 的 CUDA event 中位数。原始逐 rank 数据、110 的独占选择快照及运行日志在本目录的 `bf16-nccl-ag-*` 文件中。这是同形状通信筛选，不包含模型计算或 PD 链路；所测两种覆盖配置都没有收益，因此本轮没有改服务的 NCCL 参数。
