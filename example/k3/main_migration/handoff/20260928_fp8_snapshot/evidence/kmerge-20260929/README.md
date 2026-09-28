@@ -9,4 +9,13 @@
 
 两个原始日志保存在 `raw-logs.tar.gz`，归档校验值见 `raw-logs.sha256`。
 
-本次只验证了算子数值。还没有热态算子计时、四层 FP8+MTP PD flow 或 64K timeline；不能据此将候选并入性能锚点。后续先在独占 GPU 上按相同 64K 形状预热并比较一核与两次拷贝，再做四层双机 PD 验证和全 rank timeline。
+用相同的 65,536-token、12-head、BF16 非连续 KV 投影 view，预先分配输出，在 110 的 GPU 1 上做两次拷贝与单次 Triton 合并核的 A/B/B/A 交错测量。两种输出先逐元素精确比对。每组先完成一次惰性编译、至少 10 次同路径预热，末三次 CUDA event 时间落在中位数 ±5% 内；每组再采 30 次。原始样本在 `benchmark-64k.json`，运行日志在 `benchmark-64k-raw.tar.gz`，归档哈希在 `benchmark-64k-raw.sha256`。
+
+| 64K 局部算子 | 第一组中位数 | 第二组中位数 |
+|---|---:|---:|
+| 两次 PyTorch 拷贝 | 0.313296 ms | 0.313344 ms |
+| 单次 Triton 合并 | 0.096768 ms | 0.096400 ms |
+
+这个形状的局部 GPU 时间缩短约 0.217 ms。完整 110–115 探测记录在 `host-selection-benchmark.json`：110 和 113 都无外部 GPU 计算，数值排序选了 113；因为候选已在 110 独立编译，随后对 110 的 GPU 1 单独复查为独占可用，见 `host-selection-benchmark-110.json`。本次只测算子，没有加载模型权重或改动 3FS 并发。
+
+这仍不是四层 FP8+MTP PD flow 或 64K timeline 的结果，不能据此将候选并入性能锚点。下一步需在双机服务里核对新核实际被调用、答案链路正确，再比较全 rank target Prefill 关键路径。

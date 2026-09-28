@@ -38,3 +38,12 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_binary(
+    name = "mla_k_merge_benchmark",
+    srcs = ["mla_k_merge_benchmark.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+)

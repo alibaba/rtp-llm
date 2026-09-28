@@ -8,6 +8,21 @@ pip_repos="$base/.cache/bazel/k3-main-20260926/14e92cbfe48a8a41a60e44f9c348e502/
 root="$base/.cache/bazel/k3-mla-kmerge-20260929"
 export TMPDIR="$base/tmp/k3-mla-kmerge-build-20260929"
 
+case "${1:-test}" in
+  test)
+    action=test
+    target=//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:mla_k_merge_non_power_two_heads_test
+    extra=(--test_env=CUDA_VISIBLE_DEVICES=1 --test_env=CC=/usr/bin/gcc
+      --test_output=errors --cache_test_results=no)
+    ;;
+  benchmark-build)
+    action=build
+    target=//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:mla_k_merge_benchmark
+    extra=()
+    ;;
+  *) echo 'usage: test_mla_k_merge_110.sh [test|benchmark-build]' >&2; exit 2 ;;
+esac
+
 test "$(id -un)" = luohaocheng.lhc
 test -f /.dockerenv
 test "$(findmnt -T "$repo" -n -o FSTYPE)" = ext4
@@ -25,15 +40,13 @@ bazel=/usr/local/bin/bazelisk
 out="$("$bazel" "--output_user_root=$root" info --config=cuda13 --config=sm10x output_base)"
 test "$(findmnt -T "$out" -n -o FSTYPE)" = ext4
 
-cmd=("$bazel" "--output_user_root=$root" test
+cmd=("$bazel" "--output_user_root=$root" "$action"
   --config=cuda13 --config=sm10x
   --define=use_accl_ep=0 "--distdir=$deps"
   "--override_repository=arch_config=$deps/rdma-build-overlay/arch_config"
   "--override_repository=rtp_deps=$deps/rdma-build-overlay/rtp_deps"
   "--override_repository=xgrammar=$deps/xgrammar-384264-source"
-  --jobs=24 --test_env=CUDA_VISIBLE_DEVICES=1 --test_env=CC=/usr/bin/gcc
-  --test_output=errors --cache_test_results=no
-  //rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:mla_k_merge_non_power_two_heads_test)
+  --jobs=24 "${extra[@]}" "$target")
 for source in "$deps/feat-external-git-sources"/*; do
   test -d "$source"
   cmd+=("--override_repository=${source##*/}=$source")
