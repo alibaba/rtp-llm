@@ -12,6 +12,9 @@ from functools import partial
 import torch
 
 
+_MAX_PACKED_CULA_CHECKPOINT_BYTES = 32 << 20
+
+
 def plan_cula_checkpoint_groups(segments, block_size, max_pages=4):
     """Bound cuLA scratch while keeping each call aligned to cache pages."""
     if block_size <= 0 or max_pages <= 0:
@@ -45,9 +48,27 @@ def _cula_paged_prefill(
             if sequence.initial_block is None
             else cache_states[sequence.initial_block].unsqueeze(0).contiguous()
         )
-        # A reused prefix can start inside a cache block. Finish that block
-        # first so subsequent cuLA checkpoints again coincide with RTP pages.
-        for group in plan_cula_checkpoint_groups(segments, block_size):
+        # One aligned sequence can publish all page checkpoints in one cuLA
+        # call. Keep a scratch bound and preserve the segmented path for an
+        # in-page reused prefix or a multi-request batch.
+        packed = (
+            len(sequences) == 1
+            and len(segments) > 4
+            and len(segments) * heads * 128 * 128 * 4
+            <= _MAX_PACKED_CULA_CHECKPOINT_BYTES
+            and segments[-1].end == q.shape[0]
+            and all(
+                segment.start == index * block_size
+                and segment.end == min((index + 1) * block_size, q.shape[0])
+                for index, segment in enumerate(segments)
+            )
+        )
+        groups = (
+            (segments,)
+            if packed
+            else plan_cula_checkpoint_groups(segments, block_size)
+        )
+        for group in groups:
             if not group:
                 continue
             start, end = group[0].start, group[-1].end
