@@ -215,7 +215,7 @@ public class DefaultRouter {
         return switch (role) {
             case PREFILL, PDFUSION ->
                     prefillSelector.select(context, role, group);
-            case DECODE -> decodeSelector.select(decodeAdmission, group);
+            case DECODE -> decodeSelector.select(context, decodeAdmission, group);
             case VIT -> selectedOrBlocked(
                     vitSelector.select(context, role, group), role);
             case ENCODER -> selectedOrBlocked(
