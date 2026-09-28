@@ -1,0 +1,858 @@
+{
+  "source": "vLLM 3df4 PD TP8/EP8 target only, no MTP",
+  "timing_basis": "GPU user annotation span; family sums overlap across streams",
+  "ranks": [
+    {
+      "rank": 0,
+      "trace": "dp0_pp0_tp0_dcp0_ep0_rank0.1790615372044955288.pt.trace.json.gz",
+      "requests": [
+        {
+          "start_us": 7647582954267.207,
+          "span_ms": 111.03698399999999,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.917204999999999,
+            "FP8.producer_or_quant": 0.746598,
+            "GEMM.NVJet_unattributed": 33.175239999999995,
+            "KDA.FlashKDA": 9.065840999999999,
+            "KDA.short_conv": 1.598799,
+            "MLA.TokenSpeed": 5.357455,
+            "MoE": 13.715449,
+            "NCCL.BF16": 29.835815,
+            "Norm_or_Gate": 2.97532,
+            "Other_unattributed": 2.0849800000000003,
+            "Tensor.copy": 0.034526999999999995
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583292243.891,
+          "span_ms": 111.38633,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.911027,
+            "FP8.producer_or_quant": 0.7538309999999999,
+            "GEMM.NVJet_unattributed": 33.207302999999996,
+            "KDA.FlashKDA": 9.067505,
+            "KDA.short_conv": 1.6030229999999999,
+            "MLA.TokenSpeed": 5.356112,
+            "MoE": 13.720823000000001,
+            "NCCL.BF16": 30.867057000000003,
+            "Norm_or_Gate": 2.976474,
+            "Other_unattributed": 2.088307,
+            "Tensor.copy": 0.034976999999999994
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583630675.618,
+          "span_ms": 110.897974,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.899891,
+            "FP8.producer_or_quant": 0.755687,
+            "GEMM.NVJet_unattributed": 33.206793000000005,
+            "KDA.FlashKDA": 9.063728,
+            "KDA.short_conv": 1.602158,
+            "MLA.TokenSpeed": 5.359759,
+            "MoE": 13.759960000000001,
+            "NCCL.BF16": 30.163019,
+            "Norm_or_Gate": 2.98361,
+            "Other_unattributed": 2.0911850000000003,
+            "Tensor.copy": 0.035199
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        }
+      ]
+    },
+    {
+      "rank": 1,
+      "trace": "dp0_pp0_tp1_dcp0_ep1_rank1.1790615372043818065.pt.trace.json.gz",
+      "requests": [
+        {
+          "start_us": 7647582953753.682,
+          "span_ms": 111.505296,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.878508999999999,
+            "FP8.producer_or_quant": 0.748422,
+            "GEMM.NVJet_unattributed": 33.131962,
+            "KDA.FlashKDA": 9.067173,
+            "KDA.short_conv": 1.6002049999999999,
+            "MLA.TokenSpeed": 5.356744,
+            "MoE": 8.526527,
+            "NCCL.BF16": 35.443755,
+            "Norm_or_Gate": 2.9680229999999996,
+            "Other_unattributed": 2.053263,
+            "Tensor.copy": 0.035618000000000004
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583292615.87,
+          "span_ms": 110.980269,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.868112,
+            "FP8.producer_or_quant": 0.73978,
+            "GEMM.NVJet_unattributed": 33.08389699999999,
+            "KDA.FlashKDA": 9.064452,
+            "KDA.short_conv": 1.6015800000000002,
+            "MLA.TokenSpeed": 5.353992,
+            "MoE": 8.521858,
+            "NCCL.BF16": 35.560300999999995,
+            "Norm_or_Gate": 2.971382,
+            "Other_unattributed": 2.0506029999999997,
+            "Tensor.copy": 0.035233
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583630288.162,
+          "span_ms": 111.19550199999999,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.877517,
+            "FP8.producer_or_quant": 0.741958,
+            "GEMM.NVJet_unattributed": 33.158263,
+            "KDA.FlashKDA": 9.063013,
+            "KDA.short_conv": 1.597804,
+            "MLA.TokenSpeed": 5.355401,
+            "MoE": 8.525186,
+            "NCCL.BF16": 35.950515,
+            "Norm_or_Gate": 2.972983,
+            "Other_unattributed": 2.0540380000000003,
+            "Tensor.copy": 0.034848
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        }
+      ]
+    },
+    {
+      "rank": 2,
+      "trace": "dp0_pp0_tp2_dcp0_ep2_rank2.1790615372045423920.pt.trace.json.gz",
+      "requests": [
+        {
+          "start_us": 7647582953498.94,
+          "span_ms": 111.803533,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.885963,
+            "FP8.producer_or_quant": 0.745701,
+            "GEMM.NVJet_unattributed": 33.49068199999999,
+            "KDA.FlashKDA": 9.077188,
+            "KDA.short_conv": 1.6020299999999998,
+            "MLA.TokenSpeed": 5.357192,
+            "MoE": 12.94787,
+            "NCCL.BF16": 31.247848,
+            "Norm_or_Gate": 2.971959,
+            "Other_unattributed": 2.024305,
+            "Tensor.copy": 0.034785
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583292405.593,
+          "span_ms": 111.234313,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.860844,
+            "FP8.producer_or_quant": 0.749509,
+            "GEMM.NVJet_unattributed": 33.500189,
+            "KDA.FlashKDA": 9.07431,
+            "KDA.short_conv": 1.604842,
+            "MLA.TokenSpeed": 5.3580879999999995,
+            "MoE": 12.946561999999998,
+            "NCCL.BF16": 31.073321,
+            "Norm_or_Gate": 2.9757990000000003,
+            "Other_unattributed": 2.031567,
+            "Tensor.copy": 0.033984
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583630864.754,
+          "span_ms": 110.663077,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.856749,
+            "FP8.producer_or_quant": 0.7449020000000001,
+            "GEMM.NVJet_unattributed": 33.513405,
+            "KDA.FlashKDA": 9.081477,
+            "KDA.short_conv": 1.6054840000000001,
+            "MLA.TokenSpeed": 5.361736,
+            "MoE": 12.957219999999998,
+            "NCCL.BF16": 30.797033,
+            "Norm_or_Gate": 2.9734309999999997,
+            "Other_unattributed": 2.02785,
+            "Tensor.copy": 0.033407
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        }
+      ]
+    },
+    {
+      "rank": 3,
+      "trace": "dp0_pp0_tp3_dcp0_ep3_rank3.1790615372041891621.pt.trace.json.gz",
+      "requests": [
+        {
+          "start_us": 7647582953406.7,
+          "span_ms": 111.82949,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.893821000000001,
+            "FP8.producer_or_quant": 0.742661,
+            "GEMM.NVJet_unattributed": 32.920612,
+            "KDA.FlashKDA": 9.066798,
+            "KDA.short_conv": 1.600616,
+            "MLA.TokenSpeed": 5.359163,
+            "MoE": 10.409239,
+            "NCCL.BF16": 33.962602000000004,
+            "Norm_or_Gate": 2.977615,
+            "Other_unattributed": 2.027915,
+            "Tensor.copy": 0.03328
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583292255.279,
+          "span_ms": 111.309072,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.871805,
+            "FP8.producer_or_quant": 0.739684,
+            "GEMM.NVJet_unattributed": 32.916167,
+            "KDA.FlashKDA": 9.06475,
+            "KDA.short_conv": 1.6061219999999998,
+            "MLA.TokenSpeed": 5.360155,
+            "MoE": 10.411444000000001,
+            "NCCL.BF16": 34.384045,
+            "Norm_or_Gate": 2.978509,
+            "Other_unattributed": 2.019847,
+            "Tensor.copy": 0.032607000000000004
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583630638.001,
+          "span_ms": 110.816654,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.870848,
+            "FP8.producer_or_quant": 0.744612,
+            "GEMM.NVJet_unattributed": 32.92979699999999,
+            "KDA.FlashKDA": 9.068427,
+            "KDA.short_conv": 1.602314,
+            "MLA.TokenSpeed": 5.358139,
+            "MoE": 10.40786,
+            "NCCL.BF16": 33.84132099999999,
+            "Norm_or_Gate": 2.978574,
+            "Other_unattributed": 2.0193719999999997,
+            "Tensor.copy": 0.033664
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        }
+      ]
+    },
+    {
+      "rank": 4,
+      "trace": "dp0_pp0_tp4_dcp0_ep4_rank4.1790615372043818759.pt.trace.json.gz",
+      "requests": [
+        {
+          "start_us": 7647582952450.203,
+          "span_ms": 112.792525,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.865808,
+            "FP8.producer_or_quant": 0.751018,
+            "GEMM.NVJet_unattributed": 32.766003999999995,
+            "KDA.FlashKDA": 9.053432,
+            "KDA.short_conv": 1.599253,
+            "MLA.TokenSpeed": 5.356328,
+            "MoE": 10.355563000000002,
+            "NCCL.BF16": 35.373151,
+            "Norm_or_Gate": 2.971208,
+            "Other_unattributed": 2.018204,
+            "Tensor.copy": 0.034269999999999995
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583292554.451,
+          "span_ms": 111.03058100000001,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.901744,
+            "FP8.producer_or_quant": 0.7487460000000001,
+            "GEMM.NVJet_unattributed": 32.79957699999999,
+            "KDA.FlashKDA": 9.051419,
+            "KDA.short_conv": 1.6002139999999998,
+            "MLA.TokenSpeed": 5.356615,
+            "MoE": 10.359114000000002,
+            "NCCL.BF16": 34.439307,
+            "Norm_or_Gate": 2.97348,
+            "Other_unattributed": 2.012059,
+            "Tensor.copy": 0.033631
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583630549.903,
+          "span_ms": 110.93454799999999,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.922544,
+            "FP8.producer_or_quant": 0.75006,
+            "GEMM.NVJet_unattributed": 32.774518,
+            "KDA.FlashKDA": 9.059801,
+            "KDA.short_conv": 1.6012389999999999,
+            "MLA.TokenSpeed": 5.360841000000001,
+            "MoE": 10.355146000000001,
+            "NCCL.BF16": 34.31444700000001,
+            "Norm_or_Gate": 2.9747569999999994,
+            "Other_unattributed": 2.016669,
+            "Tensor.copy": 0.03465700000000001
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        }
+      ]
+    },
+    {
+      "rank": 5,
+      "trace": "dp0_pp0_tp5_dcp0_ep5_rank5.1790615372044571375.pt.trace.json.gz",
+      "requests": [
+        {
+          "start_us": 7647582953069.047,
+          "span_ms": 112.206515,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.894236,
+            "FP8.producer_or_quant": 0.748996,
+            "GEMM.NVJet_unattributed": 33.138898000000005,
+            "KDA.FlashKDA": 9.071431,
+            "KDA.short_conv": 1.598919,
+            "MLA.TokenSpeed": 5.35292,
+            "MoE": 12.490006000000001,
+            "NCCL.BF16": 32.527952,
+            "Norm_or_Gate": 2.9671510000000003,
+            "Other_unattributed": 2.035051,
+            "Tensor.copy": 0.033857
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583292729.848,
+          "span_ms": 110.868268,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.901306000000001,
+            "FP8.producer_or_quant": 0.745987,
+            "GEMM.NVJet_unattributed": 33.13413300000001,
+            "KDA.FlashKDA": 9.067176,
+            "KDA.short_conv": 1.6026960000000001,
+            "MLA.TokenSpeed": 5.353272,
+            "MoE": 12.493943,
+            "NCCL.BF16": 31.176517999999998,
+            "Norm_or_Gate": 2.968172,
+            "Other_unattributed": 2.034568,
+            "Tensor.copy": 0.03488
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583630546.64,
+          "span_ms": 110.94782099999999,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.883546000000001,
+            "FP8.producer_or_quant": 0.739426,
+            "GEMM.NVJet_unattributed": 33.125679999999996,
+            "KDA.FlashKDA": 9.066887,
+            "KDA.short_conv": 1.60548,
+            "MLA.TokenSpeed": 5.352567,
+            "MoE": 12.490070999999999,
+            "NCCL.BF16": 31.708685000000003,
+            "Norm_or_Gate": 2.971501,
+            "Other_unattributed": 2.0314349999999997,
+            "Tensor.copy": 0.034655
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        }
+      ]
+    },
+    {
+      "rank": 6,
+      "trace": "dp0_pp0_tp6_dcp0_ep6_rank6.1790615372043375670.pt.trace.json.gz",
+      "requests": [
+        {
+          "start_us": 7647582953584.454,
+          "span_ms": 111.657189,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.891517,
+            "FP8.producer_or_quant": 0.745668,
+            "GEMM.NVJet_unattributed": 32.90751900000001,
+            "KDA.FlashKDA": 9.095309,
+            "KDA.short_conv": 1.5994309999999998,
+            "MLA.TokenSpeed": 5.355994,
+            "MoE": 14.183334,
+            "NCCL.BF16": 30.621656,
+            "Norm_or_Gate": 2.982062,
+            "Other_unattributed": 2.0182119999999997,
+            "Tensor.copy": 0.033794
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583292502.465,
+          "span_ms": 111.082594,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.862878999999999,
+            "FP8.producer_or_quant": 0.757093,
+            "GEMM.NVJet_unattributed": 32.938654,
+            "KDA.FlashKDA": 9.106442,
+            "KDA.short_conv": 1.603977,
+            "MLA.TokenSpeed": 5.352634,
+            "MoE": 14.219623,
+            "NCCL.BF16": 30.479380999999997,
+            "Norm_or_Gate": 2.9897129999999996,
+            "Other_unattributed": 2.0131289999999997,
+            "Tensor.copy": 0.033217
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583630823.897,
+          "span_ms": 110.62908800000001,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.876606,
+            "FP8.producer_or_quant": 0.75578,
+            "GEMM.NVJet_unattributed": 32.882402000000006,
+            "KDA.FlashKDA": 9.109037,
+            "KDA.short_conv": 1.60564,
+            "MLA.TokenSpeed": 5.351546,
+            "MoE": 14.115237000000002,
+            "NCCL.BF16": 29.632207999999995,
+            "Norm_or_Gate": 2.972717,
+            "Other_unattributed": 2.018504,
+            "Tensor.copy": 0.033471
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        }
+      ]
+    },
+    {
+      "rank": 7,
+      "trace": "dp0_pp0_tp7_dcp0_ep7_rank7.1790615372044238681.pt.trace.json.gz",
+      "requests": [
+        {
+          "start_us": 7647582953954.901,
+          "span_ms": 111.336045,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.879119,
+            "FP8.producer_or_quant": 0.7472059999999999,
+            "GEMM.NVJet_unattributed": 33.280041,
+            "KDA.FlashKDA": 9.063945,
+            "KDA.short_conv": 1.5956960000000002,
+            "MLA.TokenSpeed": 5.358634,
+            "MoE": 11.651195000000001,
+            "NCCL.BF16": 32.427774,
+            "Norm_or_Gate": 2.973267,
+            "Other_unattributed": 2.007564,
+            "Tensor.copy": 0.033919
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583292398.295,
+          "span_ms": 111.236907,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.8964289999999995,
+            "FP8.producer_or_quant": 0.744773,
+            "GEMM.NVJet_unattributed": 33.28861299999999,
+            "KDA.FlashKDA": 9.062152000000001,
+            "KDA.short_conv": 1.5985720000000003,
+            "MLA.TokenSpeed": 5.353354,
+            "MoE": 11.649562999999999,
+            "NCCL.BF16": 32.755234,
+            "Norm_or_Gate": 2.971926,
+            "Other_unattributed": 2.004307,
+            "Tensor.copy": 0.033985
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        },
+        {
+          "start_us": 7647583630237.396,
+          "span_ms": 111.276044,
+          "kernel_count": 148,
+          "family_cumulative_ms": {
+            "AttnRes": 5.900716,
+            "FP8.producer_or_quant": 0.7447729999999999,
+            "GEMM.NVJet_unattributed": 33.29357400000001,
+            "KDA.FlashKDA": 9.068167,
+            "KDA.short_conv": 1.6018360000000003,
+            "MLA.TokenSpeed": 5.35409,
+            "MoE": 11.662749,
+            "NCCL.BF16": 32.799648,
+            "Norm_or_Gate": 2.971256,
+            "Other_unattributed": 2.006413,
+            "Tensor.copy": 0.033792
+          },
+          "family_kernel_count": {
+            "AttnRes": 9,
+            "FP8.producer_or_quant": 4,
+            "GEMM.NVJet_unattributed": 30,
+            "KDA.FlashKDA": 6,
+            "KDA.short_conv": 9,
+            "MLA.TokenSpeed": 1,
+            "MoE": 15,
+            "NCCL.BF16": 12,
+            "Norm_or_Gate": 10,
+            "Other_unattributed": 43,
+            "Tensor.copy": 9
+          }
+        }
+      ]
+    }
+  ],
+  "matched_requests": [
+    {
+      "request_index": 0,
+      "rank_start_spread_us": 1817.00390625,
+      "worst_rank": 4,
+      "max_rank_gpu_span_ms": 112.792525,
+      "worst_rank_family_cumulative_ms": {
+        "AttnRes": 5.865808,
+        "FP8.producer_or_quant": 0.751018,
+        "GEMM.NVJet_unattributed": 32.766003999999995,
+        "KDA.FlashKDA": 9.053432,
+        "KDA.short_conv": 1.599253,
+        "MLA.TokenSpeed": 5.356328,
+        "MoE": 10.355563000000002,
+        "NCCL.BF16": 35.373151,
+        "Norm_or_Gate": 2.971208,
+        "Other_unattributed": 2.018204,
+        "Tensor.copy": 0.034269999999999995
+      }
+    },
+    {
+      "request_index": 1,
+      "rank_start_spread_us": 485.95703125,
+      "worst_rank": 0,
+      "max_rank_gpu_span_ms": 111.38633,
+      "worst_rank_family_cumulative_ms": {
+        "AttnRes": 5.911027,
+        "FP8.producer_or_quant": 0.7538309999999999,
+        "GEMM.NVJet_unattributed": 33.207302999999996,
+        "KDA.FlashKDA": 9.067505,
+        "KDA.short_conv": 1.6030229999999999,
+        "MLA.TokenSpeed": 5.356112,
+        "MoE": 13.720823000000001,
+        "NCCL.BF16": 30.867057000000003,
+        "Norm_or_Gate": 2.976474,
+        "Other_unattributed": 2.088307,
+        "Tensor.copy": 0.034976999999999994
+      }
+    },
+    {
+      "request_index": 2,
+      "rank_start_spread_us": 627.357421875,
+      "worst_rank": 7,
+      "max_rank_gpu_span_ms": 111.276044,
+      "worst_rank_family_cumulative_ms": {
+        "AttnRes": 5.900716,
+        "FP8.producer_or_quant": 0.7447729999999999,
+        "GEMM.NVJet_unattributed": 33.29357400000001,
+        "KDA.FlashKDA": 9.068167,
+        "KDA.short_conv": 1.6018360000000003,
+        "MLA.TokenSpeed": 5.35409,
+        "MoE": 11.662749,
+        "NCCL.BF16": 32.799648,
+        "Norm_or_Gate": 2.971256,
+        "Other_unattributed": 2.006413,
+        "Tensor.copy": 0.033792
+      }
+    }
+  ],
+  "median_max_rank_gpu_span_ms": 111.38633
+}
