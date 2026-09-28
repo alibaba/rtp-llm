@@ -1,0 +1,122 @@
+{
+  "passed": true,
+  "protocol": "fixed feat a9bf four-layer FP8+MTP dual-PD, legacy HTTP aux",
+  "semantic_answer_claim": false,
+  "warmup_count": 10,
+  "last3_first_token_cost_ms": [
+    135.866,
+    142.93,
+    136.749
+  ],
+  "profiled_count": 16,
+  "allrank_trace_matched_requests": 6,
+  "mtp_evidence": "all-rank target/draft scopes; legacy HTTP aux omits draft rounds",
+  "decode_handoff_evidence": "legacy aux reports zero, so handoff bytes are not independently verified by HTTP",
+  "errors": [],
+  "requests": [
+    {
+      "label": "warmup-01",
+      "passed": true
+    },
+    {
+      "label": "warmup-02",
+      "passed": true
+    },
+    {
+      "label": "warmup-03",
+      "passed": true
+    },
+    {
+      "label": "warmup-04",
+      "passed": true
+    },
+    {
+      "label": "warmup-05",
+      "passed": true
+    },
+    {
+      "label": "warmup-06",
+      "passed": true
+    },
+    {
+      "label": "warmup-07",
+      "passed": true
+    },
+    {
+      "label": "warmup-08",
+      "passed": true
+    },
+    {
+      "label": "warmup-09",
+      "passed": true
+    },
+    {
+      "label": "warmup-10",
+      "passed": true
+    },
+    {
+      "label": "profiled-01",
+      "passed": true
+    },
+    {
+      "label": "profiled-02",
+      "passed": true
+    },
+    {
+      "label": "profiled-03",
+      "passed": true
+    },
+    {
+      "label": "profiled-04",
+      "passed": true
+    },
+    {
+      "label": "profiled-05",
+      "passed": true
+    },
+    {
+      "label": "profiled-06",
+      "passed": true
+    },
+    {
+      "label": "profiled-07",
+      "passed": true
+    },
+    {
+      "label": "profiled-08",
+      "passed": true
+    },
+    {
+      "label": "profiled-09",
+      "passed": true
+    },
+    {
+      "label": "profiled-10",
+      "passed": true
+    },
+    {
+      "label": "profiled-11",
+      "passed": true
+    },
+    {
+      "label": "profiled-12",
+      "passed": true
+    },
+    {
+      "label": "profiled-13",
+      "passed": true
+    },
+    {
+      "label": "profiled-14",
+      "passed": true
+    },
+    {
+      "label": "profiled-15",
+      "passed": true
+    },
+    {
+      "label": "profiled-16",
+      "passed": true
+    }
+  ]
+}

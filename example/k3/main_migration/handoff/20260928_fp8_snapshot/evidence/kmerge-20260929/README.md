@@ -83,3 +83,13 @@
 切换服务前，将 111 Prefill 和 112 Decode 的本轮完整启动目录分别保存为 `pagedmeta-b24-startup-111.tar.gz` 和 `pagedmeta-b24-startup-112.tar.gz`，哈希见 `pagedmeta-b24-startup-archives.sha256`。归档包含启动配置、FastSafetensors guard、RDMA 预检、主进程与八个 rank 的日志；活跃 Unix socket 不是可归档文件，tar 按预期跳过它。
 
 为了在同一 111/112 双机上复测固定 feat `a9bf762e8`，核查发现 112 的旧 Bazel 可执行产物已缺失。直接重建先因旧版 `rules_python`、`rules_cc` 指向无 SSH 授权的内部 GitLab 地址而失败；随后使用 112 个人数据盘上原有、对应 feat 的 17 份外部依赖源码快照和 RDMA 构建 overlay，保持源码提交、CUDA13/SM10x、个人账号和本机独立 Bazel 输出目录不变。`build_feat_a9bf_112_20260929.sh` 的构建完成 30,181 个动作，退出码 0，`//rtp_llm:rtp_llm_server` 可执行入口存在。完整成功日志在 `feat-a9bf-rebuild-112-with-sources-20260929.log.gz`（SHA256 `6f0f95da23dfa55776a854acf1b110228c3ec26e35c8774ea5500193c00d8dba`）。111 的固定 feat 构建产物也仍存在。以上只证明双机重启前的构建条件，还不代表 feat r8 服务或性能结果。
+
+## 固定 feat 的同机复测 r8
+
+111 Prefill、112 Decode 运行固定源码 `a9bf762e8`，四层 target 为 FP8、draft 为原生 MTP，TP8/EP8 双机 PD，Decode 开启 CUDA Graph。两端八个 rank 的启动日志均选择 FastSafetensors，直接读取已核实的 3FS shard。`host-selection-feat-r8-launch.json` 和 `host-selection-feat-r8-timeline-immediate.json` 分别记录启动前和测量前的 GPU 状态；测量前只有本任务服务进程占用 GPU。四层 flow 的 10 条请求全部返回；`feat-a9bf-r8-flow-independent-audit.json` 对原始响应独立复核为 10/10。旧 feat 的 HTTP aux 不暴露 draft 轮次，也把 Decode 复用长度报为 0，因此不能靠 flow 单独证明 MTP 执行和 KV 交接字节数。
+
+64K 测量使用与集成版相同的固定输入，token SHA256 为 `97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee`。禁用前缀复用，先完成 10 次同路径预热；末三次首 token 时间为 135.866、142.930、136.749 ms，均在中位数 ±5% 内。随后 16 次正式请求均为 HTTP 200，独立原始响应复核无错误或 Unicode 替换字符。八 rank trace 匹配到 6 条共同请求，每条都有 target 和 draft Prefill 范围，证实原生 MTP draft 实际运行。按每条请求最慢 rank 的 GPU span 取中位，target 为 **71.033 ms**、draft 为 **62.609 ms**、完整 Prefill 为 **134.763 ms**。逐模块归属见 `feat-a9bf-r8-module-target.json` 和 `feat-a9bf-r8-module-draft.json`；累计核时间可能跨 stream 重叠，不能相加成关键路径。
+
+本轮相较于上一轮固定 feat r7 的 target 71.556 ms、完整 Prefill 135.266 ms 略快。集成版 `b24b6cd88` 两轮 target 为 71.607 / 71.914 ms，完整 Prefill 为 134.950 / 135.262 ms。当前差距在 0.2–0.9 ms，且各轮匹配请求数不同；这些数据仍不足以证明集成版四层 Prefill 稳定优于 feat。feat 的 FP8 融合通信路径也不满足最终 BF16 NCCL 契约，不能直接迁入。此处只记录可比现状，不据此提交性能锚点。
+
+原始数据：`feat-a9bf-r8-allrank-traces.tar.gz` SHA256 `ef7d06639be74a7f1c340d2ded494150f62da3bdd9474caac4c78987c919d4fd`；`feat-a9bf-r8-timeline-requests.tar.gz` SHA256 `c32bf83962d7a736daed1a8f7fb946674ae9ca7773dbe8ecde1fd403d7dfabc0`；Prefill 与 Decode 启动记录归档的 SHA256 分别为 `90835b5a5fc3ce1c8f8a5ed227bd261b19a51e2c0a3dfdecb0b77d450e9134c1`、`6599459bcc9f24b2ff40ee7d46d1cd3ef407f972bf547c408c04199faffe46b4`。`feat-a9bf-r8-timeline-independent-audit.json` 保存逐请求复核和旧 aux 的证据边界。启动阶段没有观察到明显的 3FS 读取阻塞，本轮未改变机器级并发配置。
