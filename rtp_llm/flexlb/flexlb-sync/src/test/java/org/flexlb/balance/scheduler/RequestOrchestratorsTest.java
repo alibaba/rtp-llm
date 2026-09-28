@@ -3,6 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.dao.route.RequestPhase;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -144,7 +146,8 @@ class RequestOrchestratorsTest {
         Map<String, PrefillEndpoint> prefill = new LinkedHashMap<>();
         prefill.put("p1", failingPrefill);
         prefill.put("p2", healthyPrefill);
-        when(lifecycle.liveRequestCount()).thenReturn(7);
+        when(lifecycle.liveRequestCount(RequestPhase.GENERATION)).thenReturn(7);
+        when(lifecycle.liveRequestCount(RequestPhase.ENCODER)).thenReturn(2);
         when(registry.snapshotPrefillEndpoints()).thenReturn(prefill);
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new RuntimeException("metrics unavailable"))
@@ -154,6 +157,7 @@ class RequestOrchestratorsTest {
                 lifecycle, registry, reporter, admissionReporter).report();
 
         verify(reporter).reportSchedulerInflightSize(7);
+        verify(reporter).reportSchedulerInflightSize(RoleType.ENCODER, 2);
         verify(failingPrefill).reportBatchMetrics(reporter);
         verify(healthyPrefill).reportBatchMetrics(reporter);
         verify(decode).reportBatchMetrics(reporter);

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -11,6 +12,8 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -20,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -82,6 +86,279 @@ class RequestRegistryTest {
                 duplicate.join().getCode());
         assertSame(canonical, lifecycle.requestSlot(101L).future());
         assertEquals(1, lifecycle.liveRequestCount());
+    }
+
+    @Test
+    void sameBusinessRequestHasIndependentEncoderAndGenerationRecords() {
+        BalanceContext encoder = context(106L);
+        encoder.setRequestPhase(RequestPhase.ENCODER);
+        CompletableFuture<Response> encoderFuture = lifecycle.register(encoder);
+        CompletableFuture<Response> generationFuture = lifecycle.register(context(106L));
+
+        assertFalse(encoderFuture.isDone());
+        assertFalse(generationFuture.isDone());
+        assertEquals(2, lifecycle.liveRequestCount());
+        assertEquals(1, lifecycle.liveRequestCount(RequestPhase.ENCODER));
+        assertEquals(1, lifecycle.liveRequestCount(RequestPhase.GENERATION));
+        assertEquals(RequestState.Phase.QUEUED,
+                lifecycle.getRequestState("106", 0L, RequestPhase.ENCODER).state());
+        assertEquals(RequestState.Phase.QUEUED,
+                lifecycle.getRequestState("106", 0L).state());
+
+        lifecycle.cancelRequest("106", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+
+        assertEquals(RequestState.Phase.CANCELLED,
+                lifecycle.getRequestState("106", 0L, RequestPhase.ENCODER).state());
+        assertEquals(RequestState.Phase.QUEUED,
+                lifecycle.getRequestState("106", 0L).state());
+        assertFalse(generationFuture.isDone());
+        assertEquals(0, lifecycle.liveRequestCount(RequestPhase.ENCODER));
+        assertEquals(1, lifecycle.liveRequestCount(RequestPhase.GENERATION));
+    }
+
+    @Test
+    void encoderPlacementFailureCompletesItsPhaseWithoutTouchingGeneration() throws Exception {
+        BalanceContext encoder = context(111L);
+        encoder.setRequestPhase(RequestPhase.ENCODER);
+        CompletableFuture<Response> encoderFuture = lifecycle.register(encoder);
+        CompletableFuture<Response> generationFuture = lifecycle.register(context(111L));
+
+        assertTrue(lifecycle.publishDecisionResponseAsync("111", encoderFuture,
+                Response.error(StrategyErrorType.NO_ENCODER_WORKER), RequestPhase.ENCODER));
+
+        assertEquals(StrategyErrorType.NO_ENCODER_WORKER.getErrorCode(),
+                encoderFuture.get(5, TimeUnit.SECONDS).getCode());
+        assertEquals(RequestState.Phase.FAILED,
+                lifecycle.getRequestState("111", 0L, RequestPhase.ENCODER).state());
+        assertEquals(RequestState.Phase.QUEUED,
+                lifecycle.getRequestState("111", 0L).state());
+        assertFalse(generationFuture.isDone());
+    }
+
+    @Test
+    void encoderRouteCountsPendingUntilWorkerReportsRunningThenFinished() throws Exception {
+        BalanceContext context = context(107L);
+        context.setRequestPhase(RequestPhase.ENCODER);
+        CompletableFuture<Response> future = lifecycle.register(context);
+        WorkerStatus worker = mock(WorkerStatus.class);
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        Response route = new Response();
+        route.setSuccess(true);
+
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertTrue(lifecycle.claimEncoderRoute("107", future, pin));
+        }
+        assertEquals(1, endpoint.pendingEncoderRequestCount());
+        assertFalse(future.isDone());
+        assertEquals(RequestState.Phase.DISPATCHING,
+                lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
+
+        assertTrue(lifecycle.publishEncoderRoute("107", future, route));
+        assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED,
+                lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
+
+        WorkerStatus.TaskObservation task = mock(WorkerStatus.TaskObservation.class);
+        when(task.requestId()).thenReturn("107");
+        WorkerStatus.StatusObservation running = mock(WorkerStatus.StatusObservation.class);
+        when(running.owner()).thenReturn(worker);
+        when(running.runningTasks()).thenReturn(Map.of("107", task));
+        endpoint.observeStatusHeartbeat(worker, running).run();
+
+        assertEquals(0, endpoint.pendingEncoderRequestCount());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED,
+                lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
+
+        WorkerStatus.StatusObservation finished = mock(WorkerStatus.StatusObservation.class);
+        when(finished.alive()).thenReturn(true);
+        when(finished.runningTasks()).thenReturn(Map.of());
+        when(finished.finishedTasks()).thenReturn(Map.of("107", task));
+        WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
+        when(prepared.observation()).thenReturn(finished);
+        endpoint.applyPreparedStatus(worker, prepared).run();
+
+        assertEquals(RequestState.Phase.COMPLETED,
+                lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
+        assertEquals(0, endpoint.pendingEncoderRequestCount());
+    }
+
+    @Test
+    void concurrentEncoderSelectionsKeepEveryPendingRequest() throws Exception {
+        EncoderEndpoint endpoint = new EncoderEndpoint(mock(WorkerStatus.class),
+                new EndpointEventProjector(lifecycle));
+        int requestCount = 32;
+        CountDownLatch start = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(8)) {
+            List<Future<Boolean>> selected = new ArrayList<>();
+            for (int index = 0; index < requestCount; index++) {
+                String requestId = "encoder-" + index;
+                selected.add(executor.submit(() -> {
+                    start.await();
+                    return endpoint.trackSelectedRequest(requestId);
+                }));
+            }
+            start.countDown();
+            for (Future<Boolean> result : selected) {
+                assertTrue(result.get(5, TimeUnit.SECONDS));
+            }
+            assertEquals(requestCount, endpoint.pendingEncoderRequestCount());
+            assertFalse(endpoint.trackSelectedRequest("encoder-0"));
+        }
+        for (int index = 0; index < requestCount; index++) {
+            endpoint.forgetRequest("encoder-" + index);
+        }
+        assertEquals(0, endpoint.pendingEncoderRequestCount());
+    }
+
+    @Test
+    void encoderStatusAndCleanupRaceCannotDoubleReleasePendingRequest() throws Exception {
+        WorkerStatus worker = mock(WorkerStatus.class);
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            for (int index = 0; index < 32; index++) {
+                String requestId = "encoder-race-" + index;
+                assertTrue(endpoint.trackSelectedRequest(requestId));
+                WorkerStatus.TaskObservation task = mock(WorkerStatus.TaskObservation.class);
+                when(task.requestId()).thenReturn(requestId);
+                WorkerStatus.StatusObservation status = mock(WorkerStatus.StatusObservation.class);
+                when(status.owner()).thenReturn(worker);
+                when(status.runningTasks()).thenReturn(Map.of(requestId, task));
+                CountDownLatch start = new CountDownLatch(1);
+                Future<?> observed = executor.submit(() -> {
+                    start.await();
+                    endpoint.observeStatusHeartbeat(worker, status).run();
+                    return null;
+                });
+                Future<?> forgotten = executor.submit(() -> {
+                    start.await();
+                    endpoint.forgetRequest(requestId);
+                    return null;
+                });
+                start.countDown();
+                observed.get(5, TimeUnit.SECONDS);
+                forgotten.get(5, TimeUnit.SECONDS);
+                assertEquals(0, endpoint.pendingEncoderRequestCount());
+            }
+        }
+    }
+
+    @Test
+    void encoderRetirementFailsOnlyItsOwnPhaseAndReleasesPendingCount() throws Exception {
+        BalanceContext context = context(108L);
+        context.setRequestPhase(RequestPhase.ENCODER);
+        CompletableFuture<Response> encoderFuture = lifecycle.register(context);
+        CompletableFuture<Response> generationFuture = lifecycle.register(context(108L));
+        WorkerStatus worker = mock(WorkerStatus.class);
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        Response route = new Response();
+        route.setSuccess(true);
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertTrue(lifecycle.claimEncoderRoute("108", encoderFuture, pin));
+        }
+        assertTrue(lifecycle.publishEncoderRoute("108", encoderFuture, route));
+        assertTrue(encoderFuture.get(5, TimeUnit.SECONDS).isSuccess());
+        endpoint.close();
+        endpoint.awaitRetirement();
+
+        assertEquals(RequestState.Phase.FAILED,
+                lifecycle.getRequestState("108", 0L, RequestPhase.ENCODER).state());
+        assertEquals(RequestState.Phase.QUEUED,
+                lifecycle.getRequestState("108", 0L).state());
+        assertEquals(0, endpoint.pendingEncoderRequestCount());
+        assertFalse(generationFuture.isDone());
+    }
+
+    @Test
+    void encoderWorkerFailureAndInactivityEndOnlyEncoderTracking() throws Exception {
+        BalanceContext failedContext = context(109L);
+        failedContext.setRequestPhase(RequestPhase.ENCODER);
+        CompletableFuture<Response> failedFuture = lifecycle.register(failedContext);
+        WorkerStatus failedWorker = mock(WorkerStatus.class);
+        EncoderEndpoint failedEndpoint = new EncoderEndpoint(failedWorker, new EndpointEventProjector(lifecycle));
+        Response route = new Response();
+        route.setSuccess(true);
+        try (var pin = failedEndpoint.tryPinGeneration()) {
+            assertTrue(lifecycle.claimEncoderRoute("109", failedFuture, pin));
+        }
+        assertTrue(lifecycle.publishEncoderRoute("109", failedFuture, route));
+        failedFuture.get(5, TimeUnit.SECONDS);
+        WorkerStatus.TaskObservation failedTask = mock(WorkerStatus.TaskObservation.class);
+        when(failedTask.requestId()).thenReturn("109");
+        when(failedTask.errorCode()).thenReturn(7L);
+        WorkerStatus.StatusObservation failed = mock(WorkerStatus.StatusObservation.class);
+        when(failed.alive()).thenReturn(true);
+        when(failed.runningTasks()).thenReturn(Map.of());
+        when(failed.finishedTasks()).thenReturn(Map.of("109", failedTask));
+        WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
+        when(prepared.observation()).thenReturn(failed);
+        failedEndpoint.applyPreparedStatus(failedWorker, prepared).run();
+        assertEquals(RequestState.Phase.FAILED,
+                lifecycle.getRequestState("109", 0L, RequestPhase.ENCODER).state());
+        assertEquals(0, failedEndpoint.pendingEncoderRequestCount());
+
+        BalanceContext inactiveContext = context(110L);
+        inactiveContext.setRequestPhase(RequestPhase.ENCODER);
+        CompletableFuture<Response> inactiveFuture = lifecycle.register(inactiveContext);
+        WorkerStatus inactiveWorker = mock(WorkerStatus.class);
+        EncoderEndpoint inactiveEndpoint = new EncoderEndpoint(inactiveWorker, new EndpointEventProjector(lifecycle));
+        try (var pin = inactiveEndpoint.tryPinGeneration()) {
+            assertTrue(lifecycle.claimEncoderRoute("110", inactiveFuture, pin));
+        }
+        assertTrue(lifecycle.publishEncoderRoute("110", inactiveFuture, route));
+        inactiveFuture.get(5, TimeUnit.SECONDS);
+        lifecycle.expireInactiveRequest(lifecycle.requestSlot("110", RequestPhase.ENCODER), Long.MAX_VALUE);
+        assertEquals(RequestState.Phase.TIMED_OUT,
+                lifecycle.getRequestState("110", 0L, RequestPhase.ENCODER).state());
+        assertEquals(0, inactiveEndpoint.pendingEncoderRequestCount());
+    }
+
+    @Test
+    void encoderCancelAfterRouteClearsLocalTracking() throws Exception {
+        BalanceContext context = context(112L);
+        context.setRequestPhase(RequestPhase.ENCODER);
+        CompletableFuture<Response> future = lifecycle.register(context);
+        WorkerStatus worker = mock(WorkerStatus.class);
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+        Response route = new Response();
+        route.setSuccess(true);
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertTrue(lifecycle.claimEncoderRoute("112", future, pin));
+        }
+        assertTrue(lifecycle.publishEncoderRoute("112", future, route));
+        future.get(5, TimeUnit.SECONDS);
+        assertEquals(1, endpoint.pendingEncoderRequestCount());
+
+        lifecycle.cancelRequest("112", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+
+        assertEquals(RequestState.Phase.CANCELLED,
+                lifecycle.getRequestState("112", 0L, RequestPhase.ENCODER).state());
+        assertEquals(0, endpoint.pendingEncoderRequestCount());
+    }
+
+    @Test
+    void encoderCancelBetweenEndpointClaimAndRoutePublicationRejectsSuccess() throws Exception {
+        BalanceContext context = context(113L);
+        context.setRequestPhase(RequestPhase.ENCODER);
+        CompletableFuture<Response> future = lifecycle.register(context);
+        EncoderEndpoint endpoint = new EncoderEndpoint(mock(WorkerStatus.class),
+                new EndpointEventProjector(lifecycle));
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertTrue(lifecycle.claimEncoderRoute("113", future, pin));
+        }
+        assertEquals(RequestState.Phase.DISPATCHING,
+                lifecycle.getRequestState("113", 0L, RequestPhase.ENCODER).state());
+        assertEquals(1, endpoint.pendingEncoderRequestCount());
+
+        lifecycle.cancelRequest("113", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+
+        Response route = new Response();
+        route.setSuccess(true);
+        assertFalse(lifecycle.publishEncoderRoute("113", future, route));
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                future.get(5, TimeUnit.SECONDS).getCode());
+        assertEquals(RequestState.Phase.CANCELLED,
+                lifecycle.getRequestState("113", 0L, RequestPhase.ENCODER).state());
+        assertEquals(0, endpoint.pendingEncoderRequestCount());
     }
 
     @Test

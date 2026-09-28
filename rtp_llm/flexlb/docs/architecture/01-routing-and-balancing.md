@@ -7,39 +7,40 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 
 ## Router / DefaultRouter
 
+当前 `Schedule` 可传 `schedule_roles`（Encoder、Prefill、Decode、PDFusion）只选择指定角色；
+未传时选择模型配置的全部角色。显式角色去重后按 `ModelMetaConfig.requiredRoles()` 的顺序决策；
+未配置角色以及非法枚举值返回 `INVALID_REQUEST`。现有 VIT 不属于该新增请求枚举，
+其选点仍使用 `RandomStrategy`。
+
+Encoder 使用独立的 `EncoderStrategy`：候选必须是已发布且存活的 Encoder endpoint，
+`available_kv_cache >= 0`；先比较 `running_query_len + waiting_query_len + 本地待观察请求数`，
+并列时选可用 KV cache 更多的 worker。Encoder 单独请求时走 DIRECT，FlexLB 返回
+`ENCODER` 端点，不调用 EnqueueBatch；没有候选时返回 `NO_ENCODER_WORKER` (8408)。
+本地待观察请求在 endpoint 的并发 map 中逐请求更新，选点读取允许短暂滞后；并发请求可能依据
+同一份负载快照选中同一 worker。Prefill/Decode 与 PDFusion 的既有策略保持原样。
+
 `Router` 接口只有一个方法：`Response route(BalanceContext balanceContext)`。
 
-`DefaultRouter`（`balance/scheduler/DefaultRouter.java`）：
-
-- 类上标注 `@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy",
-  "cacheAffinityFirstStrategy"})`——4 个策略 bean 都在**各自构造函数里**调用
-  `LoadBalanceStrategyFactory.register()` 自注册，`@DependsOn` 保证注册先于 DefaultRouter 构造。
-- 每次路由时按 `FlexlbConfig.getStrategyForRoleType(roleType)` 从当前配置快照解析角色策略，
-  再经 `LoadBalanceStrategyFactory` 取对应 `LoadBalancer`——策略配置支持 Nacos 运行时热更新；
-  策略未注册则在路由时抛异常。
+`DefaultRouter`（`balance/scheduler/DefaultRouter.java`）由 Prefill、Decode、VIT 和
+Encoder 选择器组成，按请求有效角色顺序逐个选择，并在失败时关闭已捕获的 endpoint pin。
 
 ### route() 流程
 
-1. **校验**：`request == null` → `INVALID_REQUEST`；全局 worker 状态未初始化 →
-   `NO_AVAILABLE_WORKER`。
-2. **角色列表**：读静态单例 `EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS` 的
-   `getRoleTypeList()`——按**固定顺序 PDFUSION → DECODE → PREFILL → VIT**，只加入
-   worker map 非空的角色。没有请求级角色过滤：所有非空角色都会被路由。
-   - 因此 PD 分离部署下实际顺序是 **DECODE 先于 PREFILL**；融合部署只有 PDFUSION；
-     有 VIT worker 时 VIT 追加在最后。
-3. **`routeByRoleType()`**：逐角色调用 `loadBalancer.select(ctx, roleType, group)`。
+1. **校验**：缺少请求或显式角色未配置 → `INVALID_REQUEST`。
+2. **角色列表**：`ModelMetaConfig.requiredRoles()` 给出配置顺序；请求带
+   `schedule_roles` 时取其交集，未传时使用全部配置角色。
+3. **逐角色选择**：Prefill/PDFusion 调用 `CostBasedPrefillStrategy`，Decode 调用
+   `DecodeSelector`，VIT 调用 `RandomStrategy`，Encoder 调用 `EncoderStrategy`。
    `group` 初始为 null；每个角色选中后 `group = serverStatus.getGroup()`——**首个成功角色的
    worker group 约束后续所有角色的候选集**（group 亲和链，如 DECODE 选中的 group 决定
-   PREFILL 只能在同 group 中选）。任一角色失败立即返回
-   `RoutingResult.failure(已成功列表, 失败角色, 错误信息)`。
+   PREFILL 只能在同 group 中选）。任一角色失败立即关闭之前的选择并返回错误。
 4. **响应**：全部成功 → success 响应（携带 `List<ServerStatus>`；物理
    `server_ip/http_port/grpc_port` 保持不变，N>1 时每个成功项带逻辑 `engine_index`，
-   N=1 时省略该字段）；失败 → 先
-   `rollBackRoutingFailure()` 再构造错误响应，错误码取
-   `failedRoleType.getErrorType().getErrorCode()`。
+   N=1 时省略该字段）；没有可用角色时按该角色的错误类型返回。
 
 `RoleType.getErrorType()` 映射：PREFILL→`NO_PREFILL_WORKER`(8402)、DECODE→`NO_DECODE_WORKER`
-(8403)、PDFUSION→`NO_PDFUSION_WORKER`(8404)、VIT→`NO_VIT_WORKER`(8405)，全部 `canRetry=true`。
+(8403)、PDFUSION→`NO_PDFUSION_WORKER`(8404)、VIT→`NO_VIT_WORKER`(8405)、
+ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 
 ### 角色与策略 / 资源指标映射
 
@@ -50,6 +51,7 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 | PDFUSION / PREFILL | `loadBalanceStrategy` | `SHORTEST_TTFT` | `WAIT_TIME` |
 | DECODE | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE` | `REMAINING_KV_CACHE` |
 | VIT | `vitLoadBalanceStrategy` | `RANDOM` | `WAIT_TIME` |
+| ENCODER | 独立 `EncoderStrategy` | 最少并发、可用 KV cache 并列打破 | `running + waiting + 本地待观察请求` |
 
 ### gRPC Schedule 响应
 

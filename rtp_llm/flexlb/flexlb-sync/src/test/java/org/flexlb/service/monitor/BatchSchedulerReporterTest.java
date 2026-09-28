@@ -1,5 +1,6 @@
 package org.flexlb.service.monitor;
 
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -20,6 +21,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
@@ -143,6 +145,17 @@ class BatchSchedulerReporterTest {
                 "engineIp", "scheduler",
                 "role", "SCHEDULER");
         verify(monitor).report(INFLIGHT_MAX_AGE_MS, tags, 15_000.0);
+    }
+
+    @Test
+    void should_report_scheduler_inflight_size_by_role() {
+        reporter.reportSchedulerInflightSize(RoleType.PREFILL, 3);
+        reporter.reportSchedulerInflightSize(RoleType.ENCODER, 2);
+
+        verify(monitor).report(SCHEDULER_INFLIGHT_SIZE,
+                FlexMetricTags.of("role", "PREFILL", "engineIp", "scheduler"), 3.0);
+        verify(monitor).report(SCHEDULER_INFLIGHT_SIZE,
+                FlexMetricTags.of("role", "ENCODER", "engineIp", "scheduler"), 2.0);
     }
 
     @Test

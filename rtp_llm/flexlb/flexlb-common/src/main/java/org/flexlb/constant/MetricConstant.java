@@ -22,6 +22,8 @@ public class MetricConstant {
 
     public static final String ENGINE_DECODE_WORKER_NUMBER = "app.engine.health.check.engine.decode.worker.number";
 
+    public static final String ENGINE_ENCODER_WORKER_NUMBER = "app.engine.health.check.engine.encoder.worker.number";
+
     /**
      * Service discovery client request result
      */
@@ -83,6 +85,17 @@ public class MetricConstant {
      * Replaces the former separate BATCH_INFLIGHT_REQUEST_COUNT (prefill) and DECODE_INFLIGHT_COUNT (decode).
      */
     public static final String INFLIGHT_REQUEST_COUNT = "app.flexlb.inflight.request.count";
+
+    /**
+     * Encoder decisions awaiting their first matching WorkerStatus task.
+     */
+    public static final String ENCODER_PENDING_REQUEST_COUNT =
+            "app.flexlb.encoder.pending.request.count";
+
+    /**
+     * Encoder selection load: running plus waiting queries and local pending requests.
+     */
+    public static final String ENCODER_SELECTION_LOAD = "app.flexlb.encoder.selection.load";
 
     /**
      * FlexLB scheduler total load per decode worker (confirmed running + scheduler inflight)
@@ -177,7 +190,8 @@ public class MetricConstant {
 
     /**
      * FlexLB scheduler inflight size — the scheduler's own inflight request count.
-     * <p>Reported by BatchSchedulerReporter using role=PREFILL + engineIp="scheduler" tags.
+     * <p>Reported by BatchSchedulerReporter with role=PREFILL for Generation or role=ENCODER
+     * for Encoder, and engineIp="scheduler".
      * Formerly kept as a separate name from the now-removed per-engine local inflight size metric
      * to avoid tag schema conflict (per-engine vs scheduler-level).
      */

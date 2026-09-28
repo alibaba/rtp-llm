@@ -9,6 +9,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -249,7 +250,8 @@ class DirectAdmissionContractTest {
             });
             var model = mock(ModelMetaConfig.class);
             when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
-            var router = new DefaultRouter(prefillSelector, decodeSelector, mock(RandomStrategy.class), service, model);
+            var router = new DefaultRouter(prefillSelector, decodeSelector, mock(RandomStrategy.class),
+                    mock(EncoderStrategy.class), service, model);
             scheduler = new RequestScheduler(service, router, endpoints, reporter, mock(EvictionManager.class),
                     requests, placement);
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter, scheduler);

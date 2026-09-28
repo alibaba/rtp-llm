@@ -143,6 +143,7 @@ public class EndpointRegistry {
                 RoleType.PREFILL,
                 RoleType.DECODE,
                 RoleType.PDFUSION,
+                RoleType.ENCODER,
                 RoleType.VIT)) {
             maps.put(role, new ConcurrentHashMap<>());
         }
@@ -759,6 +760,7 @@ public class EndpointRegistry {
                     placementAvailability);
             case DECODE -> new DecodeEndpoint(
                     status, endpointEvents, placementAvailability);
+            case ENCODER -> new EncoderEndpoint(status, endpointEvents);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };

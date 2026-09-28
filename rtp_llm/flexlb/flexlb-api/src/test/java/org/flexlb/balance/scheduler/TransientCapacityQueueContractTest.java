@@ -12,6 +12,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -1024,6 +1025,7 @@ class TransientCapacityQueueContractTest {
                             prefillSelector,
                             decodeSelector,
                             new RandomStrategy(workers),
+                            mock(EncoderStrategy.class),
                             configService,
                             modelMeta(prefillFirst)),
                     metrics));
@@ -1180,6 +1182,7 @@ class TransientCapacityQueueContractTest {
                     mock(CostBasedPrefillStrategy.class),
                     mock(DecodeSelector.class),
                     mock(RandomStrategy.class),
+                    mock(EncoderStrategy.class),
                     mock(ConfigService.class),
                     modelMeta(false));
             this.delegate = delegate;

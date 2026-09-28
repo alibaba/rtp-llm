@@ -16,6 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RoleAddrProtocolCompatibilityTest {
+    private static final List<RoleType> LEGACY_ROLE_ADDR_ROLES = List.of(
+            RoleType.PDFUSION, RoleType.PREFILL, RoleType.DECODE, RoleType.VIT,
+            RoleType.FRONTEND);
 
     @Test
     void descriptorPreservesDsv4FieldsAndAddsExtensionFields() {
@@ -42,7 +45,7 @@ class RoleAddrProtocolCompatibilityTest {
     @Test
     void dualRoleAddrPayloadIsReadableByDsv4Descriptor() throws Exception {
         Descriptors.Descriptor legacy = legacyRoleAddrDescriptor();
-        for (RoleType role : RoleType.values()) {
+        for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
             EngineRpcService.RoleAddrPB payload = EngineRpcService.RoleAddrPB.newBuilder()
                     .setRole(RoleTypeProtoConverter.toLegacyProto(role))
                     .setRoleStr(role.getCode())
@@ -51,7 +54,8 @@ class RoleAddrProtocolCompatibilityTest {
                     .build();
 
             DynamicMessage oldReader = DynamicMessage.parseFrom(legacy, payload.toByteArray());
-            assertEquals(role.ordinal(), ((Descriptors.EnumValueDescriptor) oldReader.getField(
+            assertEquals(RoleTypeProtoConverter.toLegacyProto(role).getNumber(),
+                    ((Descriptors.EnumValueDescriptor) oldReader.getField(
                     legacy.findFieldByNumber(1))).getNumber());
         }
     }
@@ -59,11 +63,11 @@ class RoleAddrProtocolCompatibilityTest {
     @Test
     void currentRoleAddrReaderAcceptsDsv4PayloadAndRejectsConflict() throws Exception {
         Descriptors.Descriptor legacy = legacyRoleAddrDescriptor();
-        for (RoleType role : RoleType.values()) {
+        for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
             DynamicMessage oldWriter = DynamicMessage.newBuilder(legacy)
                     .setField(legacy.findFieldByNumber(1),
                             legacy.findEnumTypeByName("RoleType")
-                                    .findValueByNumber(role.ordinal()))
+                                    .findValueByNumber(RoleTypeProtoConverter.toLegacyProto(role).getNumber()))
                     .build();
             EngineRpcService.RoleAddrPB parsed =
                     EngineRpcService.RoleAddrPB.parseFrom(oldWriter.toByteArray());
@@ -213,10 +217,10 @@ class RoleAddrProtocolCompatibilityTest {
     private static DescriptorProtos.EnumDescriptorProto roleEnum(String name, String prefix) {
         DescriptorProtos.EnumDescriptorProto.Builder builder =
                 DescriptorProtos.EnumDescriptorProto.newBuilder().setName(name);
-        for (RoleType role : RoleType.values()) {
+        for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
             builder.addValue(DescriptorProtos.EnumValueDescriptorProto.newBuilder()
                     .setName(prefix + role.name())
-                    .setNumber(role.ordinal()));
+                    .setNumber(RoleTypeProtoConverter.toLegacyProto(role).getNumber()));
         }
         return builder.build();
     }

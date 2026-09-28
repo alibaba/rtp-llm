@@ -22,6 +22,7 @@ import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -344,6 +345,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 prefillSelector,
                 new DecodeSelector(engineWorkerStatus),
                 new RandomStrategy(engineWorkerStatus),
+                mock(EncoderStrategy.class),
                 configService,
                 modelMeta);
     }

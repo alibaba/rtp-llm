@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -78,7 +79,7 @@ class DirectRequestLifetimeRaceTest {
             var model = mock(ModelMetaConfig.class);
             when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
             var router = new DefaultRouter(prefillSelector, mock(DecodeSelector.class),
-                    mock(RandomStrategy.class), service, model);
+                    mock(RandomStrategy.class), mock(EncoderStrategy.class), service, model);
 
             AtomicBoolean lateConfirmation = new AtomicBoolean();
             doAnswer(invocation -> {

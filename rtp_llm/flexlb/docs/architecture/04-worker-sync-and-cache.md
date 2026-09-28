@@ -68,6 +68,11 @@ metrics 边界通过 `WorkerStatus.getMetricIpPort()`（或 `ServerStatus` 对�
 ### GrpcWorkerStatusRunner
 
 gRPC `getWorkerStatus`（VIT 走 multimodal 变体）携带 `latest_finished_version` 做增量拉取。
+Encoder 使用常规 `GetWorkerStatus`，角色字符串为 `ENCODER`，`RoleTypePB` 枚举值为
+`ROLE_TYPE_ENCODER = 5`。`EncoderEndpoint` 将
+`running_task_info` 和 `finished_task_list` 投影到 Encoder 阶段的请求记录；运行中的
+任务使本地待观察并发与引擎并发对账，完成任务中的错误码决定完成或失败。当前
+PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 响应字段（`WorkerStatusResponse`）：`alive`、`available_concurrency`、running/waiting/finished
 任务表（Map<requestId, TaskInfo>）、`status_version`、`step_latency_ms`、`iterate_count`、
 dp/tp size、内嵌 `cache_status`、`block_hash_lookahead_tokens`、`cache_match_rollback_blocks`、

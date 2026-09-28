@@ -32,6 +32,25 @@ enum CancelReasonPB {
     CANCEL_REASON_DEADLINE_EXCEEDED = 2;
 }
 
+// Roles requested from one Schedule call. An empty list selects all roles
+// configured for the model; callers normally request Encoder separately from
+// the later Prefill/Decode or PDFusion decision.
+enum ScheduleRolePB {
+    SCHEDULE_ROLE_UNSPECIFIED = 0;
+    SCHEDULE_ROLE_ENCODER = 1;
+    SCHEDULE_ROLE_PREFILL = 2;
+    SCHEDULE_ROLE_DECODE = 3;
+    SCHEDULE_ROLE_PDFUSION = 4;
+}
+
+// Unspecified preserves historical Cancel/GetRequestState behavior by
+// addressing the Generation request record.
+enum RequestPhasePB {
+    REQUEST_PHASE_UNSPECIFIED = 0;
+    REQUEST_PHASE_ENCODER = 1;
+    REQUEST_PHASE_GENERATION = 2;
+}
+
 message RequestLifecyclePB {
     string request_id = 1;
     RequestStatePB state = 2;
@@ -67,6 +86,7 @@ message FlexlbScheduleRequestPB {
     // Raw prompt token IDs used by the Master to derive block_cache_keys when
     // the client does not provide precomputed keys.
     repeated int32 input_ids = 16;
+    repeated ScheduleRolePB schedule_roles = 17;
 }
 
 message FlexlbServerStatusPB {
@@ -111,6 +131,7 @@ message FlexlbCancelRequestPB {
     // Single-hop guard only. Every receiver checks local lifecycle ownership;
     // only a hop-zero miss on a follower may be forwarded to the current master.
     int32 forward_hop = 4;
+    RequestPhasePB phase = 5;
 }
 
 message FlexlbCancelResponsePB {
@@ -124,6 +145,7 @@ message GetRequestStateRequestPB {
     // Same single-hop guard as Schedule. Clients leave this at zero and a
     // FlexLB follower sets it to one before forwarding.
     uint32 forward_hop = 3;
+    RequestPhasePB phase = 4;
 }
 
 message GetRequestStateResponsePB {

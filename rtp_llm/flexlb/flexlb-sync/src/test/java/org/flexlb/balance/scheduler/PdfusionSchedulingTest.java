@@ -9,6 +9,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -112,7 +113,7 @@ class PdfusionSchedulingTest {
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         DefaultRouter router = new DefaultRouter(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class)),
-                new DecodeSelector(directory), new RandomStrategy(directory), service, model);
+                new DecodeSelector(directory), new RandomStrategy(directory), mock(EncoderStrategy.class), service, model);
         RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, reporter,
                 mock(EvictionManager.class), lifecycle, availability);
         SchedulerRuntime runtime = direct
