@@ -65,3 +65,13 @@
 111/112 各自在新建的个人 ext4 工作树上使用同一 `b24b6cd88` modeling 源码和同一远端开发分支；旧的 `3d7` 工作树与 trace 原文件保留。两端容器内均以 `luohaocheng.lhc`、`--config=cuda13 --config=sm10x` 编译，Bazel 各完成 23,714 个动作并报告成功。构建日志和哈希保存在 `pagedmeta-b24-build-logs-111112.*`。`host-selection-pagedmeta-before-restart.json` 记录旧服务仍在时的占用，`host-selection-pagedmeta-launch.json` 记录新服务启动前 111/112 的 GPU 选择和占用。
 
 两端启动前的 FastSafetensors guard 均通过：target 从 3FS 读取，7 个 shard、16,402 个 tensor、54.47 GiB；MTP 视图在个人数据盘，9 个 shard、5,404 个 tensor、20.00 GiB，实际 shard 指向已核实的 3FS。启动配置显式为 `fastsafetensors`。四份 guard 输出及两份启动配置在 `pagedmeta-b24-preflight-111.tar.gz`、`pagedmeta-b24-preflight-112.tar.gz`，哈希见 `pagedmeta-b24-preflight-111112.sha256`。111/112 的 8 个 RDMA bond 都是 ACTIVE，互 ping 各 3 包、0% 丢包。这些预检和构建结果本身不证明新服务的 smoke 或性能。
+
+## Paged metadata 候选的四层双机复核
+
+`b24b6cd88` 在 111 Prefill、112 Decode 的独立个人工作树编译并启动；两端各 8 个 rank 的 FastSafetensors 日志通过校验。`host-selection-pagedmeta-flow.json` 和 `host-selection-pagedmeta-timeline.json` 记录了各次运行前的 GPU 占用检查。
+
+四层 FP8、Native MTP、TP8/EP8 双机 PD flow 的 11 条请求全部返回；独立审计 `pagedmeta-b24-flow-independent-audit.json` 逐条检查了 PD 状态长度、Decode 路由、MTP draft 轮次、UTF-8 和 300 秒上限，11/11 通过，0 条跳过，最慢一条 72.284 秒。请求原文、响应和执行记录保存在 `pagedmeta-b24-flow-raw.tar.gz`，校验值在同名前缀的 `.sha256`。四层随机裁剪权重不能证明答案语义正确。
+
+相同 65,536-token 输入和双机服务上，完成 10 次无前缀复用的同路径预热及 16 次正式采样，独立请求审计 `pagedmeta-b24-timeline-independent-audit.json` 全部通过。八个 rank 的 trace、原始请求和校验值分别保存在 `pagedmeta-b24-allrank-traces.tar.gz`、`pagedmeta-b24-timeline-requests.tar.gz` 和 `pagedmeta-b24-timeline-archives.sha256`。本轮脚本沿用了旧的 trace 文件名前缀 `k3_64k_integrated_kmerge_3d7_r1`；**文件内容属于新工作树中的 `b24b6cd88` 服务**，不能与旧版 `3d7` trace 混用。
+
+`pagedmeta-b24-aligned-phase-audit.json` 匹配 6 条全 rank 请求：target Prefill GPU span 中位数 71.607 ms，draft 63.249 ms，完整 Prefill 134.950 ms。旧 `3d7` 分别为 72.255、62.956、135.148 ms；固定 `feat/k3_dev` `a9bf762e8` 分别为 71.556、62.564、135.266 ms。target trace 中原先每个 rank、每条请求出现的 8,192 项 `aten::copy_` 已消失；`pagedmeta-b24-target-gpu-idle.json.gz` 中最慢 rank 的 GPU 空隙中位数从 4.880 降到 4.100 ms。target 与固定 feat 相差约 0.051 ms，仍在样本波动范围内；本轮不据此宣称集成版 target 更快，也不作为完整模型性能结论。
