@@ -20,3 +20,5 @@
 目前可以保留的候选是 **KDA 其他子内核、等价范围内的 FP8 producer，以及归属明确后的投影 GEMM**。需要先记录每层、每个投影的 CPU range 和输入形状，在四层用相同输入做算子 A/B、数值检查，再看完整 target 关键路径。现有 RTP trace 没有足够的模块标签，NVJet 和 DeepGEMM 仍为 `[unattributed]`。vLLM `3df4` 的历史四层 NIXL PD trace 有完整八 rank 原件，但当次 HTTP 预热未收敛，FlashInfer 64K 自动调优因超过五分钟关闭；它目前只能作为待复测的 target 候选，不能和上述两版直接宣称胜负。
 
 这些是性能锚点前的筛选记录。完整 93 层对照、最终 FP8 双机 smoke 和峰值激活锚点尚未完成。
+
+后续集成版增加了默认关闭的 `RTP_LLM_PROFILE_MODEL_MODULES=1` 标记。采集时它给各层 attention、MoE、KDA/MLA 投影和通信调用加 CPU range，再通过 CUDA correlation 归属异步 kernel。关闭开关时不生成这些 range。该改动只通过语法检查和 CPU profiler 开关检查；尚未在四层 PD 服务里重建、复测，不能把它当作新的性能结果。

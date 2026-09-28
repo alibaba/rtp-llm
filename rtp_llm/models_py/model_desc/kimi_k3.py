@@ -23,7 +23,7 @@ from rtp_llm.models_py.model_desc.block_map import (
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearMetadata
 from rtp_llm.models_py.modules import Embedding, RMSNorm
-from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA, KimiK3MLA, linear
+from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3KDA, KimiK3MLA, linear, profile_scope
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE, situ
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
@@ -49,12 +49,14 @@ class KimiK3DenseMLP(nn.Module):
         self.linear_beta = config.k3_runtime_config.activation_situ_linear_beta
 
     def forward(self, hidden, valid_mask=None):
-        return self.down(
-            situ(
-                self.gate(hidden), self.up(hidden), self.beta, self.linear_beta,
-                inplace=True,
-            )
-        )
+        with profile_scope("RTP::mlp.dense.gate_proj"):
+            gate = self.gate(hidden)
+        with profile_scope("RTP::mlp.dense.up_proj"):
+            up = self.up(hidden)
+        with profile_scope("RTP::mlp.dense.activation"):
+            activated = situ(gate, up, self.beta, self.linear_beta, inplace=True)
+        with profile_scope("RTP::mlp.dense.down_proj"):
+            return self.down(activated)
 
 
 class KimiK3DecoderLayer(nn.Module):
@@ -97,28 +99,33 @@ class KimiK3DecoderLayer(nn.Module):
         if self.block_size:
             previous = (self.index + self.block_size - 1) // self.block_size
             writes = self.index % self.block_size == 0
-            attn_input = self.attention_residual(
-                hidden, anchors, num_blocks=previous,
-                output_norm_weight=self.attention_norm.weight,
-                output_norm_eps=self.attention_norm.variance_epsilon,
-            )
+            with profile_scope(f"RTP::layers.{self.index}.attention_residual"):
+                attn_input = self.attention_residual(
+                    hidden, anchors, num_blocks=previous,
+                    output_norm_weight=self.attention_norm.weight,
+                    output_norm_eps=self.attention_norm.variance_epsilon,
+                )
             if writes:
                 anchors[:, previous].copy_(hidden)
-            attended = self.attention(
-                attn_input, fmha, cache, attention_inputs, metadata
-            )
+            with profile_scope(f"RTP::layers.{self.index}.attention"):
+                attended = self.attention(
+                    attn_input, fmha, cache, attention_inputs, metadata
+                )
             hidden = attended if writes else hidden + attended
-            mlp_input = self.mlp_residual(
-                hidden, anchors, num_blocks=previous + int(writes),
-                output_norm_weight=self.mlp_norm.weight,
-                output_norm_eps=self.mlp_norm.variance_epsilon,
-            )
+            with profile_scope(f"RTP::layers.{self.index}.mlp_residual"):
+                mlp_input = self.mlp_residual(
+                    hidden, anchors, num_blocks=previous + int(writes),
+                    output_norm_weight=self.mlp_norm.weight,
+                    output_norm_eps=self.mlp_norm.variance_epsilon,
+                )
         else:
-            hidden = hidden + self.attention(
-                self.attention_norm(hidden), fmha, cache, attention_inputs, metadata
-            )
+            with profile_scope(f"RTP::layers.{self.index}.attention"):
+                hidden = hidden + self.attention(
+                    self.attention_norm(hidden), fmha, cache, attention_inputs, metadata
+                )
             mlp_input = self.mlp_norm(hidden)
-        return hidden + self.mlp(mlp_input, valid_mask)
+        with profile_scope(f"RTP::layers.{self.index}.mlp"):
+            return hidden + self.mlp(mlp_input, valid_mask)
 
 
 class KimiK3Model(GptModelBase):

@@ -1,6 +1,8 @@
 """K3 projections over RTP's MLA and paged KDA implementations."""
 
 from functools import lru_cache
+from contextlib import nullcontext
+import os
 
 import torch
 from torch import nn
@@ -23,6 +25,18 @@ from rtp_llm.models_py.modules.kimi_k3.native_mla_ops import (
     gate_sigmoid_mul,
 )
 from rtp_llm.utils.model_weight import W
+
+_PROFILE_MODEL_MODULES = os.environ.get("RTP_LLM_PROFILE_MODEL_MODULES", "0") == "1"
+_NO_PROFILE_SCOPE = nullcontext()
+
+
+def profile_scope(name):
+    """Label model calls only during an explicitly requested profiling run."""
+    return (
+        torch.profiler.record_function(name)
+        if _PROFILE_MODEL_MODULES
+        else _NO_PROFILE_SCOPE
+    )
 
 
 def linear(weights, name, hardware=None):
@@ -102,8 +116,10 @@ class KimiK3KDA(nn.Module):
         self.decode.gate_lower_bound = runtime.kda_gate_lower_bound
 
     def forward(self, hidden, fmha, cache, attention_inputs, metadata):
-        full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
-        fused = self.input(full_hidden)
+        with profile_scope("RTP::attention.input_all_gather"):
+            full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+        with profile_scope("RTP::attention.kda.input_proj"):
+            fused = self.input(full_hidden)
         logical_width = 4 * self.width + self.fa_width + self.heads
         if fused.shape[-1] < logical_width:
             raise ValueError(
@@ -114,36 +130,46 @@ class KimiK3KDA(nn.Module):
         qkv, gate, fa, beta = fused.split(
             [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
         )
-        forget = self.f_b(fa.contiguous())
+        with profile_scope("RTP::attention.kda.forget_proj"):
+            forget = self.f_b(fa.contiguous())
         kernel = (
             self.prefill
             if attention_inputs.is_prefill and not metadata.is_target_verify
             else self.decode
         )
-        output = kernel(
-            qkv if kernel is self.prefill else qkv.contiguous(),
-            forget, beta, attention_inputs, cache, metadata
-        )
+        with profile_scope("RTP::attention.kda.core"):
+            output = kernel(
+                qkv if kernel is self.prefill else qkv.contiguous(),
+                forget, beta, attention_inputs, cache, metadata
+            )
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:
             # Paged KDA skips null-block rows, leaving their output unspecified.
             output = torch.where(valid_mask[:, None], output.reshape(-1, self.width), 0)
-        if self._fp8_output_norm:
-            from rtp_llm.models_py.kernels.cuda.fp8_kernel.fused_activation import (
-                rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
-            )
+        with profile_scope("RTP::attention.kda.output_norm_quant"):
+            if self._fp8_output_norm:
+                from rtp_llm.models_py.kernels.cuda.fp8_kernel.fused_activation import (
+                    rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
+                )
 
-            values, scales = rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
-                output.reshape(-1, self.heads, self.dim),
-                gate.reshape(-1, self.heads, self.dim),
-                self.norm.weight,
-                self.norm.eps,
+                values, scales = rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
+                    output.reshape(-1, self.heads, self.dim),
+                    gate.reshape(-1, self.heads, self.dim),
+                    self.norm.weight,
+                    self.norm.eps,
+                )
+            else:
+                output = self.norm(
+                    output.reshape(-1, self.dim), gate.reshape(-1, self.dim)
+                )
+        with profile_scope("RTP::attention.kda.output_proj"):
+            output = (
+                self.output.forward_quantized(values, scales)
+                if self._fp8_output_norm
+                else self.output(output.reshape(-1, self.width))
             )
-            output = self.output.forward_quantized(values, scales)
-        else:
-            output = self.norm(output.reshape(-1, self.dim), gate.reshape(-1, self.dim))
-            output = self.output(output.reshape(-1, self.width))
-        return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
+        with profile_scope("RTP::attention.output_reduce_scatter"):
+            return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
 
 
 @lru_cache(None)
@@ -209,51 +235,69 @@ class KimiK3MLA(nn.Module):
             [self.q_rank, self.kv_rank + self.suffix_dim], dim=-1
         )
         latent, suffix = kv.split([self.kv_rank, self.suffix_dim], dim=-1)
-        if q.is_cuda:
-            q, latent = fused_q_kv_rmsnorm(
-                q,
-                latent,
-                self.q_norm.weight,
-                self.kv_norm.weight,
-                self.q_norm.variance_epsilon,
-            )
-        else:
-            q, latent = self.q_norm(q.contiguous()), self.kv_norm(latent.contiguous())
-        q = self.q_b(q).reshape(-1, self.heads, self.q_dim)
-        output = fmha.forward(q, latent, suffix, cache, self.layer_idx, None)
+        with profile_scope("RTP::attention.mla.qkv_norm"):
+            if q.is_cuda:
+                q, latent = fused_q_kv_rmsnorm(
+                    q,
+                    latent,
+                    self.q_norm.weight,
+                    self.kv_norm.weight,
+                    self.q_norm.variance_epsilon,
+                )
+            else:
+                q, latent = self.q_norm(q.contiguous()), self.kv_norm(
+                    latent.contiguous()
+                )
+        with profile_scope("RTP::attention.mla.q_proj"):
+            q = self.q_b(q).reshape(-1, self.heads, self.q_dim)
+        with profile_scope("RTP::attention.mla.core"):
+            output = fmha.forward(q, latent, suffix, cache, self.layer_idx, None)
         if output is None:
             raise RuntimeError("K3 MLA backend returned no attention output")
         return output.reshape(-1, self.heads * self.v_dim)
 
     def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None):
-        full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+        with profile_scope("RTP::attention.input_all_gather"):
+            full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
         qkv_rows = self.q_rank + self.kv_rank + self.suffix_dim
         if self._gate_stream is not None and full_hidden.shape[0] < 512:
             # Native event fork/join: attention on current stream, gate on aux.
             self._gate_start.record()
-            output = self._attend(self.qkv_input(full_hidden), fmha, cache)
+            with profile_scope("RTP::attention.mla.qkv_input_proj"):
+                qkv = self.qkv_input(full_hidden)
+            output = self._attend(qkv, fmha, cache)
             with torch.cuda.stream(self._gate_stream):
                 self._gate_start.wait()
-                gate = self.gate_input(full_hidden)
+                with profile_scope("RTP::attention.mla.gate_input_proj"):
+                    gate = self.gate_input(full_hidden)
                 self._gate_done.record()
             self._gate_done.wait()
         else:
-            qkv, gate = self.input(full_hidden).split(
-                [qkv_rows, self.heads * self.v_dim], dim=-1
-            )
+            with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
+                qkv, gate = self.input(full_hidden).split(
+                    [qkv_rows, self.heads * self.v_dim], dim=-1
+                )
             output = self._attend(qkv, fmha, cache)
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:
             output = torch.where(valid_mask[:, None], output, 0)
-        if self._fp8_output_gate:
-            from rtp_llm.models_py.kernels.cuda.fp8_kernel.fused_activation import (
-                sigmoid_mul_per_token_group_quant_fp8,
-            )
+        with profile_scope("RTP::attention.mla.output_gate_quant"):
+            if self._fp8_output_gate:
+                from rtp_llm.models_py.kernels.cuda.fp8_kernel.fused_activation import (
+                    sigmoid_mul_per_token_group_quant_fp8,
+                )
 
-            values, scales = sigmoid_mul_per_token_group_quant_fp8(output, gate)
-            output = self.output.forward_quantized(values, scales)
-        else:
-            output = self.output(
-                gate_sigmoid_mul(output, gate) if output.is_cuda else output * gate.sigmoid()
+                values, scales = sigmoid_mul_per_token_group_quant_fp8(output, gate)
+            else:
+                output = (
+                    gate_sigmoid_mul(output, gate)
+                    if output.is_cuda
+                    else output * gate.sigmoid()
+                )
+        with profile_scope("RTP::attention.mla.output_proj"):
+            output = (
+                self.output.forward_quantized(values, scales)
+                if self._fp8_output_gate else self.output(output)
             )
-        return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
+        with profile_scope("RTP::attention.output_reduce_scatter"):
+            return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output

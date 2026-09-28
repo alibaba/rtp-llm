@@ -11,7 +11,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import MoeConfig
-from .attention import linear
+from .attention import linear, profile_scope
 from .router import KimiK3RouterProjection
 from .routing import grouped_topk
 from .moe_backend import get_k3_moe_backend
@@ -111,25 +111,37 @@ class KimiK3LatentMoE(nn.Module):
         self.experts = FusedMoeFactory().create_fused_moe(cfg, packed)
 
     def forward(self, hidden, valid_mask=None):
-        routing, ids = grouped_topk(
-            self.router(hidden),
-            self.correction,
-            top_k=self.top_k,
-            groups=self.groups,
-            top_groups=self.top_groups,
-            renormalize=self.renormalize,
-            scale=self.route_scale,
-        )
+        with profile_scope("RTP::moe.router"):
+            routing, ids = grouped_topk(
+                self.router(hidden),
+                self.correction,
+                top_k=self.top_k,
+                groups=self.groups,
+                top_groups=self.top_groups,
+                renormalize=self.renormalize,
+                scale=self.route_scale,
+            )
         if valid_mask is not None:
             ids = torch.where(valid_mask[:, None], ids, 0)
             routing = torch.where(valid_mask[:, None], routing, 0)
-        routed = self.experts(self.down(hidden), routing, ids, activation="situ")
+        with profile_scope("RTP::moe.routed_down_proj"):
+            routed_input = self.down(hidden)
+        with profile_scope("RTP::moe.routed_experts"):
+            routed = self.experts(routed_input, routing, ids, activation="situ")
         if self.norm is not None:
-            routed = self.norm(routed.contiguous())
-        gate, up = bf16_linear(hidden, self.shared_gate_up).chunk(2, dim=-1)
-        shared = self.shared_down(situ_and_mul(gate, up, self.beta, self.linear_beta))
+            with profile_scope("RTP::moe.routed_norm"):
+                routed = self.norm(routed.contiguous())
+        with profile_scope("RTP::moe.shared_gate_up_proj"):
+            gate, up = bf16_linear(hidden, self.shared_gate_up).chunk(2, dim=-1)
+        with profile_scope("RTP::moe.shared_activation"):
+            shared_input = situ_and_mul(gate, up, self.beta, self.linear_beta)
+        with profile_scope("RTP::moe.shared_down_proj"):
+            shared = self.shared_down(shared_input)
         if isinstance(self.up, KimiK3Bf16Linear):
             # Match native K3: combine the routed projection and shared
             # output in a single addmm GEMM call.
-            return self.up(routed, residual=shared)
-        return self.up(routed) + shared
+            with profile_scope("RTP::moe.routed_up_proj_add_shared"):
+                return self.up(routed, residual=shared)
+        with profile_scope("RTP::moe.routed_up_proj"):
+            routed_up = self.up(routed)
+        return routed_up + shared
