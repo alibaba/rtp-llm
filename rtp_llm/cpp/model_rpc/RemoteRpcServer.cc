@@ -24,17 +24,19 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
 }
 
 void RemoteRpcServer::startDeferredServices() {
-    LocalRpcServer::startDeferredServices();
-    if (!defer_cache_store_ || cache_store_) {
-        return;
+    if (defer_cache_store_ && !cache_store_) {
+        // Resolve host/peer identity only after the controller releases the
+        // template barrier. This keeps the source host's identity and
+        // cache-store TCP/RDMA resources out of the restored service.
+        initLocalHostInfo();
+        initLocalPeerInfo();
+        initCacheStore(maga_init_params_, nullptr);
+        defer_cache_store_ = false;
     }
-    // Resolve host/peer identity only after the controller releases the
-    // template barrier.  This prevents a restored process from publishing
-    // the source host's identity or binding its cache-store TCP/RDMA ports.
-    initLocalHostInfo();
-    initLocalPeerInfo();
-    initCacheStore(maga_init_params_, nullptr);
-    defer_cache_store_ = false;
+    // ACCL RDMA initialization calls setenv/unsetenv; finish it before starting
+    // the engine. On glibc 2.32, concurrent getenv can traverse an environment
+    // pointer array freed by setenv. Both stages must remain after the SCR barrier.
+    LocalRpcServer::startDeferredServices();
 }
 
 void RemoteRpcServer::initLocalHostInfo() {
