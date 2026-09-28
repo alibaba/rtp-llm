@@ -12,7 +12,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.discovery.LocalServiceDiscovery;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
@@ -128,8 +127,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 physicalIpPort(prefillIp, prefillHttpPort),
                 physicalWorkerIpPort(workerB)));
 
-        // Real file-backed ServiceDiscovery — re-reads the file on every poll.
-        fileServiceDiscovery = new LocalServiceDiscovery(discoveryFile.toString());
+        // The test fixture re-reads the discovery file on every poll.
+        fileServiceDiscovery = new LocalServiceDiscovery(discoveryFile);
 
         // Model topology: upstream builds ModelMetaConfig from the
         // MODEL_SERVICE_CONFIG env; mocking it keeps this test hermetic while

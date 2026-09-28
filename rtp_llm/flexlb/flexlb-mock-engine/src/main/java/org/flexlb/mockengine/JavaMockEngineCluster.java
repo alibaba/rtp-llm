@@ -150,7 +150,7 @@ public final class JavaMockEngineCluster {
             }
             writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
-            // domain→hosts mapping consumed by LocalServiceDiscovery on the master,
+            // domain-to-host mapping for test-side discovery readers,
             // kept in sync by /add_engine + /remove_engine at runtime.
             DiscoveryFileStore discoveryFileStore = config.discoveryFile != null
                     ? new DiscoveryFileStore(config.discoveryFile, config.prefillDomain, config.decodeDomain)

@@ -1,4 +1,4 @@
-package org.flexlb.discovery;
+package org.flexlb.mock.grpc;
 
 import org.flexlb.dao.master.WorkerHost;
 import org.junit.jupiter.api.Test;
@@ -165,7 +165,9 @@ class LocalServiceDiscoveryTest {
         assertTrue(discovery.getHosts((String) null).isEmpty());
     }
 
-    /** Write via tmp + atomic move, mirroring the writer-side protocol. */
+    /**
+     * Writes via a temporary file and atomic move, mirroring the writer-side protocol.
+     */
     private static void writeAtomically(Path file, String content) throws Exception {
         Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
         Files.writeString(tmp, content, StandardCharsets.UTF_8);
