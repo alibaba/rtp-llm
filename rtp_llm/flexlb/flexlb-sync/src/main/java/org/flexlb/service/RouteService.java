@@ -2,6 +2,8 @@ package org.flexlb.service;
 
 import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.DefaultRouter;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.DispatcherConfig;
@@ -19,6 +21,8 @@ import java.util.concurrent.CompletableFuture;
 public class RouteService {
 
     private final RequestScheduler requestScheduler;
+    @Autowired
+    private DefaultRouter router;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     public RouteService(RequestScheduler requestScheduler,
@@ -33,6 +37,15 @@ public class RouteService {
      * @return Routing result
      */
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
+        if (balanceContext.getRequest() != null && balanceContext.getRequest().isVitRouteOnly()) {
+            return CompletableFuture.completedFuture(router.routeVit(balanceContext));
+        }
+        // Reject stale metadata before the scheduler creates request lifecycle ownership.
+        if (balanceContext.getRequest() != null && balanceContext.getRequest().getSelectedVit() != null
+                && getRequestState(balanceContext.getRequestId(), 0) == null
+                && !router.selectedVitIsValid(balanceContext)) {
+            return CompletableFuture.completedFuture(Response.error(StrategyErrorType.VIT_ROUTE_STALE));
+        }
         FlexlbConfig flexlbConfig = balanceContext.getConfig();
         FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(),
                 FlexlbTrace.SCHEDULE_MODE, flexlbConfig.isDirect() ? "DIRECT"

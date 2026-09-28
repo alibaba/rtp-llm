@@ -247,6 +247,7 @@ class GenerateConfig(BaseModel):
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None
     max_pixels: Optional[int] = None
+    max_long_side_pixel: int = -1
     min_pixels: Optional[int] = None
     fps: Optional[int] = None
     min_frames: Optional[int] = None
@@ -617,6 +618,14 @@ class GenerateConfig(BaseModel):
         later request enrichment may only update grammar-independent fields.
         """
 
+        env_budget = getattr(generate_env_config, "max_thinking_tokens", None)
+        if (
+            env_budget is not None
+            and "max_thinking_tokens" not in self.model_fields_set
+        ):
+            self.max_thinking_tokens = (
+                2_147_483_647 if int(env_budget) < 0 else int(env_budget)
+            )
         requested_mode = self.thinking_mode
         if requested_mode == ThinkingMode.UNSPECIFIED and enable_thinking is None:
             requested_mode = thinking_mode_from_value(generate_env_config.think_mode)

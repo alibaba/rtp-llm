@@ -278,6 +278,13 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 requestTimeoutMs, ServiceType.ENGINE_CANCEL);
     }
 
+    public EngineRpcService.CacheStatusPB getMultimodalCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
+        // A directory with 100k hashes plus residency keys can exceed the channel's 8 MiB default.
+        return executeGrpcCallAsync(ip, port, stub -> stub.getMultimodalFutureStub()
+                .withMaxInboundMessageSize(16 * 1024 * 1024).getCacheStatus(request),
+                requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS).join();
+    }
+
     @Override
     protected ManagedChannel createChannel(String channelKey) {
         String[] parts = parseServiceKey(channelKey);
