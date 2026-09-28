@@ -540,12 +540,11 @@ public class EngineHealthReporter {
             monitor.report(ENCODER_SELECTION_LOAD, metricTags,
                     Math.max(0, status.runningQueryLen())
                             + Math.max(0, status.waitingQueryLen()) + pendingRequests);
-            monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, metricTags,
-                    status.availableKvCacheTokens());
         }
         if (status.blockSize() > 0) {
             monitor.report(CACHE_BLOCK_SIZE, metricTags, status.blockSize());
         }
+        reportKvCacheCapacity(metricTags, status);
         reportLocalStandbyBlockSize(metricTags, status.blockSize());
     }
 
@@ -581,24 +580,27 @@ public class EngineHealthReporter {
             reportLocalStandbyBlockSize(engineMetricTags, blockSize);
         }
 
+    }
+
+    /**
+     * WorkerStatus is the common capacity source for both regular engines and
+     * KVCM deployments.  KVCM does not poll GetCacheStatus, so cache capacity
+     * telemetry must be emitted from the WorkerStatus path rather than the
+     * optional cache-status checker.
+     */
+    private void reportKvCacheCapacity(FlexMetricTags metricTags,
+                                       WorkerStatus.EngineObservation status) {
         long totalKvCacheTokens = status.totalKvCacheTokens();
-        long availableKvCacheTokens = status.availableKvCacheTokens();
-        long usedKvCacheTokens = totalKvCacheTokens - availableKvCacheTokens;
-
-        FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
-                "model", modelName,
-                "engineIp", workerStatus.getMetricIpPort(),
-                "role", status.role().name());
-
-        monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
-        monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);
-        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS,
-                FlexMetricTags.of("model", modelName, "role", status.role().name()),
-                totalKvCacheTokens);
-        if (totalKvCacheTokens > 0) {
-            double usedRatio = (usedKvCacheTokens * 1.0 / totalKvCacheTokens) * 100;
-            monitor.report(CACHE_USED_KV_CACHE_RATIO, kvCacheMetricTags, usedRatio);
+        if (totalKvCacheTokens <= 0) {
+            return;
         }
+        long availableKvCacheTokens = Math.max(0, status.availableKvCacheTokens());
+        long usedKvCacheTokens = Math.max(0, totalKvCacheTokens - availableKvCacheTokens);
+        monitor.report(CACHE_USED_KV_CACHE_TOKENS, metricTags, usedKvCacheTokens);
+        monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, metricTags, availableKvCacheTokens);
+        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS, metricTags, totalKvCacheTokens);
+        monitor.report(CACHE_USED_KV_CACHE_RATIO, metricTags,
+                (usedKvCacheTokens * 100.0) / totalKvCacheTokens);
     }
 
     private void reportLocalStandbyBlockSize(
