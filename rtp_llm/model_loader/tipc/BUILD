@@ -1,5 +1,5 @@
 package(default_visibility = ["//:__subpackages__"])
-load("@arch_config//:arch_select.bzl", "requirement")
+load("//bazel:arch_select.bzl", "requirement")
 
 requirement(["requests"])
 
