@@ -13,8 +13,8 @@ namespace {
 // Each packed tensor starts on a kSlotAlign boundary inside its slot (mirrors the transport's
 // packer), so account for that padding when estimating whether a tensor group fits one slot.
 constexpr uint64_t kSlotAlign = 256;
-inline uint64_t alignUp(uint64_t x, uint64_t a) {
-    return (x + a - 1) / a * a;
+inline uint64_t    alignUp(uint64_t x, uint64_t a) {
+       return (x + a - 1) / a * a;
 }
 inline uint64_t tensorBytes(const torch::Tensor& t) {
     return static_cast<uint64_t>(t.numel()) * t.element_size();
@@ -33,8 +33,8 @@ MMRdmaEncoderOp::MMRdmaEncoderOp(const py::object& vit_config) {
 }
 
 std::vector<py::bytes> MMRdmaEncoderOp::exportEmbedding(torch::Tensor                embedding,
-                                                       std::optional<torch::Tensor> pos_id,
-                                                       std::vector<torch::Tensor>   extra_inputs) {
+                                                        std::optional<torch::Tensor> pos_id,
+                                                        std::vector<torch::Tensor>   extra_inputs) {
     std::vector<py::bytes> out;
     if (transport_ == nullptr) {
         return out;  // empty => caller falls back to inline bytes

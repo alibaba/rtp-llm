@@ -31,7 +31,7 @@ public:
     RemoteMultimodalProcessor(const MMModelConfig& mm_model_config,
                               int64_t              max_seq_len,
                               const VitConfig&     vit_config = VitConfig(),
-                              int                  tp_rank = 0):
+                              int                  tp_rank    = 0):
         MultimodalProcessor(py::none(), mm_model_config, max_seq_len) {
         // LLM consumer side of the encoder<->LLM RDMA fast path. nullptr when disabled /
         // unavailable, in which case every request transparently uses the inline-bytes path.
@@ -47,7 +47,7 @@ private:
     std::string                      vit_cluster_name_;
     std::shared_ptr<MMRdmaTransport> rdma_transport_;
     // Deadline (ms) for the best-effort slot-release RPC; keeps it off the critical path.
-    int64_t                          rdma_release_timeout_ms_ = 1000;
+    int64_t rdma_release_timeout_ms_ = 1000;
 
     // Best-effort: tell the encoder it can return the slot(s) to its free list. One response may
     // carry several slots (chunked output), so all handles are released in a single RPC.
@@ -60,8 +60,7 @@ private:
             return;
         }
         grpc::ClientContext rel_ctx;
-        rel_ctx.set_deadline(std::chrono::system_clock::now()
-                             + std::chrono::milliseconds(rdma_release_timeout_ms_));
+        rel_ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(rdma_release_timeout_ms_));
         ReleaseEmbeddingPB rel;
         for (const auto& handle : handles) {
             rel.add_handle(handle);
@@ -207,10 +206,10 @@ private:
         if (!connection_status.ok()) {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, connection_status.status().ToString());
         }
-        auto& connection = connection_status.value();
-        auto stub = connection.stub;
+        auto&              connection = connection_status.value();
+        auto               stub       = connection.stub;
         MultimodalOutputPB output_pb;
-        auto context = makeClientContext(server_context);
+        auto               context = makeClientContext(server_context);
 
         auto request = QueryConverter::transMMInputsPB(mm_inputs, request_id);
         if (rdma_transport_ != nullptr) {
@@ -295,8 +294,8 @@ private:
                                 "falling back to inline bytes",
                                 descs.size());
             request.set_support_rdma(false);
-            MultimodalOutputPB  fallback_pb;
-            auto fallback_context = makeClientContext(server_context);
+            MultimodalOutputPB fallback_pb;
+            auto               fallback_context = makeClientContext(server_context);
             auto fallback_status = stub->RemoteMultimodalEmbedding(fallback_context.get(), request, &fallback_pb);
             if (!fallback_status.ok()) {
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,

@@ -671,7 +671,8 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         top_logprob_token_ids,
         [&]() { return flatten_output->mutable_top_logprob_token_ids(); },
         "top_logprob_token_ids");
-    serialize_optional_tensors(top_logprobs, [&]() { return flatten_output->mutable_top_logprobs(); }, "top_logprobs");
+    serialize_optional_tensors(
+        top_logprobs, [&]() { return flatten_output->mutable_top_logprobs(); }, "top_logprobs");
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }
