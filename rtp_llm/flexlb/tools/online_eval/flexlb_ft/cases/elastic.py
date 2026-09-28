@@ -1,15 +1,12 @@
 """Elastic-category cases: dynamic engine scale-out/in.
 
-Theme: engines joining and leaving the cluster through the mock control
-plane (/add_engine + /remove_engine) with the file-based dynamic
-discovery chain enabled end to end — mock ``--discovery-file`` →
-DiscoveryFileStore (atomic rewrite) → master ``MODEL_SERVICE_CONFIG.discovery_file``
-→ LocalServiceDiscovery (re-read per poll) → EngineSyncRunner →
-EndpointRegistry → routing.  The master must converge to the new
-topology (add ~26ms, remove ~1s per the verified flexlb-api behaviour,
-FileDiscoveryDynamicScaleEndToEndTest), keep background traffic alive
-across the transition, evict removed engines within the health window,
-and survive concurrent add/remove storms.
+The mock control plane (/add_engine + /remove_engine) updates the discovery
+file through DiscoveryFileStore. These cases require the test environment to
+connect that mapping to the master's service discovery. The standalone master
+does not load this file automatically. FileDiscoveryDynamicScaleEndToEndTest
+uses a test-side reader to exercise discovery, worker synchronization and
+routing. The cases keep background traffic alive across topology changes,
+check removal convergence and exercise concurrent add/remove operations.
 
 Elastic scaling is a normal functional requirement (user ruling
 2026-08), NOT a fault scenario — the cases pin the discovery/routing
