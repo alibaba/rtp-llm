@@ -24,11 +24,6 @@ public class MetricConstant {
      */
     public static final String ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT = "app.engine.health.check.engine.worker.number.service.discovery.result";
 
-    /**
-     * Engine worker remaining available concurrency
-     */
-    public static final String ENGINE_STATUS_AVAILABLE_CONCURRENCY = "app.engine.health.check.available.concurrency";
-
     public static final String ENGINE_STATUS_VISITOR_RT = "app.engine.health.check.visitor.rt";
 
     public static final String ENGINE_STATUS_VISITOR_SUCCESS_QPS = "app.engine.health.check.visitor.success.qps";
