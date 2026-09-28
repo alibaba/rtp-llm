@@ -3,9 +3,9 @@
 # The SDK changes virtual interfaces. The April RPM cannot provide this ABI.
 # Populate both artifact records only after packaging these source commits.
 KVCM_SOURCE_LOCK = {
-    "internal_commit": "bf6de8ff3c27b7543c489d420c367830f5ff5cb2",
+    "internal_commit": "32dc3162ec4f9f981617f8d82f9696a4faa2fe5b",
     "opensource_commit": "6015fca48a091dc18ea9497518138cb58959c3f2",
-    "pace_commit": "d6cec4a4adfb8d46624b9014560a4f15ebb91296",
+    "pace_commit": "770bd4df361f86cd937f9144e910d202e1a7401f",
 }
 
 KVCM_CLIENT_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}

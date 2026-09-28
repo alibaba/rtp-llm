@@ -27,6 +27,15 @@
 
 存储地址／媒体由服务端 storage config 下发。正常写入候选只配置所选数据后端；事件存储单列在 `event_report_storage_candidates`。
 
+PACE 固定到本次核实的 `master`（`770bd4df`），支持 TENT TCP 数据传输。默认仍使用旧 AFT；需要 TCP 的 provider／consumer sidecar 均须使用该版本并配置：
+
+```sh
+export TAIR_MEMPOOL_ENABLE_TENT=1
+export MC_TENT_CONF='{"transports":{"tcp":{"enable":true},"aft":{"enable":false},"rdma":{"enable":false},"barex":{"enable":false},"shm":{"enable":false}},"policy":[{"name":"tcp_default","segment_type":"memory","transports":["tcp"]}]}'
+```
+
+TENT 使用 RDMA 设备槽位，`--no_rdma` 会将其禁用。以上环境变量须注入 sidecar；更新 SDK 依赖本身不会切换传输协议。
+
 SWA／batch 的 miss 保留原 key 位置。复用要求：FULL 完整前缀、LINEAR 最终状态、SWA 完整窗口，并满足所有 TP rank；缺失 URI 不算命中。混合 LINEAR＋SWA 可先写 FULL＋LINEAR 部分，读取仍要求 SWA 完整。原有 IOV、多 pool/group、FULL＋LINEAR、同布局 TP 沿用。
 
 自动 Instance identity 包含默认模式和注册 group 配置，升级可能切换缓存命名空间；自定义 ID 须与服务端现存配置一致。`KVCacheConfig` pickle 为版本 8／74 项，读取兼容 1～7，进程间须同一构建。
