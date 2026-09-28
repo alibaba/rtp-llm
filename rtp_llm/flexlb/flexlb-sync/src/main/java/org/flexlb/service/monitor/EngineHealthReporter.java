@@ -543,6 +543,9 @@ public class EngineHealthReporter {
             monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, metricTags,
                     status.availableKvCacheTokens());
         }
+        if (status.blockSize() > 0) {
+            monitor.report(CACHE_BLOCK_SIZE, metricTags, status.blockSize());
+        }
         reportLocalStandbyBlockSize(metricTags, status.blockSize());
     }
 
