@@ -616,8 +616,8 @@ public class MetricConstant {
      */
     public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
 
-    /** Number of input token IDs observed at the request boundary. */
-    public static final String REQUEST_INPUT_IDS_COUNT = "app.request.input.ids.count";
+    /** Request sequence length observed at the Master request boundary. */
+    public static final String REQUEST_SEQ_LEN = "app.request.seq.len";
 
     /** Protobuf message size excluding gRPC framing and compression. */
     public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";

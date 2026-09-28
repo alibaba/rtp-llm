@@ -222,7 +222,6 @@ class PvLogDataTest {
 
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
-        context.setInputIdsCount(3L);
         context.setRequestMessageBytes(1234L);
         context.setRequestBodyBytes(1_234L);
 

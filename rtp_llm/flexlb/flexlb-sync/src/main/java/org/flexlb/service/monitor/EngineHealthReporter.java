@@ -105,7 +105,7 @@ import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_BODY_BYTES;
-import static org.flexlb.constant.MetricConstant.REQUEST_INPUT_IDS_COUNT;
+import static org.flexlb.constant.MetricConstant.REQUEST_SEQ_LEN;
 import static org.flexlb.constant.MetricConstant.REQUEST_MESSAGE_BYTES;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
@@ -261,7 +261,7 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(REQUEST_NETWORK_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_SERVER_PROCESS_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(REQUEST_INPUT_IDS_COUNT,
+        this.monitor.register(REQUEST_SEQ_LEN,
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(REQUEST_MESSAGE_BYTES,
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
@@ -407,8 +407,8 @@ public class EngineHealthReporter {
         }
         FlexMetricTags tags = FlexMetricTags.of(
                 "success", String.valueOf(context.isSuccess()));
-        if (context.getInputIdsCount() != null) {
-            monitor.report(REQUEST_INPUT_IDS_COUNT, tags, context.getInputIdsCount());
+        if (context.getRequest() != null) {
+            monitor.report(REQUEST_SEQ_LEN, tags, context.getRequest().getSeqLen());
         }
         if (context.getRequestMessageBytes() != null) {
             monitor.report(REQUEST_MESSAGE_BYTES, tags, context.getRequestMessageBytes());
