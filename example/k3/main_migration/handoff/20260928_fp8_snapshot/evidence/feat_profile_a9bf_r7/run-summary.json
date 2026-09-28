@@ -1,0 +1,41 @@
+{
+  "source_commit": "a9bf762e878fc54ee9176da5c34ffbe6babc8d45",
+  "pinned_feat_base": "55641e09bc09cdafcf8f31b28aa55b18bc66d24b",
+  "prefill_host": 111,
+  "decode_host": 112,
+  "model_layers": 4,
+  "precision": "ordinary E4M3 FP8",
+  "tp": 8,
+  "ep": 8,
+  "model_target": "/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers",
+  "input_token_sha256": "97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee",
+  "input_token_count": 65536,
+  "warmup_count": 10,
+  "warmup_metric": "first_token_cost_ms",
+  "warmup_last_three_ms": [
+    138.68,
+    137.774,
+    139.176
+  ],
+  "warmup_last_three_median_ms": 138.68,
+  "warmup_last_three_max_deviation_pct": 0.6533025670608638,
+  "profile_request_count": 16,
+  "profile_http_codes": [
+    200
+  ],
+  "profile_reuse_lengths": [
+    0
+  ],
+  "allrank_matched_requests": 7,
+  "median_max_rank_gpu_span_ms": {
+    "prefill": 135.265513671875,
+    "target": 71.556421875,
+    "draft": 62.564177734375
+  },
+  "flow_checked": 10,
+  "flow_independent_passed": true,
+  "semantic_answer_claim": false,
+  "full_model_claim": false,
+  "legacy_aux_missing_mtp_counters": true,
+  "draft_execution_proof": "all-rank draft_model_forward scopes in matched traces"
+}

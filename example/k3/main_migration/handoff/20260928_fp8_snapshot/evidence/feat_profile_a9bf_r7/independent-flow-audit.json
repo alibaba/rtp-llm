@@ -1,0 +1,91 @@
+{
+  "passed": true,
+  "checked": 10,
+  "semantic_answer_claim": false,
+  "mtp_execution_claim": false,
+  "decode_handoff_length_claim": false,
+  "replacement_characters_observed": 0,
+  "errors": [],
+  "cases": [
+    {
+      "case": "chunkwise_rdma_flow_miss",
+      "file": "requests/0001-d154e083ef42.json",
+      "passed": true,
+      "input_len": 65537,
+      "elapsed_s": 117.471,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_hit_owner_0",
+      "file": "requests/0002-729a70259fa2.json",
+      "passed": true,
+      "input_len": 65537,
+      "elapsed_s": 0.855,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_uneven_0",
+      "file": "requests/0003-40806b6fb6a6.json",
+      "passed": true,
+      "input_len": 36864,
+      "elapsed_s": 11.598,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_uneven_1",
+      "file": "requests/0004-5028ec8a0fcc.json",
+      "passed": true,
+      "input_len": 40960,
+      "elapsed_s": 11.606,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_uneven_2",
+      "file": "requests/0005-fb421973d7bf.json",
+      "passed": true,
+      "input_len": 45056,
+      "elapsed_s": 9.295,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_uneven_3",
+      "file": "requests/0006-489171149484.json",
+      "passed": true,
+      "input_len": 49152,
+      "elapsed_s": 11.57,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_uneven_3_hit",
+      "file": "requests/0007-bc2b9f3331c4.json",
+      "passed": true,
+      "input_len": 49152,
+      "elapsed_s": 9.215,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_uneven_2_hit",
+      "file": "requests/0008-9e4bdf8eaac8.json",
+      "passed": true,
+      "input_len": 45056,
+      "elapsed_s": 9.227,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_uneven_1_hit",
+      "file": "requests/0009-ee5272a7e45f.json",
+      "passed": true,
+      "input_len": 40960,
+      "elapsed_s": 7.44,
+      "replacement_characters": 0
+    },
+    {
+      "case": "flow_uneven_0_hit",
+      "file": "requests/0010-d9e1e48be978.json",
+      "passed": true,
+      "input_len": 36864,
+      "elapsed_s": 9.221,
+      "replacement_characters": 0
+    }
+  ]
+}
