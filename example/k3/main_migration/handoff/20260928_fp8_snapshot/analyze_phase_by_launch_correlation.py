@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Attribute asynchronous GPU work to RTP Prefill phases by CUDA launch ID."""
 
+import gzip
 import json
 import statistics
 from collections import defaultdict
@@ -53,6 +54,10 @@ def family(name):
     low = name.lower()
     if "nccldevkernel" in low:
         return "NCCL"
+    if "attn_res_fp8" in low:
+        return "AttnRes.fp8_producer"
+    if "attn_res" in low or "attnres" in low:
+        return "AttnRes"
     if ("_paged_short_conv_prefill_kernel" in low
             or "_kimi_kda_short_conv_paged_prefill_kernel" in low
             or "_causal_conv1d_fwd_kernel" in low):
@@ -65,13 +70,18 @@ def family(name):
         return "KDA.cuLA_delta"
     if "kda_fwd" in low or "kda_gate" in low or "culaopskdasm100fwd" in low:
         return "KDA.other"
+    if "moe_output" in low:
+        return "MoE.combine"
     if "mega_moe" in low or "megamoe" in low:
         return "MoE.MegaMoE"
     if "nvjet" in low:
         return "GEMM.NVJet_unattributed"
     if "deep_gemm" in low or "deepgemm" in low:
         return "GEMM.DeepGEMM_unattributed"
-    if "quant" in low or "_rmsnorm_sigmoid_gate" in low:
+    if ("quant" in low or "_rmsnorm_sigmoid_gate" in low
+            or "_sigmoid_mul_group128" in low
+            or "_rmsnorm_fp8" in low or "_sigmoid_gate_fp8" in low
+            or "_kda_output_prefill_fp8" in low):
         return "FP8.producer_or_quant"
     if "direct_copy_kernel" in low:
         return "Tensor.copy"
@@ -97,7 +107,8 @@ def summarize(events):
 
 
 def analyze_one(path, expected_requests):
-    events = json.loads(path.read_text())["traceEvents"]
+    with (gzip.open(path, "rt") if path.suffix == ".gz" else path.open("rt")) as stream:
+        events = json.load(stream)["traceEvents"]
     cpu = [x for x in events if x.get("cat") == "cpu_op"]
     phases = {
         "target": sorted((x for x in cpu if x["name"] == "executor.mtp.prefill_step(target_model_forward)"), key=lambda x: x["ts"]),

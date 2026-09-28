@@ -2,6 +2,7 @@
 """Match full-rank MTP Prefill requests by target CPU timestamp."""
 
 import argparse
+import gzip
 import importlib.util
 import json
 import statistics
@@ -28,7 +29,8 @@ spec.loader.exec_module(phase)
 rank_data = []
 for rank in range(8):
     path = args.trace_dir / args.trace_template.format(rank=rank)
-    trace = json.loads(path.read_text())["traceEvents"]
+    with (gzip.open(path, "rt") if path.suffix == ".gz" else path.open("rt")) as stream:
+        trace = json.load(stream)["traceEvents"]
     target = sorted((e["ts"] for e in trace if e.get("cat") == "cpu_op" and
                      e["name"] == "executor.mtp.prefill_step(target_model_forward)"))
     if not target:
@@ -67,6 +69,8 @@ if len(matched) < args.min_common:
 summary = {name: statistics.median(row["phases"][name]["max_rank_gpu_span_ms"]
                                    for row in matched) for name in ("prefill", "target", "draft")}
 result = {"input_tokens": 65536, "model_layers": 4, "world_size": 8,
+          "kernel_family_classifier": "v2: symbol-level only; fused AttnRes FP8 producer has its own family, generic GEMMs remain unattributed",
+          "family_timing_caveat": "cumulative kernel durations can overlap across streams and are not wall time",
           "same_request_match": f"nearest target CPU scope timestamp within {args.match_window_us}us",
           "trace_dir": str(args.trace_dir), "trace_template": args.trace_template,
           "matched_requests": matched, "median_max_rank_gpu_span_ms": summary}
