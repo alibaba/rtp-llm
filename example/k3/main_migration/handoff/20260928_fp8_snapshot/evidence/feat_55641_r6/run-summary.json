@@ -1,0 +1,129 @@
+{
+  "feat_git_commit": "55641e09bc09cdafcf8f31b28aa55b18bc66d24b",
+  "integrated_git_commit": "0a36d6d24829f79e06e229ed53feeefee8913172",
+  "hosts": {
+    "prefill": "L20-dev-111",
+    "decode": "L20-dev-112"
+  },
+  "model_layers": 4,
+  "input_tokens_configured": 65536,
+  "input_token_ids_sha256": "97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee",
+  "precision": {
+    "target": "FP8",
+    "mla": "FP8",
+    "target_kv": "FP8",
+    "mtp": "BF16",
+    "feat_all_gather": "FP8 values and scales; violates final BF16 NCCL contract"
+  },
+  "flow": {
+    "passed": true,
+    "case_count": 10,
+    "mtp_case_count": 0,
+    "elapsed_s": 134.016,
+    "request_timeout_s": 300
+  },
+  "prefill_profile": {
+    "warmup_count": 10,
+    "warmup_stable": true,
+    "profiled_requests": 16,
+    "all_rank_trace_count": 8,
+    "matched_all_rank_requests": 6,
+    "phase_median_worst_rank_gpu_span_ms": {
+      "prefill": 134.87283154296875,
+      "target": 71.13417333984376,
+      "draft": 62.83002001953125
+    },
+    "target_family_cumulative_median_ms": {
+      "AttnRes": 0.642841,
+      "AttnRes.fp8_producer": 0.53359,
+      "FP8.producer_or_quant": 1.341312,
+      "GEMM.DeepGEMM_unattributed": 12.224411,
+      "GEMM.NVJet_unattributed": 10.459183,
+      "KDA.cuLA_delta": 3.093962,
+      "KDA.other": 3.242763,
+      "KDA.short_conv": 1.408628,
+      "MLA.TokenSpeed": 5.333454,
+      "MoE.MegaMoE": 16.100904,
+      "MoE.combine": 0.195987,
+      "NCCL": 8.827849,
+      "Other_unattributed": 4.989449,
+      "Tensor.copy": 1.183279
+    },
+    "draft_family_cumulative_median_ms": {
+      "GEMM.DeepGEMM_unattributed": 1.766777,
+      "GEMM.NVJet_unattributed": 4.958811,
+      "MLA.CUTLASS": 9.609745,
+      "MoE.MegaMoE": 6.441149,
+      "MoE.combine": 0.065296,
+      "NCCL": 18.659648,
+      "Other_unattributed": 3.806325,
+      "PD.fused_copy": 15.873869,
+      "Tensor.copy": 1.19159
+    },
+    "per_rank_target_and_draft_scope_count": {
+      "target": 8,
+      "draft": 8
+    }
+  },
+  "integrated_comparator": {
+    "matched_all_rank_requests": 2,
+    "phase_median_worst_rank_gpu_span_ms": {
+      "prefill": 138.9813447265625,
+      "target": 74.99459130859375,
+      "draft": 63.974848632812495
+    },
+    "target_family_cumulative_median_ms": {
+      "AttnRes": 0.589716,
+      "FP8.producer_or_quant": 1.803806,
+      "GEMM.DeepGEMM_unattributed": 7.267454,
+      "GEMM.NVJet_unattributed": 10.711418,
+      "KDA.cuLA_delta": 3.13742,
+      "KDA.other": 3.545389,
+      "KDA.short_conv": 1.42417,
+      "MLA.TokenSpeed": 5.445023,
+      "MoE.MegaMoE": 14.382763,
+      "NCCL": 14.05572,
+      "Other_unattributed": 5.826098,
+      "PD.fused_copy": 0.022416,
+      "Tensor.copy": 1.439596
+    },
+    "draft_family_cumulative_median_ms": {
+      "GEMM.NVJet_unattributed": 5.404466,
+      "MLA.TokenSpeed": 9.870897,
+      "MoE.MegaMoE": 5.472612,
+      "NCCL": 20.920793,
+      "Other_unattributed": 4.100778,
+      "PD.fused_copy": 13.476999,
+      "Tensor.copy": 1.612475
+    }
+  },
+  "decode_mtp_diagnostic": {
+    "status": 200,
+    "output_len": 32,
+    "iter_count": 33,
+    "pd_sep": true,
+    "per_rank_scope_counts": {
+      "draft_model_forward": 16,
+      "target_model_verify": 16,
+      "cuda_graph_replay_decode": 48
+    },
+    "all_rank_trace_count": 8
+  },
+  "raw_artifacts": {
+    "timeline-64k-feat-55641-r6-allrank.tar.gz": {
+      "sha256": "6297c8fef74832faf9cf1a5b4ad511366146571ee3adc2542cda0a5dfc583901",
+      "bytes": 9083692
+    },
+    "timeline-decode-mtp-feat-55641-r6-allrank.tar.gz": {
+      "sha256": "3c3bc2b15ff5f61b7b30373a356c4dd6f3096d0e7962890779fbf9529df45c4b",
+      "bytes": 7351309
+    }
+  },
+  "measurement_limits": [
+    "Four-layer timings only; no full-model performance claim.",
+    "Kernel family cumulative durations can overlap across CUDA streams.",
+    "Fixed feat FP8 all-gather transmits FP8 values and scales; do not migrate this path under BF16 NCCL requirement.",
+    "Only clean post-initialization full-rank requests are matched; 6 feat and 2 integrated.",
+    "Flow suite has no MTP acceptance assertion; traces prove execution, while the decode diagnostic accepted no additional token."
+  ]
+}
