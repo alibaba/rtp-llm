@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -36,6 +37,15 @@ public class DecodeSelector {
 
     public PlacementResult<SelectedRole, RoleType> select(
             DecodeBinding request, String group) {
+        return select(null, request, group);
+    }
+
+    /**
+     * Selects the least-cost available Decode endpoint and records the choice
+     * reason when the caller supplies the request context.
+     */
+    public PlacementResult<SelectedRole, RoleType> select(
+            BalanceContext context, DecodeBinding request, String group) {
         for (int attempt = 0; attempt < MAX_SELECTION_ATTEMPTS; attempt++) {
             List<DecodeRoutingView> snapshots = workerDirectory.decodeRoutingSnapshot(group);
             if (snapshots.isEmpty()) {
@@ -84,6 +94,13 @@ public class DecodeSelector {
                         + request.costFormula().expression());
             }
             double selectedCost = minimumCost;
+            int minimumCostCandidateCount = 0;
+            for (int index = 0; index < snapshots.size(); index++) {
+                if (availabilityByWorker[index] == selectedAvailability
+                        && costByWorker[index] == selectedCost) {
+                    minimumCostCandidateCount++;
+                }
+            }
             int selectedIndex = rotation.next(RoleType.DECODE, group, snapshots.size(),
                     i -> availabilityByWorker[i] == selectedAvailability && costByWorker[i] == selectedCost,
                     i -> snapshots.get(i).address());
@@ -91,6 +108,12 @@ public class DecodeSelector {
             DecodeRoutingView selected = snapshots.get(selectedIndex);
             WorkerEndpoint.GenerationPin pin = workerDirectory.captureDecodeGeneration(selected);
             if (pin != null) {
+                if (context != null) {
+                    context.recordSelectionReason(RoleType.DECODE,
+                            minimumCostCandidateCount > 1
+                                    ? "DECODE_MIN_COST_ROUND_ROBIN_TIEBREAK"
+                                    : "DECODE_MIN_COST");
+                }
                 return PlacementResult.success(buildSelectedRole(
                         selected, pin, request.requestId()));
             }

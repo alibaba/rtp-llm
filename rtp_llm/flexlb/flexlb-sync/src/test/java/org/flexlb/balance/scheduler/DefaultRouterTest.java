@@ -181,7 +181,7 @@ class DefaultRouterTest {
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 7L, 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(DecodeBinding.capture(context), "g1"))
+        when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
@@ -215,7 +215,7 @@ class DefaultRouterTest {
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 8L, 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(DecodeBinding.capture(context), "g1"))
+        when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((DecodeEndpoint) decode.endpoint).reserve(eq(decode.pin), eq("8"), eq(32L), eq(48L), eq(50)))
@@ -276,7 +276,7 @@ class DefaultRouterTest {
             var reservation = new DecodeEndpoint.ReservationHandle(1L, 9L, 2L);
             when(prefillSelector.select(context, RoleType.PREFILL, null))
                     .thenReturn(PlacementResult.success(prefill.selection));
-            when(decodeSelector.select(DecodeBinding.capture(context), "g1"))
+            when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
                     .thenReturn(PlacementResult.success(decode.selection));
             stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
             when(((PrefillEndpoint) prefill.endpoint).reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
@@ -473,7 +473,7 @@ class DefaultRouterTest {
         when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(
+        when(decodeSelector.select(context,
                 DecodeBinding.capture(context), "g1"))
                 .thenReturn(PlacementResult.rejected(
                         Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
@@ -600,7 +600,7 @@ class DefaultRouterTest {
         when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
-        when(decodeSelector.select(
+        when(decodeSelector.select(context,
                 DecodeBinding.capture(context), "g1"))
                 .thenReturn(PlacementResult.blocked(RoleType.DECODE));
 
@@ -680,7 +680,7 @@ class DefaultRouterTest {
         switch (role) {
             case PREFILL, PDFUSION -> when(prefillSelector.select(
                     context, role, group)).thenReturn(result);
-            case DECODE -> when(decodeSelector.select(
+            case DECODE -> when(decodeSelector.select(context,
                     DecodeBinding.capture(context), group)).thenReturn(result);
             case VIT -> when(vitSelector.select(context, role, group))
                     .thenReturn(result.value());

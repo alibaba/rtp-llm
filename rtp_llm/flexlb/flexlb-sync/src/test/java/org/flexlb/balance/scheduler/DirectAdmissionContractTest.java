@@ -241,8 +241,8 @@ class DirectAdmissionContractTest {
                 return PlacementResult.success(SelectedRole.prefill(pin,
                         metadata(prefill, context.getRequestId()), 30_000L, prefill.placementVersion()));
             });
-            when(decodeSelector.select(any(), any())).thenAnswer(call -> {
-                var request = call.getArgument(0, ScheduledRequest.DecodeBinding.class);
+            when(decodeSelector.select(any(), any(), any())).thenAnswer(call -> {
+                var request = call.getArgument(1, ScheduledRequest.DecodeBinding.class);
                 var pin = decode.tryPinGeneration();
                 assertNotNull(pin);
                 return PlacementResult.success(SelectedRole.decode(pin,
