@@ -76,12 +76,14 @@ def cuda13_suites():
             # the block-aligned prefix from the prefill over the cache store, and
             # that transferred prefix is what reuse accounting reports. Q3 is the
             # real reuse assertion and compares the memory-cache hit instead.
+            # The long Q2/Q4 prompts also exercise chunked prefill with a CP2-
+            # aligned 2048-token batch budget; Q3 still checks prefix reuse.
             smoke_test(
                 name="v4_flash_pd_cp2ep2_dp2ep2_reuse_memory_cache_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_reuse_cache_sm100_arm.json",
                 sleep_time_qr=10,
                 smoke_args={
-                    "prefill": "--load_method fastsafetensors --max_seq_len 65600 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1",
+                    "prefill": "--load_method fastsafetensors --max_seq_len 65600 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --prefill_chunk_size 2048 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1",
                     "decode": "--load_method fastsafetensors --max_seq_len 65600 --enable_cuda_graph 1 --decode_capture_config '1,2,4,8,32' --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1",
                 },
                 gpu_type=["SM100_ARM_CU13"],
