@@ -92,6 +92,7 @@ def concat_and_cast_mha_k_kernel(
     k_nope_ptr,
     k_rope_ptr,
     head_cnt: tl.constexpr,
+    head_block: tl.constexpr,
     k_stride0: tl.constexpr,
     k_stride1: tl.constexpr,
     nope_stride0: tl.constexpr,
@@ -101,7 +102,8 @@ def concat_and_cast_mha_k_kernel(
     rope_dim: tl.constexpr,
 ):
     pid_loc = tl.program_id(0)
-    head_range = tl.arange(0, head_cnt)
+    head_range = tl.arange(0, head_block)
+    valid_head = head_range[:, None] < head_cnt
 
     k_head_ptr = k_ptr + pid_loc * k_stride0 + head_range[:, None] * k_stride1
 
@@ -115,14 +117,14 @@ def concat_and_cast_mha_k_kernel(
     )
     dst_nope_ptr = k_head_ptr + nope_offs[None, :]
 
-    src_nope = tl.load(src_nope_ptr)
-    tl.store(dst_nope_ptr, src_nope)
+    src_nope = tl.load(src_nope_ptr, mask=valid_head, other=0)
+    tl.store(dst_nope_ptr, src_nope, mask=valid_head)
 
     rope_offs = tl.arange(0, rope_dim)
     src_rope_ptr = k_rope_ptr + pid_loc * rope_stride0 + rope_offs[None, :]
     dst_rope_ptr = k_head_ptr + nope_dim + rope_offs[None, :]
     src_rope = tl.load(src_rope_ptr)
-    tl.store(dst_rope_ptr, src_rope)
+    tl.store(dst_rope_ptr, src_rope, mask=valid_head)
 
 
 def concat_and_cast_mha_k_triton(
@@ -153,6 +155,7 @@ def concat_and_cast_mha_k_triton(
         k_nope,
         k_rope,
         k.shape[1],
+        triton.next_power_of_2(k.shape[1]),
         k.stride(0),
         k.stride(1),
         k_nope.stride(0),
@@ -370,7 +373,7 @@ class MlaFlashInferPrefillOp(object):
         compatible = (
             is_power_of_2(self.qk_nope_head_dim)
             and is_power_of_2(self.qk_rope_head_dim)
-            and is_power_of_2(self.num_heads)
+            and self.num_heads > 0
         )
         return compatible
 

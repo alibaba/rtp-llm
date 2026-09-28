@@ -31,7 +31,7 @@ cmd=("$bazel" "--output_user_root=$root" test
   "--override_repository=arch_config=$deps/rdma-build-overlay/arch_config"
   "--override_repository=rtp_deps=$deps/rdma-build-overlay/rtp_deps"
   "--override_repository=xgrammar=$deps/xgrammar-384264-source"
-  --jobs=24 --test_env=CUDA_VISIBLE_DEVICES=1
+  --jobs=24 --test_env=CUDA_VISIBLE_DEVICES=1 --test_env=CC=/usr/bin/gcc
   --test_output=errors --cache_test_results=no
   //rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:mla_k_merge_non_power_two_heads_test)
 for source in "$deps/feat-external-git-sources"/*; do
