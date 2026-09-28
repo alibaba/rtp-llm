@@ -115,3 +115,11 @@ r8 的 `concat_and_cache_mla_kernel` 在固定 feat trace 中每 rank 约 0.074 
 按相同名字的模块范围复算固定 feat r8 与集成版 b24 r2 的四层 target trace，共有 22 个可对齐的具名范围。下列数值是累计核时间，跨 stream 可能重叠。feat 仅在 KDA core、shared activation、routed down projection 和 MLA output gate 上快约 0.001–0.005 ms；这些量级不足以确认独立的算子收益。集成版的 routed experts 在 L1/L2/L3 分别快约 0.146/0.920/0.490 ms，router 每层快约 0.026–0.027 ms。两版 TokenSpeed MLA 主核按每次请求最慢 rank 取中位分别为 feat 5.342 ms、集成版 5.388 ms；两版使用同一类 TokenSpeed E4M3 算子，且 CP/SP 配置不同，不能把约 0.046 ms 差异当成可移植实现的收益。
 
 feat 的 FP8 AllGather/GEMM 和 GEMM/ReduceScatter 是不同的融合范围；它们发送 FP8，与最终 **BF16 NCCL** 契约冲突，不能只因 trace 较快而迁入。MLA cache writer 的单核差异也已被分片配置混淆。现有固定 vLLM `3df4` 的四层 NIXL PD target trace 中，TokenSpeed MLA 约 5.36 ms，但 routed MoE 实际选择 MXFP4，而且没有 MTP；它只提供 target 算子线索，不能用来替代普通 E4M3 + MTP 的整路径验收。下一轮比较须先让 CP/SP 和权重精度口径可核对，再做逐算子 A/B；目前没有足够证据从 feat 迁入新的性能模块。
+
+## 固定 feat 的无 CP 对照：110/112 r9 失败
+
+111 此前出现 GPU Xid，改选空闲的 110 Prefill、112 Decode。两端使用固定源码 `a9bf762e8`，110 在个人 `lhc_GPU` 中以 CUDA13/SM10x 独立完成 30,181 个 Bazel 动作；首次构建在依赖分析阶段停止输出，保留日志后重启同一任务专用输出目录，第二次退出码为 0。两端四层 target 的 config/index SHA256 一致，MTP 视图的 config/index SHA256 也一致；FastSafetensors guard 检查了 target 7 个 shard、MTP 9 个 shard 的索引和头部。`host-selection-feat-nocp-r9-*.json` 保存了机器筛选记录。
+
+r9 服务两端均通过健康检查和 FastSafetensors 启动日志复核。64 线程任务内 3FS 预读下，target shard 加载进度分别约 23、25 秒，MTP shard 约 6、5 秒；这次没有观察到需要调整机器级 3FS 并发的取数瓶颈。首条 65,537-token flow 请求返回 HTTP 500，**r9 的 flow 为失败，未采 timeline**。Prefill 关闭分片后实际 `local_kv_page_rr_shard_count=1`，PD 请求的 source shard count 为 1；r9 启动脚本仍在 Decode 设置 `PREFILL_CP_SIZE=8`，导致 `DecodeRpcServer::prepareGenerateContext()` 比较 source=1、upstream=8 时拒绝请求。固定 feat 源码没有改动。失败请求、启动配置、rank 日志和 RDMA 记录见 `feat-nocp-r9-failed-prefill-logs.tar.gz`（SHA256 `a83791f3a8e157446c1f610a5a9077d00e45831a725177cde30854772805e8af`）及 `feat-nocp-r9-failed-decode-logs.tar.gz`（SHA256 `c6a5d38e4c5528ef2652797892616a1b0555db3b012b8010a6c8f1f4c434b62f`）。失败后只清理了本任务的两端服务；端口和 GPU 计算进程已释放。
+
+r10 保留 r9 的失败现场和脚本，另建任务内启动脚本，把 Decode 的 `PREFILL_CP_SIZE` 与无分片 Prefill 对齐为 1。两端生成的配置文件 SHA256 均为 `b16a7c488fede37c11b4234a4e6728931622daa99270aca545ac37f79e581d4b`；这只证明配置一致，功能与性能仍待重新运行。
