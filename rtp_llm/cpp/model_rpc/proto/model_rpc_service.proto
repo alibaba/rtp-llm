@@ -167,6 +167,7 @@ message MMPreprocessConfigPB {
     int32 max_frames = 7;
     repeated float crop_positions = 8;
     int32 mm_timeout_ms = 9;
+    int32 max_long_side_pixel = 11;
 }
 
 message MultimodalInputPB {
@@ -180,6 +181,8 @@ message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
     // LLM can receive the output through GPUDirect RDMA.
     bool support_rdma = 2;
+    // Correlates frontend, ViT and content-inspection work.
+    int64 request_id = 3;
 }
 
 enum TensorDataTypePB {
@@ -231,6 +234,8 @@ message MultimodalOutputPB {
     repeated int32 split_size = 4;
     // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
     repeated MMRdmaSlotPB output_rdma_slots = 5;
+    // Compact CPU row hashes stay inline for either transport.
+    TensorPB multimodal_feature_hash = 7;
 }
 
 message ReleaseLeasePB {
@@ -251,6 +256,17 @@ message RequestInfoPB {
     TraceContextPB trace_context = 6;
 }
 
+message MultimodalTokenSpanPB {
+    int32 offset = 1;
+    int32 length = 2;
+}
+
+message MultimodalTokenLayoutPB {
+    reserved 1;
+    // In ViT output segment order, including all segments of a video.
+    repeated MultimodalTokenSpanPB spans = 2;
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -265,6 +281,8 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
+    // token_ids are already expanded when this field is present.
+    MultimodalTokenLayoutPB multimodal_token_layout = 11;
 }
 
 message AuxInfoPB {
@@ -499,6 +517,15 @@ message CacheStatusPB {
     int64 block_size = 3;
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
+    MultimodalCacheStatusPB multimodal_cache = 6;
+}
+
+message MultimodalCacheStatusPB {
+    string worker_instance = 1;
+    reserved 2;
+    repeated string keys = 3;
+    repeated string gpu_embedding_keys = 4;
+    repeated string cpu_embedding_keys = 5;
 }
 
 message UpdateSchedulerInfoRequestPB {
@@ -939,10 +966,39 @@ service RpcService {
 
 // Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern
 // because VIT proxy and LLM backend are always deployed together in this service.
+// Frontend routing metadata only. Omit inputs for a cache-only probe; supplying
+// inputs computes missing hashes and waits for any enabled safety inspection.
+message MultimodalHashRequestPB {
+    repeated string keys = 1;
+    MultimodalInputsPB inputs = 2;
+    int64 timeout_ms = 3;
+}
+
+message MultimodalHashEntryPB {
+    string key = 1;
+    bool hash_hit = 2;
+    bool embedding_hit = 3;
+    string embedding_tier = 4;
+    bool greennet_passed = 5;
+    string entry_generation = 6;
+    repeated uint32 split_size = 7;
+    // Flattened little-endian signed int32 hashes, one per output token.
+    bytes feature_hashes = 8;
+}
+
+message MultimodalHashResponsePB {
+    string worker_instance = 1;
+    reserved 2;
+    repeated MultimodalHashEntryPB entries = 3;
+}
+
 service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
     // Best-effort release after the LLM finishes reading remote slots.
     rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
+    rpc GetMultimodalHashes(MultimodalHashRequestPB) returns (MultimodalHashResponsePB);
+    rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);
+    rpc WaitGreenNetVerdict(MultimodalInputsPB) returns (EmptyPB);
 }

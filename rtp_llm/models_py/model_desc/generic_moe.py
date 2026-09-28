@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules import (
     GroupTopK,
     LinearFactory,
     MlaAttention,
+    MultimodalEmbeddingInjector,
     RMSNorm,
     RMSResNorm,
     SelectTopk,
@@ -388,6 +389,11 @@ class GenericMoeModel(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = (
+            MultimodalEmbeddingInjector()
+            if model_config.mm_model_config.is_multimodal
+            else None
+        )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
             py_hw_kernel_config.enable_cuda_graph
@@ -434,7 +440,9 @@ class GenericMoeModel(GptModelBase):
             attention_inputs = get_attention_inputs_value(inputs)
             if not isinstance(attention_inputs, Mapping) and self.kv_cache is None:
                 # Cacheless warmup shares one input and skips the indexer.
-                fmha_impl = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+                fmha_impl = super().prepare_fmha_impl(
+                    inputs, is_cuda_graph, cuda_graph_selection_mode
+                )
                 return {"default": fmha_impl, "indexer_kv": fmha_impl}
             raw_tags = (
                 list(attention_inputs) if isinstance(attention_inputs, Mapping) else []
@@ -445,11 +453,39 @@ class GenericMoeModel(GptModelBase):
                     "sparse MLA requires exactly attention input tags "
                     f"{sorted(required_tags)}; available tags={raw_tags}"
                 )
-        return super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        return super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
+
+    def embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Build token embeddings and inject features for an MM request.
+
+        The model-level flag controls whether the injector is constructed;
+        the request-level feature list controls whether this invocation uses
+        the multimodal path. This keeps text-only requests on the original
+        embedding kernel even when a VL model serves a mixed workload.
+        """
+        multimodal_inputs = getattr(inputs, "multimodal_inputs", None)
+        multimodal_features = getattr(multimodal_inputs, "multimodal_features", None)
+        injector = getattr(self, "multimodal_embedding_injector", None)
+        if injector is None or not multimodal_features:
+            return self.embed_tokens(inputs.input_ids)
+
+        inputs_embeds = self.embed_tokens(
+            inputs.input_ids,
+            inputs.combo_position_ids,
+            inputs.embedding_inputs.combo_tokens_type_ids,
+            inputs.embedding_inputs.text_tokens_mask,
+        )
+        return injector(
+            inputs_embeds,
+            multimodal_features,
+            multimodal_inputs.mm_features_locs,
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs

@@ -16,6 +16,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
+import org.flexlb.service.VitCacheDirectory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -32,6 +33,8 @@ public class DefaultRouter {
     private final RandomStrategy vitSelector;
     private final ConfigService configService;
     private final List<RoleType> requiredRoles;
+    @Autowired
+    private VitCacheDirectory vitCacheDirectory;
 
     @Autowired
     public DefaultRouter(
@@ -73,6 +76,25 @@ public class DefaultRouter {
         }
     }
 
+    public Response routeVit(BalanceContext context) {
+        Response invalid = validateRequest(context);
+        if (invalid != null) { return invalid; }
+        if (!requiredRoles.contains(RoleType.VIT)) { return Response.error(StrategyErrorType.NO_VIT_WORKER); }
+        ServerStatus vit = vitCacheDirectory.select(context, resolvePolicyGroup(context));
+        if (vit.isSuccess()) { return buildSuccessResponse(List.of(vit)); }
+        Response failure = new Response();
+        failure.setSuccess(false);
+        failure.setCode(vit.getCode());
+        failure.setErrorMessage(vit.getMessage());
+        return failure;
+    }
+
+    public boolean selectedVitIsValid(BalanceContext context) {
+        if (context.getRequest() == null || context.getRequest().getSelectedVit() == null) { return true; }
+        return requiredRoles.contains(RoleType.VIT)
+                && vitCacheDirectory.validate(context, resolvePolicyGroup(context)).isSuccess();
+    }
+
     private Response validateRequest(BalanceContext context) {
         if (context == null || context.getRequest() == null) {
             Logger.error("masterRequest is null");
@@ -94,7 +116,16 @@ public class DefaultRouter {
         }
 
         try {
+            if (context.getRequest().getSelectedVit() != null) {
+                SelectedRole vit = vitCacheDirectory.selectPinned(context, policyGroup);
+                if (vit == null) {
+                    return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
+                }
+                selected.add(vit);
+                group = vit.serverStatus().getGroup();
+            }
             for (RoleType role : roles) {
+                if (role == RoleType.VIT && context.getRequest().getSelectedVit() != null) { continue; }
                 PlacementResult<SelectedRole, RoleType> result =
                         selectRole(context, role, group, decodeAdmission);
                 if (result.status() != PlacementResult.Status.SUCCESS) {

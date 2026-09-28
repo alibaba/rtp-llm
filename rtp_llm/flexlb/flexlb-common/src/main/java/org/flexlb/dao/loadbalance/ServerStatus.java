@@ -8,6 +8,8 @@ import org.flexlb.dao.route.RoleType;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
+    @JsonProperty("worker_generation")
+    private long workerGeneration;
     @JsonProperty("role")
     private RoleType role;
 
@@ -58,6 +60,7 @@ public class ServerStatus {
         copy.dpRank = source.dpRank;
         copy.prefillTime = source.prefillTime;
         copy.group = source.group;
+        copy.workerGeneration = source.workerGeneration;
         copy.debugInfo = DebugInfo.copyOf(source.debugInfo);
         copy.requestId = source.requestId;
         copy.success = source.success;

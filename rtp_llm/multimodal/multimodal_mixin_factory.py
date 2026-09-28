@@ -56,4 +56,5 @@ class MultimodalMixinFactory:
             server_id,
             is_proxy_mode,
             device=device,
+            kv_cache_config=engine_config.kv_cache_config,
         )
