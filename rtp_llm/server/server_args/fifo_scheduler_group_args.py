@@ -70,7 +70,6 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         default=False,
         help=(
             "每个 prefill forward 最多只跑一个请求（prefill 独占），批总 token 数 = 请求自身长度。"
-            "确定性 batched 档（--deterministic_level batched）会强制开启。"
         ),
     )
     fifo_scheduler_group.add_argument(

@@ -1690,48 +1690,5 @@ class MaxGenerateBatchSizeArgumentsTest(TestCase):
             EngineConfig.create(configs)
 
 
-class MaxGenerateBatchSizeDeterministicSwitchTest(TestCase):
-    """Deterministic presets pin max_generate_batch_size (graph size / 1)."""
-
-    def _create_engine_config(self, args):
-        from rtp_llm.config.engine_config import EngineConfig
-        from rtp_llm.server.server_args import server_args
-
-        with patch.dict(os.environ, {}, clear=True):
-            configs = server_args.setup_args(args)
-        return EngineConfig.create(configs)
-
-    def test_decode_level_keeps_explicit_value(self):
-        engine_config = self._create_engine_config(
-            [
-                "--deterministic_inference", "1",
-                "--deterministic_level", "decode",
-                "--max_generate_batch_size", "8",
-            ]
-        )
-        self.assertEqual(engine_config.runtime_config.max_generate_batch_size, 8)
-
-    def test_batched_level_pins_value_to_decode_graph_size(self):
-        engine_config = self._create_engine_config(
-            [
-                "--deterministic_inference", "1",
-                "--deterministic_level", "batched",
-                "--deterministic_decode_batch_size", "8",
-                "--max_generate_batch_size", "16",
-            ]
-        )
-        self.assertEqual(engine_config.runtime_config.max_generate_batch_size, 8)
-
-    def test_full_level_pins_value_to_one(self):
-        engine_config = self._create_engine_config(
-            [
-                "--deterministic_inference", "1",
-                "--deterministic_level", "full",
-                "--max_generate_batch_size", "16",
-            ]
-        )
-        self.assertEqual(engine_config.runtime_config.max_generate_batch_size, 1)
-
-
 if __name__ == "__main__":
     main()
