@@ -15,6 +15,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -73,6 +74,44 @@ class EngineAddressResolverTest {
 
         assertWorkerHost(grpcHosts.getValue().get(0), "10.0.0.2", 8081, 18002);
         assertWorkerHost(cacheHosts.getValue().get(0), "10.0.0.2", 8081, 18002);
+    }
+
+    @Test
+    void emptyPollsAndPushesRetainAddressesUntilNonEmptyRecovery() {
+        Endpoint first = new Endpoint();
+        first.setAddress("vip-a");
+        Endpoint second = new Endpoint();
+        second.setAddress("vip-b");
+        ServiceRoute route = mock(ServiceRoute.class);
+        when(route.getAllEndpoints()).thenReturn(List.of(first, second));
+        ModelMetaConfig config = mock(ModelMetaConfig.class);
+        when(config.getServiceRoutes()).thenReturn(List.of(route));
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        WorkerHost a = workerHost("10.0.0.1", 8080);
+        WorkerHost b = workerHost("10.0.0.2", 8080);
+        WorkerHost c = workerHost("10.0.0.3", 8080);
+        when(discovery.getHosts(first)).thenReturn(List.of(a), List.of())
+                .thenThrow(new IllegalStateException("unreachable"));
+        when(discovery.getHosts(second)).thenReturn(List.of(b), List.of(c));
+        EngineAddressResolver resolver = new EngineAddressResolver(discovery, config);
+        ArgumentCaptor<ServiceHostListener> callback = ArgumentCaptor.forClass(ServiceHostListener.class);
+        verify(discovery).listen(eq(first), callback.capture());
+        EngineAddressResolver.Listener listener = mock(EngineAddressResolver.Listener.class);
+        resolver.subscribe(listener);
+        callback.getValue().onHostsChanged(List.of());
+        verify(listener).onAddressUpdate(argThat(
+                hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, b))));
+
+        resolver.periodicHostUpdate();
+        resolver.periodicHostUpdate();
+        EngineAddressResolver.Listener latest = mock(EngineAddressResolver.Listener.class);
+        resolver.subscribe(latest);
+        verify(latest).onAddressUpdate(argThat(
+                hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, c))));
+
+        callback.getValue().onHostsChanged(List.of(b));
+        verify(listener).onAddressUpdate(argThat(
+                hosts -> hosts.size() == 2 && hosts.containsAll(List.of(b, c))));
     }
 
     private void assertWorkerHost(WorkerHost host, String ip, int grpcPort, int workerStatusPort) {
