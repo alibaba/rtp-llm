@@ -5,14 +5,14 @@ set -euo pipefail
 # All paths are task-owned; the checkpoint is read directly from 3FS.
 role=${1:?producer or consumer}
 case "$role" in
-  producer) host_ip=11.163.39.111; port=26100; kv_role=kv_producer; task_dir=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/vllm-pd-3df4 ;;
-  consumer) host_ip=11.163.39.112; port=26200; kv_role=kv_consumer; task_dir=/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/vllm-pd-3df4 ;;
+  producer) host_ip=11.163.39.111; port=26100; kv_role=kv_producer; task_dir=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/vllm-pd-3df4-r2 ;;
+  consumer) host_ip=11.163.39.112; port=26200; kv_role=kv_consumer; task_dir=/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/vllm-pd-3df4-r2 ;;
   *) echo "invalid role: $role" >&2; exit 2 ;;
 esac
 
 image='mirrors-ssl.aliyuncs.com/vllm/vllm-openai@sha256:dfaab3570be5b1f66c21e60c60f1616ad3a0143f9899b8738257004f289979fd'
 model='/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers'
-name="lhc_k3_vllm_3df4_${role}_20260928"
+name="lhc_k3_vllm_3df4_${role}_20260929_r2"
 
 test "$(id -u)" = 19357313
 test -f "$model/model.safetensors.index.json"
