@@ -745,6 +745,13 @@ class PyEnvConfigs:
         self.master_config: MasterConfig = MasterConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
+        # Explicit --max_generate_batch_size override (tri-state: None = not
+        # provided, so EngineConfig.create keeps deriving
+        # max_generate_batch_size from concurrency_limit. A positive int = an
+        # explicit scheduler-side decode running-batch cap: excess streams queue
+        # in the scheduler instead of being rejected at the HTTP frontend the
+        # way concurrency_limit does.)
+        self.max_generate_batch_size_override: Optional[int] = None
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
