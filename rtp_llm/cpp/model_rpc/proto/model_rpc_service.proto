@@ -47,6 +47,7 @@ enum RoleTypePB {
     ROLE_TYPE_DECODE = 2;
     ROLE_TYPE_VIT = 3;
     ROLE_TYPE_FRONTEND = 4;
+    ROLE_TYPE_ENCODER = 5;
 }
 
 message RoleAddrPB {

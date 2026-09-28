@@ -233,15 +233,22 @@ public class BatchSchedulerReporter {
     /**
      * Report scheduler inflight size via {@code flexlb.scheduler.inflight.size}.
      * <p>Uses an independent metric name (not {@code engine.health.check.local.inflight.size})
-     * because this is a scheduler-level metric with tag schema (role=PREFILL, engineIp="scheduler"),
+     * because this is a scheduler-level metric with tag schema (role, engineIp="scheduler"),
      * which differs from EngineHealthReporter's per-engine version tagged by
      * (model, code, engineIp=real-engine-IP, role). Sharing the same metric name would cause
      * tag schema conflicts in kmonitor grouping.
-     * Uses role=PREFILL + engineIp=scheduler tags to match the Grafana panel filter.
+     * Generation requests use role=PREFILL for existing Grafana panels; Encoder uses role=ENCODER.
      */
     public void reportSchedulerInflightSize(int size) {
+        reportSchedulerInflightSize(RoleType.PREFILL, size);
+    }
+
+    /**
+     * Report separate scheduler inflight series for Generation (PREFILL) and Encoder.
+     */
+    public void reportSchedulerInflightSize(RoleType role, int size) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
+                "role", role.name(),
                 "engineIp", "scheduler");
         monitor.report(SCHEDULER_INFLIGHT_SIZE, tags, size);
     }

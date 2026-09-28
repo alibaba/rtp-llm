@@ -11,6 +11,7 @@ import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -24,6 +25,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,6 +37,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -63,6 +66,7 @@ class DefaultRouterTest {
     private CostBasedPrefillStrategy prefillSelector;
     private DecodeSelector decodeSelector;
     private RandomStrategy vitSelector;
+    private EncoderStrategy encoderSelector;
     private ConfigService configService;
     private ModelMetaConfig modelMeta;
     private RequestRegistry requests;
@@ -72,6 +76,7 @@ class DefaultRouterTest {
         prefillSelector = mock(CostBasedPrefillStrategy.class);
         decodeSelector = mock(DecodeSelector.class);
         vitSelector = mock(RandomStrategy.class);
+        encoderSelector = mock(EncoderStrategy.class);
         configService = mock(ConfigService.class);
         modelMeta = mock(ModelMetaConfig.class);
         requests = mock(RequestRegistry.class);
@@ -106,6 +111,59 @@ class DefaultRouterTest {
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 result.failure().getCode());
         verify(configService, never()).loadBalanceConfig();
+        verifyNoInteractions(prefillSelector, decodeSelector, vitSelector);
+    }
+
+    @Test
+    void explicitRolesSelectOnlyConfiguredRequestedRoles() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
+        BalanceContext context = context(701L);
+        context.setRequestedRoles(Set.of(RoleType.PREFILL));
+        SelectionFixture prefill = selection(RoleType.PREFILL, 701L, "p", 8001, "g1");
+        when(prefillSelector.select(context, RoleType.PREFILL, null))
+                .thenReturn(PlacementResult.success(prefill.selection));
+
+        try (var result = router().select(context).value()) {
+            assertEquals(RoleType.PREFILL, result.response().getServerStatus().getFirst().getRole());
+        }
+        verifyNoInteractions(decodeSelector, encoderSelector);
+    }
+
+    @Test
+    void explicitUnconfiguredRoleIsInvalidRequest() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        BalanceContext context = context(702L);
+        context.setRequestedRoles(Set.of(RoleType.ENCODER));
+
+        var result = router().select(context);
+
+        assertEquals(PlacementResult.Status.REJECTED, result.status());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), result.failure().getCode());
+        verifyNoInteractions(prefillSelector, encoderSelector);
+    }
+
+    @Test
+    void encoderOnlyUsesDirectDecisionEvenWhenGenerationIsQueued() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
+        BalanceContext context = context(703L);
+        context.setRequestedRoles(Set.of(RoleType.ENCODER));
+        SelectionFixture encoder = selection(RoleType.ENCODER, 703L, "encoder", 8003, "g1");
+        when(encoderSelector.select(context, null)).thenReturn(encoder.selection);
+        when(requests.claimEncoderRoute(eq("703"), any(), eq(encoder.pin)))
+                .thenReturn(true);
+        when(requests.publishEncoderRoute(eq("703"), any(), any()))
+                .thenAnswer(call -> {
+                    call.getArgument(1, CompletableFuture.class)
+                            .complete(call.getArgument(2, Response.class));
+                    return true;
+                });
+
+        Response response = scheduler(router(), context).submit(context).join();
+
+        assertTrue(response.isSuccess());
+        assertEquals(RequestPhase.ENCODER, context.getRequestPhase());
+        assertEquals(List.of(encoder.status), response.getServerStatus());
+        verify(encoder.pin).close();
         verifyNoInteractions(prefillSelector, decodeSelector, vitSelector);
     }
 
@@ -609,6 +667,7 @@ class DefaultRouterTest {
                 prefillSelector,
                 decodeSelector,
                 vitSelector,
+                encoderSelector,
                 configService,
                 modelMeta);
     }

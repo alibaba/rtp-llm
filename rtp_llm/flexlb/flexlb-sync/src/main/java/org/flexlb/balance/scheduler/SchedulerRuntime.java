@@ -3,6 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.dao.route.RequestPhase;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
@@ -78,7 +80,9 @@ final class SchedulerRuntime {
     private void reportSchedulerInflight() {
         try {
             reporter.reportSchedulerInflightSize(
-                    requests.liveRequestCount());
+                    requests.liveRequestCount(RequestPhase.GENERATION));
+            reporter.reportSchedulerInflightSize(RoleType.ENCODER,
+                    requests.liveRequestCount(RequestPhase.ENCODER));
             // Age of the oldest scheduler-ledger inflight entry: with a
             // healthy TTL the size gauge alone cannot distinguish "busy"
             // from "leaking"; a max age creeping toward the TTL window is

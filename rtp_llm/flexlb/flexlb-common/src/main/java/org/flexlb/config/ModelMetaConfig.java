@@ -22,7 +22,8 @@ public class ModelMetaConfig {
             RoleType.PDFUSION,
             RoleType.DECODE,
             RoleType.PREFILL,
-            RoleType.VIT);
+            RoleType.VIT,
+            RoleType.ENCODER);
 
     private final ConcurrentHashMap<String, ServiceRoute> modelServiceRoute =
             new ConcurrentHashMap<>();

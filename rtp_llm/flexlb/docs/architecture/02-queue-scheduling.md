@@ -1,5 +1,16 @@
 # Scheduling and Request Lifecycle
 
+同一个业务 `request_id` 在 FlexLB 内按 `RequestPhase` 分为 `ENCODER` 与 `GENERATION`
+两条生命周期。Encoder 单独决策始终走 DIRECT：登记请求后选点，选中端点接管请求时进入
+`DISPATCHING`，确认并提交路由成功响应时进入 `ACKNOWLEDGED`，随后由 Encoder 的 WorkerStatus 活跃任务、
+完成任务或失活超时推进状态。Frontend 负责把请求发给选中的 Encoder，FlexLB 不做
+Encoder 批量派发，也不调用 Encoder Cancel RPC。Generation 沿用原调度流程。
+
+`Cancel` 和 `GetRequestState` 可传 `phase` 查找对应阶段；省略或传默认值时定位
+Generation，以兼容旧客户端。常见 EPD 调用先单独决策 Encoder，处理完成后再以同一个
+业务 ID 决策 Prefill、Prefill + Decode 或 PDFusion。混合阶段角色同时请求不在当前
+验证流程内，也没有专门的角色组合白名单。
+
 `FLEXLB_CONFIG.scheduler` 是带 `type` 的联合配置：
 
 - `DIRECT`：`RouteService` 在调用链中执行 `DefaultRouter.route()`，返回已完成的

@@ -3,6 +3,7 @@ package org.flexlb.dao.pv;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,21 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PvLogDataTest {
+
+    @Test
+    void includesPhaseToDistinguishTwoDecisionsWithTheSameRequestId() throws Exception {
+        BalanceContext context = new BalanceContext();
+        context.setRequestPhase(RequestPhase.ENCODER);
+        Request request = new Request();
+        request.setRequestId("shared-id");
+        context.setRequest(request);
+
+        var json = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+
+        assertEquals("shared-id", json.path("requestId").asText());
+        assertEquals("ENCODER", json.path("phase").asText());
+    }
 
     @Test
     void terminalResponseUsesFinalOutcomeWithoutMutatingRoutingResponse() throws Exception {

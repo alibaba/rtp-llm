@@ -22,6 +22,9 @@ public class GroupRoleEndPoint {
     @JsonProperty("vit_endpoint")
     private Endpoint vitEndpoint;
 
+    @JsonProperty("encoder_endpoint")
+    private Endpoint encoderEndpoint;
+
     @JsonProperty("pd_fusion_endpoint")
     private Endpoint pdFusionEndpoint;
 
@@ -43,6 +46,9 @@ public class GroupRoleEndPoint {
         if (vitEndpoint != null) {
             roleTypes.add(RoleType.VIT);
         }
+        if (encoderEndpoint != null) {
+            roleTypes.add(RoleType.ENCODER);
+        }
         if (pdFusionEndpoint != null) {
             roleTypes.add(RoleType.PDFUSION);
         }
@@ -60,6 +66,9 @@ public class GroupRoleEndPoint {
         if (vitEndpoint != null) {
             endpoints.add(vitEndpoint);
         }
+        if (encoderEndpoint != null) {
+            endpoints.add(encoderEndpoint);
+        }
         if (pdFusionEndpoint != null) {
             endpoints.add(pdFusionEndpoint);
         }
@@ -73,6 +82,8 @@ public class GroupRoleEndPoint {
             return decodeEndpoint;
         } else if (roleType == RoleType.VIT) {
             return vitEndpoint;
+        } else if (roleType == RoleType.ENCODER) {
+            return encoderEndpoint;
         } else if (roleType == RoleType.PDFUSION) {
             return pdFusionEndpoint;
         }

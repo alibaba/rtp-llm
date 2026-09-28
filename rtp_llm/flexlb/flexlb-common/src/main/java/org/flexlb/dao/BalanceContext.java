@@ -12,11 +12,13 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.pv.DecisionGroup;
 import org.flexlb.dao.pv.RoutingDecision;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -117,6 +119,16 @@ public class BalanceContext {
      * and BATCH without being reset on retry or rescue.
      */
     private SchedulingMetadata schedulingMetadata;
+
+    /**
+     * Null means the caller did not restrict the configured roles.
+     */
+    private Set<RoleType> requestedRoles;
+
+    /**
+     * One business request ID may have separate Encoder and Generation decisions.
+     */
+    private RequestPhase requestPhase = RequestPhase.GENERATION;
 
     /**
      * priority scheduling plan type that finally placed the request:

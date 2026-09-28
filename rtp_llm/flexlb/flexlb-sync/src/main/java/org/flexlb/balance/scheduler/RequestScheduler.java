@@ -4,11 +4,13 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -66,14 +68,22 @@ public final class RequestScheduler {
             return CompletableFuture.completedFuture(error(
                     StrategyErrorType.INVALID_REQUEST, null));
         }
+        boolean encoderOnly = router.isEncoderOnly(context);
+        if (encoderOnly) {
+            context.setRequestPhase(RequestPhase.ENCODER);
+        }
         FlexlbConfig requestConfig = context.getConfig();
-        if (requestConfig.isQueue() && globalQueue == null) {
+        if (!encoderOnly && requestConfig.isQueue() && globalQueue == null) {
             return CompletableFuture.completedFuture(error(StrategyErrorType.DISPATCH_FAILED,
                     "QUEUE configuration was enabled after scheduler startup"));
         }
         CompletableFuture<Response> future = requestRegistry.register(context);
         context.setFuture(future);
         if (future.isDone()) {
+            return future;
+        }
+        if (encoderOnly) {
+            selectAndPublishEncoder(context);
             return future;
         }
         if (requestConfig.isDirect()) {
@@ -90,6 +100,43 @@ public final class RequestScheduler {
                     "Queue submission failed: " + failure.getMessage()));
         }
         return future;
+    }
+
+    private void selectAndPublishEncoder(BalanceContext context) {
+        Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
+        try {
+            PlacementResult<SelectedRole, PlacementKey> selection = router.selectEncoder(context);
+            context.setSchedulingDiagnostics(selection.diagnostics());
+            switch (selection.status()) {
+                case SUCCESS -> {
+                    try (SelectedRole selected = selection.value()) {
+                        Response response = new Response();
+                        response.setSuccess(true);
+                        response.setServerStatus(List.of(selected.serverStatus()));
+                        try (var pin = selected.takeGenerationPin()) {
+                            if (requestRegistry.claimEncoderRoute(context.getRequestId(), context.getFuture(), pin)
+                                    && requestRegistry.publishEncoderRoute(
+                                            context.getRequestId(), context.getFuture(), response)) {
+                                failure = null;
+                            } else {
+                                failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                            }
+                        }
+                    }
+                }
+                case BLOCKED -> failure = selection.failure() != null
+                        ? selection.failure() : Response.error(StrategyErrorType.NO_ENCODER_WORKER);
+                case REJECTED -> failure = selection.failure();
+                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+            }
+        } catch (RuntimeException selectionFailure) {
+            Logger.warn("Encoder DIRECT admission failed: request_id={}", context.getRequestId(), selectionFailure);
+        } finally {
+            if (failure != null) {
+                requestRegistry.publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), failure,
+                        RequestPhase.ENCODER);
+            }
+        }
     }
 
     private void submitDirect(BalanceContext context) {
@@ -134,6 +181,14 @@ public final class RequestScheduler {
         return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
     }
 
+    /**
+     * Cancel the selected phase while preserving the other phase with the same request ID.
+     */
+    public RequestState cancelRequest(
+            String requestId, long expectedBatchId, CancelReason reason, RequestPhase phase) {
+        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason, phase);
+    }
+
     public int getInflightSize() {
         return requestRegistry.liveRequestCount();
     }
@@ -160,6 +215,13 @@ public final class RequestScheduler {
 
     public RequestState getRequestState(String requestId, long expectedBatchId) {
         return requestRegistry.getRequestState(requestId, expectedBatchId);
+    }
+
+    /**
+     * Read the Encoder or Generation lifecycle selected by phase.
+     */
+    public RequestState getRequestState(String requestId, long expectedBatchId, RequestPhase phase) {
+        return requestRegistry.getRequestState(requestId, expectedBatchId, phase);
     }
 
     public void closePlacement() {

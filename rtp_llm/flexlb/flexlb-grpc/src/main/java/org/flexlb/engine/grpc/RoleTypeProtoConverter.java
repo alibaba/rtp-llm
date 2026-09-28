@@ -24,6 +24,7 @@ public final class RoleTypeProtoConverter {
             case ROLE_TYPE_DECODE -> RoleType.DECODE;
             case ROLE_TYPE_VIT -> RoleType.VIT;
             case ROLE_TYPE_FRONTEND -> RoleType.FRONTEND;
+            case ROLE_TYPE_ENCODER -> RoleType.ENCODER;
             default -> null;
         };
     }
@@ -35,6 +36,8 @@ public final class RoleTypeProtoConverter {
             case PREFILL -> EngineRpcService.RoleAddrPB.RoleType.PREFILL;
             case DECODE -> EngineRpcService.RoleAddrPB.RoleType.DECODE;
             case VIT -> EngineRpcService.RoleAddrPB.RoleType.VIT;
+            case ENCODER -> throw new IllegalArgumentException(
+                    "Encoder has no legacy RoleAddrPB enum value");
             case FRONTEND -> EngineRpcService.RoleAddrPB.RoleType.FRONTEND;
         };
     }
