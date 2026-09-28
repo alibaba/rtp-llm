@@ -104,6 +104,41 @@ class DecodeSelectorTest {
         }
     }
 
+    @Test
+    void recordsMinimumCostSelectionReason() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            BalanceContext context = context(100L, 2L);
+            ServerStatus selected = selectStatus(
+                    availableStrategy(registry), context, RoleType.DECODE, null);
+
+            Assertions.assertNotNull(selected);
+            Assertions.assertEquals("DECODE_MIN_COST",
+                    context.selectionReason(RoleType.DECODE));
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void recordsRoundRobinTiebreakForEqualMinimumCostCandidates() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            BalanceContext context = context(100L, 3L);
+            ServerStatus selected = selectStatus(
+                    availableStrategy(registry), context, RoleType.DECODE, null);
+
+            Assertions.assertNotNull(selected);
+            Assertions.assertEquals("DECODE_MIN_COST_ROUND_ROBIN_TIEBREAK",
+                    context.selectionReason(RoleType.DECODE));
+        } finally {
+            registry.close();
+        }
+    }
+
     private BalanceContext context(long sequenceLength, long requestId) {
         Request request = new Request();
         request.setSeqLen(sequenceLength);
@@ -777,7 +812,7 @@ class DecodeSelectorTest {
             RoleType role,
             String group) {
         PlacementResult<SelectedRole, RoleType> result =
-                strategy.select(DecodeBinding.capture(context), group);
+                strategy.select(context, DecodeBinding.capture(context), group);
         if (result.status() != PlacementResult.Status.SUCCESS) {
             return null;
         }
