@@ -9,6 +9,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
     Qwen4ExpMTPInputProjection,
     Qwen4ExpMTPModel,
 )
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
 class _Matmul(nn.Module):
@@ -30,6 +31,34 @@ def _raw_gamma_rms_norm(
 
 
 class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
+    def test_target_forward_exports_precollapse_rows_to_graph_output(self):
+        inputs = PyModelInputs()
+        inputs.attention_inputs = PyAttentionInputs()
+        embedding = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        wide = torch.cat((embedding, embedding + 10), dim=-1)
+        model = SimpleNamespace(
+            ple_layers={},
+            layers=[],
+            kv_cache=None,
+            _capture_mtp_target_hidden=True,
+            _ple_target_transaction=None,
+            word_embedding=lambda _: embedding,
+            _build_attn_meta=lambda *_: None,
+            _initial_hyper_states=lambda _: wide,
+            hyper_connection_mixer=lambda value: (value[:, :4], None, None),
+        )
+
+        outputs = Qwen4ExpModel.forward(model, inputs, object())
+        torch.testing.assert_close(outputs.hidden_states, embedding)
+        torch.testing.assert_close(outputs.mtp_target_hidden_states, wide)
+        self.assertEqual(
+            outputs.mtp_target_hidden_states.data_ptr(), wide.data_ptr()
+        )
+
+        model._capture_mtp_target_hidden = False
+        outputs = Qwen4ExpModel.forward(model, inputs, object())
+        self.assertIsNone(outputs.mtp_target_hidden_states)
+
     def test_two_projection_forward_matches_small_shape_reference(self):
         torch.manual_seed(11)
         tokens, hc_mult, hidden_size = 3, 2, 4
