@@ -62,6 +62,26 @@ class TokenNormalizer:
         """
         self.tokenizer = tokenizer
 
+    def normalize_text(
+        self, prev_token_ids: List[int], new_token_ids: List[int]
+    ) -> str:
+        """Decode a non-streaming chunk once, retaining UTF-8 boundary handling.
+
+        Non-streaming consumers parse the complete text, so they do not need
+        one delta per token. Iterating normalize_tokens over a completed long
+        response repeatedly decodes its growing prefix and blocks the frontend
+        event loop with quadratic work. Keep the original recovery path for
+        incomplete/invalid UTF-8; streaming token decomposition is unchanged.
+        """
+        if not new_token_ids:
+            return ""
+        yielded_length = self._calculate_yielded_length(prev_token_ids)
+        decoded = self.tokenizer.decode(prev_token_ids + new_token_ids)
+        delta_text = decoded[yielded_length:]
+        if "\ufffd" not in delta_text:
+            return delta_text
+        return "".join(self.normalize_tokens(prev_token_ids, new_token_ids))
+
     def normalize_tokens(
         self, prev_token_ids: List[int], new_token_ids: List[int]
     ) -> Generator[str, None, None]:
@@ -88,12 +108,12 @@ class TokenNormalizer:
             decoded_cumulative = self.tokenizer.decode(cumulative_tokens)
             delta_text = decoded_cumulative[yielded_length:]
 
-            if delta_text and "\uFFFD" in delta_text:
+            if delta_text and "\ufffd" in delta_text:
                 # Try to resolve with a sliding window that includes future tokens
                 valid_delta = self._try_resolve_with_future_tokens(
                     prev_token_ids, new_token_ids, i, yielded_length
                 )
-                if valid_delta and valid_delta != "\uFFFD":
+                if valid_delta and valid_delta != "\ufffd":
                     yield valid_delta
                     yielded_length += len(valid_delta)
                 # If can't resolve, skip this token - caller's prev_token_ids will
@@ -108,15 +128,15 @@ class TokenNormalizer:
         """
         Calculate the length of text that has already been yielded.
 
-        Key insight: If prev_decoded ends with \uFFFD, it means the last token(s)
+        Key insight: If prev_decoded ends with \ufffd, it means the last token(s)
         produced incomplete output that was NOT yielded. In that case, we need to
         find where the incomplete portion starts and only count the complete part.
 
         We do this by iteratively decoding shorter prefixes of prev_token_ids
         until we find one that no longer ends with a replacement character.
 
-        IMPORTANT: We must check token boundaries, not just strip \uFFFD from the
-        end, because the character(s) before \uFFFD may also be part of the
+        IMPORTANT: We must check token boundaries, not just strip \ufffd from the
+        end, because the character(s) before \ufffd may also be part of the
         incomplete sequence (e.g., a space that's part of a multi-token encoding).
 
         Args:
@@ -135,7 +155,7 @@ class TokenNormalizer:
         # character earlier in the string can come from a context window that
         # starts on a UTF-8 continuation token; text after it is still complete
         # and has already been yielded.
-        if not prev_decoded.endswith("\uFFFD"):
+        if not prev_decoded.endswith("\ufffd"):
             return len(prev_decoded)
 
         # There's an incomplete trailing sequence. Iterate backwards to find the
@@ -145,7 +165,7 @@ class TokenNormalizer:
             if not prefix_tokens:
                 return 0
             prefix_decoded = self.tokenizer.decode(prefix_tokens)
-            if not prefix_decoded.endswith("\uFFFD"):
+            if not prefix_decoded.endswith("\ufffd"):
                 return len(prefix_decoded)
 
         # Every prefix ends with incomplete output.
@@ -191,7 +211,7 @@ class TokenNormalizer:
             ]
             if new_only_tokens:
                 new_only_decoded = self.tokenizer.decode(new_only_tokens)
-                if "\uFFFD" not in new_only_decoded:
+                if "\ufffd" not in new_only_decoded:
                     # New tokens alone are valid! Return them directly
                     return new_only_decoded
 
@@ -208,13 +228,13 @@ class TokenNormalizer:
                 window_tokens = combined_tokens[window_start:window_end]
                 window_decoded = self.tokenizer.decode(window_tokens)
 
-                if "\uFFFD" not in window_decoded:
+                if "\ufffd" not in window_decoded:
                     # Found valid UTF-8! Calculate what to emit
                     # Get the part that's from the current position onwards
                     full_decoded = self.tokenizer.decode(combined_tokens[:window_end])
                     new_text = full_decoded[yielded_length:]
 
-                    if new_text and "\uFFFD" not in new_text:
+                    if new_text and "\ufffd" not in new_text:
                         return new_text
 
         return ""

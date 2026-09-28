@@ -24,7 +24,39 @@ from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import (
     Qwen3Detector,
     ReasoningParser,
 )
+from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import TokenNormalizer
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+
+
+class NonStreamingNormalizationRendererTest(IsolatedAsyncioTestCase):
+    async def test_long_completed_response_does_not_decode_growing_prefixes(self):
+        tokens = [ord("x")] * 4096
+        decoded_tokens = 0
+
+        def decode(ids):
+            nonlocal decoded_tokens
+            decoded_tokens += len(ids)
+            if decoded_tokens > 2 * len(tokens):
+                raise AssertionError(
+                    "non-streaming renderer repeatedly decoded prefixes"
+                )
+            return "".join(chr(token) for token in ids)
+
+        tokenizer = Mock()
+        tokenizer.decode = decode
+        renderer = Mock(spec=ReasoningToolBaseRenderer)
+        delta = Mock()
+        renderer._process_single_token_delta = AsyncMock(return_value=delta)
+        status = Mock()
+        status.prev_token_id = []
+        output = Mock()
+        result = await ReasoningToolBaseRenderer._process_normalized_tokens(
+            renderer, TokenNormalizer(tokenizer), status, tokens, output, [], [], False
+        )
+        self.assertEqual(result, ([delta], True))
+        renderer._process_single_token_delta.assert_awaited_once_with(
+            status, "x" * len(tokens), output, [], [], is_streaming=False
+        )
 
 
 class ProcessReasoningAndToolCallsTest(IsolatedAsyncioTestCase):

@@ -503,10 +503,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                     collected_deltas.append(token_delta)
             return collected_deltas, normalizer_yielded
 
-        # Non-streaming: accumulate all text first, then process once
-        all_text = "".join(
-            normalizer.normalize_tokens(status.prev_token_id, new_token_ids)
-        )
+        # Non-streaming parsers consume the complete text. Avoid decoding every
+        # growing prefix when the backend returns a long completed response.
+        all_text = normalizer.normalize_text(status.prev_token_id, new_token_ids)
         if not all_text:
             return [], False
 

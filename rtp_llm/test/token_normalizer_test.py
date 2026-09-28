@@ -4,7 +4,7 @@ Tests for TokenNormalizer with adaptive sliding window.
 These tests verify that the normalizer correctly handles:
 1. Normal single-byte tokens
 2. Multi-byte Unicode characters split across tokens (ChatGLM-style)
-3. Adaptive sliding window when \uFFFD is detected
+3. Adaptive sliding window when \ufffd is detected
 4. Real Qwen tokenizer behavior with Chinese text containing spaces (MTP-safe streaming)
 """
 
@@ -33,12 +33,12 @@ class MockTokenizer:
         # Token 5-7: Similar for 好
         self.token_map = {
             1: b"Hello ",
-            2: b"\xE4",  # First byte of 你 (incomplete)
-            3: b"\xBD",  # Second byte of 你 (incomplete)
-            4: b"\xA0",  # Third byte of 你 (complete with 2,3)
-            5: b"\xE5",  # First byte of 好 (incomplete)
-            6: b"\xA5",  # Second byte of 好 (incomplete)
-            7: b"\xBD",  # Third byte of 好 (complete with 5,6)
+            2: b"\xe4",  # First byte of 你 (incomplete)
+            3: b"\xbd",  # Second byte of 你 (incomplete)
+            4: b"\xa0",  # Third byte of 你 (complete with 2,3)
+            5: b"\xe5",  # First byte of 好 (incomplete)
+            6: b"\xa5",  # Second byte of 好 (incomplete)
+            7: b"\xbd",  # Third byte of 好 (complete with 5,6)
         }
 
     def decode(self, token_ids):
@@ -53,7 +53,7 @@ class MockTokenizer:
         try:
             return byte_sequence.decode("utf-8", errors="replace")
         except Exception:
-            return "\uFFFD"
+            return "\ufffd"
 
 
 class TestTokenNormalizer(unittest.TestCase):
@@ -80,8 +80,8 @@ class TestTokenNormalizer(unittest.TestCase):
         Test adaptive sliding window with multi-byte character split.
 
         Simulates ChatGLM tokenizing "你" as three tokens:
-        Token 2: 0xE4 (incomplete -> \uFFFD)
-        Token 3: 0xBD (incomplete -> \uFFFD)
+        Token 2: 0xE4 (incomplete -> \ufffd)
+        Token 3: 0xBD (incomplete -> \ufffd)
         Token 4: 0xA0 (completes "你" with context from 2,3)
         """
         prev_tokens = [1]  # "Hello "
@@ -170,6 +170,48 @@ class TestTokenNormalizer(unittest.TestCase):
         self.assertTrue(
             len(decode_calls) > 3, "Expected multiple decode calls for sliding window"
         )
+
+
+class TestNonStreamingNormalization(unittest.TestCase):
+    def setUp(self):
+        self.normalizer = TokenNormalizer(MockTokenizer())
+
+    def test_complete_unicode_text(self):
+        self.assertEqual(
+            self.normalizer.normalize_text([], [1, 2, 3, 4, 5, 6, 7]), "Hello 你好"
+        )
+
+    def test_incomplete_previous_character(self):
+        self.assertEqual(
+            self.normalizer.normalize_text([1, 2], [3, 4, 5, 6, 7]), "你好"
+        )
+
+    def test_empty_chunk(self):
+        self.assertEqual(self.normalizer.normalize_text([1], []), "")
+
+    def test_unresolved_utf8_keeps_existing_recovery(self):
+        for previous, new in [([], [1, 2]), ([1], [2, 3]), ([2], [1, 5])]:
+            with self.subTest(previous=previous, new=new):
+                self.assertEqual(
+                    self.normalizer.normalize_text(previous, new),
+                    "".join(self.normalizer.normalize_tokens(previous, new)),
+                )
+
+    def test_long_response_has_linear_decode_work(self):
+        tokens_decoded = 0
+
+        def decode(tokens):
+            nonlocal tokens_decoded
+            tokens_decoded += len(tokens)
+            return "".join(chr(token) for token in tokens)
+
+        tokenizer = Mock()
+        tokenizer.decode = Mock(side_effect=decode)
+        tokens = [ord("x")] * 65536
+        self.assertEqual(
+            TokenNormalizer(tokenizer).normalize_text([], tokens), "x" * len(tokens)
+        )
+        self.assertLessEqual(tokens_decoded, 2 * len(tokens))
 
 
 class TestSimpleTokenizer(unittest.TestCase):
@@ -350,7 +392,7 @@ class TestTokenNormalizerWithQwen(unittest.TestCase):
 
         result = "".join(all_deltas)
         self.assertNotIn(
-            "\uFFFD", result, "Final result should not contain replacement characters"
+            "\ufffd", result, "Final result should not contain replacement characters"
         )
 
 
@@ -383,7 +425,7 @@ class TestTokenNormalizerMockEdgeCases(unittest.TestCase):
             # Simulate Qwen-style encoding where space is part of multi-token sequence
             token_map = {
                 (100,): "可乐",
-                (101,): "\uFFFD",  # Space alone produces replacement
+                (101,): "\ufffd",  # Space alone produces replacement
                 (100, 101): "可乐 ",  # Space works with preceding context
                 (102,): "薯片",
                 (101, 102): " 薯片",  # Space works with following context
@@ -400,7 +442,7 @@ class TestTokenNormalizerMockEdgeCases(unittest.TestCase):
                 if tid == 100:
                     result += "可乐"
                 elif tid == 101:
-                    result += "\uFFFD"
+                    result += "\ufffd"
                 elif tid == 102:
                     result += "薯片"
             return result
