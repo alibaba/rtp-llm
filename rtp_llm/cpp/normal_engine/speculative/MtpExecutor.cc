@@ -1966,10 +1966,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    // DSpARK commit input was bound from the explicit target-forward output
-    // above. Re-reading mutable Python model state here is both redundant and
-    // invalid for CUDA graph replay, where Python is not executed.
-    if (!is_dspark_) {
+    // A target-forward output may own the MTP features (Qwen4 and DSpARK).
+    // Graph replay does not update mutable Python model state, so the input
+    // accessor is only a fallback for models without that explicit output.
+    if (!is_dspark_ && !model_output.mtp_target_hidden_states.defined()) {
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
     broadcastPostRejectionInputs(model_input);
