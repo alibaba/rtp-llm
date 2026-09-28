@@ -1,0 +1,1902 @@
+{
+  "candidates": [
+    {
+      "address": "L20-dev-110",
+      "avg_free_gib": 201.3038330078125,
+      "checkpoint_selected": null,
+      "checkpoints": [],
+      "cluster": "l20-a",
+      "compute_apps": [
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648025,
+          "process_name": "rtp_llm_rank-0",
+          "used_memory_mib": 70320
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648026,
+          "process_name": "rtp_llm_rank-1",
+          "used_memory_mib": 68436
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648027,
+          "process_name": "rtp_llm_rank-2",
+          "used_memory_mib": 68614
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648028,
+          "process_name": "rtp_llm_rank-3",
+          "used_memory_mib": 67994
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648029,
+          "process_name": "rtp_llm_rank-4",
+          "used_memory_mib": 68494
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648030,
+          "process_name": "rtp_llm_rank-5",
+          "used_memory_mib": 68694
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648031,
+          "process_name": "rtp_llm_rank-6",
+          "used_memory_mib": 68694
+        },
+        {
+          "group_leader_command": "amperf-detector ",
+          "owner": "root",
+          "pgid": 3015880,
+          "pid": 15293,
+          "process_name": "amperf-detector",
+          "used_memory_mib": 34
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648032,
+          "process_name": "rtp_llm_rank-7",
+          "used_memory_mib": 68694
+        }
+      ],
+      "container_selected": {
+        "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "name": "lhc_GPU",
+        "personal_user_available": true,
+        "runtime": "docker",
+        "status": "Up 3 days"
+      },
+      "containers": [
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "gray-rtp-p1-artifacts-20260929",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 hours"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "gray-rtp-sdk-isolation-20260929",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 hours"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "gray-rtp-p1-gpu-20260928",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 9 hours"
+        },
+        {
+          "image": "gray-kvcm-rtp-env:32dc3162-770bd4df",
+          "name": "gray-kvcm-consumer-20260928",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 10 hours"
+        },
+        {
+          "image": "gray-kvcm-rtp-env:32dc3162-770bd4df",
+          "name": "gray-kvcm-artifacts-20260928",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 10 hours"
+        },
+        {
+          "image": "gray-kvcm-rtp-env:32dc3162-770bd4df",
+          "name": "gray-kvcm-manager-20260928",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 10 hours"
+        },
+        {
+          "image": "gray-kvcm-rtp-env:32dc3162-770bd4df",
+          "name": "gray-kvcm-provider-20260928",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 10 hours"
+        },
+        {
+          "image": "gray-kvcm-rtp-env:32dc3162-770bd4df",
+          "name": "gray-kvcm-meta-20260928",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 10 hours"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "zhanghuidong.zhd_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 12 hours"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_3fs_20260927",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 32 hours"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_pd_20260926",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 2 days"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 3 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "luoli_gpu",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "liukan.lk_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "image": "aa22ea2ee655",
+          "name": "hf3fs-fdb",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-storage",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-meta",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "image": "ef14f7aa5d15",
+          "name": "hf3fs-fuse",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        }
+      ],
+      "eligible": false,
+      "errors": {
+        "apps": "",
+        "containers": {
+          "docker": "",
+          "pouch": "FileNotFoundError(2, \"No such file or directory: 'pouch'\")"
+        },
+        "gpu": ""
+      },
+      "external_compute_apps": [
+        {
+          "group_leader_command": "amperf-detector ",
+          "owner": "root",
+          "pgid": 3015880,
+          "pid": 15293,
+          "process_name": "amperf-detector",
+          "used_memory_mib": 34
+        }
+      ],
+      "fleet_image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+      "gpus": [
+        {
+          "index": 0,
+          "memory_free_mib": 204578,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 70462,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 1,
+          "memory_free_mib": 206444,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 68596,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 2,
+          "memory_free_mib": 206266,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 68774,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 3,
+          "memory_free_mib": 206886,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 68154,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 4,
+          "memory_free_mib": 206386,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 68654,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 5,
+          "memory_free_mib": 206186,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 68854,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 6,
+          "memory_free_mib": 206149,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 68891,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 7,
+          "memory_free_mib": 206186,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 68854,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        }
+      ],
+      "hostname": "e01-cn-yb84rbk1807",
+      "id": 110,
+      "images": [
+        "gray-kvcm-rtp-env:20260928",
+        "gray-kvcm-rtp-env:32dc3162-770bd4df",
+        "hf3fs-fuse:fc750018-helper",
+        "hub.docker.alibaba-inc.com/aone-base-global/aios-3fs-fdb:<none>",
+        "hub.docker.alibaba-inc.com/aone-base-global/search-storage-test-3fs:<none>",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "mirrors-ssl.aliyuncs.com/lmsysorg/sglang:<none>",
+        "mirrors-ssl.aliyuncs.com/vllm/vllm-openai:<none>"
+      ],
+      "max_utilization_pct": 0,
+      "min_free_gib": 199.783203125,
+      "name": "110",
+      "owned_compute_apps": [
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648025,
+          "process_name": "rtp_llm_rank-0",
+          "used_memory_mib": 70320
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648026,
+          "process_name": "rtp_llm_rank-1",
+          "used_memory_mib": 68436
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648027,
+          "process_name": "rtp_llm_rank-2",
+          "used_memory_mib": 68614
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648028,
+          "process_name": "rtp_llm_rank-3",
+          "used_memory_mib": 67994
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648029,
+          "process_name": "rtp_llm_rank-4",
+          "used_memory_mib": 68494
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648030,
+          "process_name": "rtp_llm_rank-5",
+          "used_memory_mib": 68694
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648031,
+          "process_name": "rtp_llm_rank-6",
+          "used_memory_mib": 68694
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data7/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-nocp-r9/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type PREFILL --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26600 --max_seq_len 1258294 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 42000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 32 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 0 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1258291 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 3634641,
+          "pid": 3648032,
+          "process_name": "rtp_llm_rank-7",
+          "used_memory_mib": 68694
+        }
+      ],
+      "probe_seconds": 1.5720102870036499,
+      "probe_transport": "ssh",
+      "reachable": true,
+      "rejection_reasons": [
+        "external_compute_processes=1"
+      ],
+      "score": [
+        0,
+        204578,
+        206135.125,
+        0
+      ]
+    },
+    {
+      "address": "L20-dev-111",
+      "avg_free_gib": 268.587890625,
+      "checkpoint_selected": null,
+      "checkpoints": [],
+      "cluster": "l20-a",
+      "compute_apps": [],
+      "container_selected": {
+        "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "name": "lhc_GPU",
+        "personal_user_available": true,
+        "runtime": "docker",
+        "status": "Up 8 weeks"
+      },
+      "containers": [
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_3fs_r45_20260928",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 13 hours"
+        },
+        {
+          "image": "local/rtp-llm-cuda13-hy4:cuda13.2-gcc12",
+          "name": "liukan.lk_mimo_rdma_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 18 hours"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_3fs_20260928",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 30 hours"
+        },
+        {
+          "image": "local/rtp-llm-cuda13-hy4:cuda13.2-gcc12",
+          "name": "liukan.lk_mimo_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+          "name": "bbdev_baowending_bwd",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2025_12_04_19_49_005d702",
+          "name": "huhaosheng.hhs_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "image": "renyuanming.rym_vscode:data3-clean-20260923",
+          "name": "renyuanming.rym_vscode",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-storage",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 33 hours"
+        },
+        {
+          "image": "582b95c83c7a",
+          "name": "hf3fs-fuse",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-meta",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-mgmtd",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 days"
+        },
+        {
+          "image": "aa22ea2ee655",
+          "name": "hf3fs-fdb",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_bf16_full_20260920",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 8 days"
+        },
+        {
+          "identity_error": "OCI runtime exec failed: exec failed: unable to start container process: chdir to cwd (\"/data1/luohaocheng.lhc/research/vllm-k3-20260919/perf-native-mtp\") set in config.json failed: no such file or directory: unknown",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_rtp_k3_1ca1efde97_pd_20260920",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 8 days"
+        },
+        {
+          "identity_error": "OCI runtime exec failed: exec failed: unable to start container process: chdir to cwd (\"/data1/luohaocheng.lhc/research/vllm-k3-20260919/perf-native-mtp\") set in config.json failed: no such file or directory: unknown",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_rtp_k3_1527d574_pd_20260920",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 9 days"
+        },
+        {
+          "identity_error": "OCI runtime exec failed: exec failed: unable to start container process: chdir to cwd (\"/data1/luohaocheng.lhc/research/vllm-k3-20260919/perf-native-mtp\") set in config.json failed: no such file or directory: unknown",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_vllm_k3_c3b4844_pd_rdma_20260920",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 9 days"
+        },
+        {
+          "identity_error": "OCI runtime exec failed: exec failed: unable to start container process: chdir to cwd (\"/data1/luohaocheng.lhc/research/vllm-k3-20260919/perf-native-mtp\") set in config.json failed: no such file or directory: unknown",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_vllm_k3_c3b4844_perf_20260919",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 9 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "hwx_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 10 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "caodong_pd_kv_rdma_bench_20260917",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 11 days"
+        },
+        {
+          "image": "fed51b0b3cd9",
+          "name": "codex_k3_smoke_rdma_111_20260916",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 12 days"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+          "name": "huangweixiang.hwx_cuda13_mla_round1",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_prepared_rdma_20260910",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 2 weeks"
+        },
+        {
+          "image": "85085895ba19",
+          "name": "tianpeng.wtp-k3-tp8-rdma-20260910",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 weeks"
+        },
+        {
+          "image": "local/rtp-llm-cuda13-hy4:cuda13.2-user",
+          "name": "hardcore_kowalevski",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+          "name": "yanxi.wln_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_09_04_00_14_e7cdf4d14",
+          "name": "k3_4layer_rdma_20260907_111",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 3 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_fp8_pd_20260907",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 3 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "syd_rtp",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 3 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "yzh",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 3 weeks"
+        },
+        {
+          "image": "local/rtp-llm-cuda13-hy4:cuda13.2-gcc12",
+          "name": "liukan.lk_cuda13_hy4",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "liukan.lk_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2026_03_02_11_19_e4e0030",
+          "name": "bazel_xinfei.sxf_cuda129",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "xinfei_qwen3_pd_cuda13_repro",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2026_03_02_11_19_e4e0030",
+          "name": "songchenyi.scy_cuda129",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "bazel_xinfei.sxf_cuda_new",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "aozhengkai.azk_cuda13_k3_tp_cp_20260817",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/webterminal-cli-novnc-auth:0.1.0",
+          "name": "wt-novnc-liukan.lk",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "tuoyu111",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+          "name": "wjh528431_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "caihaowen.chw_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 8 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 8 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+          "name": "zhanghuidong.zhd_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 months"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "brucelee",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 months"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "songchenyi.scy_gpu",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 months"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_05_16_10_44_a34d4d1bf",
+          "name": "wuran.wzy_sm10x",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 months"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "serina.wzq.rdma",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 months"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+          "name": "ruixuan.zrx_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 2 months"
+        }
+      ],
+      "eligible": false,
+      "errors": {
+        "apps": "",
+        "containers": {
+          "docker": "",
+          "pouch": "FileNotFoundError(2, \"No such file or directory: 'pouch'\")"
+        },
+        "gpu": ""
+      },
+      "external_compute_apps": [],
+      "fleet_image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+      "gpus": [
+        {
+          "index": 0,
+          "memory_free_mib": 275029,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 11,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 1,
+          "memory_free_mib": 275035,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 5,
+          "utilization_pct": 100,
+          "utilization_unknown": false
+        },
+        {
+          "index": 2,
+          "memory_free_mib": 275035,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 5,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 3,
+          "memory_free_mib": 275033,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 7,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 4,
+          "memory_free_mib": 275035,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 5,
+          "utilization_pct": 100,
+          "utilization_unknown": false
+        },
+        {
+          "index": 5,
+          "memory_free_mib": 275035,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 5,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 6,
+          "memory_free_mib": 275035,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 5,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 7,
+          "memory_free_mib": 275035,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 5,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        }
+      ],
+      "hostname": "e01-cn-il24rbk1805",
+      "id": 111,
+      "images": [
+        "<none>:<none>",
+        "hf3fs-fuse:fc750018-helper",
+        "hub.docker.alibaba-inc.com/aone-base-global/aios-3fs-fdb:bdff34b4-20260730140703",
+        "hub.docker.alibaba-inc.com/aone-base-global/search-storage-test-3fs:master-fc750018",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2025_12_04_19_49_005d702",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2026_03_02_11_19_e4e0030",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_05_16_10_44_a34d4d1bf",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_08_12_09_32_d2bd7fced",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_08_20_11_47_b87bb63e5",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_09_04_00_14_e7cdf4d14",
+        "hub.docker.alibaba-inc.com/isearch/webterminal-cli-novnc-auth:0.1.0",
+        "local/renyuanming-vscode:host-shared-20260910",
+        "local/rtp-llm-cuda13-fsbench:20260922",
+        "local/rtp-llm-cuda13-hy4:cuda13.2-gcc12",
+        "local/rtp-llm-cuda13-hy4:cuda13.2-user",
+        "mirrors-ssl.aliyuncs.com/vllm/vllm-openai:<none>",
+        "reg.docker.alibaba-inc.com/system-analysis/pace-mp-dev:latest",
+        "renyuanming.rym_vscode:data3-clean-20260923",
+        "renyuanming.rym_vscode:data3-migration-20260923",
+        "rtp_llm_serving:deepseek-v4-topp",
+        "rtp_llm_serving:deepseek-v4-topp-internal"
+      ],
+      "max_utilization_pct": 100,
+      "min_free_gib": 268.5830078125,
+      "name": "111",
+      "owned_compute_apps": [],
+      "probe_seconds": 1.3033982899942202,
+      "probe_transport": "ssh",
+      "reachable": true,
+      "rejection_reasons": [
+        "max_gpu_util=100>5"
+      ],
+      "score": [
+        1,
+        275029,
+        275034.0,
+        -100
+      ]
+    },
+    {
+      "address": "L20-dev-112",
+      "avg_free_gib": 224.114013671875,
+      "checkpoint_selected": null,
+      "checkpoints": [],
+      "cluster": "l20-a",
+      "compute_apps": [
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184185,
+          "process_name": "rtp_llm_rank-0",
+          "used_memory_mib": 45222
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184190,
+          "process_name": "rtp_llm_rank-1",
+          "used_memory_mib": 46428
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184192,
+          "process_name": "rtp_llm_rank-2",
+          "used_memory_mib": 45228
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184195,
+          "process_name": "rtp_llm_rank-3",
+          "used_memory_mib": 45268
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184197,
+          "process_name": "rtp_llm_rank-4",
+          "used_memory_mib": 46428
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184199,
+          "process_name": "rtp_llm_rank-5",
+          "used_memory_mib": 45188
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184202,
+          "process_name": "rtp_llm_rank-6",
+          "used_memory_mib": 45188
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184203,
+          "process_name": "rtp_llm_rank-7",
+          "used_memory_mib": 45188
+        }
+      ],
+      "container_selected": {
+        "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "name": "lhc_GPU",
+        "personal_user_available": true,
+        "runtime": "docker",
+        "status": "Up 3 days"
+      },
+      "containers": [
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+          "name": "xubaichuan.xbc_hca",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 19 hours"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_3fs_20260927",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 32 hours"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_pd_20260926",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 2 days"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 3 days"
+        },
+        {
+          "image": "799859f63d35",
+          "name": "hf3fs-fuse",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-storage",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-meta",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-mgmtd",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "image": "aa22ea2ee655",
+          "name": "hf3fs-fdb",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "tuoyu112",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "jenson.hj_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "syd_rtp",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_28_16_56_6fcb8f8",
+          "name": "yangchengjun.ycj_GPU_new",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "zw193905_new",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "tianqiu",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "liusongyue.lsy_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "xieshui_dev",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2025_12_04_19_49_005d702",
+          "name": "liusongyue.lsy_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 weeks"
+        }
+      ],
+      "eligible": true,
+      "errors": {
+        "apps": "",
+        "containers": {
+          "docker": "",
+          "pouch": "FileNotFoundError(2, \"No such file or directory: 'pouch'\")"
+        },
+        "gpu": ""
+      },
+      "external_compute_apps": [],
+      "fleet_image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+      "gpus": [
+        {
+          "index": 0,
+          "memory_free_mib": 229788,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 45252,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 1,
+          "memory_free_mib": 228582,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 46458,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 2,
+          "memory_free_mib": 229782,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 45258,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 3,
+          "memory_free_mib": 229742,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 45298,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 4,
+          "memory_free_mib": 228582,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 46458,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 5,
+          "memory_free_mib": 229822,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 45218,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 6,
+          "memory_free_mib": 229822,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 45218,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 7,
+          "memory_free_mib": 229822,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 45218,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        }
+      ],
+      "hostname": "e01-cn-cf04s46t801",
+      "id": 112,
+      "images": [
+        "fish-cuda13-202060907:latest",
+        "hf3fs-fuse:fc750018-helper",
+        "hub.docker.alibaba-inc.com/aone-base-global/aios-3fs-fdb:bdff34b4-20260730140703",
+        "hub.docker.alibaba-inc.com/aone-base-global/search-storage-test-3fs:master-fc750018",
+        "hub.docker.alibaba-inc.com/isearch/gpu-benchmark-kernel-nv-vllm-sglang:v0.47",
+        "hub.docker.alibaba-inc.com/isearch/gpu-benchmark-kernel-nv-vllm-sglang:v0.50",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_28_16_56_6fcb8f8",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_07_21_15_21_171a25a",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2025_12_04_19_49_005d702",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_dev_gpu_cuda12_9:2026_03_02_11_19_e4e0030",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_frontend:0.2.0_0.2.0_2026_09_03_19_03_520fc428c",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_05_11_20_24_a2a9edddd",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_05_31_21_15_c46216ad7",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_08_03_18_06_283bdeb14",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_08_07_16_14_32da32074",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_08_12_09_32_d2bd7fced",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_08_19_18_32_38f4fe0c7",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_08_20_11_47_b87bb63e5",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_09_04_00_14_e7cdf4d14",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_sm10x_cuda13:0.2.0_0.2.0_2026_09_14_17_46_ae03e77c4",
+        "hub.docker.alibaba-inc.com/isearch/webterminal-cli-novnc-auth:0.1.0",
+        "mirrors-ssl.aliyuncs.com/lmsysorg/sglang:glm-5.3-flash",
+        "mirrors-ssl.aliyuncs.com/vllm/vllm-openai:<none>",
+        "mirrors-ssl.aliyuncs.com/vllm/vllm-openai:glm53-flash",
+        "openmind-registry.cn-hangzhou.cr.aliyuncs.com/openmind/rtp-llm:sm10x_cuda13_0.2.0_0.2.0_2026_08_19_18_32_38f4fe0c7"
+      ],
+      "max_utilization_pct": 0,
+      "min_free_gib": 223.224609375,
+      "name": "112",
+      "owned_compute_apps": [
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184185,
+          "process_name": "rtp_llm_rank-0",
+          "used_memory_mib": 45222
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184190,
+          "process_name": "rtp_llm_rank-1",
+          "used_memory_mib": 46428
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184192,
+          "process_name": "rtp_llm_rank-2",
+          "used_memory_mib": 45228
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184195,
+          "process_name": "rtp_llm_rank-3",
+          "used_memory_mib": 45268
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184197,
+          "process_name": "rtp_llm_rank-4",
+          "used_memory_mib": 46428
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184199,
+          "process_name": "rtp_llm_rank-5",
+          "used_memory_mib": 45188
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184202,
+          "process_name": "rtp_llm_rank-6",
+          "used_memory_mib": 45188
+        },
+        {
+          "group_leader_command": "/opt/conda310/bin/python /data1/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-profile-8587b31-20260928/bazel-bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/start_server.py --role_type DECODE --tp_size 8 --dp_size 1 --ktp_size 1 --decode_cp_kv_cache_sharded 0 --decode_cp_q_replicated 0 --ep_size 8 --world_size 8 --world_rank 0 --local_world_size 8 --remote_server_port 26500 --max_seq_len 1468006 --max_context_batch_size 1 --seq_size_per_block 4096 --kernel_seq_size_per_block 128 --kv_cache_mem_mb 29000 --int8_kv_cache 0 --fp8_kv_cache 1 --linear_step 1 --ssm_state_dtype fp32 --warm_up 0 --reuse_cache 0 --enable_device_cache 1 --concurrency_limit 8 --use_deepep_moe 0 --use_deepep_internode 0 --use_deepep_low_latency 0 --deep_ep_num_sm 24 --use_all_gather 0 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 0 --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 30000 --load_cache_timeout_ms 7200000 --load_method fastsafetensors --ft_core_dump_on_exception 0 --shutdown_timeout 5 --max_batch_tokens_size 1468006 --decode_capture_config 1,2,4,8 ",
+          "owner": "luohaocheng.lhc",
+          "pgid": 4176411,
+          "pid": 4184203,
+          "process_name": "rtp_llm_rank-7",
+          "used_memory_mib": 45188
+        }
+      ],
+      "probe_seconds": 5.288753014996473,
+      "probe_transport": "ssh",
+      "reachable": true,
+      "rejection_reasons": [],
+      "score": [
+        1,
+        228582,
+        229492.75,
+        0
+      ]
+    },
+    {
+      "address": "L20-dev-113",
+      "avg_free_gib": 214.0155029296875,
+      "checkpoint_selected": null,
+      "checkpoints": [],
+      "cluster": "l20-a",
+      "compute_apps": [
+        {
+          "group_leader_command": "",
+          "owner": "liukan.lk",
+          "pgid": 1172324,
+          "pid": 1175166,
+          "process_name": "rtp_llm_backend_server",
+          "used_memory_mib": 251940
+        },
+        {
+          "group_leader_command": "python3 -m rtp_llm.start_server --checkpoint_path /data0/liukan.lk/models/autojev-27b --act_type BF16 --task_type SEQ_CLASSIFICATION --seq_size_per_block 2048 --max_seq_len 4096 --warm_up 0 --enable_cuda_graph 0 ",
+          "owner": "liukan.lk",
+          "pgid": 3050301,
+          "pid": 3051283,
+          "process_name": "rtp_llm_backend_server",
+          "used_memory_mib": 52466
+        },
+        {
+          "group_leader_command": "python3 -m rtp_llm.start_server --checkpoint_path /data0/liukan.lk/models/autojev-27b --act_type BF16 --seq_size_per_block 2048 --max_seq_len 4096 --warm_up 0 ",
+          "owner": "liukan.lk",
+          "pgid": 3522109,
+          "pid": 3523371,
+          "process_name": "rtp_llm_backend_server",
+          "used_memory_mib": 139476
+        },
+        {
+          "group_leader_command": "",
+          "owner": "liukan.lk",
+          "pgid": 2440360,
+          "pid": 2441414,
+          "process_name": "rtp_llm_backend_server",
+          "used_memory_mib": 2528
+        }
+      ],
+      "container_selected": {
+        "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "name": "lhc_GPU",
+        "personal_user_available": true,
+        "runtime": "docker",
+        "status": "Up 3 days"
+      },
+      "containers": [
+        {
+          "image": "rtp-llm-cuda13-dev:yixingyu-20260918",
+          "name": "yixingyu.yxy_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 13 hours"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda12_9:2026_09_02_19_00_70a335d",
+          "name": "liukan_rtp_dev129",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 19 hours"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_09_18_11_32_706aaa3",
+          "name": "yinzhi_dev",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 21 hours"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "liukan_rtp_dev",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 31 hours"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU_k3_pd_20260926",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 3 days"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "lhc_GPU",
+          "personal_user_available": true,
+          "runtime": "docker",
+          "status": "Up 3 days"
+        },
+        {
+          "image": "999cf86c79f3",
+          "name": "wjh528431_GPU",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 4 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "brucelee",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-storage",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 33 hours"
+        },
+        {
+          "image": "mirrors-ssl.aliyuncs.com/vllm/vllm-openai",
+          "name": "tianpeng-vllm-v41-e2e-20260922",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 days"
+        },
+        {
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+          "name": "bbdev_baowending_bwd",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "image": "cbcf9fd78f3a",
+          "name": "hf3fs-fuse",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 5 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "caodong.cao-dcp-fused-design",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-meta",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 days"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-mgmtd",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 days"
+        },
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "why492961",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 days"
+        },
+        {
+          "image": "aa22ea2ee655",
+          "name": "hf3fs-fdb",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 21 hours"
+        },
+        {
+          "image": "85085895ba19",
+          "name": "tianpeng.wtp-k3-org-smoke-72bfeb47f0-20260922",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 6 days"
+        }
+      ],
+      "eligible": false,
+      "errors": {
+        "apps": "",
+        "containers": {
+          "docker": "",
+          "pouch": "FileNotFoundError(2, 'No such file or directory')"
+        },
+        "gpu": ""
+      },
+      "external_compute_apps": [
+        {
+          "group_leader_command": "",
+          "owner": "liukan.lk",
+          "pgid": 1172324,
+          "pid": 1175166,
+          "process_name": "rtp_llm_backend_server",
+          "used_memory_mib": 251940
+        },
+        {
+          "group_leader_command": "python3 -m rtp_llm.start_server --checkpoint_path /data0/liukan.lk/models/autojev-27b --act_type BF16 --task_type SEQ_CLASSIFICATION --seq_size_per_block 2048 --max_seq_len 4096 --warm_up 0 --enable_cuda_graph 0 ",
+          "owner": "liukan.lk",
+          "pgid": 3050301,
+          "pid": 3051283,
+          "process_name": "rtp_llm_backend_server",
+          "used_memory_mib": 52466
+        },
+        {
+          "group_leader_command": "python3 -m rtp_llm.start_server --checkpoint_path /data0/liukan.lk/models/autojev-27b --act_type BF16 --seq_size_per_block 2048 --max_seq_len 4096 --warm_up 0 ",
+          "owner": "liukan.lk",
+          "pgid": 3522109,
+          "pid": 3523371,
+          "process_name": "rtp_llm_backend_server",
+          "used_memory_mib": 139476
+        },
+        {
+          "group_leader_command": "",
+          "owner": "liukan.lk",
+          "pgid": 2440360,
+          "pid": 2441414,
+          "process_name": "rtp_llm_backend_server",
+          "used_memory_mib": 2528
+        }
+      ],
+      "fleet_image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+      "gpus": [
+        {
+          "index": 0,
+          "memory_free_mib": 275039,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 1,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 1,
+          "memory_free_mib": 275039,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 1,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 2,
+          "memory_free_mib": 23084,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 251956,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 3,
+          "memory_free_mib": 83069,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 191971,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 4,
+          "memory_free_mib": 275039,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 1,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 5,
+          "memory_free_mib": 275037,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 3,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 6,
+          "memory_free_mib": 275036,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 4,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 7,
+          "memory_free_mib": 271872,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 3168,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        }
+      ],
+      "hostname": "e01-cn-cwg4s46t802",
+      "id": 113,
+      "images": [
+        "hf3fs-fuse:fc750018-helper",
+        "hub.docker.alibaba-inc.com/aone-base-global/aios-3fs-fdb:bdff34b4-20260730140703",
+        "hub.docker.alibaba-inc.com/aone-base-global/search-storage-test-3fs:master-fc750018",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda12_9:2026_09_02_19_00_70a335d",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_05_01_14_37_e91b801",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_09_18_11_32_706aaa3",
+        "mirrors-ssl.aliyuncs.com/vllm/vllm-openai:nightly",
+        "rtp-llm-cuda13-dev:yixingyu-20260918",
+        "wjh528431/rtp-llm-ssh:dev3-3fs-20260924",
+        "wjh528431/rtp-llm-ssh:dev3-rebuild-20260923"
+      ],
+      "max_utilization_pct": 0,
+      "min_free_gib": 22.54296875,
+      "name": "113",
+      "owned_compute_apps": [],
+      "probe_seconds": 4.381202092001331,
+      "probe_transport": "ssh",
+      "reachable": true,
+      "rejection_reasons": [
+        "min_free_gib=22.5<100.0",
+        "external_compute_processes=4"
+      ],
+      "score": [
+        0,
+        23084,
+        219151.875,
+        0
+      ]
+    },
+    {
+      "address": "L20-dev-114",
+      "avg_free_gib": 268.591552734375,
+      "checkpoint_selected": null,
+      "checkpoints": [],
+      "cluster": "l20-a",
+      "compute_apps": [],
+      "container_selected": null,
+      "containers": [],
+      "eligible": false,
+      "errors": {
+        "apps": "",
+        "containers": {
+          "docker": "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.45/containers/json\": dial unix /var/run/docker.sock: connect: permission denied",
+          "pouch": "FileNotFoundError(2, 'No such file or directory')"
+        },
+        "gpu": ""
+      },
+      "external_compute_apps": [],
+      "fleet_image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+      "gpus": [
+        {
+          "index": 0,
+          "memory_free_mib": 275036,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 4,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 1,
+          "memory_free_mib": 275036,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 4,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 2,
+          "memory_free_mib": 275036,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 4,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 3,
+          "memory_free_mib": 275038,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 2,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 4,
+          "memory_free_mib": 275039,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 1,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 5,
+          "memory_free_mib": 275039,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 1,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 6,
+          "memory_free_mib": 275039,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 1,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 7,
+          "memory_free_mib": 275039,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 1,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        }
+      ],
+      "hostname": "e01-cn-v8n4s5sfd01",
+      "id": 114,
+      "images": [],
+      "max_utilization_pct": 0,
+      "min_free_gib": 268.58984375,
+      "name": "114",
+      "owned_compute_apps": [],
+      "probe_seconds": 5.3350807769966195,
+      "probe_transport": "ssh",
+      "reachable": true,
+      "rejection_reasons": [
+        "no_running_lhc_gpu_compatible_container"
+      ],
+      "score": [
+        1,
+        275036,
+        275037.75,
+        0
+      ]
+    },
+    {
+      "address": "L20-dev-115",
+      "avg_free_gib": 268.59375,
+      "checkpoint_selected": null,
+      "checkpoints": [],
+      "cluster": "l20-a",
+      "compute_apps": [],
+      "container_selected": null,
+      "containers": [
+        {
+          "identity_error": "unable to find user luohaocheng.lhc: no matching entries in passwd file",
+          "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+          "name": "tianpeng.wtp",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 7 hours"
+        },
+        {
+          "image": "local/hwx-rtp-cuda13-test:20260928",
+          "name": "huangweixiang.hwx_cuda13_chunk_test",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 9 hours"
+        },
+        {
+          "image": "local/rtp-llm-cuda13-hy4:cuda13.2-gcc12",
+          "name": "liukan.lk_mimo_rdma_cuda13",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 11 hours"
+        },
+        {
+          "image": "hf3fs-fuse:fc750018-helper",
+          "name": "hf3fs-fuse",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 11 hours"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-storage",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 11 hours"
+        },
+        {
+          "image": "4f22c4bafeda",
+          "name": "hf3fs-meta",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 11 hours"
+        },
+        {
+          "image": "aa22ea2ee655",
+          "name": "hf3fs-fdb",
+          "personal_user_available": false,
+          "runtime": "docker",
+          "status": "Up 11 hours"
+        }
+      ],
+      "eligible": false,
+      "errors": {
+        "apps": "",
+        "containers": {
+          "docker": "",
+          "pouch": "FileNotFoundError(2, 'No such file or directory')"
+        },
+        "gpu": ""
+      },
+      "external_compute_apps": [],
+      "fleet_image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+      "gpus": [
+        {
+          "index": 0,
+          "memory_free_mib": 275040,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 1,
+          "memory_free_mib": 275040,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 2,
+          "memory_free_mib": 275040,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 3,
+          "memory_free_mib": 275040,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 4,
+          "memory_free_mib": 275040,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 5,
+          "memory_free_mib": 275040,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 6,
+          "memory_free_mib": 275040,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        },
+        {
+          "index": 7,
+          "memory_free_mib": 275040,
+          "memory_total_mib": 275040,
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "utilization_unknown": false
+        }
+      ],
+      "hostname": "e01-cn-qiz4s5sfe01",
+      "id": 115,
+      "images": [
+        "hf3fs-fuse:fc750018-helper",
+        "hf3fs-fuse:fc750018-raid-recovery",
+        "hub.docker.alibaba-inc.com/aone-base-global/aios-3fs-fdb:<none>",
+        "hub.docker.alibaba-inc.com/aone-base-global/search-storage-test-3fs:<none>",
+        "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+        "local/hwx-rtp-cuda13-test:20260928",
+        "local/rtp-llm-cuda13-hy4:cuda13.2-gcc12"
+      ],
+      "max_utilization_pct": 0,
+      "min_free_gib": 268.59375,
+      "name": "115",
+      "owned_compute_apps": [],
+      "probe_seconds": 0.6634873229995719,
+      "probe_transport": "local",
+      "reachable": true,
+      "rejection_reasons": [
+        "no_running_lhc_gpu_compatible_container"
+      ],
+      "score": [
+        1,
+        275040,
+        275040.0,
+        0
+      ]
+    }
+  ],
+  "checkpoint_kind": null,
+  "fleet_image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+  "model": "other",
+  "requested_hosts": 2,
+  "rules": {
+    "bazel_output_transfer": false,
+    "busy_host_waiting": false,
+    "cross_cluster_topology_migration_requires_all_endpoints": true,
+    "external_process_preemption": false,
+    "performance_requires_exclusive_gpus": true,
+    "same_cluster_pairing": true,
+    "selection_is_snapshot_reprobe_before_launch": true,
+    "source_moves_by_git_and_rebuilds_locally": true
+  },
+  "schema": "gpu-test-host-selection-v1",
+  "selected": [],
+  "task": "performance"
+}

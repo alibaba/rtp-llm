@@ -20,14 +20,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefill-tar", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--decode-port", type=int, default=26400)
     args = parser.parse_args()
     with tarfile.open(args.prefill_tar, "r:gz") as archive:
+        names = set(archive.getnames())
+        if "accuracy.json" in names:
+            root = ""
+        elif "prefill/accuracy.json" in names:
+            root = "prefill/"
+        else:
+            raise ValueError("archive has no Prefill accuracy.json")
+
         def read(name):
             return json.loads(archive.extractfile(name).read(), object_pairs_hook=no_duplicate_keys)
 
-        runner = read("accuracy.json")
+        runner = read(root + "accuracy.json")
         members = sorted(m.name for m in archive.getmembers()
-                         if m.name.startswith("requests/") and m.name.endswith(".json"))
+                         if m.name.startswith(root + "requests/") and m.name.endswith(".json"))
         errors = []
         rows = []
         for name in members:
@@ -48,7 +57,7 @@ def main():
                 role_addrs = aux.get("role_addrs", [])
                 if not any(addr.get("role") == "DECODE"
                            and addr.get("ip") == "11.163.39.112"
-                           and addr.get("http_port") == 26400 for addr in role_addrs):
+                           and addr.get("http_port") == args.decode_port for addr in role_addrs):
                     raise ValueError("Decode route differs")
                 if observed.get("output_len") != 16 or wire["usage"]["completion_tokens"] != 16:
                     raise ValueError("output length differs")
