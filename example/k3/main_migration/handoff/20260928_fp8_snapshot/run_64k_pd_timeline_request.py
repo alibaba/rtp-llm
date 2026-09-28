@@ -17,6 +17,15 @@ TOKEN_SHA = "97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee"
 NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def vllm_prompt_ids(input_ids, append_holdback_token):
+    """Keep the measured prefix intact when NIXL leaves one token for Decode."""
+    if append_holdback_token:
+        if not input_ids:
+            raise ValueError("cannot append a holdback token to an empty prompt")
+        return [*input_ids, input_ids[-1]]
+    return list(input_ids)
+
+
 def post(url, body, timeout):
     data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -65,6 +74,8 @@ def main():
     parser.add_argument("--disable-thinking", action="store_true")
     parser.add_argument("--legacy-feat-aux", action="store_true",
                         help="record the older feat/k3_dev PD response, which omits draft counters and PD handoff length")
+    parser.add_argument("--vllm-nixl-holdback-token", action="store_true",
+                        help="append one token after the fixed 64K prefix so NIXL Prefill can execute all 65,536 prefix tokens")
     parser.add_argument("--expected-decode-reuse-len", type=int)
     parser.add_argument("--block-size", type=int, default=4096)
     args = parser.parse_args()
@@ -89,6 +100,8 @@ def main():
         parser.error("--legacy-feat-aux requires RTP and --disable-thinking for identical input tokens")
     if args.legacy_feat_aux and args.expected_decode_reuse_len is not None:
         parser.error("older feat/k3_dev does not expose Decode handoff length")
+    if args.vllm_nixl_holdback_token and args.backend != "vllm":
+        parser.error("--vllm-nixl-holdback-token requires --backend=vllm")
     if args.warmup_stability_field == "first-token" and args.backend != "rtp":
         parser.error("first-token warmup stability requires RTP aux_info")
     if args.profile_after_unstable_http_warmup and not (
@@ -129,7 +142,8 @@ def main():
     else:
         url = base + "/v1/completions"
         payload = {
-            "model": "kimi-k3", "prompt": ids, "max_tokens": args.max_tokens,
+            "model": "kimi-k3", "prompt": vllm_prompt_ids(ids, args.vllm_nixl_holdback_token),
+            "max_tokens": args.max_tokens,
             "temperature": 0, "seed": 0, "stream": False,
             "ignore_eos": True,
         }
@@ -138,6 +152,9 @@ def main():
 
     meta = {"backend": args.backend, "url": url, "token_ids_sha256": TOKEN_SHA,
             "input_tokens": len(ids), "max_tokens": args.max_tokens,
+            "submitted_prompt_tokens": len(payload["prompt"]) if args.backend == "vllm" else len(ids),
+            "vllm_nixl_holdback_token": args.vllm_nixl_holdback_token,
+            "vllm_holdback_token_id": ids[-1] if args.vllm_nixl_holdback_token else None,
             "model_layers": args.model_layers,
             "http_elapsed_scope": "complete HTTP response, not Prefill duration; use rank traces",
             "disable_thinking": args.disable_thinking,
@@ -165,15 +182,18 @@ def main():
         if args.backend == "rtp":
             request_payload["messages"] = candidate["messages"]
         else:
-            request_payload["prompt"] = candidate["input_ids"]
+            request_payload["prompt"] = vllm_prompt_ids(
+                candidate["input_ids"], args.vllm_nixl_holdback_token
+            )
         elapsed, status, body, raw = post(url, request_payload, args.timeout)
         (args.output_dir / f"{label}.json").write_bytes(raw)
         if status != 200 or "error" in body:
             raise RuntimeError(f"{label}: HTTP {status}: {raw[:1000]!r}")
         usage = body.get("usage", {})
         observed = usage.get("prompt_tokens")
-        if args.backend == "vllm" and observed is not None and observed != 65536:
-            raise RuntimeError(f"{label}: prompt_tokens={observed}, expected 65536")
+        expected_vllm_tokens = 65536 + int(args.vllm_nixl_holdback_token)
+        if args.backend == "vllm" and observed is not None and observed != expected_vllm_tokens:
+            raise RuntimeError(f"{label}: prompt_tokens={observed}, expected {expected_vllm_tokens}")
         if args.backend == "rtp" and observed is not None and observed not in (65536, 65533):
             raise RuntimeError(f"{label}: prompt_tokens={observed}, expected 65536 or 65533")
         if usage.get("completion_tokens") != args.max_tokens:
@@ -203,6 +223,10 @@ def main():
                 raise RuntimeError(f"{label}: native MTP did not execute a draft round")
         entry = {"label": label, "elapsed_s": elapsed, "status": status,
                  "token_ids_sha256": candidate.get("token_ids_sha256", TOKEN_SHA),
+                 "submitted_token_ids_sha256": hashlib.sha256(json.dumps(
+                     request_payload["prompt"] if args.backend == "vllm" else candidate["input_ids"],
+                     separators=(",", ":")
+                 ).encode()).hexdigest(),
                  "prompt_tokens": observed, "output_tokens": usage.get("completion_tokens"),
                  "response_sha256": hashlib.sha256(raw).hexdigest(),
                  "reuse_len": aux.get("reuse_len"),
