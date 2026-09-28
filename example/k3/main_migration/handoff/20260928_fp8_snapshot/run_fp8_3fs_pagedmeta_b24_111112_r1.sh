@@ -32,7 +32,8 @@ server="$repo/bazel-bin/rtp_llm/rtp_llm_server"
 
 test "$(id -un)" = luohaocheng.lhc
 test -f /.dockerenv
-test "$(git -C "$repo" rev-parse HEAD)" = b24b6cd889093908923a0d62cb1ac3890438b5d4
+git -C "$repo" merge-base --is-ancestor b24b6cd889093908923a0d62cb1ac3890438b5d4 HEAD
+git -C "$repo" diff --quiet b24b6cd889093908923a0d62cb1ac3890438b5d4 -- rtp_llm
 test "$(findmnt -T "$checkpoint" -n -o FSTYPE | sort -u | head -1)" = fuse.hf3fs
 test -x "$server"
 test -f "$deps/native-deepgemm-gcc13-elfutils/k3_native_deep_gemm/_C.cpython-310-x86_64-linux-gnu.so"

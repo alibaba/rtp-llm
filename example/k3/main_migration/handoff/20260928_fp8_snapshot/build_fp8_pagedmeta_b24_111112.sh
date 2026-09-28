@@ -20,7 +20,8 @@ export TMPDIR="$base/tmp/k3-fp8-kmerge-3d7-build-$1"
 
 test "$(id -un)" = luohaocheng.lhc
 test -f /.dockerenv
-test "$(git -C "$repo" rev-parse HEAD)" = b24b6cd889093908923a0d62cb1ac3890438b5d4
+git -C "$repo" merge-base --is-ancestor b24b6cd889093908923a0d62cb1ac3890438b5d4 HEAD
+git -C "$repo" diff --quiet b24b6cd889093908923a0d62cb1ac3890438b5d4 -- rtp_llm
 test "$(readlink -f "$repo/internal_source")" = "$deps/internal_source_main"
 test "$(findmnt -T "$repo" -n -o FSTYPE)" = ext4
 test -d "$pip_repos"
