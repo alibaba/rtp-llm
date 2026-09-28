@@ -6,4 +6,4 @@
 
 启动配置见 `host_110112/kda47b-launch-config-*.json`：四层 target 为普通 E4M3 FP8 GEMM 与 KV、BF16 activation，原生 MTP draft 为 BF16，显式 `LOAD_METHOD=fastsafetensors`。target 直接从 3FS `/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers` 加载；MTP 的个人数据盘视图引用已核实的 3FS shard。两端 `target/mtp-guard-*.txt` 均为 PASS，分别核对了 7/9 个 shard、16,402/5,404 个张量及 Safetensors header；目标配置与索引 SHA256 为 `8754ec8b…` / `eb064b56…`，MTP 为 `6e5457c4…` / `52603395…`。这是用户指定的 3FS 直读路径，任务进程沿用 64 线程并发读取层，不修改共享挂载或集群配置。
 
-`host_110112/pair-selection-launch.json` 记录了启动前两端八卡均无外部计算进程、每卡至少约 268.6 GiB 空闲。双向 ping 两包均无丢失，平均约 0.24 ms；`mlx5_bond_0` 至 `mlx5_bond_7` 的 RDMA link 均为 ACTIVE，27100/27200 端口空闲。服务启动、逐 rank loader 日志、四层 flow 和 64K timeline 的结果尚需另行归档与复核；本目录当前只证明构建和启动前条件。
+`host_110112/pair-selection-launch.json` 记录了启动前两端八卡均无外部计算进程、每卡至少约 268.6 GiB 空闲。双向 ping 两包均无丢失，平均约 0.24 ms；`mlx5_bond_0` 至 `mlx5_bond_7` 的 RDMA link 均为 ACTIVE，27100/27200 端口空闲。两端服务随后都返回 HTTP 200 健康响应；`host_110112/kda47b-loader-verify-*.txt` 保存了各八个 rank 在服务健康后的 guard 复核，全部 PASS，明确选中 FastSafetensors 且未发现 fallback。四层 flow 与 64K timeline 仍待完成，当前不能声称此版已通过正确性或性能验收。
