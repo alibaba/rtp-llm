@@ -59,6 +59,7 @@ message RoleAddrPB {
         DECODE = 2;
         VIT = 3;
         FRONTEND = 4;
+        ENCODER = 5;
     }
     RoleType role = 1;
     string ip = 2;
