@@ -3,6 +3,7 @@
 from torch import nn
 
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
+from rtp_llm.models_py.modules.kimi_k3.utils import profiled
 from rtp_llm.models_py.triton_kernels.kimi_k3 import bf16_producers as bf16
 from rtp_llm.models_py.triton_kernels.kimi_kda.attn_res_fp8 import kimi_k3_attn_res_fp8
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import (
@@ -15,6 +16,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.rms_norm_gate import (
 
 
 class Fp8AttentionResidual(KimiK3AttentionResidual):
+    @profiled("RTP::attention.residual_fp8_producer")
     def forward(self, prefix_sum, block_residual, **kwargs):
         return kimi_k3_attn_res_fp8(
             prefix_sum,
@@ -33,6 +35,7 @@ class Fp8RMSNorm(nn.Module):
         self.variance_epsilon = eps
         self.retain_bf16 = retain_bf16
 
+    @profiled("RTP::attention.norm_fp8_producer")
     def forward(self, x):
         return rmsnorm_fp8(
             x, self.weight, self.variance_epsilon, retain_bf16=self.retain_bf16
@@ -85,6 +88,7 @@ class KdaOutputNorm(nn.Module):
 
 
 class Fp8KdaOutputNorm(KdaOutputNorm):
+    @profiled("RTP::attention.kda.output_norm_fp8_producer")
     def forward(self, output, output_gate, mode):
         from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import (
             kda_output_fp8,

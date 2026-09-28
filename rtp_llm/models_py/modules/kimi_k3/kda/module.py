@@ -26,6 +26,7 @@ from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
     project_kda_inputs_ktp,
     resolve_projection_local_heads,
 )
+from rtp_llm.models_py.modules.kimi_k3.utils import profiled
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_quant import (
     quantize_forget_latent_fp8,
 )
@@ -237,6 +238,7 @@ class KimiK3KDA(nn.Module):
         else:
             self.decode_executor = None
 
+    @profiled("RTP::attention.kda.input_unpack_forget_proj")
     def _project_fused_kda_inputs(
         self,
         hidden_states: torch.Tensor,
@@ -356,6 +358,7 @@ class KimiK3KDA(nn.Module):
             W.linear_attn_out_w, self.weights[W.linear_attn_out_w]
         )
 
+    @profiled("RTP::attention.kda.output_norm_quant")
     def _prepare_output_projection(
         self,
         output: torch.Tensor,
@@ -405,6 +408,7 @@ class KimiK3KDA(nn.Module):
             )
         return is_target_verify
 
+    @profiled("RTP::attention.kda")
     def forward(
         self,
         hidden_states: torch.Tensor,

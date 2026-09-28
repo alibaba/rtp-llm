@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
@@ -14,6 +15,7 @@ from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,
     resolve_kimi_k3_parallel_mode,
 )
+from rtp_llm.models_py.modules.kimi_k3.utils import profiled
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -98,6 +100,9 @@ class KimiK3MLA(MlaAttention):
         )
         tp_size = int(parallelism_config.get_attn_tp_size())
         self.attn_tp_size = tp_size
+        if os.environ.get("RTP_LLM_PROFILE_MODEL_MODULES", "0") == "1":
+            # Reuse the framework MLA's existing per-stage ranges.
+            self._perf_profile_prefix = "RTP::attention.mla"
         self.parallel_mode = resolve_kimi_k3_parallel_mode(parallelism_config)
         total_heads = int(config.attn_config.head_num)
         if total_heads % tp_size:
@@ -182,6 +187,7 @@ class KimiK3MLA(MlaAttention):
 
         return self._o_w
 
+    @profiled("RTP::attention.mla.qkv_norm_projection")
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor, context: KimiK3MLAContext
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -251,6 +257,7 @@ class KimiK3MLA(MlaAttention):
             return attn_output
         return super()._prepare_output_layout(attn_output, input_shape, output_gate)
 
+    @profiled("RTP::attention.mla.output_gate_quant")
     def _apply_output_gate(
         self,
         attn_output: torch.Tensor,
@@ -275,6 +282,7 @@ class KimiK3MLA(MlaAttention):
         # base MLA forward still calls this hook at the correct semantic point.
         return attn_output
 
+    @profiled("RTP::attention.mla.core")
     def forward(
         self,
         hidden_states: torch.Tensor,

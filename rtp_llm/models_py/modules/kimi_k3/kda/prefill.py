@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
+from rtp_llm.models_py.modules.kimi_k3.utils import profiled
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     KimiKDARecurrentCheckpointMetadata,
     KimiKDAShortConvMetadata,
@@ -488,6 +489,7 @@ class KimiK3KDAPrefill(nn.Module):
 
         return output
 
+    @profiled("RTP::attention.kda.core")
     def forward(
         self,
         mixed_qkv: torch.Tensor,

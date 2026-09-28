@@ -3,11 +3,40 @@
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
+from functools import wraps
 from typing import Optional, Sequence
 
 import torch
 
 from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+
+_PROFILE_MODEL_MODULES = os.environ.get("RTP_LLM_PROFILE_MODEL_MODULES", "0") == "1"
+
+
+def profile_scope(name: str):
+    """Opt-in CPU range used to attribute CUDA launches in model timelines."""
+
+    return torch.profiler.record_function(name) if _PROFILE_MODEL_MODULES else nullcontext()
+
+
+def profiled(name):
+    """Leave the original call path untouched when module profiling is off."""
+
+    def decorate(fn):
+        if not _PROFILE_MODEL_MODULES:
+            return fn
+
+        @wraps(fn)
+        def wrapped(self, *args, **kwargs):
+            label = name(self) if callable(name) else name
+            with torch.profiler.record_function(label):
+                return fn(self, *args, **kwargs)
+
+        return wrapped
+
+    return decorate
 
 
 def prefill_chunk_tokens() -> int:

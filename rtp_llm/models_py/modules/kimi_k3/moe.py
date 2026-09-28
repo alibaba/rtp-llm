@@ -16,6 +16,7 @@ from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models.kimi_k3.kimi_k3_weight import shared_expert_weight_shard_enabled
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
+from rtp_llm.models_py.modules.kimi_k3.utils import profile_scope, profiled
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
 
@@ -225,6 +226,7 @@ class KimiK3LatentMoE(nn.Module):
                 f"expected={expected_down}"
             )
 
+    @profiled("RTP::moe.shared_expert")
     def _shared_expert_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         shared_gate_up_weight = self.weights[K3W.MOE_SHARED_GATE_UP]
         if self.shared_expert_weight_shard:
@@ -232,7 +234,8 @@ class KimiK3LatentMoE(nn.Module):
                 shared_gate_up_weight,
                 self.ffn_tp_size,
             )
-        shared_gate_up = F.linear(hidden_states, shared_gate_up_weight)
+        with profile_scope("RTP::moe.shared_gate_up_proj"):
+            shared_gate_up = F.linear(hidden_states, shared_gate_up_weight)
         if self.shared_expert_weight_shard:
             del shared_gate_up_weight
 
@@ -240,12 +243,13 @@ class KimiK3LatentMoE(nn.Module):
         # strided SiTU kernel consumes them directly without materializing a
         # gate/up reorder or two contiguous activation copies.
         shared_gate, shared_up = shared_gate_up.chunk(2, dim=-1)
-        shared_activation = situ_and_mul(
-            shared_gate,
-            shared_up,
-            self.beta,
-            self.linear_beta,
-        )
+        with profile_scope("RTP::moe.shared_activation"):
+            shared_activation = situ_and_mul(
+                shared_gate,
+                shared_up,
+                self.beta,
+                self.linear_beta,
+            )
         del shared_gate, shared_up, shared_gate_up
 
         shared_down_weight = self.weights[K3W.MOE_SHARED_DOWN]
@@ -254,7 +258,8 @@ class KimiK3LatentMoE(nn.Module):
                 shared_down_weight,
                 self.ffn_tp_size,
             )
-        shared_output = torch.matmul(shared_activation, shared_down_weight)
+        with profile_scope("RTP::moe.shared_down_proj"):
+            shared_output = torch.matmul(shared_activation, shared_down_weight)
         if self.shared_expert_weight_shard:
             del shared_down_weight
         return shared_output
@@ -459,6 +464,7 @@ class KimiK3LatentMoE(nn.Module):
             )
             _DEEPGEMM_MEGA_LOGGED_DEVICES.add(device_index)
 
+    @profiled("RTP::moe.routed_experts")
     def _deep_gemm_mega_expert_sum(
         self,
         routed_input: torch.Tensor,
@@ -546,6 +552,7 @@ class KimiK3LatentMoE(nn.Module):
         else:
             dist.barrier(group=group)
 
+    @profiled("RTP::moe.router")
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         correction_bias = self._router_correction_fp32
         router_weight = self.weights[K3W.MOE_GATE]
@@ -658,6 +665,7 @@ class KimiK3LatentMoE(nn.Module):
             ),
         )
 
+    @profiled("RTP::moe")
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -673,7 +681,10 @@ class KimiK3LatentMoE(nn.Module):
             valid_token_mask=valid_token_mask,
             prepared_context=prepared_context,
         )
-        routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
+        with profile_scope("RTP::moe.routed_down_proj"):
+            routed_input = torch.matmul(
+                hidden_states, self.weights[K3W.MOE_ROUTED_DOWN]
+            )
         routed_output = self._mega_expert_sum(
             routed_input,
             expert_ids,
@@ -682,7 +693,10 @@ class KimiK3LatentMoE(nn.Module):
         )
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())
-        routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
+        with profile_scope("RTP::moe.routed_up_proj"):
+            routed_output = torch.matmul(
+                routed_output, self.weights[K3W.MOE_ROUTED_UP]
+            )
         shared_output = self._shared_expert_forward(hidden_states)
         from rtp_llm.models_py.triton_kernels.moe.output_add import add_moe_output
 

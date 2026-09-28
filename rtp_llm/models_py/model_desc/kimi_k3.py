@@ -105,6 +105,7 @@ from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     collective_gemm_workspace_global_tokens,
     mask_multimodal_token_ids,
+    profiled,
 )
 
 
@@ -261,6 +262,7 @@ class KimiK3DecoderLayer(nn.Module):
             else torch.matmul(x, weight)
         )
 
+    @profiled("RTP::attention.input_all_gather_projection")
     def _project_tp_sp_inputs(
         self,
         local_input: torch.Tensor,
@@ -277,6 +279,7 @@ class KimiK3DecoderLayer(nn.Module):
             logical_m=sp_layout.tokens.physical_tokens,
         )
 
+    @profiled("RTP::attention.output_projection_reduce_scatter")
     def _project_parallel_output(
         self,
         projection_input: torch.Tensor,
@@ -293,6 +296,7 @@ class KimiK3DecoderLayer(nn.Module):
             )
         return self._local_projection(projection_input, weight)
 
+    @profiled("RTP::mlp.dense")
     def _run_dense_tp_sp(
         self,
         local_input: torch.Tensor,
@@ -314,6 +318,7 @@ class KimiK3DecoderLayer(nn.Module):
         )
         return reduce_scatter(local_partial, get_process_group(Group.TP))
 
+    @profiled(lambda self: f"RTP::layers.{self.layer_idx}.forward")
     def forward(
         self,
         hidden_states: torch.Tensor,
