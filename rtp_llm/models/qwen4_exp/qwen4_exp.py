@@ -20,7 +20,8 @@ _LAYER_TYPE_TO_HYBRID_ATTENTION: Dict[str, HybridAttentionType] = {
 
 _SKELETON_WARNING = (
     "qwen4_exp is experimental and supports only the documented BF16 correctness "
-    "matrix. Unsupported PLE/QSA/MTP, parallelism, quantization and graph modes "
+    "matrix. Unsupported combinations of PLE/QSA/MTP, parallelism, "
+    "quantization and CUDA Graph "
     "fail fast. See docs/design/qwen3.8_flash_next_support_design.md appendix C."
 )
 
@@ -42,10 +43,16 @@ class Qwen4Exp(Qwen35Moe):
         return Qwen4ExpWeight
 
     def support_cuda_graph(self) -> bool:
-        # The input-hidden width is now explicit, but Qwen4's graph contract is
-        # still incomplete: draft-prefill capacity handling infers HC output
-        # semantics from hc_mult, and QSA/PLE graph state is not supported.
-        return False
+        # The Qwen3 Next backbone already owns graph-safe GDN/MoE metadata.
+        # Qwen4's PLE and QSA side pools have dynamic writes and host-side
+        # validation, so only the development variant without them may use
+        # that backbone graph path. The MTP draft has a separate graph contract.
+        config = getattr(self, "model_config", None)
+        return config is not None and not (
+            bool(getattr(config, "enable_qwen4_ple", False))
+            or bool(getattr(config, "enable_qwen4_qsa", False))
+            or bool(getattr(config, "is_mtp", False))
+        )
 
     @staticmethod
     def _experimental_serving_enabled() -> bool:
