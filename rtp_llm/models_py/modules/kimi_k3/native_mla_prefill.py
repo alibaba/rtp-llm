@@ -41,6 +41,8 @@ class KimiK3TokenspeedPrefill:
         causal,
         q_data_type,
         kv_data_type,
+        qo_indptr_host,
+        kv_indptr_host,
     ):
         if q_data_type != self.operand_dtype or kv_data_type != self.operand_dtype:
             raise ValueError(f"K3 prefill requires {self.operand_dtype} Q, K and V")
@@ -56,10 +58,19 @@ class KimiK3TokenspeedPrefill:
             raise ValueError("K3 prefill requires at least one request")
         if qo_indptr.dtype not in (torch.int32,torch.int64) or kv_indptr.dtype not in (torch.int32,torch.int64):
             raise ValueError("K3 prefill indptrs require integer storage")
-        # Planning is explicitly outside Graph capture. Keep the actual device
-        # arrays for the native kernel; only lengths and validation use mirrors.
-        q_host = qo_indptr.cpu().tolist()
-        k_host = kv_indptr.cpu().tolist()
+        if (
+            qo_indptr_host.device.type != "cpu"
+            or kv_indptr_host.device.type != "cpu"
+            or qo_indptr_host.shape != qo_indptr.shape
+            or kv_indptr_host.shape != kv_indptr.shape
+            or qo_indptr_host.dtype not in (torch.int32, torch.int64)
+            or kv_indptr_host.dtype not in (torch.int32, torch.int64)
+        ):
+            raise ValueError("K3 prefill requires matching CPU indptr mirrors")
+        # RTP fills these host mirrors and the device arrays together. Reading
+        # the device arrays back here would synchronize all earlier GPU work.
+        q_host = qo_indptr_host.tolist()
+        k_host = kv_indptr_host.tolist()
         q_lens = [b-a for a,b in zip(q_host,q_host[1:])]
         k_lens = [b-a for a,b in zip(k_host,k_host[1:])]
         if q_host[0] != 0 or k_host[0] != 0 or any(q < 0 or k < q for q,k in zip(q_lens,k_lens)):

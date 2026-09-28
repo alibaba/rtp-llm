@@ -6,10 +6,12 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <map>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -1077,6 +1079,46 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
                                                                TensorHolder&          host_holder) {
     model_input.last_hidden_states = model_output.all_hidden_states;
     const auto& new_all_token_ids  = sampler_output.token_ids;
+
+    // The default one-dimensional position policy reuses the final input
+    // position for the sampled token. Other styles keep the stream policy below.
+    const bool shift_default_positions = model_input.combo_position_ids.defined()
+        && model_input_gatherer_config_.mm_position_ids_style == PositionIdsStyle::DEFAULT
+        && model_input_gatherer_config_.position_id_len_factor == 1;
+    if (!model_input.combo_position_ids.defined() || shift_default_positions) {
+        const int64_t token_stride = new_all_token_ids.size(1);
+        RTP_LLM_CHECK_WITH_INFO(token_stride > 0 && token_stride <= std::numeric_limits<int32_t>::max(),
+                                "invalid MTP Prefill sample stride: %ld", token_stride);
+        auto input_lengths_d = toCudaInt32(model_input.input_lengths, host_holder).contiguous();
+        auto combo_tokens_d  = toCudaInt32(model_input.combo_tokens, host_holder).contiguous();
+        auto sampled_d = new_all_token_ids.is_cuda() ? new_all_token_ids : toCudaInt32(new_all_token_ids, host_holder);
+        if (sampled_d.scalar_type() != torch::kInt32) {
+            sampled_d = sampled_d.to(torch::kInt32);
+        }
+        sampled_d = sampled_d.contiguous();
+        auto offsets_d = input_lengths_d.cumsum(0).to(torch::kInt32);
+        auto shifted_d = torch::empty_like(combo_tokens_d);
+#if USING_CUDA
+        if (shift_default_positions) {
+            auto positions_d = toCudaInt32(model_input.combo_position_ids, host_holder).contiguous();
+            auto shifted_positions_d = torch::empty_like(positions_d);
+            invokeMtpPrefillShiftAppend(combo_tokens_d, input_lengths_d, offsets_d,
+                                        sampled_d, shifted_d, positions_d, shifted_positions_d,
+                                        static_cast<int32_t>(token_stride),
+                                        cuda_graph::graphGetCurrentStream().stream());
+            model_input.combo_position_ids = shifted_positions_d;
+        } else {
+            invokeMtpPrefillShiftAppend(combo_tokens_d, input_lengths_d, offsets_d,
+                                        sampled_d, shifted_d, static_cast<int32_t>(token_stride),
+                                        cuda_graph::graphGetCurrentStream().stream());
+        }
+#else
+        RTP_LLM_CHECK_WITH_INFO(false, "MTP Prefill CUDA shift requires CUDA");
+#endif
+        model_input.input_lengths = input_lengths_d;
+        model_input.combo_tokens  = shifted_d;
+        return;
+    }
 
     // set model_input.combo_tokens
     const size_t batch_size   = new_all_token_ids.size(0);

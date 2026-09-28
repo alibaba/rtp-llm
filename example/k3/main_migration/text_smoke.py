@@ -44,6 +44,7 @@ class Case:
     reuse: str
     require_chunk: bool = False
     require_mtp: bool = False
+    require_mtp_draft: bool = False
     require_multimodal: bool = False
     max_tokens: int | None = None
     timeout_s: int | None = None
@@ -235,7 +236,7 @@ def parse_args() -> argparse.Namespace:
             parser.error("main-text-64k requires a 65536-token single-prefill budget")
         if args.suite == "main-text-64k-capped" and args.block_size != 4096:
             parser.error("the capped PD427 subset requires 4096-token cache blocks")
-    args.case_deadline_s = 300 if args.suite == "main-text-64k-capped" else None
+    args.case_deadline_s = 300 if args.suite in ("flow", "main-text-64k-capped") else None
     if args.reuse_unit_tokens not in (0, args.block_size, 2 * args.block_size):
         parser.error(
             "reuse-unit-tokens must be 0, one cache block, or two cache blocks"
@@ -403,6 +404,9 @@ class Runner:
                     bool(r.get("reasoning_content", "").strip()) for r in self.records
                 ),
                 "mtp_case_count": sum(bool(r.get("require_mtp")) for r in self.records),
+                "mtp_draft_case_count": sum(
+                    bool(r.get("require_mtp_draft")) for r in self.records
+                ),
                 "multimodal_case_count": sum(
                     bool(r.get("require_multimodal")) for r in self.records
                 ),
@@ -732,6 +736,9 @@ class Runner:
                 f"{case.name}: MTP produced no accepted draft token: "
                 f"output_len={output_len}, iter_count={iter_count}"
             )
+        mtp_draft_rounds = int(aux.get("speculative_draft_rounds", 0))
+        if case.require_mtp_draft and mtp_draft_rounds <= 0:
+            raise SmokeFailure(f"{case.name}: no MTP draft rounds were observed")
 
         # The first output token is produced by P. D consumes it at position
         # input_len; conservatively exclude the final output token, which need
@@ -766,7 +773,9 @@ class Runner:
             "output_len": output_len,
             "iter_count": iter_count,
             "mtp_accepted_tokens": mtp_accepted_tokens,
+            "mtp_draft_rounds": mtp_draft_rounds,
             "require_mtp": case.require_mtp,
+            "require_mtp_draft": case.require_mtp_draft,
             "expected_json": case.expected_json,
             "expected_input_len": case.expected_input_len,
             "expected_reuse_len": case.expected_reuse_len,
@@ -1401,6 +1410,20 @@ class Runner:
             ],
             concurrent=True,
         )
+        if self.args.require_mtp:
+            self.run_stage(
+                "flow_mtp_draft",
+                [
+                    Case(
+                        "flow_mtp_draft",
+                        f"四层 MTP 草稿路径检查：{self.args.namespace}。请回复任意内容。",
+                        r".",
+                        "miss",
+                        require_mtp_draft=True,
+                        max_tokens=min(self.args.max_tokens, 32),
+                    )
+                ],
+            )
 
     def run_main_text(self) -> None:
         self.prewarm_rdma_pool()

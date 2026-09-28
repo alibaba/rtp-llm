@@ -19,7 +19,11 @@ def _store_group128(values, out, scales, row, rows, width: tl.constexpr, block: 
     tl.store(out + row * width + columns, quantized, columns < width)
 
     exponent = (scale.to(tl.int32, bitcast=True) >> 23) & 255
-    exponent = tl.where(tl.arange(0, block // 128) < width // 128, exponent, 127)
+    # Match the existing quantizer's legacy/v2 padding at its 4M-element switch.
+    pad_exponent = tl.where(rows * width >= 4 * 1024 * 1024, 0, 0x3F)
+    exponent = tl.where(
+        tl.arange(0, block // 128) < width // 128, exponent, pad_exponent
+    )
     packed = tl.sum(
         tl.reshape(exponent, (block // 512, 4)) << (tl.arange(0, 4)[None, :] * 8),
         axis=1,
@@ -57,9 +61,10 @@ def _sigmoid_mul_group128_kernel(
     b = tl.load(
         gate + row * gate_row_stride + columns, columns < width, other=0.0
     ).to(tl.float32)
-    # Match the current compiled BF16 gate path: sigmoid and multiply in FP32,
-    # then one BF16 rounding before group128 quantization.
-    _store_group128(a * tl.sigmoid(b), out, scales, row, rows, width, block)
+    # Match BF16 eager gating: sigmoid rounds before the multiply, then the
+    # grouped quantizer observes the BF16 product.
+    sigmoid_bf16 = tl.sigmoid(b).to(tl.bfloat16).to(tl.float32)
+    _store_group128(a * sigmoid_bf16, out, scales, row, rows, width, block)
 
 
 def sigmoid_mul_per_token_group_quant_fp8(
@@ -98,6 +103,105 @@ def sigmoid_mul_per_token_group_quant_fp8(
             width,
             x.stride(0),
             gate.stride(0),
+            max(512, triton.next_power_of_2(width)),
+        )
+    return out, scale_wire.T[:rows, :]
+
+
+@triton.jit(do_not_specialize=["rows"])
+def _rmsnorm_sigmoid_gate_group128_kernel(
+    x,
+    gate,
+    weight,
+    out,
+    scales,
+    rows,
+    heads: tl.constexpr,
+    x_row_stride: tl.constexpr,
+    x_head_stride: tl.constexpr,
+    x_dim_stride: tl.constexpr,
+    gate_row_stride: tl.constexpr,
+    gate_head_stride: tl.constexpr,
+    gate_dim_stride: tl.constexpr,
+    eps: tl.constexpr,
+    block: tl.constexpr,
+):
+    row = tl.program_id(0)
+    columns = tl.arange(0, block)
+    head = columns // 128
+    dim = columns % 128
+    valid = columns < heads * 128
+    a = tl.load(
+        x + row * x_row_stride + head * x_head_stride + dim * x_dim_stride,
+        valid,
+        other=0.0,
+    ).to(tl.float32)
+    b = tl.load(
+        gate
+        + row * gate_row_stride
+        + head * gate_head_stride
+        + dim * gate_dim_stride,
+        valid,
+        other=0.0,
+    ).to(tl.float32)
+    gamma = tl.load(weight + dim).to(tl.float32)
+    groups = tl.reshape(a, (block // 128, 128))
+    variance = tl.sum(groups * groups, axis=1) / 128.0
+    # Preserve the native gated-norm kernel's BF16 rounding at quantization input.
+    inverse = 1 / tl.sqrt(variance + eps)
+    normalized = tl.reshape(groups * inverse[:, None], (block,))
+    _store_group128(
+        normalized * gamma * tl.sigmoid(b),
+        out,
+        scales,
+        row,
+        rows,
+        heads * 128,
+        block,
+    )
+
+
+def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse per-head RMSNorm, sigmoid gate and group128 E4M3 production.
+
+    Inputs are BF16 ``[tokens, heads, 128]``. Scales use the same packed UE8M0
+    layout as ``sigmoid_mul_per_token_group_quant_fp8``.
+    """
+    if x.ndim != 3 or gate.shape != x.shape or x.shape[-1] != 128:
+        raise ValueError("FP8 gated RMSNorm requires matching [tokens, heads, 128] inputs")
+    if weight.shape != (128,):
+        raise ValueError("FP8 gated RMSNorm requires a 128-element weight")
+    if x.dtype != torch.bfloat16 or gate.dtype != x.dtype or weight.dtype != x.dtype:
+        raise ValueError("FP8 gated RMSNorm requires BF16 inputs and weight")
+    if not x.is_cuda or gate.device != x.device or weight.device != x.device:
+        raise ValueError("FP8 gated RMSNorm tensors must share a CUDA device")
+    rows, heads, _ = x.shape
+    if heads <= 0:
+        raise ValueError("FP8 gated RMSNorm requires at least one head")
+    width = heads * 128
+    out = torch.empty((rows, width), device=x.device, dtype=torch.float8_e4m3fn)
+    scale_wire = torch.empty(
+        ((width + 511) // 512, (rows + 3) // 4 * 4),
+        device=x.device,
+        dtype=torch.int32,
+    )
+    if rows:
+        _rmsnorm_sigmoid_gate_group128_kernel[(rows,)](
+            x,
+            gate,
+            weight,
+            out,
+            scale_wire,
+            rows,
+            heads,
+            *x.stride(),
+            *gate.stride(),
+            eps,
             max(512, triton.next_power_of_2(width)),
         )
     return out, scale_wire.T[:rows, :]

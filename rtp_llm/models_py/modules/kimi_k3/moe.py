@@ -16,6 +16,7 @@ from .router import KimiK3RouterProjection
 from .routing import grouped_topk
 from .moe_backend import get_k3_moe_backend
 from .linear import KimiK3Bf16Linear, KimiK3LatentDownLinear, bf16_linear
+from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 
 
 def situ(gate, up, beta, linear_beta, *, inplace=False):
@@ -126,7 +127,7 @@ class KimiK3LatentMoE(nn.Module):
         if self.norm is not None:
             routed = self.norm(routed.contiguous())
         gate, up = bf16_linear(hidden, self.shared_gate_up).chunk(2, dim=-1)
-        shared = self.shared_down(situ(gate, up, self.beta, self.linear_beta))
+        shared = self.shared_down(situ_and_mul(gate, up, self.beta, self.linear_beta))
         if isinstance(self.up, KimiK3Bf16Linear):
             # Match native K3: combine the routed projection and shared
             # output in a single addmm GEMM call.

@@ -71,6 +71,10 @@ def launch_config(args):
         "NO_PROXY": f"localhost,127.0.0.1,{args.peer_ip}",
         "no_proxy": f"localhost,127.0.0.1,{args.peer_ip}",
     }
+    if getattr(args, "allow_hf3fs_root", None):
+        # The Bazel runtime includes the SHM copier. Its direct 3FS path loaded
+        # target and draft checkpoints; nogds failed during MoE scale conversion.
+        environment["FASTSAFETENSORS_NOGDS"] = "0"
     options = {
         "role_type": args.role,
         "tp_size": 8,
@@ -115,15 +119,41 @@ def launch_config(args):
     return environment, command
 
 
+def filesystem_type(path):
+    output = subprocess.check_output(
+        ["findmnt", "-T", str(path), "-n", "-o", "FSTYPE"], text=True
+    )
+    types = {line.strip() for line in output.splitlines() if line.strip()}
+    if len(types) != 1:
+        raise ValueError(f"Ambiguous filesystem types for {path}: {sorted(types)}")
+    return types.pop()
+
+
 def require_local(path):
     resolved = Path(path).resolve(strict=True)
     if not re.match(r"^/(?:ssd|data[0-9]*)/", str(resolved)):
         raise ValueError(f"Not a local data destination: {resolved}")
-    fs = subprocess.check_output(
-        ["findmnt", "-T", str(resolved), "-n", "-o", "FSTYPE"], text=True
-    ).strip()
+    fs = filesystem_type(resolved)
     if fs not in {"ext4", "xfs", "btrfs"}:
         raise ValueError(f"Unsupported local filesystem: {resolved}: {fs}")
+
+
+def require_checkpoint_source(path, allowed_hf3fs_root=None):
+    resolved = Path(path).resolve(strict=True)
+    if re.match(r"^/(?:ssd|data[0-9]*)/", str(resolved)):
+        require_local(resolved)
+        return
+    if allowed_hf3fs_root is None:
+        raise ValueError(f"Checkpoint is not on a local data disk: {resolved}")
+    root = Path(allowed_hf3fs_root).resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Checkpoint is outside allowed 3FS root: {resolved}") from exc
+    for candidate in (root, resolved):
+        fs = filesystem_type(candidate)
+        if fs != "fuse.hf3fs":
+            raise ValueError(f"Expected fuse.hf3fs for {candidate}, got {fs}")
 
 
 def cpu_tp_socket_environment(run):
@@ -239,6 +269,8 @@ def main():
     parser.add_argument("--peer-port", required=True, type=int)
     parser.add_argument("--server", required=True)
     parser.add_argument("--guard", required=True, help="weight_loader_guard.py")
+    parser.add_argument("--allow-hf3fs-root",
+                        help="Explicit 3FS checkpoint root; checked by the loader guard")
     parser.add_argument("--rdma-hcas", help="Explicit comma-separated Barex HCA allowlist")
     parser.add_argument("--reserve-runtime-mem-mb", type=int, default=14336,
                         help="Per-rank runtime reserve; validated PD427 used 14336 MiB")
@@ -274,6 +306,12 @@ def main():
             raise ValueError(f"Unset inherited {name} before precision validation")
     inherited = os.environ.copy()
     inherited.update(environment)
+    jit_cache_root = os.environ.get("RTP_LLM_JIT_CACHE_ROOT")
+    if jit_cache_root:
+        jit_cache_root = Path(jit_cache_root).resolve()
+        require_local(jit_cache_root.parent)
+        jit_cache_root.mkdir(exist_ok=True)
+        require_local(jit_cache_root)
     for key, subdir in {
         "TMPDIR": "tmp",
         "LOG_PATH": "logs",
@@ -281,26 +319,24 @@ def main():
         "DG_JIT_CACHE_DIR": "deep-gemm",
         "FLASHINFER_WORKSPACE_BASE": "flashinfer",
     }.items():
-        directory = run / subdir
-        directory.mkdir()
+        cache_root = jit_cache_root if key in {"TRITON_CACHE_DIR", "DG_JIT_CACHE_DIR"} and jit_cache_root else run
+        directory = cache_root / subdir
+        directory.mkdir(exist_ok=bool(jit_cache_root))
         inherited[key] = str(directory)
         environment[key] = str(directory)
     for label, checkpoint in (
         ("target", args.checkpoint),
         ("draft", args.draft_checkpoint),
     ):
-        require_local(checkpoint)
+        require_checkpoint_source(checkpoint, args.allow_hf3fs_root)
+        guard_command = [sys.executable, args.guard, "preflight", "--checkpoint", checkpoint]
+        if args.allow_hf3fs_root:
+            guard_command.extend(["--allow-hf3fs-root", args.allow_hf3fs_root])
+        else:
+            guard_command.extend(["--local-data-root", str(Path(checkpoint).resolve().parent)])
         with (run / f"{label}-preflight.txt").open("w") as output:
             subprocess.run(
-                [
-                    sys.executable,
-                    args.guard,
-                    "preflight",
-                    "--checkpoint",
-                    checkpoint,
-                    "--local-data-root",
-                    str(Path(checkpoint).resolve().parents[0]),
-                ],
+                guard_command,
                 env=inherited,
                 stdout=output,
                 stderr=subprocess.STDOUT,
@@ -329,6 +365,7 @@ def main():
                 "command": command,
                 "pid": os.getpid(),
                 "allow_shared_accuracy": args.allow_shared_accuracy,
+                "allowed_hf3fs_root": args.allow_hf3fs_root,
                 "performance_validated": False,
             },
             indent=2,

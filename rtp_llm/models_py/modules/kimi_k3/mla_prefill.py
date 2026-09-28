@@ -22,6 +22,32 @@ class KimiK3MlaPrefillOp(MlaFlashInferPrefillOp):
     def _create_prefill_wrapper(self):
         return KimiK3TokenspeedPrefill(fp8_compute=self.kv_cache_type == KvCacheDataType.FP8)
 
+    def plan(self, mla_params):
+        self.prefill_wrapper.plan(
+            mla_params.qo_indptr_d,
+            mla_params.prefill_ragged_kv_len_indptr_d,
+            self.num_heads,
+            self.num_heads,
+            self.qk_rope_head_dim + self.qk_nope_head_dim,
+            self.v_head_dim,
+            sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
+            * self.softmax_extra_scale,
+            causal=True,
+            q_data_type=self._attention_dtype(),
+            kv_data_type=self._attention_dtype(),
+            qo_indptr_host=mla_params.qo_indptr_h,
+            kv_indptr_host=mla_params.prefill_ragged_kv_len_indptr_h,
+        )
+        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
+        self.qo_indptr = mla_params.qo_indptr_d
+        self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
+        self.total_kv_lens = int(mla_params.prefill_ragged_kv_len_indptr_h[-1])
+        self.block_table = mla_params.page_indice_d.unsqueeze(0)
+        self.workspace_starts = torch.zeros(
+            1, dtype=torch.int32, device=self.block_table.device
+        )
+        self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
+
     def _reuse_kv_cache_indexed_batched(self, compressed_kv, k_pe, kv_cache):
         if self.kv_cache_type == KvCacheDataType.FP8:
             if self.reuse_cache_page_indice is None or self.reuse_cache_page_indice.numel() == 0:

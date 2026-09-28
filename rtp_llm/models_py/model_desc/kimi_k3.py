@@ -29,6 +29,9 @@ from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
+from rtp_llm.models_py.triton_kernels.causal_conv1d.paged_short_conv_prefill import (
+    prepare_paged_short_conv_metadata,
+)
 from rtp_llm.ops import HybridAttentionType, RoleType
 from rtp_llm.ops.compute_ops import PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -201,6 +204,12 @@ class KimiK3Model(GptModelBase):
             )
             for i in range(self.layer_num)
         )
+        self.use_paged_conv_prefill = any(
+            layer.layer_type == HybridAttentionType.LINEAR
+            and getattr(layer.attention.prefill, "use_paged_conv", False)
+            for layer in self.layers
+        )
+        logging.info("K3 paged convolution Prefill enabled: %s", self.use_paged_conv_prefill)
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), model_config.layernorm_eps
         )
@@ -262,11 +271,18 @@ class KimiK3Model(GptModelBase):
             )
         )
 
-    def _forward_layers(self, hidden, inputs, fmha_impl):
-        if hidden.shape[0] % self.tp_size:
+    def _forward_layers(self, hidden, inputs, fmha_impl, sequence_parallel_input=False):
+        physical_rows = inputs.input_ids.shape[0]
+        if physical_rows % self.tp_size:
             raise ValueError("K3 requires physical token padding before SP execution")
-        local_rows = hidden.shape[0] // self.tp_size
-        hidden = hidden.narrow(0, self.tp_rank * local_rows, local_rows).contiguous()
+        local_rows = physical_rows // self.tp_size
+        if sequence_parallel_input:
+            if hidden.shape[0] != local_rows:
+                raise ValueError("K3 local SP input row count does not match physical tokens")
+        else:
+            if hidden.shape[0] != physical_rows:
+                raise ValueError("K3 full SP input row count does not match physical tokens")
+            hidden = hidden.narrow(0, self.tp_rank * local_rows, local_rows).contiguous()
         primary = get_primary_attention_inputs(inputs, self.kv_cache)
         # A device mask must be refreshed at replay; Python logical row counts
         # cannot be captured into the graph. The runner owns this metadata.
@@ -274,6 +290,7 @@ class KimiK3Model(GptModelBase):
         if valid_mask is not None:
             valid_mask = valid_mask.narrow(0, self.tp_rank * local_rows, local_rows)
         conv_meta = None
+        paged_conv_meta = None
         # Native MTP is MLA-only. Conv metadata performs host-side sequence
         # inspection and must not run in its prefill CUDA graph.
         if (
@@ -283,10 +300,24 @@ class KimiK3Model(GptModelBase):
                 layer.layer_type == HybridAttentionType.LINEAR for layer in self.layers
             )
         ):
+            cu_seqlens_host = primary.cu_seqlens
             conv_meta = prepare_causal_conv1d_metadata(
-                query_start_loc=primary.cu_seqlens_device, device=hidden.device
+                query_start_loc=(
+                    cu_seqlens_host
+                    if cu_seqlens_host is not None and cu_seqlens_host.numel()
+                    else primary.cu_seqlens_device
+                ),
+                device=hidden.device,
             )
-        metadata = KimiLinearMetadata(conv_meta, primary.is_target_verify)
+            if self.use_paged_conv_prefill:
+                if cu_seqlens_host is None or cu_seqlens_host.device.type != "cpu":
+                    raise ValueError("paged convolution requires host cu_seqlens")
+                paged_conv_meta = prepare_paged_short_conv_metadata(
+                    cu_seqlens_host, hidden.device
+                )
+        metadata = KimiLinearMetadata(
+            conv_meta, primary.is_target_verify, paged_conv_meta
+        )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         anchors = hidden.new_empty((local_rows, self.num_blocks, hidden.shape[-1]))

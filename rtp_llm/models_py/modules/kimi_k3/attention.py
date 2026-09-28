@@ -59,6 +59,15 @@ class KimiK3KDA(nn.Module):
         self.input = linear(weights, K3W.KDA_INPUT, hardware)
         self.f_b = linear(weights, W.linear_attn_f_b_w, hardware)
         self.output = linear(weights, W.linear_attn_out_w, hardware)
+        self._fp8_output_norm = False
+        if weights[W.linear_attn_out_w].dtype == torch.float8_e4m3fn:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+                CudaFp8GEMMLinear,
+            )
+
+            if not isinstance(self.output, CudaFp8GEMMLinear) or not self.output.scale_ue8m0:
+                raise ValueError("FP8 KDA output requires grouped E4M3 GEMM with UE8M0 scales")
+            self._fp8_output_norm = True
         forget_weight = weights[W.linear_attn_f_b_w]
         self.fa_width = forget_weight.shape[
             1 if forget_weight.dtype == torch.float8_e4m3fn else 0
@@ -73,7 +82,10 @@ class KimiK3KDA(nn.Module):
                 KimiK3NativeKDAPrefill,
             )
 
-            self.prefill = KimiK3NativeKDAPrefill(cfg, parallelism, weights, backend)
+            self.prefill = KimiK3NativeKDAPrefill(
+                cfg, parallelism, weights, backend,
+                use_paged_conv=self._fp8_output_norm and backend in {"flashkda", "cula"},
+            )
         elif backend == "rtp":
             self.prefill = KimiLinearKDAPrefill(cfg, parallelism, weights)
         else:
@@ -116,8 +128,21 @@ class KimiK3KDA(nn.Module):
         if valid_mask is not None:
             # Paged KDA skips null-block rows, leaving their output unspecified.
             output = torch.where(valid_mask[:, None], output.reshape(-1, self.width), 0)
-        output = self.norm(output.reshape(-1, self.dim), gate.reshape(-1, self.dim))
-        output = self.output(output.reshape(-1, self.width))
+        if self._fp8_output_norm:
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel.fused_activation import (
+                rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
+            )
+
+            values, scales = rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
+                output.reshape(-1, self.heads, self.dim),
+                gate.reshape(-1, self.heads, self.dim),
+                self.norm.weight,
+                self.norm.eps,
+            )
+            output = self.output.forward_quantized(values, scales)
+        else:
+            output = self.norm(output.reshape(-1, self.dim), gate.reshape(-1, self.dim))
+            output = self.output(output.reshape(-1, self.width))
         return reduce_scatter(output, Group.TP) if self.tp_size > 1 else output
 
 
