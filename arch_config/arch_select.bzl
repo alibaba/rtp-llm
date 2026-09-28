@@ -145,15 +145,6 @@ def torch_deps():
     })
     return deps
 
-def flashinfer_deps():
-    native.alias(
-        name = "flashinfer",
-        actual = select({
-            "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
-            "//conditions:default": "@flashinfer_cpp//:flashinfer",
-        })
-    )
-
 def flashmla_deps():
     native.alias(
         name = "flashmla",

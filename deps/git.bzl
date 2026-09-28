@@ -68,47 +68,6 @@ def git_deps():
     )
 
     new_git_repository(
-        name = "flashinfer_cpp",
-        remote = "https://github.com/flashinfer-ai/flashinfer.git",
-        commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
-        build_file = str(Label("@rtp_llm//3rdparty/flashinfer:flashinfer.BUILD")),
-        patches = [
-            "@rtp_llm//3rdparty/flashinfer:0001-fix-compile.patch",
-            "@rtp_llm//3rdparty/flashinfer:0002-dispatch-group-size.patch",
-            "@rtp_llm//3rdparty/flashinfer:0003-tanh-compatibility.patch",
-            "@rtp_llm//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
-            "@rtp_llm//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
-            "@rtp_llm//3rdparty/flashinfer:0007-fix-nan.patch",
-            "@rtp_llm//3rdparty/flashinfer:0008-enable-pdl.patch",
-            "@rtp_llm//3rdparty/flashinfer:0009-sp-sample.patch",
-            "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
-        ],
-    )
-
-    new_git_repository(
-        name = "flashinfer_cpp_cu13",
-        remote = "https://github.com/flashinfer-ai/flashinfer.git",
-        commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
-        build_file = str(Label("@rtp_llm//3rdparty/flashinfer:flashinfer_cu13.BUILD")),
-        patches = [
-            "@rtp_llm//3rdparty/flashinfer:0001-fix-compile.patch",
-            "@rtp_llm//3rdparty/flashinfer:0002-dispatch-group-size.patch",
-            "@rtp_llm//3rdparty/flashinfer:0003-tanh-compatibility.patch",
-            "@rtp_llm//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
-            "@rtp_llm//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
-            "@rtp_llm//3rdparty/flashinfer:0007-fix-nan.patch",
-            "@rtp_llm//3rdparty/flashinfer:0008-enable-pdl.patch",
-            "@rtp_llm//3rdparty/flashinfer:0009-sp-sample.patch",
-            "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
-            "@rtp_llm//3rdparty/flashinfer:0011-cuda13-cub-compat.patch",
-            "@rtp_llm//3rdparty/flashinfer:0012-pymoduledef-missing-fields.patch",
-            "@rtp_llm//3rdparty/flashinfer:0013-cuda13-kernel-visibility-scheduler.patch",
-            "@rtp_llm//3rdparty/flashinfer:0014-cuda13-kernel-visibility-decode.patch",
-            "@rtp_llm//3rdparty/flashinfer:0015-cuda13-occupancy-skip.patch",
-        ],
-    )
-
-    new_git_repository(
         name = "flashmla",
         remote = "https://github.com/deepseek-ai/FlashMLA.git",
         commit = "b31bfe72a83ea205467b3271a5845440a03ed7cb",

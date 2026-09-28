@@ -1,8 +1,7 @@
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 load("//:def.bzl", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
+load("@arch_config//:arch_select.bzl", "torch_deps", "select_py_bindings")
 load("@bazel_skylib//lib:selects.bzl", "selects")
-flashinfer_deps()
 
 config_setting(
     name = "enable_triton",
@@ -44,7 +43,7 @@ config_setting(
 # using_cuda13_arm is a stricter subset of using_cuda12_arm (the config_setting
 # above still matches so existing selects that route ARM → pip_cuda12_arm_torch
 # keep working); additionally enables code paths that need to differentiate
-# CUDA 13 from CUDA 12 (e.g. the flashinfer_cpp_cu13 repo).
+# CUDA 13 from CUDA 12 (e.g. the cutlass_cu13 repo).
 config_setting(
     name = "using_cuda13_arm",
     # Lists every define the cuda13_arm config sets so this setting is a strict
@@ -60,7 +59,7 @@ config_setting(
 )
 
 # x86_64 counterpart of using_cuda13_arm — same CUDA-13-vs-12 differentiation,
-# applied on x86 builds.  Enables the CUDA-13 variants of cutlass / flashinfer
+# applied on x86 builds.  Enables the CUDA-13 variant of cutlass
 # on the x86 toolchain.
 #
 # define_values lists ALL flags this config requires, so Bazel can detect

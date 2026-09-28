@@ -88,12 +88,12 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 1324.313,
+                    "cost_time": 1615.159,
                     "iter_count": 27,
                     "input_len": 203,
                     "output_len": 27,
                     "step_output_len": 27,
-                    "first_token_cost_time": 136.156
+                    "first_token_cost_time": 179.425
                 },
                 "extra_outputs": null
             }
@@ -268,7 +268,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "The current weather in San Francisco is 17°C (62.6°F), with 72% humidity and partly cloudy skies."
+                            "content": "The current weather in San Francisco is 17°C (62.6°F) with 72% humidity and partly cloudy skies."
                         },
                         "finish_reason": "stop"
                     }
@@ -282,12 +282,12 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 1222.809,
+                    "cost_time": 1463.189,
                     "iter_count": 27,
                     "input_len": 225,
                     "output_len": 27,
                     "step_output_len": 27,
-                    "first_token_cost_time": 82.586
+                    "first_token_cost_time": 105.417
                 },
                 "extra_outputs": null
             }
