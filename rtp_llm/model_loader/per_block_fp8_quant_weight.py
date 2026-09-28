@@ -1,5 +1,6 @@
 import copy
 import functools
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -142,6 +143,21 @@ def _pack_ue8m0_scale_bytes(scale: torch.Tensor) -> torch.Tensor:
     packed_aligned = packed_storage.T[: packed.shape[0]]
     packed_aligned.copy_(packed)
     return packed_aligned
+
+
+_FLASHINFER_SM12X_BACKEND = "flashinfer_sm12x"
+
+
+def _flashinfer_raw_scale_key(weight_name: str) -> Optional[str]:
+    """Return the runtime-only canonical-scale sidecar key when requested."""
+    if os.environ.get("MOE_TP_PREFILL_BACKEND", "default").strip().lower() != (
+        _FLASHINFER_SM12X_BACKEND
+    ):
+        return None
+    return {
+        W.moe_w1: W.moe_s1_raw,
+        W.moe_w2: W.moe_s2_raw,
+    }.get(weight_name)
 
 
 def cast_to_fp8(x: torch.Tensor):
@@ -872,6 +888,17 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
+            flashinfer_raw_key = _flashinfer_raw_scale_key(self.kernel.name)
+            flashinfer_raw_scale = None
+            if flashinfer_raw_key is not None:
+                if self.group_size != 128:
+                    raise ValueError(
+                        "FlashInfer SM12x FP8 MoE requires FP8_PER_BLOCK group_size=128"
+                    )
+                if not is_deep_gemm_e8m0_used():
+                    raise ValueError(
+                        "FlashInfer SM12x FP8 MoE requires the SM100/SM120 UE8M0 path"
+                    )
             if not is_deep_gemm_e8m0_used():
                 scale_weight = (
                     scale_weight.reshape(scale_weight.shape[-1], -1)
@@ -895,12 +922,33 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             # inputs still arrive with floating-point block scales and require
             # the old dequantize/requantize conversion here.
             if is_deep_gemm_e8m0_used() and scale_weight.dtype != torch.int32:
-                kernel_weight, scale_weight = requant_weight_ue8m0(
-                    kernel_weight, scale_weight
+                if flashinfer_raw_key is not None:
+                    kernel_weight, scale_weight, flashinfer_raw_scale = (
+                        requant_weight_ue8m0(
+                            kernel_weight, scale_weight, return_raw_scale=True
+                        )
+                    )
+                else:
+                    kernel_weight, scale_weight = requant_weight_ue8m0(
+                        kernel_weight, scale_weight
+                    )
+            elif flashinfer_raw_key is not None:
+                # This loader does not implement or validate an inverse from a
+                # packed DeepGEMM scale to FlashInfer's canonical scale.  The
+                # FlashInfer path is therefore available only when the loader
+                # owns a floating-point scale and returns its canonical form
+                # from the same requantization that produced the FP8 bits.
+                raise ValueError(
+                    "FlashInfer SM12x FP8 MoE requires floating-point source "
+                    "block scales; packed DeepGEMM "
+                    "UE8M0 scales do not have an implemented inverse"
                 )
 
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
+            if flashinfer_raw_key is not None:
+                assert flashinfer_raw_scale is not None
+                processed_res[flashinfer_raw_key] = flashinfer_raw_scale.contiguous()
 
         return processed_res
 

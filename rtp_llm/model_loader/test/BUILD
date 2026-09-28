@@ -68,3 +68,9 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_flashinfer_moe_raw_scale",
+    srcs = ["test_flashinfer_moe_raw_scale.py"],
+    deps = py_test_deps,
+)

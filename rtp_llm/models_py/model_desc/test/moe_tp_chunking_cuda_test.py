@@ -98,6 +98,7 @@ def _run_chunked(
     chunks: int,
     *,
     mode: str,
+    direct_output: bool = False,
 ) -> tuple[torch.Tensor, list[dict[str, object]]]:
     from rtp_llm.models_py.model_desc import generic_moe
 
@@ -108,6 +109,9 @@ def _run_chunked(
             # real small routed/shared/gate CUDA math for each chunk.
             torch.nn.Module.__init__(self)
             self.tp_chunk_config = SimpleNamespace(chunks=chunks, mode=mode)
+            self.tp_prefill_config = SimpleNamespace(
+                backend="default", direct_output=direct_output
+            )
             self.shared_expert_gate = lambda hidden: hidden @ module.gate_weight
 
         def _route(self, hidden_states):
@@ -123,13 +127,21 @@ def _run_chunked(
             skip_final_allreduce: bool = False,
             routing=None,
             shared_gate_output=None,
+            tp_prefill_backend="default",
+            output_tensor=None,
         ) -> torch.Tensor:
             assert skip_final_allreduce
             ids = routing[1].flatten()
             self.token_offset += hidden_states.size(0)
             # This is the GenericMoe unified boundary: routed + gated shared
             # before the collective, never an MoE-only reduction plus shared add.
-            return module.partial(hidden_states, ids, shared_gate_output).contiguous()
+            partial = module.partial(
+                hidden_states, ids, shared_gate_output
+            ).contiguous()
+            if output_tensor is not None:
+                output_tensor.copy_(partial)
+                return output_tensor
+            return partial
 
     harness = _ChunkHarness()
     harness.token_offset = 0
@@ -145,13 +157,14 @@ def _run_chunked(
                 "shape": tuple(tensor.shape),
                 "is_cuda": tensor.is_cuda,
                 "data_ptr": tensor.data_ptr(),
+                "storage_ptr": tensor.untyped_storage().data_ptr(),
             }
         )
         return real_all_reduce_async(tensor, group, inplace=inplace)
 
     generic_moe.all_reduce_async = _track_real_nccl
     try:
-        result = harness._forward_tp_chunks(x)
+        result = harness._forward_tp_chunks(x, use_fusion=direct_output)
     finally:
         generic_moe.all_reduce_async = real_all_reduce_async
     assert harness.token_offset == x.size(0)
@@ -218,6 +231,15 @@ def _worker(rank: int, world_size: int, port: int) -> None:
         torch.testing.assert_close(serial, reference, rtol=1e-2, atol=2e-2)
         torch.testing.assert_close(overlap, reference, rtol=1e-2, atol=2e-2)
         torch.testing.assert_close(overlap, serial, rtol=0, atol=0)
+        for mode in ("serial", "overlap"):
+            direct, launches = _run_chunked(
+                module, x, expert_ids, chunk_size, mode=mode, direct_output=True
+            )
+            assert len(launches) == 4
+            assert len({item["data_ptr"] for item in launches}) == 4
+            assert len({item["storage_ptr"] for item in launches}) == 1
+            assert direct.data_ptr() == launches[0]["data_ptr"]
+            torch.testing.assert_close(direct, serial, rtol=0, atol=0)
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()

@@ -116,11 +116,37 @@ def sgl_per_token_group_quant_fp8(
     scale_ue8m0: bool = False,
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
+    fuse_silu_and_mul_up_gate: bool = False,
 ):
     assert (
         x.shape[-1] % group_size == 0
     ), "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
+    if fuse_silu_and_mul_up_gate and not fuse_silu_and_mul:
+        raise ValueError("fuse_silu_and_mul_up_gate requires fuse_silu_and_mul=True")
+    if fuse_silu_and_mul:
+        if group_size not in (16, 32, 64, 128):
+            raise ValueError(
+                "fused SiLU-and-mul only supports group_size in "
+                f"(16, 32, 64, 128), got {group_size}"
+            )
+        if x.shape[-1] % (2 * group_size) != 0:
+            raise ValueError(
+                "fused SiLU-and-mul requires its half-width to be divisible "
+                f"by group_size ({group_size}), got {x.shape[-1]}"
+            )
+        if not (column_major_scales and scale_tma_aligned and scale_ue8m0):
+            raise ValueError(
+                "fused SiLU-and-mul requires column_major_scales=True, "
+                "scale_tma_aligned=True, and scale_ue8m0=True"
+            )
+
+    quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+    if fuse_silu_and_mul and quant_kernel == "legacy":
+        raise ValueError(
+            "DSV4_FP8_QUANT_KERNEL=legacy does not support fused "
+            "SiLU-and-mul; use auto or v2"
+        )
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
     x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
@@ -133,7 +159,6 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.shape[0] > 0:
-        quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
 
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):
@@ -167,6 +192,7 @@ def sgl_per_token_group_quant_fp8(
                 scale_ue8m0,
                 fuse_silu_and_mul,
                 masked_m,
+                fuse_silu_and_mul_up_gate,
             )
         elif quant_kernel != "auto":
             raise ValueError(
@@ -185,6 +211,7 @@ def sgl_per_token_group_quant_fp8(
                 scale_ue8m0,
                 fuse_silu_and_mul,
                 masked_m,
+                fuse_silu_and_mul_up_gate,
             )
         elif masked_m is not None:
             per_token_group_quant_fp8_v2(
@@ -198,6 +225,7 @@ def sgl_per_token_group_quant_fp8(
                 scale_ue8m0,
                 fuse_silu_and_mul,
                 masked_m,
+                fuse_silu_and_mul_up_gate,
             )
         else:
             per_token_group_quant_fp8(
@@ -205,6 +233,43 @@ def sgl_per_token_group_quant_fp8(
             )
 
     return x_q, x_s
+
+
+def silu_and_mul_up_gate_fp8_quant(
+    x: torch.Tensor,
+    group_size: int = 128,
+    eps: float = 1e-10,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fuse routed ``[up | gate]`` SiLU×mul and per-group FP8 quantization.
+
+    The input must be a contiguous 2D BF16 tensor. The returned pair uses the
+    column-major, TMA-aligned UE8M0 scale ABI required by contiguous DeepGEMM
+    FC2. This path is CUDA v2-only; it deliberately rejects the legacy quant
+    backend because that backend cannot safely consume a halved output buffer.
+    """
+    if x.ndim != 2:
+        raise ValueError(f"expected a 2D [M, 2I] tensor, got {tuple(x.shape)}")
+    if x.dtype != torch.bfloat16:
+        raise ValueError(f"expected BF16 input, got {x.dtype}")
+    if not x.is_cuda:
+        raise ValueError("input must be a CUDA tensor")
+    if not x.is_contiguous():
+        raise ValueError("input must be contiguous")
+    if x.shape[-1] % (2 * group_size) != 0:
+        raise ValueError(
+            f"input width {x.shape[-1]} must be divisible by 2 * group_size "
+            f"({2 * group_size})"
+        )
+    return sgl_per_token_group_quant_fp8(
+        x,
+        group_size=group_size,
+        eps=eps,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=True,
+        fuse_silu_and_mul=True,
+        fuse_silu_and_mul_up_gate=True,
+    )
 
 
 def scaled_fp8_per_tensor_quant(
@@ -468,7 +533,11 @@ def quant_weight_ue8m0_packed(
 def requant_weight_ue8m0(
     weight: torch.Tensor,
     weight_scale_inv: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    *,
+    return_raw_scale: bool = False,
+) -> (
+    Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
     weight_block_size = [128, 128]
 
     weight_dequant = block_quant_dequant(
@@ -481,8 +550,13 @@ def requant_weight_ue8m0(
         weight_dequant=weight_dequant,
         weight_block_size=weight_block_size,
     )
-    out_s = _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
-    return out_w, out_s
+    packed_out_s = _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
+    if return_raw_scale:
+        # Keep this before DeepGEMM's row expansion/TMA packing.  It is the
+        # power-of-two scale that produced ``out_w``, so another backend can
+        # consume the same FP8 bits without dequantizing and requantizing.
+        return out_w, packed_out_s, out_s
+    return out_w, packed_out_s
 
 
 def per_token_cast_to_fp8(

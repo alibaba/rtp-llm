@@ -32,6 +32,41 @@ def strict_fused_moe_enabled() -> bool:
     return os.environ.get("MOE_STRICT_FUSED", "1") != "0"
 
 
+@dataclass(frozen=True)
+class TpMoePrefillConfig:
+    """Independent, opt-in SM12x pure-TP prefill implementations."""
+
+    backend: str = "default"
+    direct_output: bool = False
+    min_tokens: int = 4096
+
+    @property
+    def enabled(self) -> bool:
+        return self.backend != "default" or self.direct_output
+
+    @classmethod
+    def from_env(cls) -> "TpMoePrefillConfig":
+        direct_output = os.environ.get("MOE_TP_DIRECT_OUTPUT", "0").strip()
+        if direct_output not in ("0", "1"):
+            raise ValueError("MOE_TP_DIRECT_OUTPUT must be 0 or 1")
+        config = cls(
+            backend=os.environ.get("MOE_TP_PREFILL_BACKEND", "default").strip().lower(),
+            direct_output=direct_output == "1",
+            min_tokens=int(os.environ.get("MOE_TP_FUSION_MIN_TOKENS", "4096")),
+        )
+        if config.backend not in ("default", "deepgemm_fused", "flashinfer_sm12x"):
+            raise ValueError(
+                "MOE_TP_PREFILL_BACKEND must be default, deepgemm_fused or flashinfer_sm12x"
+            )
+        if config.min_tokens < 1:
+            raise ValueError("MOE_TP_FUSION_MIN_TOKENS must be positive")
+        if config.backend == "deepgemm_fused" and os.environ.get(
+            "DSV4_FP8_QUANT_KERNEL", "auto"
+        ).strip().lower() not in ("auto", "v2"):
+            raise ValueError("deepgemm_fused requires DSV4_FP8_QUANT_KERNEL=auto or v2")
+        return config
+
+
 def shared_expert_mode() -> str:
     return os.environ.get("MOE_SHARED_EXPERT_MODE", "sequential").strip().lower()
 

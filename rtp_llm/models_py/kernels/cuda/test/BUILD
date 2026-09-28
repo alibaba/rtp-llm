@@ -16,6 +16,14 @@ py_test (
     exec_properties = {'gpu':'L20'},
 )
 
+py_test(
+    name = "silu_and_mul_up_gate_fp8_quant_test",
+    srcs = ["silu_and_mul_up_gate_fp8_quant_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
 py_test (
     name = "cutlass_fp8_grouped_gemm_test",
     srcs = ["cutlass_fp8_grouped_gemm_test.py"],

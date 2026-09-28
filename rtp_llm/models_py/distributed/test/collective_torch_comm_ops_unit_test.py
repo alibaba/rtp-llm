@@ -40,6 +40,37 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "differs across TP ranks"):
                     collective._validate_tp_moe_chunking_config(pc)
 
+    def test_tp_prefill_signature_mismatch_is_rejected_before_collectives(self):
+        pc = SimpleNamespace(tp_size=2, dp_size=1)
+        local = {
+            "MOE_TP_CHUNKS": "2",
+            "MOE_TP_CHUNK_MODE": "overlap",
+            "MOE_TP_CHUNK_MIN_TOKENS": "1",
+            "MOE_TP_PREFILL_BACKEND": "flashinfer_sm12x",
+            "MOE_TP_DIRECT_OUTPUT": "1",
+            "MOE_TP_FUSION_MIN_TOKENS": "1",
+            "DSV4_FP8_QUANT_KERNEL": "auto",
+        }
+        expected = ("2", "overlap", "1", "flashinfer_sm12x", "1", "1", "auto")
+        for changed_index, changed_value in ((3, "default"), (4, "0")):
+            with self.subTest(changed_index=changed_index):
+
+                def gather(output, received, group):
+                    self.assertEqual(received, expected)
+                    remote = list(received)
+                    remote[changed_index] = changed_value
+                    output[:] = [received, tuple(remote)]
+
+                with (
+                    patch.dict(os.environ, local, clear=True),
+                    patch.object(collective, "_get_group", return_value=object()),
+                    patch.object(
+                        torch.distributed, "all_gather_object", side_effect=gather
+                    ),
+                ):
+                    with self.assertRaisesRegex(ValueError, "differs across TP ranks"):
+                        collective._validate_tp_moe_chunking_config(pc)
+
     def test_matching_disabled_tp_chunk_config_still_participates(self):
         with (
             patch.dict(os.environ, {}, clear=True),

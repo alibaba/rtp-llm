@@ -9,13 +9,18 @@ from unittest.mock import Mock, patch
 import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
-from rtp_llm.models_py.modules.factory.fused_moe.utils.config import TpMoeChunkConfig
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
+    TpMoeChunkConfig,
+    TpMoePrefillConfig,
+)
 
 
 def make_layer(chunks=4, mode="overlap"):
     layer = GenericMoeLayer.__new__(GenericMoeLayer)
     torch.nn.Module.__init__(layer)
     layer.tp_chunk_config = TpMoeChunkConfig(chunks, mode, 1)
+    layer.tp_prefill_config = TpMoePrefillConfig()
+    layer.flashinfer_tp_prefill = None
     layer.use_unified_tp_allreduce = True
     layer.use_ep_shared_allreduce = False
     layer.ffn_tp_size = 2
@@ -37,7 +42,12 @@ def make_layer(chunks=4, mode="overlap"):
     def routed(*, hidden_states, topk_weights, topk_ids, **kwargs):
         assert kwargs["skip_tp_allreduce"]
         scale = (topk_weights * (topk_ids + 1)).sum(-1, keepdim=True)
-        return hidden_states * scale
+        result = hidden_states * scale
+        output_tensor = kwargs.get("extra_expert_args", {}).get("output_tensor")
+        if output_tensor is not None:
+            output_tensor.copy_(result)
+            return output_tensor
+        return result
 
     layer.fused_moe = Mock(side_effect=routed)
     layer.fused_moe.topk_ids_dtype = torch.int32
@@ -251,6 +261,160 @@ class GenericMoeTpChunkingTest(unittest.TestCase):
             ):
                 with self.assertRaises(ValueError):
                     TpMoeChunkConfig.from_env()
+
+
+class TpMoePrefillConfigContractTest(unittest.TestCase):
+    def test_default_and_invalid_env(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(TpMoePrefillConfig.from_env(), TpMoePrefillConfig())
+        for key, value in (
+            ("MOE_TP_PREFILL_BACKEND", "bad"),
+            ("MOE_TP_DIRECT_OUTPUT", "2"),
+            ("MOE_TP_FUSION_MIN_TOKENS", "0"),
+        ):
+            with self.subTest(key=key), patch.dict(
+                os.environ, {key: value}, clear=True
+            ):
+                with self.assertRaises(ValueError):
+                    TpMoePrefillConfig.from_env()
+        with patch.dict(
+            os.environ,
+            {"MOE_TP_PREFILL_BACKEND": "deepgemm_fused", "DSV4_FP8_QUANT_KERNEL": "v1"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "requires"):
+                TpMoePrefillConfig.from_env()
+
+    def test_fusion_eligibility_and_fallback_guards(self):
+        layer = make_layer()
+        layer.tp_prefill_config = TpMoePrefillConfig("deepgemm_fused", True, 1)
+        x = SimpleNamespace(shape=(8, 8), dtype=torch.bfloat16, is_cuda=True)
+        with patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        ), patch.object(torch.version, "hip", None), patch.dict(
+            os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "0"}
+        ):
+            self.assertTrue(layer._can_fuse_tp_prefill(x, True))
+            for attr, value in (
+                ("use_unified_tp_allreduce", False),
+                ("ffn_tp_size", 1),
+            ):
+                with self.subTest(attr=attr), patch.object(layer, attr, value):
+                    self.assertFalse(layer._can_fuse_tp_prefill(x, True))
+            for name, value in (("dp_size", 2),):
+                with self.subTest(name=name), patch.object(
+                    layer.parallelism_config, name, value
+                ):
+                    self.assertFalse(layer._can_fuse_tp_prefill(x, True))
+            with patch.object(
+                layer.parallelism_config.prefill_cp_config,
+                "is_enabled",
+                return_value=True,
+            ):
+                self.assertFalse(layer._can_fuse_tp_prefill(x, True))
+            self.assertFalse(layer._can_fuse_tp_prefill(x, False))
+            self.assertFalse(
+                layer._can_fuse_tp_prefill(
+                    SimpleNamespace(shape=x.shape, dtype=torch.float16, is_cuda=True),
+                    True,
+                )
+            )
+            self.assertFalse(
+                layer._can_fuse_tp_prefill(
+                    SimpleNamespace(shape=x.shape, dtype=torch.bfloat16, is_cuda=False),
+                    True,
+                )
+            )
+            with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+                self.assertFalse(layer._can_fuse_tp_prefill(x, True))
+            with patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=True
+            ):
+                self.assertFalse(layer._can_fuse_tp_prefill(x, True))
+
+    def test_direct_output_uses_one_buffer_without_cat(self):
+        x = torch.randn(5, 8)
+        for backend in ("default", "deepgemm_fused", "flashinfer_sm12x"):
+            with self.subTest(backend=backend):
+                layer = make_layer(2, "overlap")
+                layer.tp_prefill_config = TpMoePrefillConfig(backend, True, 1)
+                if backend == "flashinfer_sm12x":
+                    layer.flashinfer_tp_prefill = Mock()
+                    layer.flashinfer_tp_prefill.forward.side_effect = (
+                        lambda hidden, *_args, output_tensor=None: output_tensor.copy_(
+                            hidden
+                        )
+                    )
+                seen = []
+
+                def launch(tensor, _group):
+                    if backend == "flashinfer_sm12x":
+                        seen.append(
+                            layer.flashinfer_tp_prefill.forward.call_args.kwargs[
+                                "output_tensor"
+                            ]
+                        )
+                    else:
+                        seen.append(
+                            layer.fused_moe.call_args.kwargs["extra_expert_args"][
+                                "output_tensor"
+                            ]
+                        )
+                    return Pending(tensor, [])
+
+                with patch(
+                    "rtp_llm.models_py.model_desc.generic_moe.all_reduce_async",
+                    side_effect=launch,
+                ), patch(
+                    "torch.cat",
+                    side_effect=AssertionError("direct output must not concatenate"),
+                ):
+                    out = layer._forward_tp_chunks(x, use_fusion=True)
+                self.assertEqual(len(seen), 2)
+                self.assertEqual(out.data_ptr(), seen[0].data_ptr())
+                self.assertNotEqual(seen[0].data_ptr(), seen[1].data_ptr())
+                self.assertEqual(
+                    seen[0].untyped_storage().data_ptr(),
+                    seen[1].untyped_storage().data_ptr(),
+                )
+                self.assertEqual(seen[0].numel() + seen[1].numel(), out.numel())
+                if backend == "deepgemm_fused":
+                    self.assertTrue(
+                        layer.fused_moe.call_args.kwargs["extra_expert_args"][
+                            "tp_prefill_fused_quant"
+                        ]
+                    )
+
+    def test_backend_dispatch_uses_requested_path_and_flash_bypasses_fused_moe(self):
+        x = torch.randn(3, 8)
+        for backend in ("default", "deepgemm_fused"):
+            with self.subTest(backend=backend):
+                layer = make_layer()
+                with patch(
+                    "rtp_llm.models_py.model_desc.generic_moe.all_reduce",
+                    side_effect=lambda tensor, **_: tensor,
+                ):
+                    out = layer._forward_impl(x, tp_prefill_backend=backend)
+                self.assertEqual(out.shape, x.shape)
+                extra = layer.fused_moe.call_args.kwargs.get("extra_expert_args", {})
+                self.assertEqual(
+                    extra.get("tp_prefill_fused_quant", False),
+                    backend == "deepgemm_fused",
+                )
+        layer = make_layer()
+        layer.flashinfer_tp_prefill = Mock()
+        layer.flashinfer_tp_prefill.forward.side_effect = (
+            lambda hidden, *_args, output_tensor=None: (
+                hidden if output_tensor is None else output_tensor.copy_(hidden)
+            )
+        )
+        with patch(
+            "rtp_llm.models_py.model_desc.generic_moe.all_reduce",
+            side_effect=lambda tensor, **_: tensor,
+        ):
+            layer._forward_impl(x, tp_prefill_backend="flashinfer_sm12x")
+        layer.flashinfer_tp_prefill.forward.assert_called_once()
+        layer.fused_moe.assert_not_called()
 
 
 if __name__ == "__main__":

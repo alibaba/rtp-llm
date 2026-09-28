@@ -1344,10 +1344,20 @@ class W:
     ffn_w2_i_s = "ffn_weights.intermediate_weight2.input_scale"
     moe_z1 = "partial_moe_weights.intermediate_weight.zero"
     moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale"
+    # Runtime-only canonical FP32 [E, N/128, K/128] scales for the optional
+    # FlashInfer SM12x MoE path.  These are not checkpoint tensor names: the
+    # per-block FP8 loader retains them during float-scale requantization,
+    # before its DeepGEMM packed-scale conversion.
+    moe_s1_raw = (
+        "partial_moe_weights.intermediate_weight.flashinfer_canonical_block_scale"
+    )
     moe_w1_s2 = "partial_moe_weights.intermediate_weight.weight_scale_2"
     moe_w1_i_s = "partial_moe_weights.intermediate_weight.input_scale"
     moe_z2 = "partial_moe_weights.intermediate_weight2.zero"
     moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale"
+    moe_s2_raw = (
+        "partial_moe_weights.intermediate_weight2.flashinfer_canonical_block_scale"
+    )
     moe_w2_s2 = "partial_moe_weights.intermediate_weight2.weight_scale_2"
     moe_w2_i_s = "partial_moe_weights.intermediate_weight2.input_scale"
 

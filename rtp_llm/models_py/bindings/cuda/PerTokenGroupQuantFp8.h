@@ -27,5 +27,6 @@ void per_token_group_quant_fp8_v2(at::Tensor&                         input,
                                   double                              fp8_max,
                                   bool                                scale_ue8m0,
                                   bool                                fuse_silu_and_mul,
-                                  const std::optional<torch::Tensor>& masked_m);
+                                  const std::optional<torch::Tensor>& masked_m,
+                                  bool                                fuse_silu_and_mul_up_gate);
 }  // namespace torch_ext

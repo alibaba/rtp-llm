@@ -13,10 +13,12 @@ from .fp8_kernel import (
     scaled_fp8_per_tensor_quant,
     scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
+    silu_and_mul_up_gate_fp8_quant,
 )
 
 __all__ = [
     "sgl_per_token_group_quant_fp8",
+    "silu_and_mul_up_gate_fp8_quant",
     "scaled_fp8_per_tensor_quant",
     "scaled_fp8_per_token_quant",
     "cutlass_moe_mm_fp8_scaled",

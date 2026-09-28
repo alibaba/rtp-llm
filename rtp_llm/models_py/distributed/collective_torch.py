@@ -103,6 +103,10 @@ def _validate_tp_moe_chunking_config(parallelism_config: ParallelismConfig) -> N
             ("MOE_TP_CHUNKS", "0"),
             ("MOE_TP_CHUNK_MODE", "overlap"),
             ("MOE_TP_CHUNK_MIN_TOKENS", "4096"),
+            ("MOE_TP_PREFILL_BACKEND", "default"),
+            ("MOE_TP_DIRECT_OUTPUT", "0"),
+            ("MOE_TP_FUSION_MIN_TOKENS", "4096"),
+            ("DSV4_FP8_QUANT_KERNEL", "auto"),
         )
     )
     configs = [None] * parallelism_config.tp_size

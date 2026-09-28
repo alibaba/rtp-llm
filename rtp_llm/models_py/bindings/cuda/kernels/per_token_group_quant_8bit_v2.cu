@@ -242,10 +242,11 @@ template<typename SCHEDULER,
          int THREADS_PER_SUBWARP,
          typename T,
          typename DST_DTYPE,
-         bool IS_COLUMN_MAJOR    = false,
-         bool SCALE_UE8M0        = false,
-         bool FUSE_SILU_AND_MUL  = false,
-         typename scale_packed_t = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
+         bool IS_COLUMN_MAJOR           = false,
+         bool SCALE_UE8M0               = false,
+         bool FUSE_SILU_AND_MUL         = false,
+         bool FUSE_SILU_AND_MUL_UP_GATE = false,
+         typename scale_packed_t        = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
 __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                                                   DST_DTYPE* __restrict__ output_q,
                                                   scale_packed_t* __restrict__ output_s,
@@ -266,10 +267,10 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
         hidden_dim_num_groups,
         masked_m,
         num_tokens_per_expert,
-        [&](const int expert_idx,
-            const int token_idx,
-            const int hidden_dim_group_idx,
-            const int lane_id,
+        [&](const int     expert_idx,
+            const int     token_idx,
+            const int     hidden_dim_group_idx,
+            const int     lane_id,
             const int64_t input_group_start_offset) {
             constexpr uint32_t INPUT_PRIMARY_VEC_SIZE  = INPUT_PRIMARY_VEC_NUM_BYTES / sizeof(T);
             constexpr uint32_t INPUT_PRIMARY_INT4_SIZE = INPUT_PRIMARY_VEC_NUM_BYTES / sizeof(int4);
@@ -346,9 +347,20 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
             for (uint32_t j = 0; j < INPUT_PRIMARY_VEC_SIZE; ++j) {
                 float val;
                 if constexpr (FUSE_SILU_AND_MUL) {
-                    // TODO maybe vectorize
-                    T val_lowprec =
-                        static_cast<T>(silu(static_cast<float>(input_primary_vec[j]))) * input_secondary_vec[j];
+                    T val_lowprec;
+                    if constexpr (FUSE_SILU_AND_MUL_UP_GATE) {
+                        // The routed Qwen FC1 layout is [up | gate]. Match the
+                        // existing Triton path: FP32 sigmoid/gate/multiply, then
+                        // exactly one BF16 round before FP8 quantization.
+                        const float gate      = static_cast<float>(input_secondary_vec[j]);
+                        const float up        = static_cast<float>(input_primary_vec[j]);
+                        const float activated = gate * (1.0f / (1.0f + __expf(-gate))) * up;
+                        val_lowprec           = static_cast<T>(activated);
+                    } else {
+                        // Preserve the pre-existing [gate | up] fused behavior.
+                        val_lowprec =
+                            static_cast<T>(silu(static_cast<float>(input_primary_vec[j]))) * input_secondary_vec[j];
+                    }
                     val                  = static_cast<float>(val_lowprec);
                     input_primary_vec[j] = val_lowprec;
                 } else {
@@ -418,12 +430,22 @@ void sgl_per_token_group_quant_8bit_v2(
     double                              max_8bit,
     bool                                scale_ue8m0,
     bool                                fuse_silu_and_mul,
-    const std::optional<torch::Tensor>& masked_m) {
+    const std::optional<torch::Tensor>& masked_m,
+    bool                                fuse_silu_and_mul_up_gate) {
     CHECK_INPUT(input);
     CHECK_INPUT(output_q);
     TORCH_CHECK(input.numel() > 0);
 
     CHECK_EQ(input.numel() % group_size, 0);
+    TORCH_CHECK(!fuse_silu_and_mul_up_gate || fuse_silu_and_mul,
+                "fuse_silu_and_mul_up_gate requires fuse_silu_and_mul");
+    if (fuse_silu_and_mul) {
+        TORCH_CHECK(input.size(-1) % (2 * group_size) == 0,
+                    "fused SiLU-and-mul input width must be divisible by 2 * group_size");
+        TORCH_CHECK(scale_ue8m0, "fused SiLU-and-mul requires UE8M0 column-major scales");
+        TORCH_CHECK(output_q.size(-1) * 2 == input.size(-1),
+                    "fused SiLU-and-mul output width must be half the input width");
+    }
     const int64_t num_groups_64 = input.numel() / group_size / (fuse_silu_and_mul ? 2 : 1);
     TORCH_CHECK(num_groups_64 <= std::numeric_limits<int>::max(), "num_groups exceeds int32 range");
     const int num_groups = static_cast<int>(num_groups_64);
@@ -442,6 +464,10 @@ void sgl_per_token_group_quant_8bit_v2(
     const int  num_tokens_per_expert = static_cast<int>(output_q.size(-2));
     const int  scale_expert_stride   = masked_layout ? static_cast<int>(output_s.stride(0)) : 0;
     const int  scale_hidden_stride   = static_cast<int>(output_s.stride(-1));
+
+    if (fuse_silu_and_mul) {
+        TORCH_CHECK(is_column_major, "fused SiLU-and-mul requires column-major scales");
+    }
 
 #define LAUNCH_KERNEL_INNER(SCHEDULER, GROUP_SIZE, THREADS_PER_SUBWARP, T, DST_DTYPE, output_s_dtype, ...)             \
     do {                                                                                                               \
@@ -481,25 +507,53 @@ void sgl_per_token_group_quant_8bit_v2(
             if (scale_ue8m0) {                                                                                         \
                 if (fuse_silu_and_mul) {                                                                               \
                     if (masked_layout) {                                                                               \
-                        LAUNCH_KERNEL_INNER(MaskedLayoutScheduler,                                                     \
-                                            GROUP_SIZE,                                                                \
-                                            THREADS_PER_SUBWARP,                                                       \
-                                            T,                                                                         \
-                                            DST_DTYPE,                                                                 \
-                                            uint32_t,                                                                  \
-                                            true,                                                                      \
-                                            true,                                                                      \
-                                            true);                                                                     \
+                        if (fuse_silu_and_mul_up_gate) {                                                               \
+                            LAUNCH_KERNEL_INNER(MaskedLayoutScheduler,                                                 \
+                                                GROUP_SIZE,                                                            \
+                                                THREADS_PER_SUBWARP,                                                   \
+                                                T,                                                                     \
+                                                DST_DTYPE,                                                             \
+                                                uint32_t,                                                              \
+                                                true,                                                                  \
+                                                true,                                                                  \
+                                                true,                                                                  \
+                                                true);                                                                 \
+                        } else {                                                                                       \
+                            LAUNCH_KERNEL_INNER(MaskedLayoutScheduler,                                                 \
+                                                GROUP_SIZE,                                                            \
+                                                THREADS_PER_SUBWARP,                                                   \
+                                                T,                                                                     \
+                                                DST_DTYPE,                                                             \
+                                                uint32_t,                                                              \
+                                                true,                                                                  \
+                                                true,                                                                  \
+                                                true,                                                                  \
+                                                false);                                                                \
+                        }                                                                                              \
                     } else {                                                                                           \
-                        LAUNCH_KERNEL_INNER(NaiveScheduler,                                                            \
-                                            GROUP_SIZE,                                                                \
-                                            THREADS_PER_SUBWARP,                                                       \
-                                            T,                                                                         \
-                                            DST_DTYPE,                                                                 \
-                                            uint32_t,                                                                  \
-                                            true,                                                                      \
-                                            true,                                                                      \
-                                            true);                                                                     \
+                        if (fuse_silu_and_mul_up_gate) {                                                               \
+                            LAUNCH_KERNEL_INNER(NaiveScheduler,                                                        \
+                                                GROUP_SIZE,                                                            \
+                                                THREADS_PER_SUBWARP,                                                   \
+                                                T,                                                                     \
+                                                DST_DTYPE,                                                             \
+                                                uint32_t,                                                              \
+                                                true,                                                                  \
+                                                true,                                                                  \
+                                                true,                                                                  \
+                                                true);                                                                 \
+                        } else {                                                                                       \
+                            LAUNCH_KERNEL_INNER(NaiveScheduler,                                                        \
+                                                GROUP_SIZE,                                                            \
+                                                THREADS_PER_SUBWARP,                                                   \
+                                                T,                                                                     \
+                                                DST_DTYPE,                                                             \
+                                                uint32_t,                                                              \
+                                                true,                                                                  \
+                                                true,                                                                  \
+                                                true,                                                                  \
+                                                false);                                                                \
+                        }                                                                                              \
                     }                                                                                                  \
                 } else {                                                                                               \
                     LAUNCH_KERNEL_INNER(                                                                               \
