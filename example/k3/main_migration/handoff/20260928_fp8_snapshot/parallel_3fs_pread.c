@@ -84,6 +84,7 @@ static int populate(int fd, const struct stat *st) {
     const char *setting = getenv("K3_3FS_PREAD_THREADS");
     if (setting && *setting) workers = atoi(setting);
     if (workers < 1) workers = 1;
+    /* FastSafetensors SHM showed no read-time gain at 128/256 workers. */
     if (workers > 64) workers = 64;
     size_t blocks = (file_size + BLOCK - 1) / BLOCK;
     size_t map_size = blocks * BLOCK;

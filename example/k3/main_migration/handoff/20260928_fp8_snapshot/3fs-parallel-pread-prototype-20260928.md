@@ -27,6 +27,10 @@
 
 111 的启动输出有 14 次 `task 3FS parallel pread ... threads=64 ready`，rank0 target/MTP 的 `load weights took` 为 12.33/7.91 秒；同机器原 r41 为 24.31/9.03 秒。r41b 各 rank 两次权重加载均完成，target 范围约 8.81–16.61 秒，MTP 范围约 4.79–10.26 秒。启动日志经 `weight_loader_guard.py verify-log` 检查为 PASS，仍明确选中 `fastsafetensors`，无 scratch/fallback 证据。完整服务健康、正式正确性和长期稳定性须另行记录，不能用一次加载结果代替。
 
+## 更高并发的复核
+
+原始 `O_DIRECT` 分片扫描在 113 的热态测试中以 256 线程最快，但这不能直接代表 FastSafetensors。114 上用同一 shard、真实 SHM 加载路径和空闲 GPU4 交错测试 64、128、256 线程，三组各两次的内部 `read` 均约 2.1–2.2 秒；提高到 128 或 256 没有可确认收益，整次加载也没有变快。原始日志与测试范围在 `3fs-owner-read-report-20260928.md` 第 14 项。原型保留 64 线程上限；若以后改为多 rank 或完整模型，须重新测量内存、3FS 负载和总加载时间。
+
 ## 回滚
 
 只在实际读权重的任务进程上移除 `libparallel_3fs_pread.so:` 这一段 `LD_PRELOAD`，并取消 `K3_3FS_PREAD_THREADS=64`；保留原 GCC13 `libstdc++` 路径，再按原 r41 启动脚本重启即可。没有调整 FUSE、机器共享配置或集群参数，也没有权重文件变更。任务进程退出后这份匿名缓存随进程释放。

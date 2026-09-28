@@ -12,4 +12,6 @@
 - `run_fp8_3fs_*.sh`、`run_64k_*.sh`、`analyze_r41_aligned_phases.py`：当时的四层 Prefill 启动和 timeline 复现脚本。
 - `evidence/`：小型原始读速日志、guard 结果、逐 case flow 审计、全 rank 相位审计及冷编译失败日志。
 
+后续又在 113/114 测了更高读取并发：原始分片扫描在 256 线程最高，真实 FastSafetensors SHM 加载在 64、128、256 线程下的内部读取时间基本相同。记录和日志已附在本目录；任务进程仍选 64 线程。
+
 大型逐 rank trace、完整请求 JSON、模型权重、Bazel/JIT 缓存没有存入 Git；当时的本地原件在 `/data1/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/`，111/112 的运行目录中也有对应日志。若这些机器清盘，本分支保留源码与本页列出的关键结果，但无法重建未上传的原始 trace。工作树的 `internal_source` 曾被本机改成绝对路径符号链接，仅为本地内部依赖定位；该机器路径没有提交，远端仍保留原来的相对符号链接。
