@@ -18,7 +18,9 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -36,6 +38,7 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayOutputStream;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -47,6 +50,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -65,6 +69,122 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class FlexlbServiceImplTest {
+
+    @Test
+    void schedulePassesDistinctRequestedRolesAndEncoderPhaseToRouter() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
+                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("encoder-request")
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                .build(), mock(StreamObserver.class));
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertEquals(Set.of(RoleType.ENCODER), context.getValue().getRequestedRoles());
+        assertEquals(RequestPhase.ENCODER, context.getValue().getRequestPhase());
+    }
+
+    @Test
+    void scheduleWithoutRoleListUsesEncoderPhaseForEncoderOnlyModel() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServiceRoute modelRoute = mock(ServiceRoute.class);
+        when(modelRoute.getAllRoleTypes()).thenReturn(List.of(RoleType.ENCODER));
+        when(configService.modelServiceConfig()).thenReturn(modelRoute);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
+                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("encoder-only-model")
+                .build(), mock(StreamObserver.class));
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertNull(context.getValue().getRequestedRoles());
+        assertEquals(RequestPhase.ENCODER, context.getValue().getRequestPhase());
+    }
+
+    @Test
+    void scheduleRejectsUnspecifiedOrUnknownExplicitRole() {
+        for (int roleNumber : List.of(0, 99)) {
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+            service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("invalid-role-" + roleNumber)
+                    .addScheduleRolesValue(roleNumber)
+                    .build(), observer);
+
+            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> result =
+                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(result.capture());
+            assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), result.getValue().getCode());
+        }
+        verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void encoderPhaseStateAndCancelUseSeparateLifecycleKey() {
+        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId("two-stage-request")
+                .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER)
+                .build(), mock(StreamObserver.class));
+        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                .setRequestId("two-stage-request")
+                .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER)
+                .build(), mock(StreamObserver.class));
+
+        verify(routeService).getRequestState("two-stage-request", 0L, RequestPhase.ENCODER);
+        verify(routeService).cancelRequest("two-stage-request", 0L,
+                CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+    }
+
+    @Test
+    void encoderRouteResponseUsesEncoderRoleAndLifecycle() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus encoder = new ServerStatus();
+        encoder.setRole(RoleType.ENCODER);
+        encoder.setServerIp("10.0.0.31");
+        encoder.setHttpPort(8080);
+        encoder.setGrpcPort(9090);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(encoder));
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+        when(routeService.getRequestState("encoder-response", 0L, RequestPhase.ENCODER))
+                .thenReturn(new RequestState("encoder-response",
+                        RequestState.Phase.ACKNOWLEDGED, DeliveryClaimKind.ROUTE_DECISION,
+                        0L, 10L, 20L, "route delivered"));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        ch.qos.logback.classic.Logger scheduleLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
+        ListAppender<ILoggingEvent> scheduleAppender = new ListAppender<>();
+        scheduleAppender.start();
+        scheduleLogger.addAppender(scheduleAppender);
+
+        try {
+            service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("encoder-response")
+                    .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                    .build(), observer);
+        } finally {
+            scheduleLogger.detachAppender(scheduleAppender);
+            scheduleAppender.stop();
+        }
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> result =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(result.capture());
+        assertEquals("ENCODER", result.getValue().getServerStatus(0).getRole());
+        assertEquals("10.0.0.31", result.getValue().getServerStatus(0).getServerIp());
+        assertEquals(FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED,
+                result.getValue().getLifecycle().getState());
+        assertTrue(scheduleAppender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(message -> message.contains("phase=ENCODER")
+                        && message.contains("selected_encoder=10.0.0.31")));
+    }
 
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor();

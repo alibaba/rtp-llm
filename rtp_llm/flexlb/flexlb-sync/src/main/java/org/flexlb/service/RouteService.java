@@ -11,6 +11,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -80,7 +81,8 @@ public class RouteService {
             return CompletableFuture.failedFuture(new IllegalStateException(
                     "RequestScheduler is required for the configured scheduling path"));
         }
-        if (balanceContext.getConfig().getDispatcher().requiresGenerateInput()
+        if (balanceContext.getRequestPhase() != RequestPhase.ENCODER
+                && balanceContext.getConfig().getDispatcher().requiresGenerateInput()
                 && !hasValidGenerateInput(balanceContext)) {
             Logger.warn("{} dispatcher rejected request without serialized generate input: request_id={}",
                     balanceContext.getConfig().getDispatcher().typeName(),
@@ -118,6 +120,15 @@ public class RouteService {
                 : requestScheduler.getRequestState(requestId, expectedBatchId);
     }
 
+    /**
+     * Read the selected phase; callers omitting phase use Generation.
+     */
+    public RequestState getRequestState(
+            String requestId, long expectedBatchId, RequestPhase phase) {
+        return requestScheduler == null ? null
+                : requestScheduler.getRequestState(requestId, expectedBatchId, phase);
+    }
+
     public RequestState getRequestState(long requestId, long expectedBatchId) {
         return getRequestState(Long.toString(requestId), expectedBatchId);
     }
@@ -134,6 +145,15 @@ public class RouteService {
                                                    CancelReason reason) {
         return requestScheduler == null ? null
                 : requestScheduler.cancelRequest(requestId, expectedBatchId, reason);
+    }
+
+    /**
+     * Cancel the selected phase locally. Encoder cancellation sends no engine RPC.
+     */
+    public RequestState cancelRequest(
+            String requestId, long expectedBatchId, CancelReason reason, RequestPhase phase) {
+        return requestScheduler == null ? null
+                : requestScheduler.cancelRequest(requestId, expectedBatchId, reason, phase);
     }
 
     public RequestState cancelRequest(

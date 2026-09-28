@@ -1,8 +1,10 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -34,6 +36,38 @@ public final class EndpointEventProjector {
             DecodeEndpoint source,
             List<DecodeEndpoint.WorkerStatusFact> facts) {
         projectDecodeStatus(source, facts);
+    }
+
+    public void onEncoderStatus(EncoderEndpoint source,
+                                List<WorkerStatus.TaskObservation> running,
+                                List<WorkerStatus.TaskObservation> finished) {
+        for (WorkerStatus.TaskObservation task : running) {
+            try {
+                scheduler.processEncoderStatus(source, task, false);
+            } catch (Throwable failure) {
+                logErrorNoFail("Encoder status fact projection isolated: request_id={}",
+                        task.requestId(), failure);
+            }
+        }
+        for (WorkerStatus.TaskObservation task : finished) {
+            try {
+                scheduler.processEncoderStatus(source, task, true);
+            } catch (Throwable failure) {
+                logErrorNoFail("Encoder finished fact projection isolated: request_id={}",
+                        task.requestId(), failure);
+            }
+        }
+    }
+
+    public void onEncoderGenerationRetired(EncoderEndpoint source, List<String> requestIds) {
+        for (String requestId : requestIds) {
+            try {
+                scheduler.projectEncoderRetirement(source, requestId);
+            } catch (Throwable failure) {
+                logErrorNoFail("Encoder retirement projection isolated: request_id={}",
+                        requestId, failure);
+            }
+        }
     }
 
     public void onPrefillGenerationRetired(

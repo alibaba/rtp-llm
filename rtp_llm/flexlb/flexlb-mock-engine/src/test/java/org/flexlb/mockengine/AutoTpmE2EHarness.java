@@ -16,6 +16,7 @@ import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -467,6 +468,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                         workers, cache, healthReporter),
                 new DecodeSelector(workers),
                 new RandomStrategy(workers),
+                mock(EncoderStrategy.class),
                 configService,
                 modelMeta);
     }

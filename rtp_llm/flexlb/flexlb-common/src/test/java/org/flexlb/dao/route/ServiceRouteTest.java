@@ -2,6 +2,8 @@ package org.flexlb.dao.route;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
@@ -90,6 +92,32 @@ class ServiceRouteTest {
                 List.of(RoleType.PDFUSION, RoleType.VIT)));
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.PDFUSION).size());
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.VIT).size());
+    }
+
+    @Test
+    void should_load_encoder_endpoint_as_independent_role() throws Exception {
+        String json = """
+                {
+                  "service_id": "test.service",
+                  "role_endpoints": [{
+                    "group": "g1",
+                    "encoder_endpoint": {"address": "encoder", "protocol": "http", "path": "/"},
+                    "vit_endpoint": {"address": "vit", "protocol": "http", "path": "/"}
+                  }]
+                }
+                """;
+
+        ServiceRoute route = objectMapper.readValue(json, ServiceRoute.class);
+        ModelMetaConfig config = new ModelMetaConfig();
+        config.putServiceRoute(route.getServiceId(), route);
+
+        Assertions.assertEquals(List.of(RoleType.VIT, RoleType.ENCODER), config.requiredRoles());
+        Assertions.assertEquals("encoder", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getAddress());
+        Assertions.assertEquals("g1", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getGroup());
+        Assertions.assertEquals("vit", route.getRoleEndpoints(RoleType.VIT).getFirst().getAddress());
+        Assertions.assertEquals(RoleType.ENCODER, RoleType.fromString("ENCODER"));
+        Assertions.assertEquals(StrategyErrorType.NO_ENCODER_WORKER,
+                RoleType.ENCODER.getErrorType());
     }
 
     @Test

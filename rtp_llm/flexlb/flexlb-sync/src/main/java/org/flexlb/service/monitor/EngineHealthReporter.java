@@ -4,6 +4,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
@@ -56,12 +57,15 @@ import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_VISITOR_SUCC
 import static org.flexlb.constant.MetricConstant.CACHE_TOTAL_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_TOKENS;
+import static org.flexlb.constant.MetricConstant.ENCODER_PENDING_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.ENCODER_SELECTION_LOAD;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
+import static org.flexlb.constant.MetricConstant.ENGINE_ENCODER_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
@@ -167,6 +171,9 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_PREFILL_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_DECODE_WORKER_NUMBER, FlexMetricType.GAUGE);
+        this.monitor.register(ENGINE_ENCODER_WORKER_NUMBER, FlexMetricType.GAUGE);
+        this.monitor.register(ENCODER_PENDING_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENCODER_SELECTION_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL_TOTAL,
@@ -290,6 +297,8 @@ public class EngineHealthReporter {
                 workerDirectory.discoveredCount(RoleType.PREFILL));
         monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags,
                 workerDirectory.discoveredCount(RoleType.DECODE));
+        monitor.report(ENGINE_ENCODER_WORKER_NUMBER, tags,
+                workerDirectory.discoveredCount(RoleType.ENCODER));
 
         reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "gRpcExecutor", (ThreadPoolExecutor) engineGrpcClient.getExecutor());
 
@@ -539,6 +548,15 @@ public class EngineHealthReporter {
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
+        if (status.role() == RoleType.ENCODER) {
+            int pendingRequests = ep == null ? 0 : ((EncoderEndpoint) ep).pendingEncoderRequestCount();
+            monitor.report(ENCODER_PENDING_REQUEST_COUNT, metricTags, pendingRequests);
+            monitor.report(ENCODER_SELECTION_LOAD, metricTags,
+                    Math.max(0, status.runningQueryLen())
+                            + Math.max(0, status.waitingQueryLen()) + pendingRequests);
+            monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, metricTags,
+                    status.availableKvCacheTokens());
+        }
         reportLocalStandbyBlockSize(metricTags, status.blockSize());
     }
 

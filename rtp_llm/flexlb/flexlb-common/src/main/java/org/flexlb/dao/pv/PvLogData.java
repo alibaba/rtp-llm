@@ -8,6 +8,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
@@ -20,6 +21,7 @@ public class PvLogData {
     // Identifiers may be absent when entry parsing fails.
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String requestId;
+    private RequestPhase phase;
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long seqLen;
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -85,6 +87,7 @@ public class PvLogData {
     }
 
     private void populateCommonFields(BalanceContext ctx) {
+        this.phase = ctx.getRequestPhase();
         BalanceContext.RoutingTelemetry telemetry = ctx.getRoutingTelemetry();
         Request request = ctx.getRequest();
         if (request != null) {

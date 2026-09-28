@@ -1,6 +1,7 @@
 package org.flexlb.service.monitor;
 
 import io.netty.channel.EventLoopGroup;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
@@ -29,6 +30,7 @@ import reactor.netty.resources.LoopResources;
 
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -351,6 +353,27 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void reportsEncoderSelectionInputsFromWorkerStatus() {
+        reporter.init();
+        WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.ENCODER, 800, 1000, null, 3, 4);
+        EncoderEndpoint endpoint = mock(EncoderEndpoint.class);
+        when(endpoint.pendingEncoderRequestCount()).thenReturn(2);
+        when(endpoint.getLoadMetric()).thenReturn(OptionalLong.empty());
+
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, endpoint, 3, 1);
+
+        FlexMetricTags tags = FlexMetricTags.of("model", "test-model",
+                "engineIp", "10.0.0.1:8080", "role", "ENCODER");
+        verify(monitor).register("app.flexlb.encoder.pending.request.count",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.flexlb.encoder.selection.load",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).report("app.flexlb.encoder.pending.request.count", tags, 2.0);
+        verify(monitor).report("app.flexlb.encoder.selection.load", tags, 9.0);
+        verify(monitor).report("app.cache.available.kv.cache.tokens", tags, 800.0);
+    }
+
+    @Test
     void shouldKeepLogicalMetricIdentityForMultiEngineWorker() {
         WorkerStatus workerStatus = WorkerStatus.createDiscovered(
                 RoleType.PREFILL, null, "10.0.0.1", 8080, 8081,
@@ -633,6 +656,18 @@ class EngineHealthReporterTest {
             long availableKvCacheTokens,
             long totalKvCacheTokens,
             CacheStatus cacheStatus) {
+        return workerStatus(ip, role, availableKvCacheTokens, totalKvCacheTokens,
+                cacheStatus, 0L, 0L);
+    }
+
+    private WorkerStatus workerStatus(
+            String ip,
+            RoleType role,
+            long availableKvCacheTokens,
+            long totalKvCacheTokens,
+            CacheStatus cacheStatus,
+            long runningQueryLen,
+            long waitingQueryLen) {
         WorkerStatus workerStatus = WorkerStatus.createDiscovered(
                 role, null, ip, 8080, 8081, "test-site");
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -644,6 +679,8 @@ class EngineHealthReporterTest {
         response.setFinishedTaskInfo(Map.of());
         response.setAvailableKvCacheTokens(availableKvCacheTokens);
         response.setTotalKvCacheTokens(totalKvCacheTokens);
+        response.setRunningQueryLen(runningQueryLen);
+        response.setWaitingQueryLen(waitingQueryLen);
 
         workerStatus.lock.lock();
         try {

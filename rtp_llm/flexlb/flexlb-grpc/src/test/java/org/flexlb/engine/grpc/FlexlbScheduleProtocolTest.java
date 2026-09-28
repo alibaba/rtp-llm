@@ -94,4 +94,39 @@ class FlexlbScheduleProtocolTest {
         assertArrayEquals(input.toByteArray(), parsed.getGenerateInput().toByteArray());
     }
 
+    @Test
+    void scheduleRolesAndRequestPhaseHaveStableWireFields() throws Exception {
+        assertEquals(0, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_UNSPECIFIED.getNumber());
+        assertEquals(1, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER.getNumber());
+        assertEquals(2, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL.getNumber());
+        assertEquals(3, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_DECODE.getNumber());
+        assertEquals(4, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PDFUSION.getNumber());
+        var schedule = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("request-1")
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL)
+                .build();
+        assertEquals(17, schedule.getDescriptorForType()
+                .findFieldByName("schedule_roles").getNumber());
+        assertEquals(schedule.getScheduleRolesList(),
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(schedule.toByteArray())
+                        .getScheduleRolesList());
+
+        var cancel = FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER)
+                .build();
+        assertEquals(5, cancel.getDescriptorForType().findFieldByName("phase").getNumber());
+        assertEquals(cancel.getPhase(), FlexlbScheduleProtocol.FlexlbCancelRequestPB
+                .parseFrom(cancel.toByteArray()).getPhase());
+        assertEquals(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_UNSPECIFIED,
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.getDefaultInstance().getPhase());
+
+        var query = FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_GENERATION)
+                .build();
+        assertEquals(4, query.getDescriptorForType().findFieldByName("phase").getNumber());
+        assertEquals(query.getPhase(), FlexlbScheduleProtocol.GetRequestStateRequestPB
+                .parseFrom(query.toByteArray()).getPhase());
+    }
+
 }

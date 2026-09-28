@@ -4,6 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
@@ -19,6 +20,8 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.Map;
@@ -122,6 +125,8 @@ public final class RequestSlot {
     /** Used while active to capture PV evidence; released with the terminal record. */
     private BalanceContext context;
     private final String requestId;
+    private final RequestPhase requestPhase;
+    private EncoderEndpoint encoderEndpoint;
     private final long createdAtMs;
     private final RequestFuture future;
     private RequestState.Phase state = RequestState.Phase.QUEUED;
@@ -211,6 +216,7 @@ public final class RequestSlot {
                 completionPublisher, "completionPublisher");
         this.context = Objects.requireNonNull(context, "context");
         this.requestId = context.getRequestId();
+        this.requestPhase = context.getRequestPhase();
         this.createdAtMs = System.currentTimeMillis();
         this.updatedAtMs = createdAtMs;
         this.lastWorkerStatusAtMs = createdAtMs;
@@ -221,6 +227,85 @@ public final class RequestSlot {
 
     String requestId() {
         return requestId;
+    }
+
+    RequestPhase requestPhase() {
+        return requestPhase;
+    }
+
+    boolean claimEncoderRoute(EncoderEndpoint endpoint) {
+        Objects.requireNonNull(endpoint, "endpoint");
+        synchronized (this) {
+            if (requestPhase != RequestPhase.ENCODER || !isOpen()
+                    || state != RequestState.Phase.QUEUED || encoderEndpoint != null) {
+                return false;
+            }
+            if (!endpoint.trackSelectedRequest(requestId)) { return false; }
+            encoderEndpoint = endpoint;
+            deliveryClaimKind = DeliveryClaimKind.ROUTE_DECISION;
+            transitionLocked(RequestState.Phase.DISPATCHING, "route decision delivery started");
+            return true;
+        }
+    }
+
+    boolean publishEncoderRoute(Response response) {
+        Objects.requireNonNull(response, "response");
+        if (!response.isSuccess()) {
+            throw new IllegalArgumentException("Encoder route requires a successful response");
+        }
+        SelectedPublication publication;
+        synchronized (this) {
+            if (requestPhase != RequestPhase.ENCODER || !isOpen()
+                    || state != RequestState.Phase.DISPATCHING || encoderEndpoint == null
+                    || cancellationReason != null) {
+                return false;
+            }
+            PublicationPermit permit = requirePublicationPermitLocked(PublicationKind.DELIVERY);
+            try {
+                transitionLocked(RequestState.Phase.ACKNOWLEDGED, "route decision delivered");
+                publicationWinner = PublicationKind.DELIVERY;
+                permit.claim();
+                publication = new SelectedPublication(permit, future, true,
+                        ResponseCompletion.RESPONSE, response, null, false);
+            } catch (RuntimeException | Error failure) {
+                permit.abandonIfUnclaimed();
+                throw failure;
+            }
+        }
+        completionPublisher.submit(publication);
+        return true;
+    }
+
+    void processEncoderStatus(EncoderEndpoint source, WorkerStatus.TaskObservation task, boolean finished) {
+        TerminalAction action = null;
+        synchronized (this) {
+            if (requestPhase != RequestPhase.ENCODER || !ownsResourceTrackingLocked()
+                    || encoderEndpoint != source || !requestId.equals(task.requestId())) {
+                return;
+            }
+            lastWorkerStatusAtMs = System.currentTimeMillis();
+            if (finished) {
+                TerminalOutcome result = task.errorCode() == 0L
+                        ? TerminalOutcome.complete("encoder completed")
+                        : TerminalOutcome.fail("encoder worker error code " + task.errorCode());
+                action = claimTerminalActionLocked(null, result, null, false);
+            }
+        }
+        if (!finished) { expirationTimer.attachInactivityDeadline(this); }
+        terminalCleanup.submitTerminal(action);
+    }
+
+    void recordEncoderRetirement(EncoderEndpoint source) {
+        TerminalAction action;
+        synchronized (this) {
+            if (requestPhase != RequestPhase.ENCODER || !ownsResourceTrackingLocked()
+                    || encoderEndpoint != source) {
+                return;
+            }
+            action = claimTerminalActionLocked(null,
+                    TerminalOutcome.fail("Encoder endpoint generation retired"), null, false);
+        }
+        terminalCleanup.submitTerminal(action);
     }
 
     RequestFuture future() {
@@ -1926,6 +2011,10 @@ public final class RequestSlot {
             terminal = commitTerminalStateLocked(TerminalOutcome.fail("terminal projection did not terminate"));
         }
 
+        if (encoderEndpoint != null) {
+            encoderEndpoint.forgetRequest(requestId);
+            encoderEndpoint = null;
+        }
         item = null;
         context = null;
         cleanupProgress = null;

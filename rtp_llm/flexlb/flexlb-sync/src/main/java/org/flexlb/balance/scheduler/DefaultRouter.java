@@ -5,6 +5,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -24,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Component
 public class DefaultRouter {
@@ -31,6 +33,7 @@ public class DefaultRouter {
     private final CostBasedPrefillStrategy prefillSelector;
     private final DecodeSelector decodeSelector;
     private final RandomStrategy vitSelector;
+    private final EncoderStrategy encoderSelector;
     private final ConfigService configService;
     private final List<RoleType> requiredRoles;
     @Autowired
@@ -41,19 +44,33 @@ public class DefaultRouter {
             CostBasedPrefillStrategy prefillSelector,
             DecodeSelector decodeSelector,
             RandomStrategy vitSelector,
+            EncoderStrategy encoderSelector,
             ConfigService configService,
             ModelMetaConfig modelMetaConfig) {
-        this.prefillSelector = Objects.requireNonNull(
-                prefillSelector, "prefillSelector");
-        this.decodeSelector = Objects.requireNonNull(
-                decodeSelector, "decodeSelector");
-        this.vitSelector = Objects.requireNonNull(
-                vitSelector, "vitSelector");
-        this.configService = Objects.requireNonNull(
-                configService, "configService");
-        this.requiredRoles = List.copyOf(
-                Objects.requireNonNull(
-                        modelMetaConfig, "modelMetaConfig").requiredRoles());
+        this.prefillSelector = Objects.requireNonNull(prefillSelector, "prefillSelector");
+        this.decodeSelector = Objects.requireNonNull(decodeSelector, "decodeSelector");
+        this.vitSelector = Objects.requireNonNull(vitSelector, "vitSelector");
+        this.encoderSelector = Objects.requireNonNull(encoderSelector, "encoderSelector");
+        this.configService = Objects.requireNonNull(configService, "configService");
+        this.requiredRoles = List.copyOf(Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles());
+    }
+
+    boolean isEncoderOnly(BalanceContext context) {
+        return requestedRoles(context).equals(List.of(RoleType.ENCODER));
+    }
+
+    PlacementResult<SelectedRole, PlacementKey> selectEncoder(BalanceContext context) {
+        Response failure = validateRequest(context);
+        if (failure != null) {
+            return PlacementResult.rejected(failure);
+        }
+        if (!isEncoderOnly(context)) {
+            return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
+        }
+        SelectedRole selected = encoderSelector.select(context, resolvePolicyGroup(context));
+        return selected == null
+                ? PlacementResult.blocked(new PlacementKey(RoleType.ENCODER, resolvePolicyGroup(context)))
+                : PlacementResult.success(selected);
     }
 
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
@@ -64,7 +81,7 @@ public class DefaultRouter {
         Response validationFailure = validateRequest(context);
         if (validationFailure != null) { return PlacementResult.rejected(validationFailure); }
         DecodeBinding decodeAdmission = DecodeBinding.capture(context);
-        try (PinnedRouting routing = selectAll(context, requiredRoles, policyGroup, decodeAdmission)) {
+        try (PinnedRouting routing = selectAll(context, requestedRoles(context), policyGroup, decodeAdmission)) {
             if (routing.blocker() != null) {
                 return PlacementResult.blocked(routing.blocker(), routing.failure(), routing.diagnostics);
             }
@@ -102,7 +119,17 @@ public class DefaultRouter {
             Logger.error("masterRequest is null");
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
+        Set<RoleType> requested = context.getRequestedRoles();
+        if (requested != null && !requiredRoles.containsAll(requested)) {
+            return Response.error(StrategyErrorType.INVALID_REQUEST);
+        }
         return null;
+    }
+
+    private List<RoleType> requestedRoles(BalanceContext context) {
+        Set<RoleType> requested = context.getRequestedRoles();
+        return requested == null ? requiredRoles
+                : requiredRoles.stream().filter(requested::contains).toList();
     }
 
     private PinnedRouting selectAll(BalanceContext context, List<RoleType> roles, String policyGroup,
@@ -191,6 +218,8 @@ public class DefaultRouter {
             case DECODE -> decodeSelector.select(decodeAdmission, group);
             case VIT -> selectedOrBlocked(
                     vitSelector.select(context, role, group), role);
+            case ENCODER -> selectedOrBlocked(
+                    encoderSelector.select(context, group), role);
             case FRONTEND -> throw new IllegalArgumentException(
                     "Endpoint selection is not supported for FRONTEND");
         };

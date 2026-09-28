@@ -15,6 +15,7 @@ public enum StrategyErrorType {
     NO_PDFUSION_WORKER(8404, true),
     NO_VIT_WORKER(8405, true),
     NO_FRONTEND_WORKER(8407, true),
+    NO_ENCODER_WORKER(8408, true),
     INVALID_REQUEST(8406, false),
     VIT_ROUTE_STALE(8408, false),
 
