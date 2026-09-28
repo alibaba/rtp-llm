@@ -2,6 +2,7 @@
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -27,6 +28,55 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, DFlash2RejectsUnsupportedRequestsBeforeScheduling) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    engine->propose_params_ = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_DFLASH2, 7);
+    auto make_input         = []() {
+        auto input                             = std::make_shared<GenerateInput>();
+        input->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
+        input->generate_config                 = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens = 1;
+        return input;
+    };
+    for (int kind = 0; kind < 7; ++kind) {
+        SCOPED_TRACE(kind);
+        auto  input  = make_input();
+        auto& config = *input->generate_config;
+        switch (kind) {
+            case 0:
+                config.json_schema = "{}";
+                break;
+            case 1:
+                config.regex = "[0-9]+";
+                break;
+            case 2:
+                config.num_beams = 2;
+                break;
+            case 3:
+                config.num_return_sequences = 2;
+                break;
+            case 4:
+                config.temperature = -1.0f;
+                break;
+            case 5:
+                config.temperature = std::numeric_limits<float>::quiet_NaN();
+                break;
+            case 6:
+                config.temperature = std::numeric_limits<float>::infinity();
+                break;
+        }
+        auto stream = engine->makeStream(input);
+        ASSERT_TRUE(stream->hasError());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    }
+    for (float temperature : {0.0f, 0.7f, 1.0f}) {
+        auto input                          = make_input();
+        input->generate_config->temperature = temperature;
+        EXPECT_FALSE(engine->makeStream(input)->hasError());
+    }
+}
 
 TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     class CopyPayloadProcessor: public NormalBatchStreamProcessor {

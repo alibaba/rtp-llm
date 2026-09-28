@@ -279,6 +279,30 @@ public:
         return output_holder.get();
     }
 
+    using DFlash2Selector = std::function<DFlash2DraftOutput(const torch::Tensor&,
+                                                             const torch::Tensor&,
+                                                             const torch::Tensor&,
+                                                             const torch::Tensor&,
+                                                             const torch::Tensor&,
+                                                             const torch::Tensor&)>;
+
+    void setDFlash2Selector(DFlash2Selector selector) {
+        dflash2_selector_ = std::move(selector);
+    }
+
+    DFlash2DraftOutput sampleDFlash2(const torch::Tensor& hidden,
+                                     const torch::Tensor& logits,
+                                     const torch::Tensor& anchors,
+                                     const torch::Tensor& temperatures,
+                                     const torch::Tensor& greedy_mask,
+                                     const torch::Tensor& uniforms) override {
+        ++dflash2_sample_count_;
+        if (!dflash2_selector_) {
+            return ModelBase::sampleDFlash2(hidden, logits, anchors, temperatures, greedy_mask, uniforms);
+        }
+        return dflash2_selector_(hidden, logits, anchors, temperatures, greedy_mask, uniforms);
+    }
+
     size_t forwardCount() const {
         return forward_count_;
     }
@@ -396,6 +420,8 @@ private:
         }
     }
 
+    DFlash2Selector                            dflash2_selector_;
+    size_t                                     dflash2_sample_count_ = 0;
     TestDataHolder<GptModelInputs>             input_holder;
     TestDataHolder<GptModelInputs>             prepare_input_holder;
     TestDataHolder<GptModelOutputs>            output_holder;
@@ -660,7 +686,7 @@ public:
         sp_config.type                                     = test_config.sp_type;
         sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
         sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
-        if (test_config.sp_type == SP_TYPE_DFLASH) {
+        if (test_config.sp_type == SP_TYPE_DFLASH || test_config.sp_type == SP_TYPE_DFLASH2) {
             sp_config.sp_dspark_sample_from_anchor = false;
         }
 
@@ -912,6 +938,49 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
 
+TEST_F(MtpExecutorTest, BlockDraftNonRootProposalPreservesGatheredHybridCacheIdentity) {
+    auto full        = test::makeMhaSpec("a_full", 4, TYPE_FP16, 1, 2);
+    auto target      = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
+    target.layer_num = 2;
+    target.fromGroupedSpecs({test::makeLinearSpec("z_linear", 4, TYPE_FP16, 1, 1), full},
+                            {{0}, {1}},
+                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                            {"z_linear", "a_full"});
+    auto draft = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
+    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+    target.finalizeBlockNums(8, RuntimeConfig{});
+
+    for (auto type : {SP_TYPE_DSPARK, SP_TYPE_DFLASH, SP_TYPE_DFLASH2}) {
+        SCOPED_TRACE(static_cast<int>(type));
+        MtpExecutorTestConfig config;
+        config.sp_type              = type;
+        config.vocab_size_override  = config.vocab_size;
+        config.dspark_mask_token_id = 3;
+        auto  components            = createMtpExecutorComponents(config, &target);
+        auto* executor              = components.executor.get();
+        executor->tp_rank_          = 1;
+        // Non-root ranks have no scheduled requests, but the real gatherer
+        // still supplies the rank-local group identity required by TP sync.
+        StreamGroups streams(std::list<GenerateStreamPtr>{});
+        TensorHolder holder;
+        auto         gathered = executor->batch_stream_processor_->gatherDecodeModelInput(streams, holder);
+        ASSERT_TRUE(gathered.ok());
+        const auto& target_input = gathered.value();
+        ASSERT_EQ(target_input.kv_cache_group_tags, target.groupTags());
+        ASSERT_EQ(target_input.kv_cache_group_tags.size(), 2u);
+        MtpBatchStreamProcessor::DSparkRoundState round;
+        auto proposal = executor->prepareBlockDraftProposalInput(streams, target_input, round);
+        EXPECT_EQ(proposal.kv_cache_group_tags, target_input.kv_cache_group_tags);
+        EXPECT_TRUE(torch::equal(proposal.kv_cache_group_types, target_input.kv_cache_group_types));
+        EXPECT_EQ(getModelInputShapeHints(proposal)[GptModelInputIndex::kvCacheGroupNum], 2);
+        EXPECT_EQ(proposal.seq_size_per_block, target_input.seq_size_per_block);
+        EXPECT_EQ(proposal.kernel_seq_size_per_block, target_input.kernel_seq_size_per_block);
+        EXPECT_FALSE(round.anchors.defined());
+        proposal.kv_cache_group_tags.front() = "changed_proposal";
+        EXPECT_EQ(target_input.kv_cache_group_tags, target.groupTags());
+    }
+}
+
 TEST_F(MtpExecutorTest, DFlashInitializesWithoutMarkovWeights) {
     MtpExecutorTestConfig config;
     config.sp_type              = SP_TYPE_DFLASH;
@@ -923,6 +992,322 @@ TEST_F(MtpExecutorTest, DFlashInitializesWithoutMarkovWeights) {
     EXPECT_FALSE(components.executor->dspark_markov_w1_.defined());
     EXPECT_FALSE(components.executor->dspark_markov_w2_.defined());
     EXPECT_EQ(components.executor->fast_topk_sampler_, nullptr);
+}
+
+TEST_F(MtpExecutorTest, DFlash2InitializesWithoutMarkovWeights) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH2;
+    config.vocab_size_override  = config.vocab_size;
+    config.gen_num_per_cycle    = 7;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    ASSERT_EQ(components.executor->draft_vocab_size_, config.vocab_size);
+    EXPECT_TRUE(components.executor->is_block_draft_);
+    EXPECT_TRUE(components.executor->is_dflash_);
+    EXPECT_TRUE(components.executor->is_dflash2_);
+    EXPECT_FALSE(components.executor->dspark_markov_w1_.defined());
+    EXPECT_FALSE(components.executor->dspark_markov_w2_.defined());
+    EXPECT_EQ(components.executor->fast_topk_sampler_, nullptr);
+}
+
+TEST_F(MtpExecutorTest, DFlash2BlockProposalPassesMaskRowsAndScattersActualConditionalQ) {
+    constexpr int64_t     gamma = 3;
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH2;
+    config.vocab_size_override  = config.vocab_size;
+    config.gen_num_per_cycle    = gamma;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    ASSERT_EQ(components.executor->draft_vocab_size_, config.vocab_size);
+    auto greedy =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto stochastic =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    greedy->generateConfig()->do_sample       = false;
+    stochastic->generateConfig()->do_sample   = true;
+    stochastic->generateConfig()->top_k       = 2;
+    stochastic->generateConfig()->top_p       = 0.6f;
+    stochastic->generateConfig()->temperature = 0.8f;
+    StreamGroups streams({greedy, stochastic});
+    const auto   options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+
+    GptModelInputs input;
+    input.combo_tokens      = torch::tensor({1, 3, 3, 3, 3, 3, 3, 3}, torch::kInt32);
+    input.input_lengths     = torch::tensor({4, 4}, torch::kInt32);
+    input.prefix_lengths    = torch::tensor({2, 2}, torch::kInt32);
+    input.lm_output_indexes = torch::tensor({1, 2, 3, 5, 6, 7}, torch::kInt32);
+    GptModelOutputs proposal;
+    proposal.hidden_states = torch::arange(12, options).reshape({2 * gamma, 2});
+    // Padding intentionally dominates the unary logits. The executor preserves
+    // the gathered logits; the selector applies the valid vocabulary boundary.
+    proposal.logits = torch::full({2 * gamma, 128}, 1000.0f, options);
+    proposal.logits.narrow(1, 0, 4).copy_(torch::tensor({0.0f, 1.0f, 2.0f, 3.0f}, options).expand({2 * gamma, 4}));
+    const auto anchors         = torch::tensor({1, 3}, options.dtype(torch::kInt32));
+    const auto expected_tokens = torch::tensor({3, 3, 3, 2, 0, 2}, options.dtype(torch::kInt32)).reshape({2, gamma});
+    const auto candidate_ids =
+        torch::tensor({3, 2, 3, 2, 3, 2, 1, 2, 0, 3, 2, 1}, options.dtype(torch::kInt64)).reshape({2, gamma, 2});
+    const auto conditional_q =
+        torch::tensor({1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.25f, 0.75f, 0.8f, 0.2f, 0.6f, 0.4f}, options)
+            .reshape({2, gamma, 2});
+    auto* model = components.fake_draft_model.get();
+    model->setDFlash2Selector([&](const torch::Tensor& hidden,
+                                  const torch::Tensor& logits,
+                                  const torch::Tensor& received_anchors,
+                                  const torch::Tensor& temperatures,
+                                  const torch::Tensor& greedy_mask,
+                                  const torch::Tensor& uniforms) {
+        EXPECT_TRUE(torch::equal(hidden, proposal.hidden_states.reshape({2, gamma, 2})));
+        EXPECT_TRUE(torch::equal(logits, proposal.logits.reshape({2, gamma, 128})));
+        EXPECT_TRUE(torch::equal(received_anchors, anchors));
+        EXPECT_TRUE(torch::equal(temperatures.cpu(), torch::tensor({1.0f, 0.8f})));
+        EXPECT_TRUE(torch::equal(greedy_mask.cpu(), torch::tensor({true, false}, torch::kBool)));
+        EXPECT_EQ(uniforms.size(0), 2);
+        EXPECT_EQ(uniforms.size(1), gamma);
+        EXPECT_TRUE(torch::equal(uniforms[0], torch::zeros({gamma}, options)));
+        EXPECT_TRUE(torch::all((uniforms[1] >= 0) & (uniforms[1] < 1)).item<bool>());
+        return DFlash2DraftOutput{expected_tokens, candidate_ids, conditional_q};
+    });
+    model->setInputs({input});
+    model->setOutputs({proposal});
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    MtpBatchStreamProcessor::DSparkRoundState state;
+    state.anchors = anchors;
+    SamplerOutput output;
+    int64_t       forward_us = 0;
+    components.executor->runDSparkProposal(input, streams, state, output, forward_us);
+
+    EXPECT_EQ(model->forward_count_, 1);
+    EXPECT_EQ(model->dflash2_sample_count_, 1);
+    EXPECT_FALSE(output.token_ids_are_point_mass);
+    EXPECT_TRUE(torch::equal(output.token_ids, expected_tokens));
+    EXPECT_EQ(output.all_probs.scalar_type(), torch::kFloat32);
+    EXPECT_EQ(output.all_probs.size(2), 4);
+    const auto expected_q = torch::tensor({0.0f, 0.0f,  0.0f,  1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                                           0.0f, 0.25f, 0.75f, 0.0f, 0.8f, 0.0f, 0.0f, 0.2f, 0.0f, 0.4f, 0.6f, 0.0f},
+                                          options)
+                                .reshape({2, gamma, 4});
+    EXPECT_TRUE(torch::equal(output.all_probs, expected_q));
+
+    // The sparse conditional q must reach the shared rejection path unchanged.
+    // Equal p and q accept all three proposals in both mixed-batch rows.
+    spec::SpeculativeSampler sampler({}, gamma);
+    SamplerOutput            target;
+    target.all_probs = torch::zeros({2, gamma + 1, 128}, options);
+    target.all_probs.narrow(1, 0, gamma).narrow(2, 0, 4).copy_(expected_q);
+    target.all_probs.select(1, gamma).select(1, 1).fill_(1.0f);
+    auto target_tokens = torch::ones({2, gamma + 1}, options.dtype(torch::kInt32));
+    target_tokens.narrow(1, 0, gamma).copy_(expected_tokens);
+    target.token_ids = target_tokens.reshape({2 * (gamma + 1), 1});
+    auto accepted    = sampler.forward({greedy, stochastic}, output, target);
+    EXPECT_TRUE(torch::equal(accepted.accept_len.cpu(), torch::tensor({4, 4}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(accepted.accept_tokens, target_tokens));
+
+    // Non-root ranks participate in the draft forward but must not enter the
+    // rank-local selector callback after the gathered-head boundary.
+    model->setInputs({input});
+    model->setOutputs({proposal});
+    components.executor->tp_rank_ = 1;
+    SamplerOutput non_root_output;
+    components.executor->runDSparkProposal(input, streams, state, non_root_output, forward_us);
+    EXPECT_EQ(model->forward_count_, 2);
+    EXPECT_EQ(model->dflash2_sample_count_, 1);
+    EXPECT_FALSE(non_root_output.token_ids.defined());
+}
+
+TEST_F(MtpExecutorTest, DFlash2ProposalClearsTargetOnlyOutputFlagsOnEveryRank) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH2;
+    config.vocab_size_override  = config.vocab_size;
+    config.gen_num_per_cycle    = 3;
+    config.dspark_mask_token_id = 3;
+    auto           components   = createMtpExecutorComponents(config);
+    GptModelInputs target_input;
+    target_input.combo_tokens           = torch::tensor({1, 3, 3, 3}, torch::kInt32);
+    target_input.input_lengths          = torch::tensor({4}, torch::kInt32);
+    target_input.prefix_lengths         = torch::tensor({2}, torch::kInt32);
+    target_input.lm_output_indexes      = torch::tensor({1, 2, 3}, torch::kInt32);
+    target_input.need_all_logits        = true;
+    target_input.need_all_hidden_states = true;
+    auto proposal_input                 = target_input;
+    bool observed                       = false;
+    components.fake_draft_model->setInputObserver([&](const GptModelInputs& actual) {
+        observed = true;
+        EXPECT_FALSE(actual.need_all_logits);
+        EXPECT_FALSE(actual.need_all_hidden_states);
+    });
+    components.fake_draft_model->setInputs({target_input});
+    components.fake_draft_model->setOutputs({GptModelOutputs{}});
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    // All ranks must clear these flags, even when they never run the selector.
+    components.executor->tp_rank_ = 1;
+    StreamGroups                              streams(std::list<GenerateStreamPtr>{});
+    MtpBatchStreamProcessor::DSparkRoundState round;
+    SamplerOutput                             output;
+    int64_t                                   forward_us = 0;
+    components.executor->runDSparkProposal(proposal_input, streams, round, output, forward_us);
+    EXPECT_TRUE(observed);
+    EXPECT_FALSE(proposal_input.need_all_logits);
+    EXPECT_FALSE(proposal_input.need_all_hidden_states);
+    EXPECT_TRUE(target_input.need_all_logits);
+    EXPECT_TRUE(target_input.need_all_hidden_states);
+}
+
+TEST_F(MtpExecutorTest, DFlash2PureGreedyNeedsOnlyTokensAndNoDenseProbabilities) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH2;
+    config.vocab_size_override  = config.vocab_size;
+    config.gen_num_per_cycle    = 2;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    ASSERT_EQ(components.executor->draft_vocab_size_, config.vocab_size);
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample = false;
+    StreamGroups    streams({stream});
+    const auto      options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    GptModelOutputs proposal;
+    proposal.logits        = torch::zeros({2, 4}, options);
+    proposal.hidden_states = torch::ones({2, 3}, options);
+    auto tokens            = torch::tensor({3, 1}, options.dtype(torch::kInt32)).reshape({1, 2});
+    components.fake_draft_model->setDFlash2Selector([&](const torch::Tensor&,
+                                                        const torch::Tensor&,
+                                                        const torch::Tensor&,
+                                                        const torch::Tensor&,
+                                                        const torch::Tensor& greedy,
+                                                        const torch::Tensor&) {
+        EXPECT_TRUE(greedy.all().item<bool>());
+        // Omitting sparse q proves that the pure-greedy path does not request
+        // or allocate a full-vocabulary probability tensor.
+        return DFlash2DraftOutput{tokens, {}, {}};
+    });
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    auto anchors = torch::tensor({1}, options.dtype(torch::kInt32));
+    for (const bool temperature_zero : {false, true}) {
+        stream->generateConfig()->do_sample   = temperature_zero;
+        stream->generateConfig()->top_k       = 0;
+        stream->generateConfig()->temperature = temperature_zero ? 0.0f : 1.0f;
+        auto output                           = components.executor->sampleDFlash2Draft(streams, proposal, anchors);
+        EXPECT_TRUE(output.token_ids_are_point_mass);
+        EXPECT_FALSE(output.all_probs.defined());
+        EXPECT_TRUE(torch::equal(output.token_ids, tokens));
+    }
+}
+
+TEST_F(MtpExecutorTest, DFlash2RoundsOwnDenseQWhileSelectorBuffersAreReused) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH2;
+    config.vocab_size_override  = config.vocab_size;
+    config.gen_num_per_cycle    = 2;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    ASSERT_EQ(components.executor->draft_vocab_size_, config.vocab_size);
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample = true;
+    stream->generateConfig()->top_k     = 0;
+    StreamGroups    streams({stream});
+    const auto      options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    GptModelOutputs proposal;
+    proposal.logits        = torch::zeros({2, 4}, options);
+    proposal.hidden_states = torch::ones({2, 3}, options);
+    auto tokens            = torch::tensor({1, 2}, options.dtype(torch::kInt32)).reshape({1, 2});
+    auto ids               = torch::tensor({1, 2, 2, 3}, options.dtype(torch::kInt64)).reshape({1, 2, 2});
+    auto q                 = torch::tensor({0.7f, 0.3f, 0.4f, 0.6f}, options).reshape({1, 2, 2});
+    components.fake_draft_model->setDFlash2Selector(
+        [&](const torch::Tensor&,
+            const torch::Tensor&,
+            const torch::Tensor&,
+            const torch::Tensor&,
+            const torch::Tensor&,
+            const torch::Tensor&) { return DFlash2DraftOutput{tokens, ids, q}; });
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    auto anchors = torch::tensor({1}, options.dtype(torch::kInt32));
+    auto first   = components.executor->sampleDFlash2Draft(streams, proposal, anchors);
+    auto saved   = first.all_probs.clone();
+    // Simulate graph-owned selector buffers being overwritten for the next
+    // proposal while the prior round still owns its verification inputs.
+    ids.copy_(torch::tensor({0, 3, 1, 0}, options.dtype(torch::kInt64)).reshape_as(ids));
+    q.copy_(torch::tensor({0.2f, 0.8f, 0.9f, 0.1f}, options).reshape_as(q));
+    auto second = components.executor->sampleDFlash2Draft(streams, proposal, anchors);
+    EXPECT_NE(first.all_probs.data_ptr(), second.all_probs.data_ptr());
+    EXPECT_TRUE(torch::equal(first.all_probs, saved));
+    EXPECT_TRUE(torch::equal(
+        second.all_probs, torch::tensor({0.2f, 0.0f, 0.0f, 0.8f, 0.1f, 0.9f, 0.0f, 0.0f}, options).reshape({1, 2, 4})));
+}
+
+TEST_F(MtpExecutorTest, DFlash2RejectsMalformedProposalSelectorResultsAndSamplingConfig) {
+    MtpExecutorTestConfig config;
+    config.sp_type              = SP_TYPE_DFLASH2;
+    config.vocab_size_override  = config.vocab_size;
+    config.gen_num_per_cycle    = 2;
+    config.dspark_mask_token_id = 3;
+    auto components             = createMtpExecutorComponents(config);
+    ASSERT_EQ(components.executor->draft_vocab_size_, config.vocab_size);
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample = true;
+    stream->generateConfig()->top_k     = 0;
+    StreamGroups    streams({stream});
+    const auto      options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    GptModelOutputs proposal;
+    proposal.logits            = torch::zeros({2, 4}, options);
+    proposal.hidden_states     = torch::ones({2, 3}, options);
+    auto               anchors = torch::tensor({1}, options.dtype(torch::kInt32));
+    auto*              model   = components.fake_draft_model.get();
+    DFlash2DraftOutput selected{torch::ones({1, 2}, options.dtype(torch::kInt32)),
+                                torch::ones({1, 2, 1}, options.dtype(torch::kInt64)),
+                                torch::ones({1, 2, 1}, options)};
+    model->setDFlash2Selector([&](const torch::Tensor&,
+                                  const torch::Tensor&,
+                                  const torch::Tensor&,
+                                  const torch::Tensor&,
+                                  const torch::Tensor&,
+                                  const torch::Tensor&) { return selected; });
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    // A valid call first proves every rejection below starts from a consistent
+    // vocabulary/shape fixture and is not an earlier, unrelated failure.
+    ASSERT_NO_THROW(components.executor->sampleDFlash2Draft(streams, proposal, anchors));
+    ASSERT_EQ(model->dflash2_sample_count_, 1);
+    auto expect_rejection = [&](const GptModelOutputs& input, const torch::Tensor& input_anchors, const char* message) {
+        try {
+            components.executor->sampleDFlash2Draft(streams, input, input_anchors);
+            FAIL() << "expected DFlash2 rejection: " << message;
+        } catch (const c10::Error& error) {
+            EXPECT_NE(std::string(error.what()).find(message), std::string::npos) << error.what();
+        }
+    };
+    auto malformed   = proposal;
+    malformed.logits = proposal.logits.narrow(0, 0, 1);
+    expect_rejection(malformed, anchors, "DFlash2 proposal logits");
+    malformed               = proposal;
+    malformed.hidden_states = torch::ones({3, 3}, options);
+    expect_rejection(malformed, anchors, "DFlash2 selector requires row-aligned");
+    expect_rejection(proposal, anchors.repeat({2}), "DFlash2 selector requires row-aligned");
+    EXPECT_EQ(model->dflash2_sample_count_, 1);
+    for (const float temperature :
+         {-1.0f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        stream->generateConfig()->temperature = temperature;
+        expect_rejection(proposal, anchors, "DFlash2 temperature must be finite and nonnegative");
+    }
+    stream->generateConfig()->temperature = 1.0f;
+    stream->generateConfig()->num_beams   = 2;
+    expect_rejection(proposal, anchors, "DFlash2 does not support tiled or beam sampling");
+    stream->generateConfig()->num_beams            = 1;
+    stream->generateConfig()->num_return_sequences = 2;
+    expect_rejection(proposal, anchors, "DFlash2 does not support tiled or beam sampling");
+    stream->generateConfig()->num_return_sequences = 1;
+    EXPECT_EQ(model->dflash2_sample_count_, 1);
+
+    selected.token_ids = selected.token_ids.to(torch::kInt64);
+    expect_rejection(proposal, anchors, "DFlash2 selector tokens must be int32");
+    EXPECT_EQ(model->dflash2_sample_count_, 2);
+    selected.token_ids     = selected.token_ids.to(torch::kInt32);
+    selected.probabilities = selected.probabilities.to(torch::kFloat16);
+    expect_rejection(proposal, anchors, "DFlash2 selector must return candidate IDs");
+    EXPECT_EQ(model->dflash2_sample_count_, 3);
+    selected.probabilities = torch::ones({1, 2, 2}, options);
+    expect_rejection(proposal, anchors, "DFlash2 selector must return candidate IDs");
+    EXPECT_EQ(model->dflash2_sample_count_, 4);
 }
 
 TEST_F(MtpExecutorTest, DFlashExecutorRoutesOneBlockForwardToPlainSampler) {

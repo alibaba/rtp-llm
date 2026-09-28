@@ -20,8 +20,13 @@ class StartupRealWarmupTest(unittest.TestCase):
         mtp = self._configs(SpeculativeType.MTP, 3)
         dspark = self._configs(SpeculativeType.DSPARK, 3)
         dflash = self._configs(SpeculativeType.DFLASH, 3)
+        dflash2 = self._configs(SpeculativeType.DFLASH2, 7)
 
         with patch.dict("os.environ", {"RTP_LLM_STREAM_ASYNC": "0"}):
+            self.assertEqual(
+                start_server._get_startup_real_warmup_speculative_reserve_step(dflash2),
+                21,
+            )
             self.assertEqual(
                 start_server._get_startup_real_warmup_speculative_reserve_step(mtp),
                 4,
@@ -35,6 +40,10 @@ class StartupRealWarmupTest(unittest.TestCase):
                 9,
             )
         with patch.dict("os.environ", {"RTP_LLM_STREAM_ASYNC": "1"}):
+            self.assertEqual(
+                start_server._get_startup_real_warmup_speculative_reserve_step(dflash2),
+                21,
+            )
             self.assertEqual(
                 start_server._get_startup_real_warmup_speculative_reserve_step(mtp),
                 7,

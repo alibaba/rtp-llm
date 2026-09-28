@@ -173,11 +173,28 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+DFlash2DraftOutput PyWrappedModel::sampleDFlash2(const torch::Tensor& hidden,
+                                                 const torch::Tensor& logits,
+                                                 const torch::Tensor& anchors,
+                                                 const torch::Tensor& temperatures,
+                                                 const torch::Tensor& greedy_mask,
+                                                 const torch::Tensor& uniforms) {
+    RTP_LLM_PROFILE_SCOPE("py_model.dflash2_selector");
+    py::gil_scoped_acquire gil;
+    RTP_LLM_CHECK_WITH_INFO(py_dflash2_sample_method_.ptr() != nullptr,
+                            "DFlash2 candidate selector was not initialized");
+    auto result =
+        py_dflash2_sample_method_(hidden, logits, anchors, temperatures, greedy_mask, uniforms).cast<py::tuple>();
+    RTP_LLM_CHECK_WITH_INFO(result.size() == 3, "DFlash2 selector must return tokens, candidate IDs and conditional q");
+    return {result[0].cast<torch::Tensor>(), result[1].cast<torch::Tensor>(), result[2].cast<torch::Tensor>()};
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_   = py::object();
-        py_forward_method_ = py::object();
+        held_attn_pyobj_          = py::object();
+        py_forward_method_        = py::object();
+        py_dflash2_sample_method_ = py::object();
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
         // Runners retain Python methods and graph-owned tensors. Drain and
