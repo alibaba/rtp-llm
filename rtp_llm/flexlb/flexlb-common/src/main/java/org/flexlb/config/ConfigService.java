@@ -13,12 +13,13 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
-/** Loads the single, strict FLEXLB_CONFIG JSON document. */
+/** Loads the strict FLEXLB_CONFIG document and the optional HTTP Dispatcher enablement override. */
 @Slf4j
 @Component
 public class ConfigService {
 
     static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+    static final String DISPATCH_ENABLED_ENV = "DISPATCH_ENABLED";
 
     private static final Set<String> REMOVED_LEGACY_ENV_VARS = Set.copyOf(
             java.util.Arrays.asList("""
@@ -88,15 +89,26 @@ public class ConfigService {
     }
 
     ConfigService(Map<String, String> environment) {
-        this(configDocument(environment));
+        this(configDocument(environment), environment.get(DISPATCH_ENABLED_ENV));
     }
 
     ConfigService(String document) {
+        this(document, null);
+    }
+
+    private ConfigService(String document, String dispatchEnabled) {
         if (document == null || document.isBlank()) {
             throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
                     "is required; configure requestLifecycle.request.timeoutMs");
         }
         this.flexlbConfig = parse(document);
+        if (dispatchEnabled != null) {
+            String value = dispatchEnabled.trim();
+            if (!"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value)) {
+                throw new ConfigValidationException(DISPATCH_ENABLED_ENV, "must be true or false");
+            }
+            this.flexlbConfig.getHttpDispatcher().setEnabled(Boolean.parseBoolean(value));
+        }
         FlexlbConfigValidator.validate(flexlbConfig);
         logEffectiveConfig(flexlbConfig);
     }

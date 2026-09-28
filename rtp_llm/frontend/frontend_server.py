@@ -359,7 +359,13 @@ class FrontendServer(object):
                 trace_state.finish()
             self._global_controller.decrement()
 
-    async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+    async def inference(
+        self,
+        req: Union[str, Dict[Any, Any]],
+        raw_request: RawRequest,
+        *,
+        batch: bool = False,
+    ):
         request_headers: Dict[str, str] = {}
         try:
             if isinstance(req, str):
@@ -381,8 +387,10 @@ class FrontendServer(object):
         def generate_call():
             assert self._frontend_worker is not None
             if request_headers:
-                return self._frontend_worker.inference(**req, headers=request_headers)
-            return self._frontend_worker.inference(**req)
+                return self._frontend_worker.inference(
+                    batch, **req, headers=request_headers
+                )
+            return self._frontend_worker.inference(batch, **req)
 
         try:
             rep = await self._infer_wrap(req, raw_request, generate_call)
@@ -522,33 +530,6 @@ class FrontendServer(object):
                     responses=[r.model_dump(exclude_none=True) for r in responses]
                 ).model_dump()
             )
-        finally:
-            self._global_controller.decrement()
-
-    async def batch_infer(self, req: dict, raw_request: Request):
-        from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
-
-        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
-        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
-        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
-        # only one slot regardless of N.
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
-        try:
-            assert self._frontend_worker is not None
-            prompts = req.get("prompt_batch", [])
-            generate_config = req.get("generate_config", {})
-            result = await self._frontend_worker.batch_infer(
-                prompts=prompts,
-                request_id=request_id,
-                generate_config=generate_config,
-            )
-            return ORJSONResponse(content=result.model_dump(exclude_none=True))
         finally:
             self._global_controller.decrement()
 

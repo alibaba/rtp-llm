@@ -206,8 +206,9 @@ JSON mapping of service domains to HTTP host:port lists. Production discovery
 providers continue to resolve their service domains.
 
 Master configuration uses `FLEXLB_CONFIG`, `MODEL_SERVICE_CONFIG`,
-`FLEXLB_SYNC_CONSISTENCY_CONFIG`, and `LOG_LEVEL`. Spring does not bind environment
-variables. Configure ports, RPC transport and logging with their standard
+`FLEXLB_SYNC_CONSISTENCY_CONFIG`, and `LOG_LEVEL`. Spring does not generally bind environment
+variables; HTTP Dispatcher explicitly supports [`DISPATCH_*` settings](docs/fe-allocation-via-master.md#http-dispatcher-configuration).
+Configure ports, RPC transport and logging with their standard
 command-line properties, such as `--server.port` and
 `--flexlb.engine-grpc.enqueue-timeout-ms`.
 HA currently retains `HIPPO_ROLE` as its existing election group identifier.
@@ -405,3 +406,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+## HTTP dispatcher
+
+See [dispatcher batch fanout and configuration](docs/fe-allocation-via-master.md) for FE allocation, `/rtp_llm/batch_schedule`, embedding worker discovery, and leader election.

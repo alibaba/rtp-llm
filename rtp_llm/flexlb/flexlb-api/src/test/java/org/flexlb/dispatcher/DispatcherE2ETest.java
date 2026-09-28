@@ -1,0 +1,400 @@
+package org.flexlb.dispatcher;
+
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
+import org.flexlb.balance.strategy.RoundRobinLoadBalancer;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.TrafficPolicyConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest.AllocationType;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
+import org.flexlb.service.BatchScheduleCoordinator;
+import org.flexlb.service.monitor.EngineHealthReporter;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.support.StaticListableBeanFactory;
+import org.springframework.http.MediaType;
+import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
+import org.springframework.test.web.reactive.server.WebTestClient;
+import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.server.RouterFunctions;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+import reactor.netty.DisposableServer;
+import reactor.netty.http.server.HttpServer;
+import reactor.netty.resources.ConnectionProvider;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+/** Real HTTP coverage for routing, fanout, wire schemas and streaming passthrough. */
+@Timeout(30)
+class DispatcherE2ETest {
+    private final List<MockWebServer> frontends = List.of(new MockWebServer(), new MockWebServer(), new MockWebServer());
+    private final DispatchConfig cfg = new DispatchConfig();
+    private final FlexlbConfig lb = new FlexlbConfig();
+    private final RoundRobinLoadBalancer workers = mock(RoundRobinLoadBalancer.class);
+    private BatchScheduleCoordinator coordinator;
+    private boolean allocationFails;
+    private FePool pool;
+    private FeClient feClient;
+    private WebTestClient client;
+    private DisposableServer server;
+    private ConnectionProvider connections;
+
+    @BeforeEach
+    void startFrontends() throws Exception {
+        for (MockWebServer frontend : frontends) {
+            frontend.start();
+        }
+    }
+
+    @AfterEach
+    void closeConnections() throws Exception {
+        if (server != null) {
+            server.disposeNow();
+        }
+        if (connections != null) {
+            connections.disposeLater().block(Duration.ofSeconds(5));
+        }
+        if (pool != null) {
+            pool.close();
+        }
+        for (MockWebServer frontend : frontends) {
+            frontend.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '~', textBlock = """
+            / | /batch_infer | {"prompt_batch":["a","b"],"max_new_tokens":37,"generate_config":{"max_new_tokens":8}} | {"response_batch":[1]} | {"response_batch":[2]} | 200 | 200 | 200 | {"response_batch":[1,2]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | {"response_batch":[]} | {"response_batch":[2]} | 200 | 200 | 200 | {"response_batch":[null,2],"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[0]}}
+            /v1/batch/chat/completions | /v1/batch/chat/completions | {"requests":[{},{}]} | {"responses":[{"id":"a"}]} | boom | 200 | 500 | 200 | {"responses":[{"id":"a"},{"index":1,"error":{"code":"dispatcher_sub_batch_failed","message":"fe_server_error"}}],"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[1]}}
+            /v1/embeddings | /v1/embeddings | {"input":["a","b"]} | {"data":[{"index":0,"embedding":[1.0]}],"usage":{"prompt_tokens":4,"total_tokens":4}} | boom | 200 | 500 | 200 | {"data":[{"index":0,"embedding":[1.0]},{"index":1,"embedding":null,"error":"fe_server_error"}],"object":"list","model":"","usage":{"prompt_tokens":4,"total_tokens":4},"_partial_failure":{"failed_count":1,"total_count":2,"failed_indices":[1]}}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 400 | 400 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error","fe_server_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | bad | bad | 400 | 404 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | disconnected | bad | 0 | 400 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_unavailable","fe_client_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | bad | disconnected | 404 | 0 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["fe_client_error","fe_unavailable"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | [] | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
+            /batch_infer | /batch_infer | {"prompt_batch":["a","b"]} | {} | bad | 200 | 500 | 500 | {"error":"all_sub_batches_failed","failed_count":2,"total_count":2,"total_chunks":2,"failed_reasons":["malformed_sub_batch","fe_server_error"]}
+            /v1/reranker | /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 200 | 200 | {"results":[{"index":1,"document":"文档🧥1","relevance_score":0.9},{"index":2,"document":"文档🧥2","relevance_score":0.9}],"total_tokens":28}
+            /v1/reranker | /v1/reranker | {"query":"cape pants","documents":["文档🧥0","文档🧥1","文档🧥2","文档🧥3"],"top_k":2} | {"results":[{"index":0,"document":"文档🧥0","relevance_score":0.2},{"index":1,"document":"文档🧥1","relevance_score":0.9}],"total_tokens":11} | {"results":[{"index":0,"document":"文档🧥2","relevance_score":0.9},{"index":1,"document":"文档🧥3","relevance_score":0.4}],"total_tokens":17} | 200 | 500 | 500 | {"error":"sub_batch_failed","failed_count":2,"total_count":4,"total_chunks":2,"failed_reasons":["fe_server_error"]}
+            """)
+    void realHttpFanoutPreservesWireSchemas(String path, String fePath, String input, String first, String second,
+                                           int firstStatus, int secondStatus, int status, String expected) throws Exception {
+        cfg.setPreAssignBe(false);
+        reply(0, firstStatus, first);
+        reply(1, secondStatus, second);
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get(path);
+        JSONArray items = JSON.parseObject(input).getJSONArray(spec.getRequestArrayField());
+        int chunkSize = items.size() / 2;
+        startDispatcher(chunkSize);
+        JSONArray preview = preview(path, input, "split", 2);
+        assertEquals(JSON.parseObject(expected), post(path, input, status));
+        for (int i = 0; i < 2; i++) {
+            JSONObject chunk = takeChunk(i, fePath, spec.getRequestArrayField(), chunkSize);
+            assertEquals(items.subList(i * chunkSize, (i + 1) * chunkSize), chunk.getJSONArray(spec.getRequestArrayField()));
+            if (spec == BatchEndpointSpec.RERANKER) {
+                assertFalse(chunk.getBoolean("sorted"));
+                assertFalse(chunk.containsKey("top_k"));
+            }
+            assertEquals(preview.getJSONObject(i), chunk);
+        }
+        assertEquals(0, frontends.get(2).getRequestCount());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '~', textBlock = """
+            /v1/embeddings | {"model":"embed-model","input":"hello world"} | {"object":"list","data":[{"index":0,"embedding":[0.1,0.2]}]}
+            /v1/chat/completions | {"model":"qwen","messages":[{"role":"user","content":"hi"}]} | {"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]}
+            / | {"prompt_batch":["a","b"],"images":[["u0"],["u1"]]} | {"response_batch":[]}
+            / | {"prompt_batch":["a","b"],"generation_config":{"adapter_name":["a","b"]}} | {"response_batch":[]}
+            / | {"prompt_batch":["a","b"],"generate_config":{"is_streaming":true}} | raw-stream
+            / | {"prompt_batch":["a","b"],"yield_generator":true} | raw-stream
+            """)
+    void passthroughPreservesRequestAndResponseBytes(String path, String json, String upstream) throws Exception {
+        reply(0, 200, upstream);
+        startDispatcher(2);
+        if (BatchEndpointSpec.BY_PATH.containsKey(path)) {
+            assertEquals(JSONArray.of(JSON.parseObject(json)), preview(path, json, "passthrough", 1));
+        } else {
+            post("/_dryrun" + path, json, 400);
+            assertNoFeTraffic();
+        }
+        byte[] response = send(path, json, 200);
+        assertArrayEquals(upstream.getBytes(StandardCharsets.UTF_8), response);
+        RecordedRequest received = frontends.getFirst().takeRequest(5, TimeUnit.SECONDS);
+        assertNotNull(received);
+        assertEquals(path, received.getPath());
+        assertEquals("POST", received.getMethod());
+        assertEquals(json, received.getBody().readUtf8());
+        assertEquals(0, frontends.get(1).getRequestCount() + frontends.get(2).getRequestCount());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,false,generate_config,LLM", "false,false,generate_config,LLM", "true,true,generate_config,LLM",
+            "true,false,generation_config,LLM", "true,false,generate_config,EMBEDDING"})
+    void masterAllocationAndOptionalBeAssignmentAppearOnTheFeWire(boolean preassign, boolean groupPolicy, String configKey, EngineType engineType) throws Exception {
+        cfg.setPreAssignBe(preassign);
+        lb.getWorkerRegistry().setEngineType(engineType);
+        boolean expectBeAssignment = preassign && !groupPolicy && engineType == EngineType.LLM;
+        if (groupPolicy) {
+            TrafficPolicyConfig.Target target = new TrafficPolicyConfig.Target();
+            target.setGroup("tenant");
+            target.setWeight(1);
+            TrafficPolicyConfig group = new TrafficPolicyConfig();
+            group.setDefaultTargets(List.of(target));
+            lb.getRouter().setGroupSelector(group);
+        }
+        for (int i = 0; i < 3; i++) {
+            reply(i, 200, "{\"response_batch\":[\"ok\"]}");
+        }
+        startDispatcher(1);
+        if (expectBeAssignment) {
+            pool.next(); // An independent FE cursor must not affect colocated BE assignment.
+        }
+        JSONArray preview = preview("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", "split", 2);
+        assertFalse(preview.toJSONString().contains("role_addrs"));
+        JSONObject body = JSONObject.of("prompt_batch", JSONArray.of("a", "b", "c"));
+        body.put(configKey, JSONObject.of("temperature", 0.5));
+        post("/batch_infer", body.toJSONString(), 200);
+        for (int i = 0; i < 3; i++) {
+            JSONObject chunk = takeChunk(i, "/batch_infer", "prompt_batch", 1);
+            assertEquals(String.valueOf((char) ('a' + i)), chunk.getJSONArray("prompt_batch").getString(0));
+            assertFalse(chunk.containsKey("pre_assigned_be"));
+            Object expected = expectBeAssignment ? JSONArray.of(JSONObject.of("role", "PDFUSION", "ip", "localhost",
+                    "http_port", frontends.get(i).getPort(), "grpc_port", frontends.get(i).getPort() + 1)) : null;
+            JSONObject config = chunk.getJSONObject(configKey);
+            assertEquals(expected, config == null ? null : config.get("role_addrs"));
+        }
+        verify(coordinator).schedule(argThat(r -> r.getAllocationType() == (expectBeAssignment ? AllocationType.BE : AllocationType.FE)));
+        if (expectBeAssignment) {
+            verify(workers).schedule(3);
+            verify(pool, never()).nextBatch(anyInt());
+        } else {
+            verifyNoInteractions(workers);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '~', textBlock = """
+            []
+            {"generate_config":null}
+            {"prompt_batch":["a"],"role_addrs":[]}
+            {"prompt_batch":["a"],"generate_config":{"role_addrs":[]},"stream":true}
+            {"prompt_batch":["a"],"generation_config":{"role_addrs":[]},"images":[]}
+            """)
+    void invalidRequestsFailBeforeAnyFrontendIsContacted(String body) {
+        startDispatcher(1);
+        post("/_dryrun/batch_infer", body, 400);
+        post("/batch_infer", body, 400);
+        verifyNoInteractions(coordinator);
+        assertNoFeTraffic();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"request", "count"})
+    void oversizedBatchesFailBeforeAllocation(String limit) {
+        cfg.setPreAssignBe(false);
+        String input = "{\"prompt_batch\":[\"a\",\"b\"]}";
+        if (limit.equals("count")) {
+            lb.getRouter().setBatchScheduleMaxCount(1);
+        } else {
+            // Small input, but repeating its envelope across 1,000 chunks exceeds the fixed 128 MiB budget.
+            input = JSONObject.of("prompt_batch", Collections.nCopies(1000, "a"),
+                    "metadata", "x".repeat(140 * 1024)).toJSONString();
+        }
+        startDispatcher(1);
+        post("/_dryrun/batch_infer", input, 413);
+        post("/batch_infer", input, 413);
+        verifyNoInteractions(coordinator);
+        assertNoFeTraffic();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {200, 400, 500})
+    void oversizedFeBodyReturns413OnlyForSuccessfulResponses(int feStatus) {
+        cfg.setPreAssignBe(false);
+        reply(0, feStatus, "{\"response_batch\":[\"" + "x".repeat(FeClient.MAX_RESPONSE_BYTES) + "\"]}");
+        reply(1, 200, "{\"response_batch\":[1]}");
+        startDispatcher(1);
+        JSONObject response = post("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", feStatus == 200 ? 413 : 200);
+        if (feStatus == 200) {
+            assertEquals("batch_response_too_large", response.getString("error"));
+        } else {
+            assertEquals(JSONArray.of(null, 1), response.getJSONArray("response_batch"));
+            assertEquals(1, response.getJSONObject("_partial_failure").getIntValue("failed_count"));
+        }
+    }
+
+    @Test
+    void exhaustedResponseBudgetReturns413() {
+        cfg.setPreAssignBe(false);
+        reply(0, 200, "{\"response_batch\":[1]}");
+        startDispatcher(1);
+        doAnswer(call -> {
+            // Exhaust the real budget without allocating a 128 MiB response fixture.
+            AtomicByteBudget.Reservation reservation = call.getArgument(5);
+            assertTrue(reservation.tryReserve(FanoutService.MAX_AGGREGATE_BYTES));
+            return call.callRealMethod();
+        }).when(feClient).postBytes(any(), any(), any(), any(), any(), any());
+        assertEquals("batch_response_too_large", post("/batch_infer", "{\"prompt_batch\":[\"a\"]}", 413).getString("error"));
+        assertEquals(1, frontends.get(0).getRequestCount());
+    }
+
+    @Test
+    void preassignmentRejectsNonFusionWorkersBeforeHttpFanout() {
+        startDispatcher(1);
+        BatchScheduleTarget prefill = BatchScheduleTarget.of(
+                new WorkerHost("localhost", frontends.getFirst().getPort()), RoleType.PREFILL, EngineType.LLM);
+        when(workers.schedule(1)).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(prefill))));
+
+        JSONObject response = post("/batch_infer", "{\"prompt_batch\":[\"a\"]}", 400);
+
+        assertEquals("invalid_batch_request", response.getString("error"));
+        assertTrue(response.toJSONString().contains("colocated PDFUSION"));
+        assertNoFeTraffic();
+        verify(pool, never()).nextBatch(anyInt());
+    }
+
+    @Test
+    void emptyRequestsAndBatchesContactNoFe() {
+        startDispatcher(2);
+        post("/_dryrun/batch_infer", "", 400);
+        preview("/batch_infer", "{\"prompt_batch\":[]}", "split", 0);
+        assertEquals("invalid_batch_request", post("/batch_infer", "", 400).getString("error"));
+        assertEquals(JSON.parseObject("{\"response_batch\":[]}"), post("/batch_infer", "{\"prompt_batch\":[]}", 200));
+        assertEquals(JSON.parseObject("{\"object\":\"list\",\"model\":\"\",\"data\":[],\"usage\":{\"prompt_tokens\":0,\"total_tokens\":0}}"),
+                post("/v1/embeddings", "{\"input\":[]}", 200));
+        assertEquals(JSON.parseObject("{\"results\":[],\"total_tokens\":0}"),
+                post("/v1/reranker", "{\"query\":\"q\",\"documents\":[]}", 200));
+        assertNoFeTraffic();
+    }
+
+    @Test
+    void allocationFailureContactsNoFe() {
+        allocationFails = true;
+        startDispatcher(2);
+        assertFalse(preview("/v1/batch/chat/completions", "{\"requests\":[{},{}]}", "split", 1).toJSONString().contains("dryrun-secret"));
+        client.get().uri("/dispatcher/_dryrun").exchange().expectStatus().isBadRequest();
+        post("/_dryrun/unknown", "{}", 400);
+        verifyNoInteractions(coordinator);
+        assertEquals("batch_schedule_failed", post("/v1/batch/chat/completions", "{\"requests\":[{},{}]}", 503).getString("error"));
+        verify(coordinator).schedule(any());
+        assertNoFeTraffic();
+    }
+
+    private void startDispatcher(int chunkSize) {
+        lb.getHttpDispatcher().setEnabled(true);
+        List<String> urls = frontends.stream().map(fe -> fe.url("/").toString().replaceAll("/$", "")).toList();
+        pool = spy(DispatcherTestSupport.fePool(allocationFails ? List.of() : urls, cfg));
+        cfg.setBatchTimeoutMs(5000);
+        cfg.setFePoolServiceId(cfg.isPreAssignBe() ? "" : "e2e.fe.publish");
+        cfg.setSubBatch("size:" + chunkSize);
+        cfg.setSubBatchSpec(SubBatchSpec.parse(cfg.getSubBatch()));
+        connections = ConnectionProvider.builder("e2e").build();
+        DispatcherMetricsReporter metrics = DispatcherTestSupport.noopMetrics();
+        feClient = spy(new FeClient(WebClient.builder(), connections, cfg));
+        FanoutService fanout = new FanoutService(feClient, metrics, Schedulers.parallel());
+        when(workers.schedule(anyInt())).thenAnswer(call -> {
+            int count = call.getArgument(0);
+            List<BatchScheduleTarget> targets = new ArrayList<>();
+            for (int i = 0; i < count; i++) {
+                MockWebServer frontend = frontends.get(i % frontends.size());
+                BatchScheduleTarget target = BatchScheduleTarget.of(new WorkerHost("localhost", frontend.getPort()),
+                        RoleType.PDFUSION, lb.getWorkerRegistry().getEngineType());
+                targets.add(target);
+            }
+            return Mono.just(BatchScheduleResponse.success(targets));
+        });
+        StaticListableBeanFactory beans = new StaticListableBeanFactory();
+        beans.addBean("fePool", pool);
+        coordinator = spy(new BatchScheduleCoordinator(workers, mock(LBStatusConsistencyService.class),
+                WebClient.builder(), mock(EngineHealthReporter.class), beans.getBeanProvider(FePool.class),
+                DispatcherTestSupport.configService(lb)));
+        PassthroughClient passthrough = new PassthroughClient(WebClient.create(), pool, metrics, cfg);
+        BatchHandler handler = new BatchHandler(fanout, cfg, coordinator, passthrough, metrics, DispatcherTestSupport.configService(lb), Schedulers.immediate());
+        DispatchRouter router = new DispatchRouter(handler, passthrough);
+        // A real transport is required to exercise lazy DataBuffer bodies and their ownership.
+        server = HttpServer.create().port(0).handle(new ReactorHttpHandlerAdapter(RouterFunctions.toHttpHandler(router.routes()))).bindNow();
+        client = WebTestClient.bindToServer().baseUrl("http://localhost:" + server.port()).responseTimeout(Duration.ofSeconds(10)).build();
+    }
+
+    private byte[] send(String path, String json, int status) {
+        return client.post().uri("/dispatcher" + path).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(json.getBytes(StandardCharsets.UTF_8)).exchange().expectStatus().isEqualTo(status)
+                .expectBody().returnResult().getResponseBody();
+    }
+
+    private JSONObject post(String path, String json, int status) {
+        return JSON.parseObject(send(path, json, status));
+    }
+
+    private void reply(int frontend, int status, String body) {
+        MockResponse response = new MockResponse().setResponseCode(status == 0 ? 200 : status)
+                .setHeader("Content-Type", "application/json").setBody(body);
+        if (status == 0) {
+            response.setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY);
+        }
+        frontends.get(frontend).enqueue(response);
+    }
+
+    private JSONObject takeChunk(int frontend, String path, String field, int size) throws Exception {
+        RecordedRequest received = frontends.get(frontend).takeRequest(5, TimeUnit.SECONDS);
+        assertNotNull(received);
+        assertEquals("POST", received.getMethod());
+        assertEquals(path, received.getPath());
+        JSONObject body = JSON.parseObject(received.getBody().readUtf8());
+        assertEquals(size, body.getJSONArray(field).size());
+        return body;
+    }
+
+    private JSONArray preview(String path, String body, String mode, int count) {
+        JSONObject result = post("/_dryrun" + path, body, 200);
+        assertEquals(mode, result.getString("mode"));
+        assertEquals(count, result.getInteger("chunk_count"));
+        assertEquals(count, result.getJSONArray("chunks").size());
+        verifyNoInteractions(coordinator);
+        assertNoFeTraffic();
+        return result.getJSONArray("chunks");
+    }
+
+    private void assertNoFeTraffic() {
+        frontends.forEach(fe -> assertEquals(0, fe.getRequestCount()));
+    }
+}
