@@ -4,6 +4,7 @@ import gc
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
 from typing import Dict, List, Optional, Union
@@ -84,6 +85,32 @@ def _init_flashinfer_allreduce(
         single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
         disable_custom_all_reduce=disable_custom_all_reduce,
     )
+
+
+def _validate_tp_moe_chunking_config(parallelism_config: ParallelismConfig) -> None:
+    """Fail on all TP ranks before different chunk counts can enter NCCL."""
+    if (
+        torch.version.hip is not None
+        or parallelism_config.tp_size != 2
+        or parallelism_config.dp_size != 1
+    ):
+        return
+    # All ranks participate even when chunking is disabled locally. Checking
+    # only enabled ranks would itself deadlock when the environment differs.
+    local = tuple(
+        os.environ.get(name, default).strip().lower()
+        for name, default in (
+            ("MOE_TP_CHUNKS", "0"),
+            ("MOE_TP_CHUNK_MODE", "overlap"),
+            ("MOE_TP_CHUNK_MIN_TOKENS", "4096"),
+        )
+    )
+    configs = [None] * parallelism_config.tp_size
+    torch.distributed.all_gather_object(configs, local, group=_get_group(Group.TP))
+    if any(config != local for config in configs):
+        raise ValueError(
+            f"MoE TP chunk configuration differs across TP ranks: {configs}"
+        )
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -184,6 +211,7 @@ def init_distributed_environment(
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        _validate_tp_moe_chunking_config(parallelism_config)
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
         return
 
@@ -219,6 +247,7 @@ def init_distributed_environment(
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        _validate_tp_moe_chunking_config(parallelism_config)
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
         return
 
@@ -260,6 +289,7 @@ def init_distributed_environment(
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
+    _validate_tp_moe_chunking_config(parallelism_config)
     _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
 
 
@@ -760,6 +790,48 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     """
     process_group = _get_group(group)
     torch.distributed.broadcast(tensor, src, group=process_group)
+
+
+@dataclass
+class PendingAllReduce:
+    """Own a reduction's storage until its consumer stream has joined NCCL."""
+
+    tensor: torch.Tensor
+    work: torch.distributed.Work
+
+    def wait(self) -> torch.Tensor:
+        # Work.wait fences the *current* CUDA stream. Do not cache a Python
+        # "done" flag: a later consumer on another stream needs its own fence.
+        self.work.wait()
+        self.tensor.record_stream(torch.cuda.current_stream(self.tensor.device))
+        return self.tensor
+
+
+def all_reduce_async(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = True
+) -> PendingAllReduce:
+    """Enqueue an eager CUDA NCCL reduction without fencing the producer stream.
+
+    This deliberately bypasses custom all-reduce implementations, whose shared
+    workspaces do not expose an asynchronous ownership contract. The caller must
+    retain the handle and wait on the consumer stream before reading/reusing the
+    output. No device-wide synchronization or host completion wait is inserted.
+    """
+    if not tensor.is_cuda or torch.version.hip is not None:
+        raise ValueError("Asynchronous all-reduce requires a CUDA tensor and NCCL")
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("Asynchronous all-reduce does not support graph capture")
+    process_group = _get_group(group)
+    if torch.distributed.get_backend(process_group) != "nccl":
+        raise ValueError("Asynchronous all-reduce requires an NCCL process group")
+    target = tensor if inplace else tensor.clone()
+    work = torch.distributed.all_reduce(
+        target,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
+        async_op=True,
+    )
+    return PendingAllReduce(target, work)
 
 
 def all_reduce(
