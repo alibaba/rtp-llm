@@ -1,0 +1,21 @@
+{
+  "length": 65539,
+  "heads": 12,
+  "block_size": 4096,
+  "pages": 17,
+  "output": {
+    "max_abs": 0.0,
+    "mean_abs": 0.0,
+    "reference_abs_max": 0.006134033203125,
+    "all_finite": true,
+    "within_tolerance": true
+  },
+  "checkpoint_state": {
+    "max_abs": 0.0,
+    "mean_abs": 0.0,
+    "reference_abs_max": 0.060034289956092834,
+    "all_finite": true,
+    "within_tolerance": true
+  },
+  "passed": true
+}

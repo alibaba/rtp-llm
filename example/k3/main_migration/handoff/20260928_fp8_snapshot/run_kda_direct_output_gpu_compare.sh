@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-base=/data1/luohaocheng.lhc
+base=${K3_TASK_BASE:-/data1/luohaocheng.lhc}
 repo="$base/worktrees/rtp-llm-k3-fp8-opt-kda-packed-928-20260928"
 deps="$base/artifacts/k3-fp8-main-20260926"
 case_dir="$base/artifacts/k3-fp8-opt-20260927/kda-direct-output-tdd"
@@ -25,10 +25,20 @@ export DG_JIT_NVCC_COMPILER="$deps/nvcc-gcc13.sh"
 export DG_JIT_USE_NVRTC=0
 export KIMI_K3_CUTLASS_DSL_ROOT="$deps/cutlass-runtime-452"
 export CUTE_DSL_CACHE_DIR="$case_dir/cute-cache"
-mkdir -p "$CUTE_DSL_CACHE_DIR"
+export TRITON_CACHE_DIR="$case_dir/triton-cache"
+mkdir -p "$CUTE_DSL_CACHE_DIR" "$TRITON_CACHE_DIR"
 
 if [[ "${1:-}" == --check-import ]]; then
   python3 -c 'from cula.kda import chunk_kda; print(chunk_kda.__module__)'
+  exit
+fi
+
+if [[ "${1:-}" == --benchmark ]]; then
+  python3 "$case_dir/benchmark_kda_direct_output_gpu.py" \
+    --baseline "$case_dir/baseline.py" \
+    --candidate "$case_dir/native_kda.py" \
+    --output "$case_dir/benchmark-near-64k.json" \
+    --pages 17 --heads 12 --block-size 4096
   exit
 fi
 
