@@ -29,15 +29,14 @@ public final class RoleTypeProtoConverter {
         };
     }
 
-    /** Convert the domain role to the original RoleAddrPB field-1 enum. */
+    /** Convert the domain role to the RoleAddrPB field-1 enum. */
     public static EngineRpcService.RoleAddrPB.RoleType toLegacyProto(RoleType role) {
         return switch (role) {
             case PDFUSION -> EngineRpcService.RoleAddrPB.RoleType.PDFUSION;
             case PREFILL -> EngineRpcService.RoleAddrPB.RoleType.PREFILL;
             case DECODE -> EngineRpcService.RoleAddrPB.RoleType.DECODE;
             case VIT -> EngineRpcService.RoleAddrPB.RoleType.VIT;
-            case ENCODER -> throw new IllegalArgumentException(
-                    "Encoder has no legacy RoleAddrPB enum value");
+            case ENCODER -> EngineRpcService.RoleAddrPB.RoleType.ENCODER;
             case FRONTEND -> EngineRpcService.RoleAddrPB.RoleType.FRONTEND;
         };
     }
@@ -95,6 +94,7 @@ public final class RoleTypeProtoConverter {
             case DECODE -> RoleType.DECODE;
             case VIT -> RoleType.VIT;
             case FRONTEND -> RoleType.FRONTEND;
+            case ENCODER -> RoleType.ENCODER;
             case UNRECOGNIZED -> throw new IllegalArgumentException("unknown legacy RoleAddrPB role: " + role);
         };
     }

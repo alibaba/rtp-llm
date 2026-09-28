@@ -30,6 +30,7 @@
 - 当前使用流程是先单独请求 Encoder，处理完后再请求 Generation；已有 Generation 路径为 Prefill、Prefill + Decode、PDFusion。文档和 Javadoc 说明该流程，不新增角色组合白名单，也不对混合 Encoder/Generation 请求显式抛异常。
 - 无 `schedule_roles` 时仍按协议尝试所有已配置角色；不为混合阶段调用承诺额外的端到端语义。
 - DashLLM 的 `flexlb-batch-qwen-3-8-flash-multimodal` 分支已有 Encoder 场景的 WorkerStatus 负载和任务测试。本次对齐后，PAI-vLLM EPD 的 `is_vit_node` 上报 `RoleType.ENCODER`；WorkerStatus 的 `RoleTypePB` 新增 `ROLE_TYPE_ENCODER = 5`，字符串与 typed enum 一致。RTP-LLM 的 VIT 仍是独立角色。
+- `RoleAddrPB.RoleType` 在现有 0-4 值后追加 `ENCODER=5`，Java 转换器可对 Encoder 双写枚举和 `role_str`；现有角色的 wire 编号保持不变。RTP-LLM C++ 当前只消费原有角色，Encoder 地址仍只由支持该枚举的客户端消费。
 
 ## Open Questions
 
@@ -69,6 +70,7 @@
 - 2026-09-28: 按用户确认的 PAI-vLLM EPD 角色语义，追加 `ROLE_TYPE_ENCODER = 5`，并让 DashLLM 的 Encoder 节点双写一致的字符串和 typed enum；FlexLB 转换器与跨语言 wire 测试同步更新。
 - 2026-09-28: 按 DashLLM Encoder 容量语义允许 `available_kv_cache = 0` 入围，继续过滤负数；保留并发优先、可用 KV cache 并列决胜。
 - 2026-09-28: 对齐 Prefill DIRECT 生命周期，将 Encoder 端点接管与成功响应发布拆开；两者分别推进 `DISPATCHING` 和 `ACKNOWLEDGED`，并验证中间取消不会发布成功响应。
+- 2026-09-28: 应用户要求，补齐 `RoleAddrPB.RoleType.ENCODER=5` 与 Java 双向转换；验证现有角色 wire 编号不变及 Encoder 新值往返。
 
 ## Validation
 
@@ -80,6 +82,7 @@
 - 核心目标是否已由证据证明完成：FlexLB 内部行为及 DashLLM Encoder role wire 对齐已由自动化测试证明；真实跨仓库端到端行为仍待部署验证。
 - 若未完成，当前剩余差距：真实部署验证。
 - 剩余风险：旧版 FlexLB 不识别 typed enum 5，部署时应先升级 FlexLB；真实 Encoder 节点的选点与生命周期仍需部署验证。
+- `RoleAddrPB` 后续补齐：先观察到 Encoder 转换测试因缺少枚举而失败；追加 `ENCODER=5` 后，定向 `RoleAddrProtocolCompatibilityTest`、全量 `./mvnw test`、全仓 `./mvnw spotless:check -Pspotless-check` 与 `git diff --check` 均通过。旧角色 0-4 的编号有固定值断言；旧版读取器仍不能消费新的 Encoder 地址。
 
 ## Resume / Handoff
 
