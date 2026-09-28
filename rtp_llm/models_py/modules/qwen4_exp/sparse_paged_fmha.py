@@ -19,6 +19,65 @@ import triton.language as tl
 _BLOCK_K = 64
 
 
+def _validate_sparse_paged_indices(
+    block_table: torch.Tensor,
+    kv_lens: torch.Tensor,
+    selected: torch.Tensor,
+    *,
+    page_size: int,
+    cache_blocks: int,
+) -> None:
+    """Check paged reads with one device-to-host verdict on valid inputs."""
+    table_width = int(block_table.shape[1])
+    invalid_lengths = (kv_lens < 0) | (kv_lens > table_width * page_size)
+    invalid_pool = block_table >= cache_blocks
+    if selected.numel():
+        invalid_negative = selected < -1
+        invalid_visible = (selected >= 0) & (
+            selected >= kv_lens.unsqueeze(-1)
+        )
+        logical_blocks = torch.clamp_min(selected, 0) // page_size
+        invalid_logical = logical_blocks >= table_width
+        # An invalid selected index must never reach gather before its error
+        # is reported. Clamp only the lookup; invalid_logical retains the
+        # original value for the verdict and the diagnostic below.
+        safe_logical_blocks = logical_blocks.clamp(max=table_width - 1)
+        physical = torch.gather(
+            block_table.unsqueeze(1).expand(-1, selected.shape[1], -1),
+            2,
+            safe_logical_blocks.to(torch.long),
+        )
+        invalid_missing = (selected >= 0) & (physical <= 0)
+        invalid_selection = (
+            invalid_negative | invalid_visible | invalid_logical | invalid_missing
+        )
+        failed = (
+            invalid_lengths.any() | invalid_pool.any() | invalid_selection.any()
+        )
+    else:
+        failed = invalid_lengths.any() | invalid_pool.any()
+    if not bool(failed.item()):
+        return
+
+    # Error paths may synchronize again to preserve the existing specific
+    # diagnostics. No main-cache write has happened at this point.
+    if bool(invalid_lengths.any().item()):
+        raise ValueError("kv_lens exceed the block-table token capacity")
+    if selected.numel():
+        if bool(invalid_negative.any().item()):
+            raise ValueError("selected indices may only use -1 as padding")
+        if bool(invalid_visible.any().item()):
+            raise ValueError("selected contains an index outside its row's kv_len")
+        if bool(invalid_logical.any().item()):
+            raise ValueError("selected index exceeds the block-table width")
+        if bool(invalid_missing.any().item()):
+            raise ValueError("selected index resolves to an unallocated cache block")
+    max_physical = int(block_table.max().item())
+    raise ValueError(
+        f"block table physical id {max_physical} exceeds cache blocks {cache_blocks}"
+    )
+
+
 @triton.jit
 def _sparse_paged_gqa_kernel(
     q_ptr,
@@ -260,31 +319,9 @@ def sparse_paged_gqa_attn(
         )
     if int(block_table.shape[1]) == 0:
         raise ValueError("block_table must contain at least one logical block")
-    if bool(torch.any(kv_lens < 0).item()) or bool(
-        torch.any(kv_lens > int(block_table.shape[1]) * page_size).item()
-    ):
-        raise ValueError("kv_lens exceed the block-table token capacity")
-    if selected.numel():
-        if int(selected.min().item()) < -1:
-            raise ValueError("selected indices may only use -1 as padding")
-        invalid_visible = (selected >= 0) & (selected >= kv_lens.unsqueeze(-1))
-        if bool(invalid_visible.any().item()):
-            raise ValueError("selected contains an index outside its row's kv_len")
-        logical_blocks = torch.clamp_min(selected, 0) // page_size
-        if int(logical_blocks.max().item()) >= int(block_table.shape[1]):
-            raise ValueError("selected index exceeds the block-table width")
-        physical = torch.gather(
-            block_table.unsqueeze(1).expand(batch, query_len, -1),
-            2,
-            logical_blocks.to(torch.long),
-        )
-        if bool(((selected >= 0) & (physical <= 0)).any().item()):
-            raise ValueError("selected index resolves to an unallocated cache block")
-    max_physical = int(block_table.max().item()) if block_table.numel() else 0
-    if max_physical >= cache_blocks:
-        raise ValueError(
-            f"block table physical id {max_physical} exceeds cache blocks {cache_blocks}"
-        )
+    _validate_sparse_paged_indices(
+        block_table, kv_lens, selected, page_size=page_size, cache_blocks=cache_blocks
+    )
 
     q = q.contiguous()
     block_table = block_table.contiguous()
