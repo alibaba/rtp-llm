@@ -26,8 +26,6 @@ public class MetricConstant {
 
     public static final String ENGINE_STATUS_VISITOR_RT = "app.engine.health.check.visitor.rt";
 
-    public static final String ENGINE_STATUS_VISITOR_SUCCESS_QPS = "app.engine.health.check.visitor.success.qps";
-
     /**
      * Engine status check failure information
      */
