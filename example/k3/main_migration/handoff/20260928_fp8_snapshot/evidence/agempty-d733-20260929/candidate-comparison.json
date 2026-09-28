@@ -1,0 +1,49 @@
+{
+  "model_layers": 4,
+  "input_tokens": 65536,
+  "fixed_input_sha256": "97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee",
+  "host_pair": [
+    "111",
+    "112"
+  ],
+  "gpu_span_method": "median over matched requests of maximum rank GPU kernel span",
+  "module_time_caveat": "cumulative kernel durations may overlap across streams",
+  "runs": {
+    "integrated_before": {
+      "matched_requests": 7,
+      "median_max_rank_gpu_span_ms": {
+        "prefill": 137.27209765625,
+        "target": 73.5930009765625,
+        "draft": 63.8179228515625
+      },
+      "attention_input_all_gather": {
+        "median_per_request_max_rank_cumulative_ms": 6.665406,
+        "median_per_request_max_rank_fill_ms": 0.950284,
+        "fill_symbol_occurrences_all_matched_rank_layers": 224
+      }
+    },
+    "candidate": {
+      "matched_requests": 7,
+      "median_max_rank_gpu_span_ms": {
+        "prefill": 135.7220224609375,
+        "target": 72.61731640625,
+        "draft": 63.479521484375
+      },
+      "attention_input_all_gather": {
+        "median_per_request_max_rank_cumulative_ms": 5.472668,
+        "median_per_request_max_rank_fill_ms": 0,
+        "fill_symbol_occurrences_all_matched_rank_layers": 0
+      }
+    },
+    "feat_reference": {
+      "matched_requests": 7,
+      "median_max_rank_gpu_span_ms": {
+        "prefill": 135.265513671875,
+        "target": 71.556421875,
+        "draft": 62.564177734375
+      }
+    }
+  },
+  "target_delta_candidate_minus_before_ms": -0.9756845703124952,
+  "target_gap_candidate_minus_feat_ms": 1.0608945312499998
+}

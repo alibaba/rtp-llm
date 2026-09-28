@@ -49,7 +49,7 @@ case "$mode" in
       --max-tokens 8 --warmups 10 --max-extra-warmups 4 --timeout 300 \
       --warmup-stability-field http \
       --profile-prefill --profile-steps 16 --profile-requests 16 \
-      --trace-name k3_64k_integrated_agempty_d733_r1 --no-reuse-cache \
+      --trace-name k3_64k_integrated_kda47b_r2 --no-reuse-cache \
       --disable-thinking > "$out/stdout.log" 2>&1
     ;;
   *) echo 'usage: run_ag_empty_d733_checks_111112_r1.sh flow|timeline' >&2; exit 2 ;;
