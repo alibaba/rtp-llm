@@ -35,6 +35,7 @@ class PackedCulaPrefillTest(unittest.TestCase):
         )
         sequence = NATIVE_KDA.StateSequence(None, segments)
         calls = []
+        cula_output_ptrs = []
 
         def cula(q_arg, k_arg, v_arg, g_arg, beta_arg, **kwargs):
             calls.append((q_arg.shape[1], kwargs["checkpoint_states"].shape[1]))
@@ -45,7 +46,9 @@ class PackedCulaPrefillTest(unittest.TestCase):
                 self.assertTrue(torch.count_nonzero(kwargs["initial_state"]) == 0)
             for page, checkpoint in enumerate(kwargs["checkpoint_states"][0]):
                 checkpoint.fill_(page + 1)
-            return v_arg, None, kwargs["checkpoint_states"]
+            cula_output = v_arg.clone()
+            cula_output_ptrs.append(cula_output[0].data_ptr())
+            return cula_output, None, kwargs["checkpoint_states"]
 
         output = NATIVE_KDA._cula_paged_prefill(
             cula, q, k, v, g, beta,
@@ -54,6 +57,7 @@ class PackedCulaPrefillTest(unittest.TestCase):
         )
         self.assertEqual(calls, [(length, len(segments))])
         self.assertTrue(torch.equal(output, v))
+        self.assertEqual(output.data_ptr(), cula_output_ptrs[0])
         for page in range(7):
             self.assertTrue(torch.all(state_cache[page + 1] == page + 1))
 
@@ -82,6 +86,22 @@ class PackedCulaPrefillTest(unittest.TestCase):
             cache, (NATIVE_KDA.StateSequence(1, segments),), block_size,
         )
         self.assertEqual(calls, [(3, 1), (256, 4), (64, 1)])
+
+    def test_virtual_request_keeps_zero_output(self):
+        shape = (64, 1, 128)
+        inputs = [torch.ones(shape, dtype=torch.bfloat16) for _ in range(4)]
+        beta = torch.zeros((64, 1), dtype=torch.bfloat16)
+        cache = torch.zeros((2, 1, 128, 128), dtype=torch.float32)
+
+        def unused_cula(*args, **kwargs):
+            self.fail("virtual KDA request must not enter cuLA")
+
+        output = NATIVE_KDA._cula_paged_prefill(
+            unused_cula, *inputs, beta, torch.zeros(1), torch.zeros(1), -5.0,
+            cache, (NATIVE_KDA.StateSequence(None, ()),), 64,
+        )
+        self.assertEqual(output.shape, shape)
+        self.assertEqual(torch.count_nonzero(output), 0)
 
 
 if __name__ == "__main__":

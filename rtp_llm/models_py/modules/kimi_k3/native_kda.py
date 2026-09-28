@@ -38,7 +38,7 @@ def _cula_paged_prefill(
     if block_size % 64:
         raise ValueError("cuLA KDA checkpoint span must be a multiple of 64")
     heads = q.shape[1]
-    output = torch.zeros_like(v)
+    output = None
     for sequence in sequences:
         segments = sequence.segments
         if not segments:
@@ -94,12 +94,19 @@ def _cula_paged_prefill(
                 )
             if final is not None or published is None or published.data_ptr() != checkpoints.data_ptr():
                 raise RuntimeError("cuLA did not publish the requested FP32 KDA checkpoints")
-            output[start:end].copy_(values[0].to(q.dtype))
+            if packed:
+                # The sole group covers every token, so cuLA's result is the
+                # final output; no zero-fill or second full-tensor copy is needed.
+                output = values[0].to(q.dtype)
+            else:
+                if output is None:
+                    output = torch.zeros_like(v)
+                output[start:end].copy_(values[0].to(q.dtype))
             for index, segment in enumerate(group):
                 if segment.cache_block > 0:
                     cache_states[segment.cache_block].copy_(checkpoints[0, index])
             state = checkpoints[:, -1].contiguous()
-    return output
+    return torch.zeros_like(v) if output is None else output
 
 
 @dataclass(frozen=True)
