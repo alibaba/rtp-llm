@@ -49,6 +49,22 @@ class Bert(BaseModel):
     def support_cuda_graph(self) -> bool:
         return True
 
+    def _new_loader_unsupported_reason(
+        self, *, skip_python_model: bool = False
+    ) -> Optional[str]:
+        reason = super()._new_loader_unsupported_reason(
+            skip_python_model=skip_python_model
+        )
+        if reason is not None:
+            return reason
+        configured_quantization = self.model_config.quantization or ""
+        if (
+            self.model_config.quant_config is not None
+            or configured_quantization.strip().lower() not in ("", "none")
+        ):
+            return "BERT/RoBERTa NewLoader supports unquantized checkpoints only"
+        return None
+
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.bert import BertModel
 

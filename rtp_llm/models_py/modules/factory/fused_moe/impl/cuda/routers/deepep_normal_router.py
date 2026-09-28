@@ -267,7 +267,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
     def _do_quant_fp8_per_token(
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        a1, a1_scale = scaled_fp8_per_token_quant(a1, None)
+        a1, a1_scale = scaled_fp8_per_token_quant(a1)
         assert a1.shape[1] % 128 == 0
         a1_scale = a1_scale.repeat(1, a1.shape[1] // 128)
         return a1, a1_scale

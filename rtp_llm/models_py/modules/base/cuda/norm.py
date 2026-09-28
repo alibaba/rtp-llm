@@ -1,6 +1,5 @@
 from typing import Optional, Tuple
 
-import flashinfer
 import torch
 from torch import nn
 
@@ -92,6 +91,12 @@ class FusedQKRMSNorm(nn.Module):
         enable_pdl: bool = False,
     ):
         super().__init__()
+        # The module is shared by CUDA/ROCm import graphs, while this class is
+        # CUDA-only. Resolve FlashInfer once when the CUDA implementation is
+        # actually constructed instead of importing it globally or per token.
+        import flashinfer
+
+        self._rmsnorm = flashinfer.norm.rmsnorm
         self.q_weight = q_weight
         self.k_weight = k_weight
         self.eps = eps
@@ -110,12 +115,8 @@ class FusedQKRMSNorm(nn.Module):
         )
         q = qkv[:, : self.head_num, :]
         k = qkv[:, self.head_num : self.head_num + self.kv_head_num, :]
-        flashinfer.norm.rmsnorm(
-            q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl
-        )
-        flashinfer.norm.rmsnorm(
-            k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl
-        )
+        self._rmsnorm(q, self.q_weight, eps=self.eps, out=q, enable_pdl=self.enable_pdl)
+        self._rmsnorm(k, self.k_weight, eps=self.eps, out=k, enable_pdl=self.enable_pdl)
         return qkv.reshape(m, n)
 
 

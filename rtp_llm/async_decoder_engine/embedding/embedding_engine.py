@@ -55,6 +55,7 @@ class EmbeddingCppEngine(BaseEngine):
                     engine_config=self.engine_config,
                     vit_config=self.model.vit_config,
                     device=f"cuda:{self.engine_config.parallelism_config.local_rank}",
+                    resolved_use_new_loader=self.model.uses_new_loader,
                 )
             )
         self.cpp_engine.init(

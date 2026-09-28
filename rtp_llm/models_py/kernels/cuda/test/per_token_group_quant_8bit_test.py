@@ -281,7 +281,7 @@ class PerTokenGroupQuantTest(TestCase):
     NUM_TOKENS = [127]
     HIDDEN_DIMS = [256]
     GROUP_SIZES = [8]
-    DST_DTYPES = [fp8_type_]
+    DST_DTYPES = [torch.int8, fp8_type_]
     COLUMN_MAJOR_SCALES = [False]
     SCALE_TMA_ALIGNED = [False]
 
@@ -324,33 +324,33 @@ class PerTokenGroupQuantTest(TestCase):
             column_major_scales=column_major_scales,
             scale_tma_aligned=scale_tma_aligned,
         )
-        # Compare, do not just print. This target runs on L20 rather than A10
-        # precisely so the Triton reference above can execute (it stores fp8e4nv,
-        # which Triton only permits at capability >= 89), and printing both
-        # results meant the reference cost a GPU slot while gating nothing -- the
-        # two could disagree completely and the test would still pass.
-        #
-        # Quantized values are compared to within one fp8 ULP, not exactly. Both
-        # paths round the same fp16 input to the same fp8 grid with a per-group
-        # scale that agrees to the tolerance asserted below, but they are
-        # independent implementations and round half-way cases at the grid
-        # boundary differently. That shows up as a data-dependent handful of
-        # elements off by a single code (observed greatest relative difference
-        # 0.125, i.e. exactly one e4m3 mantissa step), so an exact comparison is
-        # flaky across GPU archs while a >= 2 ULP disagreement is still caught.
-        # finfo.eps is one mantissa step; finfo.tiny*eps is one subnormal step,
-        # which bounds the near-zero region where the relative term vanishes.
-        q_finfo = torch.finfo(dst_dtype)
-        torch.testing.assert_close(
-            x_q_sglang.to(torch.float32),
-            x_q_triton.to(torch.float32),
-            rtol=q_finfo.eps,
-            atol=q_finfo.tiny * q_finfo.eps,
-            msg=lambda m: (
-                "quantized values differ from the Triton reference by more "
-                f"than one fp8 ULP: {m}"
-            ),
-        )
+        self.assertEqual(x_q_triton.shape, x.shape)
+        self.assertEqual(x_q_sglang.shape, x.shape)
+        self.assertEqual(x_q_triton.dtype, dst_dtype)
+        self.assertEqual(x_q_sglang.dtype, dst_dtype)
+        self.assertEqual(x_s_triton.shape, x_s_sglang.shape)
+        self.assertEqual(x_s_triton.dtype, torch.float32)
+        self.assertEqual(x_s_sglang.dtype, torch.float32)
+
+        # The independent kernels can round halfway values to adjacent codes.
+        # Permit one integer code for INT8 and one FP8 ULP, while the independent
+        # scale and dequantization checks below still catch material drift.
+        if dst_dtype == torch.int8:
+            torch.testing.assert_close(
+                x_q_triton.float(), x_q_sglang.float(), rtol=0, atol=1
+            )
+        else:
+            q_finfo = torch.finfo(dst_dtype)
+            torch.testing.assert_close(
+                x_q_sglang.to(torch.float32),
+                x_q_triton.to(torch.float32),
+                rtol=q_finfo.eps,
+                atol=q_finfo.tiny * q_finfo.eps,
+                msg=lambda m: (
+                    "quantized values differ from the Triton reference by more "
+                    f"than one FP8 ULP: {m}"
+                ),
+            )
         torch.testing.assert_close(
             x_s_sglang.to(torch.float32),
             x_s_triton.to(torch.float32),
@@ -358,6 +358,9 @@ class PerTokenGroupQuantTest(TestCase):
             atol=1e-8,
             msg=lambda m: f"scales differ from the Triton reference: {m}",
         )
+        expanded_scale = x_s_triton.repeat_interleave(group_size, dim=-1)
+        dequantized = x_q_triton.float() * expanded_scale
+        torch.testing.assert_close(dequantized, x.float(), rtol=0.13, atol=0.02)
 
     def test_per_token_group_quant(self):
         for params in itertools.product(
@@ -419,6 +422,40 @@ class PerTokenGroupQuantTest(TestCase):
         self.assertEqual(x_q.dtype, fp8_type_)
         self.assertEqual(x_s.shape[0], num_tokens)
         self.assertTrue(torch.all(x_q[-1] == 0).item())
+
+    def test_int8_zero_negative_saturation_and_scale_shape(self):
+        x = torch.tensor(
+            [
+                [0.0] * 8,
+                [-1000.0, 1000.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=torch.float16,
+            device="cuda",
+        )
+        triton_q, triton_scale = triton_per_token_group_quant_8bit(
+            x,
+            group_size=8,
+            eps=1e-10,
+            dtype=torch.int8,
+            column_major_scales=False,
+            scale_tma_aligned=False,
+        )
+        native_q, native_scale = sglang_per_token_group_quant_8bit(
+            x,
+            group_size=8,
+            eps=1e-10,
+            dtype=torch.int8,
+            column_major_scales=False,
+            scale_tma_aligned=False,
+        )
+
+        self.assertEqual(triton_scale.shape, (2, 1))
+        self.assertEqual(native_scale.shape, (2, 1))
+        self.assertTrue(torch.equal(triton_q[0], torch.zeros_like(triton_q[0])))
+        self.assertEqual(triton_q[1, 0].item(), torch.iinfo(torch.int8).min + 1)
+        self.assertEqual(triton_q[1, 1].item(), torch.iinfo(torch.int8).max)
+        torch.testing.assert_close(triton_scale, native_scale, rtol=1e-5, atol=1e-7)
+        self.assertTrue(torch.equal(triton_q, native_q))
 
 
 if __name__ == "__main__":

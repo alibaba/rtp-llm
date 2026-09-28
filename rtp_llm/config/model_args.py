@@ -30,6 +30,8 @@ class ModelArgs:
         "phy2log_path",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
+        "use_new_loader",
+        "require_weight_update",
     ]
 
     def __init__(self):
@@ -61,3 +63,8 @@ class ModelArgs:
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
         self.enable_output_vocab_pruning: bool = False
+        # None selects the model registry default; bool is an explicit override.
+        self.use_new_loader: Optional[bool] = None
+        # None means the deployment has not declared whether UpdateWeights is
+        # required.  Automatic NewLoader routing requires an explicit choice.
+        self.require_weight_update: Optional[bool] = None

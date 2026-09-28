@@ -4,6 +4,22 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "deepgemm_wrapper_lazy_test",
+    srcs = ["deepgemm_wrapper_lazy_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "fp8_quant_regression_test",
+    srcs = ["fp8_quant_regression_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+)
 
 py_test (
     name = "per_token_group_quant_8bit_test",
@@ -12,7 +28,7 @@ py_test (
     # Not sm90-bound: the op under test has an sm86 cubin, but the in-test Triton
     # reference stores fp8e4nv, which Triton only allows at capability >= 89.
     # A10 (sm86) would hard-fail, so this runs on L20 (sm89) instead of H20.
-    tags = ["open_skip", "L20"],
+    tags = ["L20"],
     exec_properties = {'gpu':'L20'},
 )
 

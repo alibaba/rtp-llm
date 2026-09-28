@@ -21,10 +21,20 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
         "@local_config_cuda//cuda:cublas_headers",
-        "@local_config_cuda//cuda:cuda_driver",
         "@local_config_cuda//cuda:nvml",
-    ],
-    copts = copts(),
+    ] + select({
+        # The PPU cuda_driver stub additionally links nvToolsExt, which is not
+        # shipped in the PPU image. cuda_host_utils uses numeric CUresult
+        # diagnostics on PPU, so it does not need the driver library.
+        "@//:using_ppu": [],
+        "//conditions:default": ["@local_config_cuda//cuda:cuda_driver"],
+    }),
+    copts = copts() + select({
+        # Keep preprocessing and driver linkage controlled by the same PPU
+        # condition so cuGetErrorName cannot survive after cuda_driver is removed.
+        "@//:using_ppu": ["-DUSE_PPU=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

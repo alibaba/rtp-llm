@@ -1,18 +1,36 @@
 """Configuration resolver tests"""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import torch
+
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, Fp8PerTensorQuantConfig
 from rtp_llm.device.device_type import DeviceType
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPMode,
+    DeepEPWrapper,
+    DeepepWrapperConfig,
+    init_deepep_wrapper,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
+    DeepEpLowLatencyRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig
+from rtp_llm.models_py.quant_methods.base import (
+    QuantizationConfig as RuntimeQuantizationConfig,
+)
+from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig, SpeculativeType
 
 
 def create_config_adapter(
@@ -28,6 +46,8 @@ def create_config_adapter(
     model_config = ModelConfig()
     model_config.hidden_size = 1024
     model_config.expert_num = 8
+    model_config.num_layers = 1
+    model_config.moe_layer_index = [0]
     model_config.moe_k = 2
     model_config.data_type = data_type
     model_config.quant_config = quant_config
@@ -53,6 +73,7 @@ def create_config_adapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
+        quant_config=quant_config,
     )
 
 
@@ -93,6 +114,258 @@ class TestMoeConfigResolver(unittest.TestCase):
         quant_config = Fp8BlockWiseQuantConfig()
         config = create_config_adapter(quant_config=quant_config)
         self.assertEqual(self.resolver.get_quant_method(config), "FP8_PER_BLOCK")
+
+    def test_get_quant_method_normalizes_online_fp8_for_execution(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=False)
+        config = create_config_adapter(quant_config=quant_config)
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config), "FP8_DYNAMIC_PER_TENSOR"
+        )
+
+    def test_get_quant_method_normalizes_prequantized_fp8_for_execution(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=True)
+        config = create_config_adapter(quant_config=quant_config)
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config), "FP8_DYNAMIC_PER_TENSOR"
+        )
+
+    def test_fp8_moe_and_deepep_low_latency_share_runtime_method(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=True)
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=quant_config,
+            use_deepep_low_latency=True,
+        )
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config),
+            quant_config.get_moe_runtime_method_key(),
+        )
+        self.assertEqual(
+            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+                17, 2, quant_config
+            ),
+            16,
+        )
+
+    def test_ignored_fp8_moe_layer_uses_process_wide_deepep_capacity(self):
+        quant_config = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=["model.layers.0.mlp"],
+        )
+        ignored_layer = create_config_adapter(
+            ep_size=2,
+            quant_config=None,
+            use_deepep_low_latency=True,
+        )
+        ignored_layer.model_config.quant_config = quant_config
+
+        quantized_capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+            17, 2, quant_config
+        )
+        unquantized_capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+            17, 2, None
+        )
+        process_capacity = (
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+                17,
+                2,
+                ignored_layer.model_config.quant_config,
+                ignored_layer.model_config,
+            )
+        )
+
+        self.assertEqual(quantized_capacity, 16)
+        self.assertEqual(unquantized_capacity, 64)
+        self.assertEqual(process_capacity, unquantized_capacity)
+        self.assertFalse(self.resolver.has_quantization(ignored_layer))
+        self.assertIsNone(ignored_layer.moe_quant_method)
+
+    def test_non_moe_exclusion_keeps_quantized_deepep_capacity(self):
+        quant_config = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=["model.layers.0.self_attn.o_proj", "lm_head"],
+        )
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=quant_config,
+            use_deepep_low_latency=True,
+        )
+
+        capacity = DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+            17,
+            2,
+            quant_config,
+            config.model_config,
+        )
+
+        self.assertEqual(capacity, 16)
+
+    def test_kimi_block_sparse_exclusion_expands_deepep_capacity(self):
+        quant_config = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=["model.layers.0.block_sparse_moe.experts"],
+        )
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=quant_config,
+            use_deepep_low_latency=True,
+        )
+        config.model_config.model_type = "kimi_linear"
+
+        self.assertEqual(
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+                17, 2, quant_config, config.model_config
+            ),
+            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(17, 2, None),
+        )
+
+    def test_fused_gate_up_exclusion_matches_both_logical_projections(self):
+        prefix = "layers.0.mlp.experts"
+        ignored_layers = [
+            f"{prefix}.gate_up_proj",
+            f"{prefix}.down_proj",
+        ]
+        checkpoint_quant = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=ignored_layers,
+        )
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=checkpoint_quant,
+            use_deepep_low_latency=True,
+        )
+        runtime_quant = RuntimeQuantizationConfig(
+            "FP8_DYNAMIC_PER_TENSOR",
+            source_config=checkpoint_quant,
+        )
+        layer = SimpleNamespace(PROJ_NAMES=("gate_proj", "up_proj", "down_proj"))
+
+        self.assertTrue(runtime_quant.is_moe_layer_ignored(layer, prefix))
+        self.assertEqual(
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+                17,
+                2,
+                checkpoint_quant,
+                config.model_config,
+            ),
+            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(17, 2, None),
+        )
+
+    def test_partial_fused_gate_up_exclusion_is_rejected(self):
+        prefix = "layers.0.mlp.experts"
+        checkpoint_quant = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=[f"{prefix}.gate_up_proj"],
+        )
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=checkpoint_quant,
+            use_deepep_low_latency=True,
+        )
+        runtime_quant = RuntimeQuantizationConfig(
+            "FP8_DYNAMIC_PER_TENSOR",
+            source_config=checkpoint_quant,
+        )
+        layer = SimpleNamespace(PROJ_NAMES=("gate_proj", "up_proj", "down_proj"))
+
+        with self.assertRaisesRegex(ValueError, "partially match fused MoE"):
+            runtime_quant.is_moe_layer_ignored(layer, prefix)
+        with self.assertRaisesRegex(ValueError, "partially match fused MoE"):
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+                17,
+                2,
+                checkpoint_quant,
+                config.model_config,
+            )
+
+    def test_deepep_low_latency_capacity_matches_dispatch_partition_under_cp(self):
+        config = create_config_adapter(
+            ep_size=2,
+            tp_size=4,
+            use_deepep_low_latency=True,
+            cp_enabled=True,
+        )
+        self.assertEqual(config.tp_size, 1)
+        self.assertEqual(config.parallelism_config.tp_size, 4)
+
+        wrapper = SimpleNamespace(
+            mode=DeepEPMode.LOW_LATENCY,
+            buffer=object(),
+            num_topk=config.moe_k,
+            ll_num_max_token_per_rank=64,
+            use_accl_ep=False,
+        )
+        with (
+            patch.object(
+                DeepepWrapperConfig,
+                "calc_model_low_latency_max_token_per_rank",
+                return_value=64,
+            ) as calc_capacity,
+            patch.object(
+                DeepepWrapperConfig,
+                "from_config_adapter",
+                return_value=object(),
+            ),
+            patch.object(DeepEPWrapper, "get_instance", return_value=wrapper),
+        ):
+            router = DeepEpLowLatencyRouter(config, FusedMoEQuantConfig())
+
+        calc_capacity.assert_called_once_with(
+            config.ll_num_max_token,
+            1,
+            config.model_config.quant_config,
+            config.model_config,
+        )
+        tokens = torch.arange(24).reshape(6, 4)
+        topk_ids = torch.zeros((6, 2), dtype=torch.int64)
+        topk_weights = torch.ones((6, 2))
+        sliced_tokens, sliced_ids, sliced_weights = router._prepare_pre_tp_slice(
+            tokens, topk_ids, topk_weights
+        )
+        self.assertEqual(sliced_tokens.shape[0], 6)
+        self.assertEqual(sliced_ids.shape[0], 6)
+        self.assertEqual(sliced_weights.shape[0], 6)
+
+    def test_process_deepep_capacity_matches_cp_router_partition(self):
+        config = create_config_adapter(
+            ep_size=2,
+            tp_size=4,
+            use_deepep_low_latency=True,
+            cp_enabled=True,
+        )
+        engine_config = SimpleNamespace(
+            parallelism_config=config.parallelism_config,
+            moe_config=config.moe_config,
+            hw_kernel_config=None,
+            runtime_config=SimpleNamespace(max_generate_batch_size=128),
+            sp_config=SimpleNamespace(type=SpeculativeType.NONE),
+        )
+
+        with (
+            patch.object(DeepEPWrapper, "supported", return_value=True),
+            patch.object(
+                DeepepWrapperConfig,
+                "calc_model_low_latency_max_token_per_rank",
+                return_value=128,
+            ) as calc_capacity,
+            patch.object(
+                DeepepWrapperConfig,
+                "from_config_adapter",
+                return_value=object(),
+            ),
+            patch.object(DeepEPWrapper, "create"),
+        ):
+            init_deepep_wrapper(engine_config, config.model_config)
+
+        calc_capacity.assert_called_once_with(
+            128,
+            1,
+            config.model_config.quant_config,
+            config.model_config,
+        )
 
     def test_is_bf16_false(self):
         """Test is_bf16 returns False for fp16"""

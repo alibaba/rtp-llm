@@ -35,7 +35,7 @@ class MoeConfigResolver:
         Returns:
             Whether quantization is enabled
         """
-        return config.model_config.quant_config is not None
+        return config.quant_config is not None
 
     @staticmethod
     def is_bf16(config: MoEConfigAdapter) -> bool:
@@ -59,9 +59,9 @@ class MoeConfigResolver:
         Returns:
             Quantization method name, or None if quantization is not enabled
         """
-        if config.model_config.quant_config is None:
+        if config.quant_config is None:
             return None
-        return config.model_config.quant_config.get_method()
+        return config.quant_config.get_moe_runtime_method_key()
 
     @staticmethod
     def is_ep_enabled(config: MoEConfigAdapter) -> bool:
@@ -127,8 +127,7 @@ class MoeConfigResolver:
         Pure TP mode requires ep_size == 1 and dp_size == 1, meaning each
         rank holds all experts without EP/DP splitting. This covers both
         single-GPU (tp=1) and multi-GPU pure-TP (tp>1) scenarios. This
-        aligns with the weight-splitting condition (moe_pure_tp_mode) in
-        model_weight_info.py.
+        matches the runtime weight layout used by the fused MoE executor.
 
         Args:
             config: MOE configuration adapter

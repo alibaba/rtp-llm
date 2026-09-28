@@ -4,6 +4,8 @@ This module provides a unified interface for DeepEP initialization and managemen
 combining the functionality of the previous DeepEPInitializer and DeepEPWrapper classes.
 """
 
+from __future__ import annotations
+
 import gc
 import logging
 import os
@@ -11,17 +13,9 @@ import platform
 import threading
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-
-try:
-    from deep_ep import Buffer as DeepEPBuffer
-    from deep_ep import Config as DeepEPConfig
-except ImportError:
-    DeepEPBuffer = None  # type: ignore[misc,assignment]
-    DeepEPConfig = None  # type: ignore[misc,assignment]
-
 from torch.distributed import ProcessGroup
 
 try:
@@ -48,9 +42,7 @@ except ImportError as _deep_ep_import_err:
             )
 
         def __init_subclass__(cls, **kwargs):
-            raise NotImplementedError(
-                "deep_ep is not available in this build."
-            )
+            raise NotImplementedError("deep_ep is not available in this build.")
 
         @classmethod
         def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
@@ -63,15 +55,19 @@ except ImportError as _deep_ep_import_err:
     DeepEPBuffer = _DeepEPUnavailable  # type: ignore[assignment,misc]
     DeepEPConfig = _DeepEPUnavailable  # type: ignore[assignment,misc]
 
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
-    MoEConfigAdapter,
+from rtp_llm.models_py.quantization_exclusion import (
+    collect_quantization_exclusions,
+    is_module_ignored,
+    moe_projection_exclusion_states,
 )
-from rtp_llm.models_py.utils.arch import is_sm10x
-from rtp_llm.ops import SpeculativeType
+
+if TYPE_CHECKING:
+    from rtp_llm.config.engine_config import EngineConfig
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.config.quant_config import QuantizationConfig
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
+    )
 
 __all__ = [
     "DeepepWrapperConfig",
@@ -87,12 +83,16 @@ __all__ = [
 
 def use_accl_ep() -> bool:
     """Check if ACCL EP should be used based on device type."""
+    from rtp_llm.device.device_type import DeviceType, get_device_type
+
     device_type = get_device_type()
     return not device_type == DeviceType.ROCm
 
 
 def allow_mnnvl() -> bool:
     """Check if MNNVL is allowed based on architecture and GPU capability."""
+    from rtp_llm.models_py.utils.arch import is_sm10x
+
     return "aarch64" in platform.machine() and is_sm10x()
 
 
@@ -219,24 +219,25 @@ class DeepepWrapperConfig:
     def calc_low_latency_max_token_per_rank(
         ll_num_max_token: int,
         tp_size: int,
-        quant_config: QuantizationConfig,
+        quant_config: Optional[QuantizationConfig],
     ) -> int:
         ll_num_max_token_per_rank = (ll_num_max_token + tp_size - 1) // tp_size
         # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
         is_quantized = quant_config is not None and quant_config.is_quanted()
-        is_block_quantized = (
-            quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
+        quant_method = (
+            quant_config.get_moe_runtime_method_key()
+            if quant_config is not None
+            else None
         )
-        is_per_act_token = quant_config is not None and quant_config.get_method() in (
+        is_block_quantized = quant_method == "FP8_PER_BLOCK"
+        is_per_act_token = quant_method in (
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
             "W4A8_INT4_PER_CHANNEL",
             "W4A8_INT4_PER_CHANNEL_COMPRESSED",
             "W8A8_INT8_PER_CHANNEL_COMPRESSED",
         )
-        is_per_group_fp4 = (
-            quant_config is not None and quant_config.get_method() == "modelopt_fp4"
-        )
+        is_per_group_fp4 = quant_method == "modelopt_fp4"
         if not is_quantized or is_block_quantized or is_per_group_fp4:
             matched_tokens = [128] if allow_mnnvl() else [64, 128]
         elif is_per_act_token:
@@ -267,6 +268,58 @@ class DeepepWrapperConfig:
                 ll_num_max_token_per_rank = t
                 return ll_num_max_token_per_rank
         return 128
+
+    @staticmethod
+    def calc_model_low_latency_max_token_per_rank(
+        ll_num_max_token: int,
+        tp_size: int,
+        quant_config: Optional[QuantizationConfig],
+        model_config: Optional[ModelConfig] = None,
+    ) -> int:
+        """Size the process-wide DeepEP buffer for every layer in the model.
+
+        DeepEP owns one process-wide low-latency buffer, while NewLoader may
+        disable quantization for individual MoE layers through checkpoint
+        exclusion patterns. In that case the buffer must satisfy both the
+        quantized and unquantized executors; sizing it from a layer's effective
+        quantization would make construction order affect the singleton config.
+        """
+        capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+            ll_num_max_token, tp_size, quant_config
+        )
+        exclusion_patterns = collect_quantization_exclusions(quant_config)
+        exclusions_exist = bool(exclusion_patterns)
+        has_unquantized_moe_layer = exclusions_exist and model_config is None
+        if exclusions_exist and model_config is not None:
+            moe_layer_indices = list(getattr(model_config, "moe_layer_index", ()))
+            if not moe_layer_indices and model_config.expert_num > 0:
+                moe_layer_indices = list(range(model_config.num_layers))
+            model_type = str(model_config.model_type)
+            moe_path = "block_sparse_moe" if model_type == "kimi_linear" else "mlp"
+            for layer_idx in moe_layer_indices:
+                prefix = f"layers.{layer_idx}.{moe_path}.experts"
+                root_ignored = is_module_ignored(prefix, exclusion_patterns)
+                projection_ignored = moe_projection_exclusion_states(
+                    prefix,
+                    exclusion_patterns,
+                )
+                if root_ignored or all(projection_ignored):
+                    has_unquantized_moe_layer = True
+                    break
+                if any(projection_ignored):
+                    raise ValueError(
+                        "Quantization exclusions partially match fused MoE layer "
+                        f"{prefix!r}; all expert projections must use the same "
+                        "quantization layout"
+                    )
+        if has_unquantized_moe_layer:
+            capacity = max(
+                capacity,
+                DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+                    ll_num_max_token, tp_size, None
+                ),
+            )
+        return capacity
 
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
@@ -669,6 +722,11 @@ def init_deepep_wrapper(
         None
     """
 
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
+    )
+    from rtp_llm.ops import SpeculativeType
+
     if not DeepEPWrapper.supported():
         logging.warning(
             "DeepEP is not supported on this device, skipping initialization"
@@ -694,12 +752,14 @@ def init_deepep_wrapper(
         ll_num_max_token = engine_config.runtime_config.max_generate_batch_size
         if engine_config.sp_config.type != SpeculativeType.NONE:
             ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
-        ll_num_max_token_per_rank = (
-            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
-                ll_num_max_token,
-                engine_config.parallelism_config.tp_size,
-                model_config.quant_config,
-            )
+        ll_num_max_token_per_rank = DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+            ll_num_max_token,
+            # Keep process-wide allocation identical to the router's
+            # prepare() partitioning. Under CP, adapter.tp_size is one and
+            # each rank dispatches its full local token set.
+            deepep_config_adapter.tp_size,
+            model_config.quant_config,
+            model_config,
         )
 
     deepep_config = DeepepWrapperConfig.from_config_adapter(

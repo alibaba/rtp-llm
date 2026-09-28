@@ -58,6 +58,7 @@ class LanguageCppEngine(BaseEngine):
                     engine_config=engine_config,
                     vit_config=self.model.vit_config,
                     device=f"cuda:{engine_config.parallelism_config.local_rank}",
+                    resolved_use_new_loader=self.model.uses_new_loader,
                 )
             )
         self.rtp_llm_op_ = RtpLLMOp(

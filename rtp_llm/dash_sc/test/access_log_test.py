@@ -1073,6 +1073,23 @@ class GrpcMetricsTest(TestCase):
             "5",
         )
 
+    def test_priority_tag_enforces_declared_range(self) -> None:
+        for qos_priority, expected in (
+            (0, "0"),
+            (1, "1"),
+            (100, "100"),
+            (101, "0"),
+            (-1, "0"),
+            (2**63, "0"),
+        ):
+            with self.subTest(qos_priority=qos_priority):
+                self.assertEqual(
+                    grpc_metrics._priority_tag(
+                        _make_record(generate_config={"qos_priority": qos_priority})
+                    ),
+                    expected,
+                )
+
 
 if __name__ == "__main__":
     main()

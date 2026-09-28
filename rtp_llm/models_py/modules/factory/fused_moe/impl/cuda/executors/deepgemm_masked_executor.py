@@ -34,13 +34,26 @@ from rtp_llm.utils.model_weight import W
 
 
 class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
-
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
     @classmethod
     def executor_type(cls):
         return ExecutorType.DEEPGEMM_MASKED
+
+    @classmethod
+    def required_deep_gemm_symbols(cls, config: MoEConfigAdapter) -> tuple[str, ...]:
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+            MoeConfigResolver,
+        )
+
+        quant_method = MoeConfigResolver().get_quant_method(config)
+        grouped_symbol = (
+            "m_grouped_fp8_gemm_nt_masked"
+            if quant_method == "FP8_PER_BLOCK"
+            else "m_grouped_bf16_gemm_nt_masked"
+        )
+        return ("get_num_sms", "set_num_sms", grouped_symbol)
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -51,11 +64,14 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         )
 
         resolver = MoeConfigResolver()
-        checker.check(has_deep_gemm())
+        checker.check(has_deep_gemm(cls.required_deep_gemm_symbols(config)))
         checker.check(resolver.is_bf16(config))
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in [None, "FP8_PER_BLOCK"])
-        checker.check(get_sm()[0] >= 9)
+        # The BF16 masked implementation is Hopper-only. A callable symbol on
+        # Blackwell does not imply that this kernel supports that architecture.
+        sm_major = get_sm()[0]
+        checker.check(sm_major == 9 if quant_method is None else sm_major >= 9)
 
     def __init__(
         self,
@@ -107,11 +123,12 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     self._w1_scale.size(0) == self._E
                     and self._w2_scale.size(0) == self._E
                 )
-                assert (
-                    self._w1_scale.size(1) == self._N
-                    if is_deep_gemm_e8m0_used()
+                expected_w1_scale_dim = (
+                    self._N
+                    if self._scale_dtype == torch.int32
                     else self._N // self.DEEPGEMM_BLOCK_SHAPE[0]
                 )
+                assert self._w1_scale.size(1) == expected_w1_scale_dim
                 assert (
                     self._w1_scale.size(2)
                     == (
@@ -121,11 +138,12 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     )
                     // self._num_packed_scales
                 )
-                assert (
-                    self._w2_scale.size(1) == self._K
-                    if is_deep_gemm_e8m0_used()
+                expected_w2_scale_dim = (
+                    self._K
+                    if self._scale_dtype == torch.int32
                     else self._K // self.DEEPGEMM_BLOCK_SHAPE[1]
                 )
+                assert self._w2_scale.size(1) == expected_w2_scale_dim
                 assert (
                     self._w2_scale.size(2)
                     == (
