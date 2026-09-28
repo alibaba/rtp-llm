@@ -1,0 +1,6 @@
+stage=chunkwise_rdma_flow_miss passed=true skipped=False owners=[0]
+stage=flow_hit_owner_0 passed=true skipped=False owners=[0]
+stage=flow_uneven_miss passed=true skipped=False owners=[0, 0, 0, 0]
+stage=flow_uneven_hit_rotated passed=true skipped=False owners=[0, 0, 0, 0]
+stage=flow_mtp_draft passed=true skipped=False owners=[0]
+PASS: suite=flow cases=11 artifacts=/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/smoke-4layer-fp8-agempty-d733-r1-111112-20260929/result.json
