@@ -52,8 +52,7 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
     @Override
     public List<WorkerHost> getHosts(Endpoint endpoint) {
         bindRuntimeConfig(endpoint);
-        List<WorkerHost> discoveredHosts =
-                providers.get(endpoint.getDiscovery().getType()).getHosts(endpoint);
+        List<WorkerHost> discoveredHosts = providers.get(endpoint.getDiscovery().getType()).getHosts(endpoint);
         return normalizeHosts(discoveredHosts, endpoint);
     }
 

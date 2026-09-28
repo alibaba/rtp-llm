@@ -29,6 +29,14 @@ Running 和 Finished 任务表均以解析后的 ID 为键，缓存反馈与调�
     一个在途状态检查**；
   - **仅当 `!kvcmEnabled`** 时提交 `GrpcCacheStatusCheckRunner`（`cacheCheckInProgress` CAS）。
 
+`WorkerAddressService` 按 Endpoint 保存最近一次成功的非空发现快照。查询异常、超过 500ms、
+线程池拒绝任务或返回空列表时保留该快照，已有 worker 继续接受状态探测；首次发现尚无缓存时
+返回空列表。发现线程池使用 AbortPolicy，饱和时不在同步线程执行网络查询。超时查询即使稍后
+完成，也不会更新快照。成功的非空结果替换快照，允许正常的部分缩容与节点更换。
+
+`EngineAddressResolver` 的定期查询和订阅回调同样忽略空列表，保留该 Endpoint 的地址，
+避免关闭现有 channel 或清除已有 worker cache。真实 worker 失效 由健康探测处理。
+
 一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
 统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个
 `GrpcWorkerStatusRunner` 连接显式配置的 `worker_status_port + i`，N=1 时同样接受该覆盖；

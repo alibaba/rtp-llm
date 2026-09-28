@@ -93,11 +93,11 @@ public class EngineAddressResolver {
      * @param hostList Host list
      */
     private void updateEndpointHosts(Endpoint endpoint, List<WorkerHost> hostList) {
-        if (hostList == null || hostList.isEmpty()) {
-            domainHostsMap.remove(endpoint);
-        } else {
-            domainHostsMap.put(endpoint, List.copyOf(hostList));
+        if (hostList.isEmpty()) {
+            // Empty discovery must not retire existing channels or worker caches.
+            return;
         }
+        domainHostsMap.put(endpoint, List.copyOf(hostList));
         // Aggregate host lists from all addresses
         List<WorkerHost> aggregatedHosts = new ArrayList<>();
         for (List<WorkerHost> hosts : domainHostsMap.values()) {

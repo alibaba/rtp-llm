@@ -1,13 +1,17 @@
 package org.flexlb.sync.runner;
 
+import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -15,6 +19,8 @@ import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
@@ -23,8 +29,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -216,6 +224,63 @@ class EngineSyncRunnerTest {
                 .containsKey(ipPort));
         assertNull(registry.get(RoleType.PREFILL, ipPort));
         registry.close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"empty", "exception", "timeout"})
+    void discoveryFailureRetainsWorkerAndEndpointAndContinuesProbing(String failure) {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        ModelMetaConfig metadata = Mockito.mock(ModelMetaConfig.class);
+        ServiceDiscovery discovery = Mockito.mock(ServiceDiscovery.class);
+        Endpoint endpoint = new Endpoint();
+        endpoint.setAddress("vip");
+        when(metadata.endpointsWithGroup(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(Pair.of("", endpoint)));
+        WorkerHost host = WorkerHost.of("127.0.0.1", 8080);
+        when(discovery.getHosts(endpoint)).thenReturn(List.of(host));
+        WorkerAddressService addresses = new WorkerAddressService(
+                engineHealthReporter, metadata, discovery, configService);
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
+        try {
+            assertEquals(List.of(host), addresses.getEngineWorkerList(modelName, RoleType.PREFILL));
+            when(discovery.getHosts(endpoint)).thenAnswer(ignored -> {
+                if (failure.equals("exception")) {
+                    throw new IllegalStateException("VIP unavailable");
+                }
+                if (failure.equals("timeout")) {
+                    new CountDownLatch(1).await(5, TimeUnit.SECONDS);
+                }
+                return List.of();
+            });
+            WorkerDirectory directory = new WorkerDirectory(registry);
+            String ipPort = host.getLogicalIpPort();
+            WorkerStatus status = Mockito.spy(RunnerTestSupport.discovered(
+                    RoleType.PREFILL, "", host.getIp(), host.getHttpPort(), host.getGrpcPort(), ""));
+            // Make removal eligible if discovery mistakenly drops this worker.
+            Mockito.lenient().when(status.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
+                    System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true));
+            discover(directory, status);
+            RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, status);
+            WorkerEndpoint originalEndpoint = registry.get(RoleType.PREFILL, ipPort);
+            assertNotNull(originalEndpoint);
+            EngineSyncRunner runner = new EngineSyncRunner(
+                    modelName, directory, addresses, statusCheckExecutor, engineHealthReporter,
+                    engineGrpcService, RoleType.PREFILL, cacheAwareService, cacheIntervalService,
+                    syncRequestTimeoutMs, syncCount, syncEngineStatusInterval, false, 1_000_000L);
+
+            runner.run();
+
+            assertTrue(status.isActiveGeneration());
+            assertEquals(status, directory.statusSnapshot(RoleType.PREFILL).get(ipPort));
+            assertEquals(originalEndpoint, registry.get(RoleType.PREFILL, ipPort));
+            ArgumentCaptor<Runnable> tasks = ArgumentCaptor.forClass(Runnable.class);
+            verify(statusCheckExecutor, times(2)).submit(tasks.capture());
+            assertTrue(tasks.getAllValues().stream().anyMatch(GrpcWorkerStatusRunner.class::isInstance));
+        } finally {
+            addresses.destroy();
+            registry.close();
+        }
     }
 
     @Test
