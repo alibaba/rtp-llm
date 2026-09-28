@@ -15,7 +15,7 @@ def unique_keys(pairs):
     return result
 
 
-def audit(directory: Path) -> dict:
+def audit(directory: Path, decode_ip: str = "11.163.39.112", decode_port: int = 25200) -> dict:
     result = json.loads((directory / "result.json").read_text(), object_pairs_hook=unique_keys)
     errors = []
     cases = result.get("cases", [])
@@ -64,8 +64,8 @@ def audit(directory: Path) -> dict:
             expected_handoff = ((input_len - 1) // result["block_size"]) * result["block_size"]
             if aux.get("decode_total_reuse_len") != expected_handoff:
                 raise ValueError("Decode KV handoff differs from full-block count")
-            if not any(isinstance(addr, dict) and addr.get("ip") == "11.163.39.112"
-                       and addr.get("http_port") == 25200
+            if not any(isinstance(addr, dict) and addr.get("ip") == decode_ip
+                       and addr.get("http_port") == decode_port
                        for addr in aux.get("role_addrs", [])):
                 raise ValueError("Decode owner route differs")
             if not isinstance(aux.get("speculative_draft_rounds"), int) or aux["speculative_draft_rounds"] <= 0:
@@ -99,6 +99,9 @@ def audit(directory: Path) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=Path)
-    summary = audit(parser.parse_args().directory)
+    parser.add_argument("--decode-ip", default="11.163.39.112")
+    parser.add_argument("--decode-port", type=int, default=25200)
+    args = parser.parse_args()
+    summary = audit(args.directory, args.decode_ip, args.decode_port)
     print(json.dumps({key: summary[key] for key in ("passed", "checked", "errors")}))
     raise SystemExit(0 if summary["passed"] else 1)
