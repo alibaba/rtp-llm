@@ -1491,6 +1491,16 @@ class W:
     dspark_markov_w1 = "dspark_markov_w1.weight"
     dspark_markov_w2 = "dspark_markov_w2.weight"
 
+    # DFlash2 dynamic convolutions and candidate selector are replicated under
+    # TP: both consume the complete, reduced residual hidden state.
+    dflash2_attention_conv_base = "dflash2.attention_conv.base_kernel"
+    dflash2_attention_conv_kernel = "dflash2.attention_conv.kernel_projection.weight"
+    dflash2_mlp_conv_base = "dflash2.mlp_conv.base_kernel"
+    dflash2_mlp_conv_kernel = "dflash2.mlp_conv.kernel_projection.weight"
+    dflash2_selector_predecessor = "dflash2.selector.predecessor_codebook"
+    dflash2_selector_successor = "dflash2.selector.successor_codebook"
+    dflash2_selector_projection = "dflash2.selector.hidden_projection.weight"
+
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
@@ -1680,6 +1690,13 @@ class W:
         dspark_hidden_norm_gamma: sp_id,
         dspark_markov_w1: sp_id,
         dspark_markov_w2: sp_id,
+        dflash2_attention_conv_base: sp_id,
+        dflash2_attention_conv_kernel: sp_id,
+        dflash2_mlp_conv_base: sp_id,
+        dflash2_mlp_conv_kernel: sp_id,
+        dflash2_selector_predecessor: sp_id,
+        dflash2_selector_successor: sp_id,
+        dflash2_selector_projection: sp_id,
     }
 
     weights_list = [

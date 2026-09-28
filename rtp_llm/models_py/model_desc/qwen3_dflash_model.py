@@ -277,6 +277,8 @@ class _DFlashDecoderLayer(nn.Module):
 class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
     """DFlash V1 using target-owned embedding and lm-head weights."""
 
+    decoder_layer_cls = _DFlashDecoderLayer
+
     def __init__(
         self,
         config: ModelConfig,
@@ -350,7 +352,7 @@ class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
 
             self.context_rope = MhaRotaryEmbeddingOp(self.attn_configs)
         self.layers = nn.ModuleList(
-            _DFlashDecoderLayer(
+            self.decoder_layer_cls(
                 config,
                 parallelism_config,
                 weights.weights[index],
@@ -364,6 +366,9 @@ class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
 
     def cuda_graph_input_hidden_size(self) -> int:
         return self._dspark_aux_feature_dim
+
+    def embed_query_tokens(self, query_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(query_ids.reshape(-1))
 
     def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
         return self.fc(features)
@@ -470,7 +475,7 @@ class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
         # The shared fixed-block buffer may retain arbitrary values in proposal
         # slots.  Only column zero is a genuine anchor; the mixin builds the
         # remaining columns from DFlash's configured mask token.
-        hidden_states = self.embed_tokens(query_ids.reshape(-1))
+        hidden_states = self.embed_query_tokens(query_ids)
         request_ids = torch.arange(
             batch, device=hidden_states.device, dtype=torch.int32
         ).repeat_interleave(width)

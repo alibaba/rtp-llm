@@ -699,7 +699,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_                 = params.model_config_.vocab_size;
     draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_block_draft_             = isBlockDraftType(propose_params->sp_type);
-    is_dflash_                  = propose_params->sp_type == SP_TYPE_DFLASH;
+    is_dflash2_                 = propose_params->sp_type == SP_TYPE_DFLASH2;
+    is_dflash_                  = propose_params->sp_type == SP_TYPE_DFLASH || is_dflash2_;
     dspark_prefill_commit_only_ = is_block_draft_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -1524,14 +1525,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         GptModelInputs proposal_input;
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_proposal_and_tp_sync)");
-            if (isTpRank0()) {
-                dspark_round_state =
-                    batch_stream_processor_->buildDSparkRoundState(stream_groups, model_input, buffer_holder_);
-                proposal_input = model_input;
-                batch_stream_processor_->prepareDSparkProposeModelInput(
-                    dspark_round_state, proposal_input, buffer_holder_);
-                ensureModelInputsOnCuda(proposal_input, "decode.prepare_dspark_proposal");
-            }
+            proposal_input = prepareBlockDraftProposalInput(stream_groups, model_input, dspark_round_state);
             tpSyncModelInputs(proposal_input, parallelism_config_);
             if (proposal_input.skip_run) {
                 return absl::OkStatus();
@@ -2224,6 +2218,95 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_);
 }
 
+SamplerOutput MtpExecutor::sampleDFlash2Draft(const StreamGroups&    stream_groups,
+                                              const GptModelOutputs& proposal,
+                                              const torch::Tensor&   anchors) {
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.dflash2_draft_sample");
+    const auto batch = static_cast<int64_t>(stream_groups.size());
+    const auto gamma = static_cast<int64_t>(propose_step_);
+    TORCH_CHECK(batch > 0 && gamma > 0 && proposal.logits.dim() == 2 && proposal.logits.size(0) == batch * gamma
+                    && proposal.logits.size(1) >= static_cast<int64_t>(draft_vocab_size_),
+                "DFlash2 proposal logits must be [B*gamma,vocab_padded]");
+    TORCH_CHECK(proposal.hidden_states.defined() && proposal.hidden_states.dim() == 2
+                    && proposal.hidden_states.size(0) == batch * gamma && anchors.numel() == batch,
+                "DFlash2 selector requires row-aligned mask hidden states and one anchor per request");
+
+    const auto host_options      = torch::TensorOptions().device(torch::kCPU).pinned_memory(proposal.logits.is_cuda());
+    auto       temperatures_host = torch::empty({batch}, host_options.dtype(torch::kFloat32));
+    auto       greedy_host       = torch::empty({batch}, host_options.dtype(torch::kBool));
+    auto*      temperatures      = temperatures_host.data_ptr<float>();
+    auto*      greedy_rows       = greedy_host.data_ptr<bool>();
+    std::vector<torch::Tensor> uniform_rows;
+    uniform_rows.reserve(batch);
+    bool    all_greedy = true;
+    int64_t row        = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        TORCH_CHECK(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
+                    "DFlash2 does not support tiled or beam sampling");
+        const auto& config = *stream->generateConfig();
+        TORCH_CHECK(std::isfinite(config.temperature) && config.temperature >= 0.0f,
+                    "DFlash2 temperature must be finite and nonnegative");
+        const bool greedy    = !config.stochastic() || config.temperature == 0.0f;
+        temperatures[row]    = greedy ? 1.0f : config.temperature;
+        greedy_rows[row++]   = greedy;
+        all_greedy           = all_greedy && greedy;
+        const auto options   = proposal.logits.options().dtype(torch::kFloat32);
+        auto       generator = stream->getGenerator();
+        uniform_rows.push_back(
+            greedy ? torch::zeros({gamma}, options) :
+                     torch::rand({gamma},
+                                 generator.defined() ? std::optional<at::Generator>(generator) : std::nullopt,
+                                 options));
+    }
+    buffer_holder_.hold_host(temperatures_host);
+    buffer_holder_.hold_host(greedy_host);
+    auto temperatures_device = temperatures_host.to(proposal.logits.device(), /*non_blocking=*/true);
+    auto greedy_device       = greedy_host.to(proposal.logits.device(), /*non_blocking=*/true);
+    auto uniforms            = torch::stack(uniform_rows);
+    auto hidden              = proposal.hidden_states.reshape({batch, gamma, proposal.hidden_states.size(1)});
+    auto logits              = proposal.logits.reshape({batch, gamma, proposal.logits.size(1)});
+    auto selected            = draft_model_->sampleDFlash2(
+        hidden, logits, anchors.reshape({batch}), temperatures_device, greedy_device, uniforms);
+    TORCH_CHECK(selected.token_ids.dim() == 2 && selected.token_ids.size(0) == batch
+                    && selected.token_ids.size(1) == gamma && selected.token_ids.scalar_type() == torch::kInt32
+                    && selected.token_ids.device() == proposal.logits.device(),
+                "DFlash2 selector tokens must be int32 [B,gamma] on the proposal device");
+    SamplerOutput output;
+    output.token_ids                = selected.token_ids.contiguous();
+    output.token_ids_are_point_mass = all_greedy;
+    if (!all_greedy) {
+        TORCH_CHECK(selected.candidate_ids.dim() == 3 && selected.candidate_ids.size(0) == batch
+                        && selected.candidate_ids.size(1) == gamma
+                        && selected.candidate_ids.scalar_type() == torch::kInt64
+                        && selected.probabilities.sizes() == selected.candidate_ids.sizes()
+                        && selected.probabilities.scalar_type() == torch::kFloat32
+                        && selected.probabilities.device() == proposal.logits.device()
+                        && selected.candidate_ids.device() == proposal.logits.device(),
+                    "DFlash2 selector must return candidate IDs and actual conditional FP32 q [B,gamma,K]");
+        // Each in-flight round owns its q. Reusing a scratch tensor here would
+        // overwrite probabilities still consumed by asynchronous verification.
+        output.all_probs = torch::zeros({batch, gamma, static_cast<int64_t>(draft_vocab_size_)},
+                                        proposal.logits.options().dtype(torch::kFloat32));
+        output.all_probs.scatter_(-1, selected.candidate_ids, selected.probabilities);
+    }
+    return output;
+}
+
+GptModelInputs MtpExecutor::prepareBlockDraftProposalInput(const StreamGroups&                        stream_groups,
+                                                           const GptModelInputs&                      target_input,
+                                                           MtpBatchStreamProcessor::DSparkRoundState& round_state) {
+    // TP transport broadcasts numeric cache rows in canonical tag order, but
+    // tags stay rank-local. Preserve the gathered layout even on ranks with no
+    // scheduled streams; an empty input would treat a hybrid cache as legacy.
+    GptModelInputs proposal_input = target_input;
+    if (isTpRank0()) {
+        round_state = batch_stream_processor_->buildDSparkRoundState(stream_groups, target_input, buffer_holder_);
+        batch_stream_processor_->prepareDSparkProposeModelInput(round_state, proposal_input, buffer_holder_);
+        ensureModelInputsOnCuda(proposal_input, "decode.prepare_dspark_proposal");
+    }
+    return proposal_input;
+}
+
 void MtpExecutor::runDSparkProposal(GptModelInputs&                                  proposal_input,
                                     const StreamGroups&                              stream_groups,
                                     const MtpBatchStreamProcessor::DSparkRoundState& round_state,
@@ -2234,15 +2317,24 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&                             
 
     const auto& draft_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     applyCacheStrideToModelInput(proposal_input, draft_cache_cfg);
+    // Loss/prompt-output flags belong to the target forward. In DFlash2 the
+    // post-head selector requires hidden and logits from the same mask rows;
+    // need_all_logits would otherwise select only logits and retain anchor
+    // rows in hidden_states. Apply this on every TP rank before the forward.
+    if (is_dflash2_) {
+        proposal_input.need_all_logits        = false;
+        proposal_input.need_all_hidden_states = false;
+    }
     int64_t start_time_us  = autil::TimeUtility::currentTimeInMicroSeconds();
     auto    propose_output = runDSparkProposeForward(proposal_input);
     model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
     if (isTpRank0()) {
-        draft_sampler_output = is_dflash_ ?
-                                   speculative_sampler_->sampleDFlashDraft(
-                                       propose_output.logits, stream_groups.allStreams(), draft_vocab_size_) :
-                                   sampleDSparkDraft(stream_groups, propose_output.logits, round_state.anchors);
+        draft_sampler_output =
+            is_dflash2_ ? sampleDFlash2Draft(stream_groups, propose_output, round_state.anchors) :
+            is_dflash_  ? speculative_sampler_->sampleDFlashDraft(
+                             propose_output.logits, stream_groups.allStreams(), draft_vocab_size_) :
+                         sampleDSparkDraft(stream_groups, propose_output.logits, round_state.anchors);
     }
 }
 

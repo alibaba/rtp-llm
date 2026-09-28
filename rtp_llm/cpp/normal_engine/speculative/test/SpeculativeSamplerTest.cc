@@ -77,6 +77,25 @@ TEST(DFlashConfigTest, TypeIsDistinctAndRoundTrips) {
     EXPECT_FALSE(isBlockDraftType(SP_TYPE_MTP));
 }
 
+TEST(DFlash2ConfigTest, TypeRoundTripsAndReservesBlockDraftWindow) {
+    EXPECT_EQ(SpeculativeExecutionConfig::from_string("dflash2"), SP_TYPE_DFLASH2);
+    EXPECT_EQ(SpeculativeExecutionConfig::to_string(SP_TYPE_DFLASH2), "dflash2");
+    EXPECT_NE(SP_TYPE_DFLASH2, SP_TYPE_DFLASH);
+    EXPECT_NE(SP_TYPE_DFLASH2, SP_TYPE_DSPARK);
+    EXPECT_TRUE(isBlockDraftType(SP_TYPE_DFLASH2));
+    SpeculativeExecutionConfig config;
+    config.type = SP_TYPE_DFLASH2;
+    for (const int64_t gamma : {0, 1, 7}) {
+        config.gen_num_per_cycle = gamma;
+        EXPECT_EQ(config.speculativeReserveStep(), static_cast<size_t>(3 * gamma));
+    }
+    config.gen_num_per_cycle = 7;
+    config.type              = SP_TYPE_MTP;
+    EXPECT_EQ(config.speculativeReserveStep(), 8u);
+    config.type = SP_TYPE_NONE;
+    EXPECT_EQ(config.speculativeReserveStep(), 0u);
+}
+
 }  // namespace
 }  // namespace speculative
 }  // namespace rtp_llm

@@ -84,3 +84,21 @@ py_test(
     args = ["DFlashAttentionContractTest"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
 )
+
+py_test(
+    name = "dflash2_conv_cuda_test",
+    srcs = ["dflash2_conv_test.py"],
+    main = "dflash2_conv_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "dflash2_conv_rocm_test",
+    srcs = ["dflash2_conv_test.py"],
+    main = "dflash2_conv_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+)

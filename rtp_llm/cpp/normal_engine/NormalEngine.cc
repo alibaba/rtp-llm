@@ -20,6 +20,7 @@
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -738,6 +739,18 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     // invariants here as well; otherwise that first allocation is planned without
     // the speculative-round headroom.
     stream->setReserveStep(reserve_step_);
+    if (propose_params_ && propose_params_->sp_type == SP_TYPE_DFLASH2) {
+        // Reject unsupported requests before scheduling. A rank-zero exception
+        // during proposal sampling would leave the other TP ranks in collectives.
+        const auto& config = *input->generate_config;
+        if (config.hasStructuredOutputRequest()) {
+            stream->reportError(ErrorCode::INVALID_PARAMS, "DFlash2 does not support structured output");
+        } else if (stream->hasNumBeams() || stream->maxBatchSize() != 1) {
+            stream->reportError(ErrorCode::INVALID_PARAMS, "DFlash2 does not support beam or tiled sampling");
+        } else if (!std::isfinite(config.temperature) || config.temperature < 0.0f) {
+            stream->reportError(ErrorCode::INVALID_PARAMS, "DFlash2 temperature must be finite and nonnegative");
+        }
+    }
     if (selection_error.hasError()) {
         stream->reportError(selection_error.code(), selection_error.ToString());
     }

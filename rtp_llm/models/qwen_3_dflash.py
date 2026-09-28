@@ -38,6 +38,8 @@ class Qwen3DFlashWeight(QWenV3Weight):
 class Qwen3DFlash(QwenV3):
     """Dense mixed-mask Qwen3 DFlash draft model."""
 
+    checkpoint_architecture = "DFlashDraftModel"
+
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         raw = get_config_from_path(ckpt_path)
@@ -48,9 +50,10 @@ class Qwen3DFlash(QwenV3):
             raise ValueError("DFlash requires object dflash_config")
         config = cls._create_config_from_json(ckpt_path, raw)
         architectures = raw.get("architectures", ())
-        if "DFlashDraftModel" not in architectures:
+        if cls.checkpoint_architecture not in architectures:
             raise ValueError(
-                "DFlash requires architectures to include DFlashDraftModel"
+                "DFlash requires architectures to include "
+                + cls.checkpoint_architecture
             )
         config.input_vocab_size = int(raw["vocab_size"])
         config.dflash_mask_token_id = int(dflash["mask_token_id"])

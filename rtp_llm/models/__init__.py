@@ -47,6 +47,7 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "QwenV3": "rtp_llm.models.qwen_v3",
     "Qwen3DSpark": "rtp_llm.models.qwen_3_dspark",
     "Qwen3DFlash": "rtp_llm.models.qwen_3_dflash",
+    "Qwen3DFlash2": "rtp_llm.models.qwen_3_dflash2",
     "StarCoder": "rtp_llm.models.starcoder",
     "StarCoder2": "rtp_llm.models.starcoder2",
 }

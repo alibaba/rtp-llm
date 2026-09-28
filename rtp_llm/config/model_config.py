@@ -91,6 +91,11 @@ class ModelConfig(CppModelConfig):
         "dflash_layer_types",
         "dflash_sliding_window",
         "dflash_native_block_size",
+        "dflash2_conv_kernel_size",
+        "dflash2_conv_group_size",
+        "dflash2_selector_rank",
+        "dflash2_selector_top_k",
+        "dflash2_input_embedding_scale",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -586,6 +591,11 @@ class ModelConfig(CppModelConfig):
         self.dflash_layer_types: Optional[list[str]] = None
         self.dflash_sliding_window: Optional[int] = None
         self.dflash_native_block_size: Optional[int] = None
+        self.dflash2_conv_kernel_size: Optional[int] = None
+        self.dflash2_conv_group_size: Optional[int] = None
+        self.dflash2_selector_rank: Optional[int] = None
+        self.dflash2_selector_top_k: Optional[int] = None
+        self.dflash2_input_embedding_scale: float = 1.0
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False

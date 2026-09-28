@@ -81,16 +81,22 @@ public:
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
-    GptModelOutputs forward(const GptModelInputs& inputs) override;
-    GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
-    void            releaseBuffers() override;
-    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool            hasMtpTargetHiddenBuffer() const override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    std::string     waitCacheStorePublication() override;
+    GptModelOutputs    forward(const GptModelInputs& inputs) override;
+    GptModelOutputs    forwardMicroBatched(const GptModelInputs& inputs);
+    void               releaseBuffers() override;
+    torch::Tensor      getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor      getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool               hasMtpTargetHiddenBuffer() const override;
+    void               prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void               prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void               updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string        waitCacheStorePublication() override;
+    DFlash2DraftOutput sampleDFlash2(const torch::Tensor& hidden,
+                                     const torch::Tensor& logits,
+                                     const torch::Tensor& anchors,
+                                     const torch::Tensor& temperatures,
+                                     const torch::Tensor& greedy_mask,
+                                     const torch::Tensor& uniforms) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -158,6 +164,7 @@ private:
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
     py::object                 py_model_;
     py::object                 py_forward_method_;
+    py::object                 py_dflash2_sample_method_;
     py::object                 held_attn_pyobj_;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
@@ -351,10 +358,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
     }
-    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                      "forward";
-    py_forward_method_             = py_model_.attr(forward_method);
+    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                  "forward";
+    py_forward_method_         = py_model_.attr(forward_method);
+    if (params.sp_config.type == SP_TYPE_DFLASH2 && dspark_model_role_ == DSparkModelRole::PROPOSE) {
+        RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "sample_dflash2"),
+                                "DFlash2 draft model must expose sample_dflash2");
+        py_dflash2_sample_method_ = py_model_.attr("sample_dflash2");
+    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.
@@ -364,6 +376,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (owns_generation_prefill_cuda_graph_) {
             generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
         }
+    }
+    if (params.sp_config.type == SP_TYPE_DFLASH2 && dspark_model_role_ == DSparkModelRole::PROPOSE) {
+        // The selector runs after the draft forward and owns its rank-local
+        // graph. Propagate the resolved policy, including eager fallback.
+        py_model_.attr("configure_dflash2_graph")(enable_cuda_graph_);
     }
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM

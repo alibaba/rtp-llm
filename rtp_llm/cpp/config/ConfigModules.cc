@@ -301,6 +301,8 @@ SpeculativeType SpeculativeExecutionConfig::from_string(const std::string& str) 
         return SP_TYPE_DSPARK;
     } else if (str == "dflash") {
         return SP_TYPE_DFLASH;
+    } else if (str == "dflash2") {
+        return SP_TYPE_DFLASH2;
     } else {
         return SP_TYPE_NONE;  // Default to NONE for unknown values
     }
@@ -324,6 +326,8 @@ std::string SpeculativeExecutionConfig::to_string(SpeculativeType type) {
             return "dspark";
         case SP_TYPE_DFLASH:
             return "dflash";
+        case SP_TYPE_DFLASH2:
+            return "dflash2";
         default:
             return "none";
     }

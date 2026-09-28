@@ -143,10 +143,16 @@ protected:
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
+    GptModelInputs  prepareBlockDraftProposalInput(const StreamGroups&                        stream_groups,
+                                                   const GptModelInputs&                      target_input,
+                                                   MtpBatchStreamProcessor::DSparkRoundState& round_state);
     GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
     SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
                                       const torch::Tensor& base_logits,
                                       const torch::Tensor& anchors);
+    SamplerOutput   sampleDFlash2Draft(const StreamGroups&    stream_groups,
+                                       const GptModelOutputs& proposal,
+                                       const torch::Tensor&   anchors);
     void            runDSparkProposal(GptModelInputs&                                  proposal_input,
                                       const StreamGroups&                              stream_groups,
                                       const MtpBatchStreamProcessor::DSparkRoundState& round_state,
@@ -263,6 +269,7 @@ private:
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool is_block_draft_ = false;
     bool is_dflash_      = false;
+    bool is_dflash2_     = false;
     // Dedicated PREFILL workers only seed DSpARK's draft feature KV and must
     // not construct proposal wrappers or require proposal-only Markov weights.
     bool          dspark_prefill_commit_only_ = false;

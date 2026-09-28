@@ -350,11 +350,12 @@ enum SpeculativeType {
     SP_TYPE_EAGLE         = 4,  // EAGLE
     SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
     SP_TYPE_DSPARK        = 6,  // DSpARK block-diffusion draft
-    SP_TYPE_DFLASH        = 7   // DFlash parallel block draft
+    SP_TYPE_DFLASH        = 7,  // DFlash parallel block draft
+    SP_TYPE_DFLASH2       = 8   // DFlash with dynamic convolution and candidate selection
 };
 
 inline bool isBlockDraftType(SpeculativeType type) {
-    return type == SP_TYPE_DSPARK || type == SP_TYPE_DFLASH;
+    return type == SP_TYPE_DSPARK || type == SP_TYPE_DFLASH || type == SP_TYPE_DFLASH2;
 }
 
 struct SpeculativeExecutionConfig {

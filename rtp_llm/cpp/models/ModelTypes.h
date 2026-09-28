@@ -13,6 +13,7 @@
 #include <string>
 #include <utility>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace kmonitor {
@@ -186,12 +187,29 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
+struct DFlash2DraftOutput {
+    torch::Tensor token_ids;
+    torch::Tensor candidate_ids;
+    torch::Tensor probabilities;
+};
+
 class ModelBase {
 public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+
+    // Runs only on TP rank zero, after proposal hidden states and logits have
+    // completed their collectives. Implementations must not issue collectives.
+    virtual DFlash2DraftOutput sampleDFlash2(const torch::Tensor& hidden,
+                                             const torch::Tensor& logits,
+                                             const torch::Tensor& anchors,
+                                             const torch::Tensor& temperatures,
+                                             const torch::Tensor& greedy_mask,
+                                             const torch::Tensor& uniforms) {
+        throw std::logic_error("DFlash2 requires a model with candidate selection support");
+    }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
