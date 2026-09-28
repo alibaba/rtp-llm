@@ -306,6 +306,8 @@ class FrontendServer(object):
             await self._collect_complete_response_and_record_access_log(
                 request, response
             )
+            if is_openai_response:
+                yield "data: [DONE]\r\n\r\n"
             if trace_state is not None:
                 _record_http_status(trace_state, 200)
                 trace_state.finish()

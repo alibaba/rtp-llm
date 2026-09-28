@@ -95,6 +95,23 @@ class FrontendServerTest(TestCase):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res
 
+    def test_openai_stream_ends_with_done_marker(self):
+        async def _run():
+            with patch.object(
+                self.frontend_server._frontend_worker,
+                "is_streaming",
+                return_value=True,
+            ):
+                response = await self.frontend_server.inference(
+                    req={"prompt": "hello", "stream": True},
+                    raw_request=FakeRawRequest(),
+                )
+                return [chunk async for chunk in response.body_iterator]
+
+        chunks = asyncio.run(_run())
+        self.assertIn('"res":"hello"', chunks[0])
+        self.assertEqual(chunks[-1], "data: [DONE]\r\n\r\n")
+
     def test_simple(self):
         loop = asyncio.new_event_loop()
         res = loop.run_until_complete(
