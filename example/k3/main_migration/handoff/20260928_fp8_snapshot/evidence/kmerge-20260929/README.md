@@ -33,3 +33,19 @@
 停止旧服务后，111/112 的本任务进程组分别启动固定候选提交 `3d7fe34a7`。两端 8 个 rank 的实际日志均显示 `finally choose load method: fastsafetensors`，guard 的 `verify-log` 全部通过；111 Prefill 和 112 Decode 的 `/health` 均返回 200。启动参数为 target FP8 per-block、FP8 KV cache、draft BF16、NCCL TP8/EP8，Decode 启用 CUDA Graph；Prefill MLA 日志显示 TokenSpeed 路径。`host-selection-flow.json` 是请求前的双机占用快照：只豁免这两个已核实的本任务服务进程组，没有外部 GPU 计算进程。
 
 11 条 flow 的 runner 全部通过、没有跳过；独立复核结果在 `flow-11-independent-audit.json`。复核逐条检查 HTTP 200、非空 UTF-8 响应、PD 状态交接长度、Decode 路由、Native MTP draft 实际轮次及 300 秒上限。最慢的首个 65,537-token 请求为 71.18 秒，其余请求均在 17 秒内；11 条响应没有 Unicode replacement character。含逐请求原始响应和 token fixture 的归档为 `flow-11-raw.tar.gz`，校验值在 `flow-11-raw.sha256`。四层权重是随机裁剪模型，这些结果只证明运行链路和格式，不能作为完整模型语义准确性的证据。
+
+## 64K 热态 Prefill 对照
+
+`host-selection-timeline.json` 证明测量时 111/112 的 GPU 只有本任务服务进程。三组 RTP 请求使用相同的 65,536 个输入 token（SHA256 `97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee`）、四层权重、FP8 target、Native MTP、TP8/EP8、PD 路径、8 个输出 token，以及不复用前缀的 10 次预热和 16 次正式请求。候选请求的独立复核见 `independent-request-audit.json`，10 次预热和 16 次请求均通过，未见替换字符。八个 rank 的原始 trace 在 `allrank-traces.tar.gz`；请求原文和响应在 `requests-64k-kmerge-3d7.tar.gz`，哈希在 `timeline-archives.sha256`。`module-target.json` 和 `module-draft.json` 保存逐 rank、逐请求的 CUDA launch 到模块归属；`startup-111.tar.gz`、`startup-112.tar.gz` 保存本轮服务全 rank 加载日志及预检，哈希在 `startup-archives.sha256`。
+
+| 四层版本 | 全 rank 匹配请求数 | target Prefill 中位数 | draft Prefill 中位数 | 完整 Prefill GPU span 中位数 |
+|---|---:|---:|---:|---:|
+| 集成版 `d733278ac` | 7 | 72.617 ms | 63.480 ms | 135.722 ms |
+| 本候选 `3d7fe34a7` | 6 | 72.255 ms | 62.956 ms | 135.148 ms |
+| 固定 `feat/k3_dev` `a9bf762e8` | 7 | 71.556 ms | 62.564 ms | 135.266 ms |
+
+数值来自同一版全 rank GPU 时间关联脚本，HTTP 往返不用于 Prefill 结论；每组可匹配的请求数不同，因此 0.1 ms 量级的差异需要复测。集成版 L3 `attention.mla.core` 的累计核时间从 6.359 ms 降到 6.084 ms；旧版 `direct_copy_kernel_cuda` 在该范围的最慢 rank 中位数为 0.307 ms，新版 `concat_and_cast_mha_k_kernel` 为 0.078 ms。固定 feat 的 `native_mla_and_cache_pipeline` 为 6.087 ms，但范围边界不同，只能作为定位线索。候选 target 仍比固定 feat 慢约 0.70 ms，尚未满足性能锚点条件。
+
+固定 feat 的 `kimi_k3.all_gather_gemm.fp8_fused` 将 E4M3 激活值和 UE8M0 scale 作为通信数据交给 PyTorch symmetric-memory pipeline；`kimi_k3.gemm_reduce_scatter.fp8_fused` 调用 DeepGEMM `fp8_gemm_rs_nt` 自带的归约/散发 workspace。这两个原实现的通信路径不符合本任务的 BF16 NCCL 约束，不能直接迁入。其 fused scope 的累计时间较短，但与集成版分开的 AllGather、投影和 ReduceScatter 范围也不是同一测量边界。下一步应在 BF16 NCCL 约束下定位剩余约 0.70 ms，再做针对性候选，而不是整包迁入 feat 的通信实现。
+
+111 的 target loader 选择 FastSafetensors 后约 25 秒进入 MTP loader，112 约 41 秒；这段时间同时包含权重处理，不能当作纯 3FS 吞吐。112 服务总启动约 342 秒，后续还进行了模型初始化和 Decode CUDA Graph 相关工作。实际使用的是本任务进程的 64 线程 3FS 预读辅助库，没有改动机器或集群级 3FS 配置；本轮没有观察到需要先调整并发才能继续测试的权重读取阻塞。
