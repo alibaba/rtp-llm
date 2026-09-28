@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "http_warmup_stable": false,
+  "http_warmup_exception": "four-layer vLLM PD HTTP latency did not converge after all warmups; GPU Prefill trace stability must be checked before performance claims",
+  "warmup_count": 14,
+  "profiled_count": 3,
+  "prefill_tokens_per_rank": 65536,
+  "worst_rank_target_gpu_span_ms": [
+    112.792525,
+    111.38633,
+    111.276044
+  ],
+  "target_gpu_span_stable": true,
+  "nixl_transfer_count": 136,
+  "nixl_bytes_transferred": 5506080768,
+  "nixl_failed_transfers": 0,
+  "replacement_characters_observed": 3,
+  "semantic_answer_claim": false,
+  "errors": []
+}
