@@ -16,38 +16,32 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-_ENV_DEFAULTS = (
-    ("RTP_LLM_TP_FP8_ALLREDUCE", "0"),
-    ("RTP_LLM_TP_FP8_ALLREDUCE_MIN_BYTES", "2097152"),
-    ("RTP_LLM_TP_FP8_ALLREDUCE_MAX_BYTES", "134217728"),
-)
+# Runtime policy, not user tuning knobs. Small messages retain the existing
+# latency-oriented path; the upper bound is the preallocated IPC capacity.
+_MIN_BYTES = 2 * 1024 * 1024
+_MAX_BYTES = 128 * 1024 * 1024
 _communicator: Optional["TpFp8AllReduceCommunicator"] = None
 
 
 @dataclass(frozen=True)
 class TpFp8AllReduceConfig:
     enabled: bool = False
-    min_bytes: int = 2097152
-    max_bytes: int = 134217728
 
     @classmethod
-    def from_values(cls, values: tuple[str, str, str]) -> "TpFp8AllReduceConfig":
-        enabled, minimum, maximum = values
+    def from_value(cls, enabled: str) -> "TpFp8AllReduceConfig":
         if enabled not in ("0", "1"):
             raise ValueError("RTP_LLM_TP_FP8_ALLREDUCE must be 0 or 1")
-        minimum, maximum = int(minimum), int(maximum)
-        if minimum < 64 or maximum < minimum or maximum % 64:
-            raise ValueError(
-                "TP FP8 all-reduce requires MIN_BYTES >= 64, MAX_BYTES >= "
-                "MIN_BYTES, and MAX_BYTES divisible by 64"
-            )
-        return cls(enabled == "1", minimum, maximum)
+        return cls(enabled == "1")
 
 
-def read_config_values() -> tuple[str, str, str]:
-    return tuple(
-        os.environ.get(name, default).strip() for name, default in _ENV_DEFAULTS
-    )
+def read_config_value() -> str:
+    return os.environ.get("RTP_LLM_TP_FP8_ALLREDUCE", "0").strip()
+
+
+def _select_blocks(sm_counts: list[int]) -> int:
+    # One block per SM is a conservative residency bound. Native code also
+    # checks actual occupancy before launching its device-wide peer barriers.
+    return min(64, *sm_counts)
 
 
 def _gather(value, group):
@@ -59,13 +53,13 @@ def _gather(value, group):
 def validate_config(group) -> TpFp8AllReduceConfig:
     # Disabled ranks must also participate: otherwise a typo on one rank can
     # send its peer into an IPC kernel while it runs NCCL.
-    local = read_config_values()
+    local = read_config_value()
     values = _gather(local, group)
     if any(value != local for value in values):
         raise ValueError(
             f"TP FP8 all-reduce configuration differs across ranks: {values}"
         )
-    return TpFp8AllReduceConfig.from_values(local)
+    return TpFp8AllReduceConfig.from_value(local)
 
 
 def _check_errors(error: Optional[str], group, phase: str) -> None:
@@ -99,25 +93,22 @@ class TpFp8AllReduceCommunicator:
     """
 
     def __init__(
-        self, group, device, max_bytes=134217728, min_bytes=2097152, blocks=None
+        self, group, device, max_bytes=_MAX_BYTES, min_bytes=_MIN_BYTES, blocks=None
     ):
-        config = TpFp8AllReduceConfig.from_values(("1", str(min_bytes), str(max_bytes)))
         self.group = group
         self.device = torch.device(device)
-        self.max_bytes = config.max_bytes
-        self.min_bytes = config.min_bytes
+        self.max_bytes = max_bytes
+        self.min_bytes = min_bytes
         self.calls = 0
         self._native = None
         self._closed = False
         error = None
         try:
-            self.blocks = int(
-                os.environ.get("RTP_LLM_TP_FP8_ALLREDUCE_BLOCKS", "16")
-                if blocks is None
-                else blocks
-            )
-            if not 1 <= self.blocks <= 256:
-                raise ValueError("TP FP8 all-reduce BLOCKS must be in [1,256]")
+            if min_bytes < 64 or max_bytes < min_bytes or max_bytes % 64:
+                raise ValueError("invalid TP FP8 internal workspace bounds")
+            # Explicit arguments are for kernel tests; serving has one switch.
+            if blocks is not None and not 1 <= blocks <= 256:
+                raise ValueError("TP FP8 all-reduce blocks must be in [1,256]")
             if dist.get_world_size(group) != 2 or dist.get_backend(group) != "nccl":
                 raise ValueError("requires a TP=2 NCCL group")
             if self.device.type != "cuda" or torch.version.hip is not None:
@@ -133,7 +124,8 @@ class TpFp8AllReduceCommunicator:
                 str(properties.uuid),
                 self.max_bytes,
                 self.min_bytes,
-                self.blocks,
+                blocks,
+                properties.multi_processor_count,
             )
         except Exception as exc:
             local = None
@@ -144,8 +136,13 @@ class TpFp8AllReduceCommunicator:
             raise RuntimeError("TP FP8 all-reduce requires both ranks on the same host")
         if len({item[1] for item in identities}) != 2:
             raise RuntimeError("TP FP8 all-reduce requires two distinct GPUs")
-        if len({item[2:] for item in identities}) != 1:
-            raise RuntimeError("TP FP8 byte bounds / BLOCKS differ across ranks")
+        if len({item[2:5] for item in identities}) != 1:
+            raise RuntimeError("TP FP8 internal workspace / blocks differ across ranks")
+        self.blocks = (
+            _select_blocks([item[5] for item in identities])
+            if blocks is None
+            else blocks
+        )
 
         # Each phase reports local failures before the next collective. Never
         # silently fall back on just one rank after an explicit enable request.
@@ -280,9 +277,7 @@ def init_tp_fp8_allreduce(group, device) -> None:
     config = validate_config(group)
     if not config.enabled or _communicator is not None:
         return
-    _communicator = TpFp8AllReduceCommunicator(
-        group, device, max_bytes=config.max_bytes, min_bytes=config.min_bytes
-    )
+    _communicator = TpFp8AllReduceCommunicator(group, device)
 
 
 def get_tp_fp8_allreduce() -> Optional[TpFp8AllReduceCommunicator]:

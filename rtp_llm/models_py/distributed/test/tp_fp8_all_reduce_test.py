@@ -375,6 +375,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--iters", type=int, default=ITERS)
     parser.add_argument("--json", type=Path, required=True)
     parser.add_argument("--profile-dir", type=Path)
+    parser.add_argument(
+        "--blocks", type=int, help="Kernel benchmark override; default is automatic"
+    )
     return parser.parse_args()
 
 
@@ -397,6 +400,7 @@ def main() -> None:
             torch.device("cuda", rank),
             max_bytes=max_bytes,
             min_bytes=64,
+            blocks=args.blocks,
         )
         edge_sizes = (64, 1024, 7936 * 2)
         correctness = [

@@ -13,52 +13,87 @@ from rtp_llm.models_py.distributed import tp_fp8_all_reduce as fp8_ar
 
 
 class TpFp8AllReduceConfigTest(unittest.TestCase):
-    def test_defaults_are_disabled_and_have_documented_byte_bounds(self):
+    def test_defaults_are_disabled(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(fp8_ar.read_config_values(), ("0", "2097152", "134217728"))
+            self.assertEqual(fp8_ar.read_config_value(), "0")
             self.assertEqual(
-                fp8_ar.TpFp8AllReduceConfig.from_values(fp8_ar.read_config_values()),
+                fp8_ar.TpFp8AllReduceConfig.from_value(fp8_ar.read_config_value()),
                 fp8_ar.TpFp8AllReduceConfig(),
             )
 
     def test_enabled_is_strict_binary_switch(self):
-        enabled = fp8_ar.TpFp8AllReduceConfig.from_values(("1", "64", "128"))
-        self.assertTrue(enabled.enabled)
+        self.assertTrue(fp8_ar.TpFp8AllReduceConfig.from_value("1").enabled)
         for value in ("", "true", "True", "-1", "2"):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
-                    fp8_ar.TpFp8AllReduceConfig.from_values((value, "64", "128"))
+                    fp8_ar.TpFp8AllReduceConfig.from_value(value)
 
-    def test_byte_bounds_reject_invalid_or_ambiguous_launch_ranges(self):
-        invalid_values = (
-            ("1", "63", "128"),
-            ("1", "128", "127"),
-            ("1", "64", "129"),
-            ("1", "not-a-number", "128"),
-        )
-        for values in invalid_values:
-            with self.subTest(values=values):
-                with self.assertRaises(ValueError):
-                    fp8_ar.TpFp8AllReduceConfig.from_values(values)
-        self.assertEqual(
-            fp8_ar.TpFp8AllReduceConfig.from_values(("1", "65", "128")).min_bytes,
-            65,
+    def test_removed_environment_knobs_do_not_change_policy(self):
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_TP_FP8_ALLREDUCE": "1",
+                "RTP_LLM_TP_FP8_ALLREDUCE_MIN_BYTES": "invalid",
+                "RTP_LLM_TP_FP8_ALLREDUCE_MAX_BYTES": "1",
+                "RTP_LLM_TP_FP8_ALLREDUCE_BLOCKS": "256",
+            },
+            clear=True,
+        ):
+            self.assertEqual(fp8_ar.read_config_value(), "1")
+            self.assertEqual(fp8_ar._MIN_BYTES, 2 * 1024 * 1024)
+            self.assertEqual(fp8_ar._MAX_BYTES, 128 * 1024 * 1024)
+            self.assertEqual(fp8_ar._select_blocks([96, 96]), 64)
+
+    def test_auto_blocks_uses_common_conservative_residency_limit(self):
+        self.assertEqual(fp8_ar._select_blocks([96, 96]), 64)
+        self.assertEqual(fp8_ar._select_blocks([96, 24]), 24)
+        self.assertEqual(fp8_ar._select_blocks([24, 96]), 24)
+
+    def test_constructor_negotiates_auto_blocks_before_allocating_native_context(self):
+        from rtp_llm.models_py.kernels.cuda import low_precision_all_reduce as native
+
+        def gather(value, group):
+            if isinstance(value, tuple):
+                peer = (*value[:1], "peer-uuid", *value[2:5], 24)
+                return [value, peer]
+            return [value, value]
+
+        properties = MagicMock(uuid="local-uuid", multi_processor_count=96)
+        with (
+            patch.dict(os.environ, {"RTP_LLM_TP_FP8_ALLREDUCE_BLOCKS": "256"}),
+            patch.object(dist, "get_world_size", return_value=2),
+            patch.object(dist, "get_backend", return_value="nccl"),
+            patch.object(dist, "get_rank", return_value=0),
+            patch.object(torch.version, "hip", None),
+            patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)),
+            patch.object(torch.cuda, "get_device_properties", return_value=properties),
+            patch.object(torch.cuda, "device", return_value=nullcontext()),
+            patch.object(torch.cuda, "Stream"),
+            patch.object(torch.cuda, "current_stream"),
+            patch.object(fp8_ar, "_gather", side_effect=gather),
+            patch.object(native, "TpFp8AllReduce") as constructor,
+        ):
+            communicator = fp8_ar.TpFp8AllReduceCommunicator(object(), "cuda:0")
+        self.assertEqual(communicator.blocks, 24)
+        constructor.assert_called_once_with(
+            max_numel=128 * 1024 * 1024 // 2,
+            device_index=0,
+            rank=0,
+            blocks=24,
         )
 
     def test_rank_mismatch_is_detected_before_any_low_precision_collective(self):
-        local = ("1", "64", "128")
+        local = "1"
 
         def gather(output, value, group):
             self.assertEqual(value, local)
-            output[:] = [local, ("1", "64", "256")]
+            output[:] = [local, "0"]
 
         with (
             patch.dict(
                 os.environ,
                 {
-                    "RTP_LLM_TP_FP8_ALLREDUCE": local[0],
-                    "RTP_LLM_TP_FP8_ALLREDUCE_MIN_BYTES": local[1],
-                    "RTP_LLM_TP_FP8_ALLREDUCE_MAX_BYTES": local[2],
+                    "RTP_LLM_TP_FP8_ALLREDUCE": local,
                 },
                 clear=True,
             ),
@@ -69,7 +104,7 @@ class TpFp8AllReduceConfigTest(unittest.TestCase):
                 fp8_ar.validate_config(object())
 
     def test_matching_disabled_ranks_participate_in_the_same_validation(self):
-        local = ("0", "2097152", "134217728")
+        local = "0"
 
         def gather(output, value, group):
             self.assertEqual(value, local)
