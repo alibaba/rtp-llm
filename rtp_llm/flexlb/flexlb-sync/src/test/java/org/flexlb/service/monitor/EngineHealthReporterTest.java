@@ -392,24 +392,19 @@ class EngineHealthReporterTest {
     }
 
     @Test
-    void shouldReportCacheCapacityMetricsFromSharedWorkerStatus() {
-        WorkerStatus workerStatus = workerStatusWithCacheStatus();
+    void shouldReportCacheCapacityMetricsFromWorkerStatusWithoutCacheStatusPoll() {
+        WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL, 800L, 1000L, null);
 
-        reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus, 0L);
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, null, 0, 0);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
                 "engineIp", "10.0.0.1:8080",
                 "role", "PREFILL");
-        verify(monitor).report("app.cache.block.size",
-                FlexMetricTags.of("model", "test-model", "role", "PREFILL"), 64.0);
-        verify(monitor).report("app.cache.local.standby.block.size", expectedTags, 64.0);
         verify(monitor).report("app.cache.used.kv.cache.tokens", expectedTags, 200.0);
         verify(monitor).report("app.cache.available.kv.cache.tokens", expectedTags, 800.0);
-        verify(monitor).report("app.cache.total.kv.cache.tokens",
-                FlexMetricTags.of("model", "test-model", "role", "PREFILL"), 1000.0);
+        verify(monitor).report("app.cache.total.kv.cache.tokens", expectedTags, 1000.0);
         verify(monitor).report("app.cache.used.kv.cache.ratio", expectedTags, 20.0);
-        verify(monitor).report("app.cache.key.size", expectedTags, 7.0);
     }
 
     @Test
