@@ -41,6 +41,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.stream.Stream;
 
@@ -51,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -113,6 +115,36 @@ class FlexlbServiceImplTest {
         deadlineTimer.shutdownNow();
         pvLogger.detachAppender(pvAppender);
         pvAppender.stop();
+    }
+
+    @Test
+    void localScheduleReportsBalancingWithResponseAlreadyPublished() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        CompletableFuture<Response> routeResult = new CompletableFuture<>();
+        when(routeService.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext context = invocation.getArgument(0);
+            routeResult.whenComplete((result, error) -> {
+                if (error == null) {
+                    context.setResponse(result);
+                }
+            });
+            return routeResult;
+        });
+        AtomicReference<Response> observedResponse = new AtomicReference<>();
+        doAnswer(invocation -> {
+            BalanceContext context = invocation.getArgument(0);
+            observedResponse.set(context.getResponse());
+            return null;
+        }).when(engineHealthReporter).reportBalancingService(any());
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("metric-response-1").build(), mock(StreamObserver.class));
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        routeResult.complete(response);
+
+        assertSame(response, observedResponse.get());
     }
 
     @Test

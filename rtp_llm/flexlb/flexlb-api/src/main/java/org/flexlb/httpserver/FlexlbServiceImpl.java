@@ -638,6 +638,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
         return prepareBlockCacheKeys(ctx).thenCompose(ignored -> routeService.route(ctx)).thenApply(response -> {
+            // RouteService's side-effect callback may run after this dependent stage.
+            // Publish the result before response completion reports balancing metrics.
+            ctx.setResponse(response);
             if (response.isSuccess() && cacheAwareService != null) {
                 try {
                     cacheAwareService.updateFromRoutedRequest(ctx.getRequest(), response.getServerStatus());

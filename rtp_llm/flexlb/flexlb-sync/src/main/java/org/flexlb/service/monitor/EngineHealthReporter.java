@@ -13,7 +13,6 @@ import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
@@ -435,31 +434,36 @@ public class EngineHealthReporter {
     }
 
     public void reportPrefillWorkerStatusTask(
-            String modelName, String engineIp, String role, String group, TaskInfo task) {
+            String modelName, String engineIp, String role, String group,
+            WorkerStatus.TaskTelemetry task) {
         FlexMetricTags tags = lifecycleTags(modelName, engineIp, role, group);
         monitor.report(ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS,
-                tags, task.getHbmLocalMatchTokens());
+                tags, task.hbmLocalMatchTokens());
         monitor.report(ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS,
-                tags, task.getRemoteKvAddedMatchTokens());
+                tags, task.remoteKvAddedMatchTokens());
         monitor.report(ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT,
-                tags, task.getPrefillStepCount());
+                tags, task.prefillStepCount());
         monitor.report(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN,
-                tags, task.getPrefillNonfinalChunkTokensMin());
+                tags, task.prefillNonfinalChunkTokensMin());
         monitor.report(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX,
-                tags, task.getPrefillNonfinalChunkTokensMax());
+                tags, task.prefillNonfinalChunkTokensMax());
         reportDuration(ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS, tags,
-                task.getInputQueueDrainTimeMs(), task.getInputQueueEnqueueTimeMs());
+                task.inputQueueDrainTimeMs(), task.inputQueueEnqueueTimeMs());
         monitor.report(ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS,
-                tags, task.getRemoteKvWaitMs());
+                tags, task.remoteKvWaitMs());
         long schedulerToRunningMs = reportDuration(
                 ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS, tags,
-                task.getRunningEnteredTimeMs(), task.getWaitingEnteredTimeMs());
+                task.runningEnteredTimeMs(), task.waitingEnteredTimeMs());
         if (schedulerToRunningMs >= 0L) {
             monitor.report(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS,
-                    tags, Math.max(0L, schedulerToRunningMs - task.getRemoteKvWaitMs()));
+                    tags, Math.max(0L, schedulerToRunningMs - task.remoteKvWaitMs()));
         }
         reportDuration(ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS, tags,
-                task.getFirstTokenTimeMs(), task.getRunningEnteredTimeMs());
+                task.firstTokenTimeMs(), task.runningEnteredTimeMs());
+        reportDuration(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
+                tags, task.waitingEnteredTimeMs(), task.requestReceivedTimeMs());
+        reportDuration(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
+                tags, task.runningEnteredTimeMs(), task.waitingEnteredTimeMs());
     }
 
     private static FlexMetricTags lifecycleTags(
@@ -535,6 +539,7 @@ public class EngineHealthReporter {
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
+        reportLocalStandbyBlockSize(metricTags, status.blockSize());
     }
 
     public void reportCacheStatusCheckerSuccess(
