@@ -72,6 +72,7 @@ def _start_validate(params, plan):
         "OUTPUT_DIR",
         "GRPC_TARGET",
         "GRPC_TARGETS",
+        "MASTER_DISCOVERY_FILE",
     }:
         raise ValueError(
             "client endpoint and runtime identities are resolved by framework"

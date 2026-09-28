@@ -13,10 +13,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scenario.actions import master
 from scenario.contracts import PlanContext
 from scenario.runtime import Deadline, RuntimeContext
-from runtime.ha import HaMasterStateSampler
+from runtime.ha import HaMasterStateSampler, HaTrafficRunner
 
 
 class MasterActionsTest(unittest.TestCase):
+    def test_ha_client_receives_http_discovery_candidates(self):
+        root = Path(self.tmp.name)
+        env = SimpleNamespace(master_specs={
+            "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=18080),
+            "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=18083),
+        })
+        manager = Mock()
+        manager.master_instance_target.side_effect = lambda _env, name: {
+            "A": "127.0.0.1:18082", "B": "127.0.0.1:18085"
+        }[name]
+        with patch("runtime.ha.ClientOps"):
+            runner = HaTrafficRunner(manager, env, root, "flow", [
+                "127.0.0.1:18082", "127.0.0.1:18085"
+            ])
+        path = Path(runner._overrides["MASTER_DISCOVERY_FILE"])
+        self.assertEqual({"hosts": [
+            {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
+            {"http": "127.0.0.1:18083", "grpc": "127.0.0.1:18085"},
+        ]}, json.loads(path.read_text()))
+
     def test_ha_state_sampler_keeps_each_master_and_missing_inflight_distinct(self):
         root = Path(self.tmp.name)
         env = SimpleNamespace(master_specs={

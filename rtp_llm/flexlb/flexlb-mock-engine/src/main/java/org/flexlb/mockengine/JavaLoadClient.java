@@ -183,15 +183,17 @@ public final class JavaLoadClient implements AutoCloseable {
         }
         this.eventLoopGroup = new NioEventLoopGroup(config.eventLoopThreads);
         if (config.isMultiTarget()) {
-            // HA mode (GRPC_TARGETS >= 2): every target gets its own
-            // N_CHANNELS pool inside the router; the legacy arrays stay empty.
-            this.router = new MasterTargetRouter(
-                    config.grpcTargets, config.nChannels, eventLoopGroup);
+            // A discovery file enables the frontend-style VIP + /master/info
+            // route. GRPC_TARGETS alone retains the older transport-only mode.
+            String discoveryFile = System.getenv("MASTER_DISCOVERY_FILE");
+            this.router = discoveryFile == null || discoveryFile.isBlank()
+                    ? new MasterTargetRouter(config.grpcTargets, config.nChannels, eventLoopGroup)
+                    : new MasterTargetRouter(Path.of(discoveryFile), config.nChannels, eventLoopGroup);
             this.scheduleChannels = new ManagedChannel[0];
             this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[0];
             System.out.println("HA multi-target mode: targets=" + config.grpcTargets
-                    + ", sticky=" + router.stickyTarget()
-                    + " (gRPC UNAVAILABLE retries same-request on the next target)");
+                    + ", selected=" + router.stickyTarget()
+                    + ", discovery_file=" + discoveryFile);
             return;
         }
         this.router = null;
@@ -759,9 +761,8 @@ public final class JavaLoadClient implements AutoCloseable {
 
                 long scheduleStartNanos = System.nanoTime();
                 if (router != null) {
-                    // HA multi-target mode: one failover-aware Schedule call —
-                    // sticky target first, same-request retry on the next target
-                    // ONLY on gRPC UNAVAILABLE (see MasterTargetRouter).
+                    // HA mode: MasterTargetRouter owns discovery and any
+                    // same-request retry; the attempt ledger records both.
                     // schedule_ms spans the whole attempt chain, so
                     // send_start_epoch_ms + schedule_ms stays one wall clock.
                     MasterTargetRouter.ScheduleOutcome outcome =
@@ -887,11 +888,9 @@ public final class JavaLoadClient implements AutoCloseable {
             //    schedule_error) may trigger the fallback attempt — byte-identical
             //    to the historical behavior the existing pressure-test line
             //    relies on.
-            //  - HA multi-target mode: ONLY the double-connection failure (every
-            //    GRPC_TARGETS target answered gRPC UNAVAILABLE, error_kind=
-            //    "transport") may bypass the master. Business error codes (8431 /
-            //    8511 — master answered) and DEADLINE_EXCEEDED never fall back
-            //    (production connection_failed contract).
+            //  - HA multi-target mode: only connection failure after all
+            //    eligible targets were attempted (error_kind="transport")
+            //    may bypass the master. Business responses and deadlines do not.
             boolean legacyScheduleFailure = scheduleResponse == null
                     || "schedule_error".equals(result.status)
                     || "exception".equals(result.status);

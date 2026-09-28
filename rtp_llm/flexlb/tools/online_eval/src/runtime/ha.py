@@ -92,8 +92,10 @@ def write_ha_trace(case_dir: Path) -> Path:
 
 
 class HaTrafficRunner:
-    """Background JavaLoadClient over GRPC_TARGETS (the HA multi-target
-    mode: sticky target + same-request transport-failure retry).
+    """Background JavaLoadClient using a refreshable Master candidate file.
+
+    The client probes /master/info and chooses the healthy leader, then
+    retries a healthy backup only after a Schedule connection failure.
 
     Phase bookkeeping: the runner stamps wall-clock epoch seconds at
     ``mark()`` call sites; row windows are then sliced offline by
@@ -127,6 +129,16 @@ class HaTrafficRunner:
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
         self.state_sampler = HaMasterStateSampler(env, case_dir / "master_states.jsonl")
+        specs_by_target = {
+            manager.master_instance_target(env, master_name): spec
+            for master_name, spec in env.master_specs.items()
+        }
+        discovery_file = case_dir / "master-discovery.json"
+        discovery_file.write_text(json.dumps({"hosts": [
+            {"http": f"{specs_by_target[target].bind_ip}:{specs_by_target[target].http_port}",
+             "grpc": target}
+            for target in targets
+        ]}), encoding="utf-8")
         heap = "8g" if source is not None else "1g"
         self._client = ClientOps(manager, heap, heap)
         if source is None:
@@ -145,6 +157,7 @@ class HaTrafficRunner:
             "TRACE_FILE": str(trace),
             "LIVE_CLIENT_EVENTS": str(live_events).lower(),
             "GRPC_TARGETS": ",".join(self.targets),
+            "MASTER_DISCOVERY_FILE": str(discovery_file),
             "DURATION_S": str(int(duration_s)),
             "REPLAY_SPEED": str(replay_speed),
             "MAX_CONCURRENCY": str(max_concurrency),

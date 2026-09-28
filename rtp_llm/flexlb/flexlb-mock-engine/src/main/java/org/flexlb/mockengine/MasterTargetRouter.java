@@ -11,62 +11,27 @@ import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.nio.file.Path;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Sticky multi-target failover router for the Schedule RPC — the HA case-test
- * counterpart of the legacy single-address path in {@link JavaLoadClient}.
+ * Schedule routing for HA traffic. With a discovery file, the selected Master
+ * and healthy slave come from periodic /master/info probes; without it, the
+ * older GRPC_TARGETS mode retains its sticky transport-failover behavior.
  *
- * <p>Simplified model (deliberately NOT a 1:1 port of the production Python
- * frontend's vipserver discovery layer): the client holds a static list of
- * flexlb gRPC addresses ({@code GRPC_TARGETS=A,B}), sticks to one "current"
- * target, and only reacts to <b>transport-layer</b> failures. The production
- * frontend instead polls {@code master/info} every second for
- * {@code real_master_host}. The mock HA harness runs two independent masters
- * with consistency disabled, so this router exercises client-side transport
- * failover, not master election or follower forwarding.
+ * <p>In discovery mode the candidate file plays VipServer's membership role.
+ * The routing policy follows the production frontend: prefer a healthy node
+ * reporting itself as leader, retain the healthy previous choice when no node
+ * claims leadership, and retry a healthy non-leader only after a non-deadline
+ * Schedule connection failure. A Schedule response, including a business
+ * error, is terminal. The mock dual_standalone topology itself has no Master
+ * election or follower forwarding.
  *
- * <p>Per-request decision flow (brief p1 decision tree — event ① "A
- * unreachable" is decoupled from event ② "B became master"; the client never
- * waits for or probes ZK state):
- * <ol>
- *   <li>Send Schedule to the sticky target (per-target channel pool,
- *       round-robin within the pool — same pool shape as the legacy path).</li>
- *   <li>On gRPC {@code UNAVAILABLE} (connection refused/broken — the ONLY
- *       retrying error family): same-request retry on the next target in the
- *       list, wrap-around, one attempt per target. On success from a
- *       different target the sticky pointer moves there (a backup answering
- *       is good enough — whether it is already master is event ②, none of
- *       the client's business).</li>
- *   <li>Every other outcome is terminal for the request:
- *       {@code DEADLINE_EXCEEDED} → no retry/switch/direct-fallback
- *       (single-assertion caliber); any other gRPC status or non-gRPC
- *       exception → treated as "master answered at the gRPC layer" — no
- *       retry, no switch, no direct fallback (same boundary as business
- *       error codes such as 8431/8511).</li>
- *   <li>All targets {@code UNAVAILABLE} → double-connection-failure outcome
- *       ({@link ErrorKind#TRANSPORT}); the caller decides whether the
- *       ENABLE_FALLBACK direct-to-engine escape hatch applies.</li>
- *   <li>Failback is symmetric wrap-around: when the sticky target dies and a
- *       previously-dead target has recovered, the retry chain naturally lands
- *       back on it and the sticky pointer follows — no probing thread, no
- *       direction preference.</li>
- * </ol>
- *
- * <p>Error-code boundary (brief p1 "edge notes" — none of these enter the
- * retry/switch/fallback logic): business codes in the Schedule response
- * (8431 admission rejection, 8511 forwarding terminal code from the
- * split-brain window, ...) are returned to the caller as ordinary responses;
- * the router does not even look at them. Classification of those rows into
- * {@code error_kind=business} happens in the caller.
- *
- * <p>Sticky-pointer concurrency: the pointer is a plain volatile write on
- * success. Concurrent requests during a failover window may briefly diverge
- * before converging on the newly-proven target; this is best-effort by
- * design (the simplified model has no probing, so the next request simply
- * retries). Observability (per-request {@code master_target}/{@code failover}
- * fields) is stamped per request and stays exact regardless of the race.
+ * <p>Per-request attempt targets and retry status are recorded in the request
+ * ledger. Discovery snapshots are immutable across an individual request.
  */
 final class MasterTargetRouter {
 
@@ -75,7 +40,7 @@ final class MasterTargetRouter {
         /** Schedule RPC returned a response (any code — business codes are
          *  classified by the caller, not the router). */
         NONE("none"),
-        /** Every target failed with gRPC UNAVAILABLE (transport layer). */
+        /** Every eligible target failed before a Schedule response. */
         TRANSPORT("transport"),
         /** gRPC DEADLINE_EXCEEDED — no retry, no switch, no fallback. */
         DEADLINE("deadline"),
@@ -156,6 +121,10 @@ final class MasterTargetRouter {
     }
 
     private final List<TargetPool> pools;
+    private final Map<String, TargetPool> discoveredPools = new ConcurrentHashMap<>();
+    private final MasterRouteDiscovery discovery;
+    private final EventLoopGroup eventLoopGroup;
+    private final int nChannels;
     /** Index into {@link #pools} of the current sticky target. */
     private volatile int sticky;
 
@@ -165,27 +134,55 @@ final class MasterTargetRouter {
      * JavaLoadClient.
      */
     MasterTargetRouter(List<String> targets, int nChannels, EventLoopGroup eventLoopGroup) {
+        this.discovery = null;
+        this.eventLoopGroup = eventLoopGroup;
+        this.nChannels = nChannels;
         this.pools = new ArrayList<>(targets.size());
         for (String target : targets) {
-            ManagedChannel[] channels = new ManagedChannel[nChannels];
-            FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs =
-                    new FlexlbServiceGrpc.FlexlbServiceBlockingStub[nChannels];
-            for (int i = 0; i < nChannels; i++) {
-                ManagedChannel channel = NettyChannelBuilder.forTarget(target)
-                        .eventLoopGroup(eventLoopGroup)
-                        .channelType(NioSocketChannel.class)
-                        .maxInboundMessageSize(16 * 1024 * 1024)
-                        .flowControlWindow(1024 * 1024)
-                        .keepAliveTime(30, TimeUnit.SECONDS)
-                        .keepAliveTimeout(10, TimeUnit.SECONDS)
-                        .usePlaintext()
-                        .build();
-                channels[i] = channel;
-                stubs[i] = FlexlbServiceGrpc.newBlockingStub(channel);
-            }
-            pools.add(new TargetPool(target, channels, stubs));
+            pools.add(newTargetPool(target));
         }
         this.sticky = 0;
+    }
+
+    MasterTargetRouter(Path discoveryFile, int nChannels, EventLoopGroup eventLoopGroup) {
+        this(MasterRouteDiscovery.fromFile(discoveryFile), nChannels, eventLoopGroup);
+        discovery.start();
+    }
+
+    private MasterTargetRouter(MasterRouteDiscovery discovery, int nChannels,
+            EventLoopGroup eventLoopGroup) {
+        this.discovery = discovery;
+        this.eventLoopGroup = eventLoopGroup;
+        this.nChannels = nChannels;
+        this.pools = List.of();
+    }
+
+    MasterTargetRouter(MasterRouteDiscovery discovery,
+            Map<String, FlexlbServiceGrpc.FlexlbServiceBlockingStub[]> stubs) {
+        this(discovery, 0, null);
+        for (Map.Entry<String, FlexlbServiceGrpc.FlexlbServiceBlockingStub[]> entry : stubs.entrySet()) {
+            discoveredPools.put(entry.getKey(), new TargetPool(entry.getKey(), null, entry.getValue()));
+        }
+    }
+
+    private TargetPool newTargetPool(String target) {
+        ManagedChannel[] channels = new ManagedChannel[nChannels];
+        FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs =
+                new FlexlbServiceGrpc.FlexlbServiceBlockingStub[nChannels];
+        for (int i = 0; i < nChannels; i++) {
+            ManagedChannel channel = NettyChannelBuilder.forTarget(target)
+                    .eventLoopGroup(eventLoopGroup)
+                    .channelType(NioSocketChannel.class)
+                    .maxInboundMessageSize(16 * 1024 * 1024)
+                    .flowControlWindow(1024 * 1024)
+                    .keepAliveTime(30, TimeUnit.SECONDS)
+                    .keepAliveTimeout(10, TimeUnit.SECONDS)
+                    .usePlaintext()
+                    .build();
+            channels[i] = channel;
+            stubs[i] = FlexlbServiceGrpc.newBlockingStub(channel);
+        }
+        return new TargetPool(target, channels, stubs);
     }
 
     /**
@@ -193,6 +190,9 @@ final class MasterTargetRouter {
      * {@link #shutdown()} skips them).
      */
     MasterTargetRouter(List<String> targets, List<FlexlbServiceGrpc.FlexlbServiceBlockingStub[]> stubs) {
+        this.discovery = null;
+        this.eventLoopGroup = null;
+        this.nChannels = 0;
         this.pools = new ArrayList<>(targets.size());
         for (int i = 0; i < targets.size(); i++) {
             pools.add(new TargetPool(targets.get(i), null, stubs.get(i)));
@@ -201,6 +201,9 @@ final class MasterTargetRouter {
     }
 
     String stickyTarget() {
+        if (discovery != null) {
+            return discovery.route().master();
+        }
         return pools.get(sticky).target;
     }
 
@@ -210,6 +213,9 @@ final class MasterTargetRouter {
      * returned {@link ScheduleOutcome}.
      */
     ScheduleOutcome schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
+        if (discovery != null) {
+            return scheduleDiscovered(request, timeoutMs);
+        }
         int start = sticky;
         Exception lastFailure = null;
         List<ScheduleAttempt> attempts = new ArrayList<>();
@@ -263,9 +269,58 @@ final class MasterTargetRouter {
                 ErrorKind.TRANSPORT, lastFailure, attempts);
     }
 
+    private ScheduleOutcome scheduleDiscovered(
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request, long timeoutMs) {
+        MasterRouteDiscovery.Route route = discovery.route();
+        if (route.master() == null) {
+            return new ScheduleOutcome(null, "", false, ErrorKind.TRANSPORT, null, List.of());
+        }
+        List<String> targets = new ArrayList<>();
+        targets.add(route.master());
+        if (route.slave() != null && !route.slave().equals(route.master())) {
+            targets.add(route.slave());
+        }
+        List<ScheduleAttempt> attempts = new ArrayList<>();
+        Exception lastFailure = null;
+        for (String target : targets) {
+            TargetPool pool = discoveredPools.computeIfAbsent(target, this::newTargetPool);
+            FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = pool.nextStub()
+                    .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+            long startedEpochMs = System.currentTimeMillis();
+            long startedNanos = System.nanoTime();
+            try {
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = stub.schedule(request);
+                attempts.add(new ScheduleAttempt(target, startedEpochMs, startedNanos,
+                        "OK", response.getCode()));
+                return new ScheduleOutcome(response, target, attempts.size() > 1,
+                        ErrorKind.NONE, null, attempts);
+            } catch (StatusRuntimeException e) {
+                Status.Code code = e.getStatus().getCode();
+                attempts.add(new ScheduleAttempt(target, startedEpochMs, startedNanos,
+                        code.name(), null));
+                if (code == Status.Code.DEADLINE_EXCEEDED) {
+                    return new ScheduleOutcome(null, target, attempts.size() > 1,
+                            ErrorKind.DEADLINE, e, attempts);
+                }
+                lastFailure = e;
+            } catch (RuntimeException e) {
+                attempts.add(new ScheduleAttempt(target, startedEpochMs, startedNanos,
+                        "EXCEPTION", null));
+                lastFailure = e;
+            }
+        }
+        return new ScheduleOutcome(null, targets.get(targets.size() - 1), attempts.size() > 1,
+                ErrorKind.TRANSPORT, lastFailure, attempts);
+    }
+
     /** Shuts down every target pool's channels (no-op for test-constructed pools). */
     void shutdown() {
-        for (TargetPool pool : pools) {
+        if (discovery != null) {
+            discovery.close();
+        }
+        List<TargetPool> allPools = new ArrayList<>(pools);
+        allPools.addAll(discoveredPools.values());
+        for (TargetPool pool : allPools) {
             if (pool.channels == null) {
                 continue;
             }
