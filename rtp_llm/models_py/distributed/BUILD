@@ -9,9 +9,11 @@ py_library(
         "flashinfer_all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
+        "tp_fp8_all_reduce.py",
     ],
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm/models_py/kernels/cuda/low_precision_all_reduce:tp_fp8_all_reduce",
     ],
     visibility = ["//visibility:public"],
 )
