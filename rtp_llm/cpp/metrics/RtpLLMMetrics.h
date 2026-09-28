@@ -491,6 +491,15 @@ public:
         }
     }
 
+    // Raw TPS numerators, using the same timing validation and reporting-window reset.
+    int64_t contextTokens() const {
+        return context_token_num_;
+    }
+
+    int64_t contextTokensWithCache() const {
+        return context_token_num_with_cache_;
+    }
+
     double contextTPS() const {
         return calcTps(context_token_num_, context_time_us_);
     }
@@ -621,10 +630,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* context_tps_metric            = nullptr;
-    kmonitor::MutableMetric* context_tps_with_cache_metric = nullptr;
-    kmonitor::MutableMetric* generate_tps_metric           = nullptr;
-    kmonitor::MutableMetric* total_tps_metric              = nullptr;
+    kmonitor::MutableMetric* context_tokens_metric            = nullptr;
+    kmonitor::MutableMetric* context_tokens_with_cache_metric = nullptr;
+    kmonitor::MutableMetric* context_tps_metric               = nullptr;
+    kmonitor::MutableMetric* context_tps_with_cache_metric    = nullptr;
+    kmonitor::MutableMetric* generate_tps_metric              = nullptr;
+    kmonitor::MutableMetric* total_tps_metric                 = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
