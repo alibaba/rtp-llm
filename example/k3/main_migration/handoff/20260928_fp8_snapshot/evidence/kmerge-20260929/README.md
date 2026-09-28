@@ -19,3 +19,11 @@
 这个形状的局部 GPU 时间缩短约 0.217 ms。完整 110–115 探测记录在 `host-selection-benchmark.json`：110 和 113 都无外部 GPU 计算，数值排序选了 113；因为候选已在 110 独立编译，随后对 110 的 GPU 1 单独复查为独占可用，见 `host-selection-benchmark-110.json`。本次只测算子，没有加载模型权重或改动 3FS 并发。
 
 这仍不是四层 FP8+MTP PD flow 或 64K timeline 的结果，不能据此将候选并入性能锚点。下一步需在双机服务里核对新核实际被调用、答案链路正确，再比较全 rank target Prefill 关键路径。
+
+## 111/112 双机候选编译与启动前检查
+
+候选源码固定在 `3d7fe34a7f025fd06ebc731fa0b39323bd5484c8`。111 和 112 分别在个人 ext4 数据盘上的独立工作树、Bazel 输出目录编译了 `//rtp_llm:rtp_llm_server`；容器镜像相同，容器内用户均为 `luohaocheng.lhc`，命令包含 `--config=cuda13 --config=sm10x`。两端各完成 23,714 个动作，Bazel 均报告 `Build completed successfully`。原始日志及哈希保存在 `build-logs-111112.tar.gz` 和 `build-logs-111112.sha256`。
+
+同一套启动参数的 `--print-config` 显示 target 从 `/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers` 直接读取，`LOAD_METHOD=fastsafetensors`；MTP 视图在各自主机个人数据盘，shard 指向已核实的 3FS 权重。启动前 guard 结果见四份 `weight-*.txt`：每端 target 为 7 个 shard、16,402 个 tensor、54.47 GiB；MTP 为 9 个 shard、5,404 个 tensor、20.00 GiB；索引和 Safetensors header 均通过。111/112 各 8 个 RDMA bond 都是 `ACTIVE`，两端互 ping 无丢包。3FS 挂载可读。这里仅证明启动前条件，服务实际加载日志仍需在切换后核查。
+
+`host-selection-build-complete.json` 是旧 `d733` 服务仍占用 111/112 显存时的只读快照：110 可用，113 显存不足，114/115 没有运行中、同镜像的个人容器，因此当时没有可直接再加载一套 TP8/EP8 PD 的双机组合。旧服务属于本任务；完成证据留存并确认不再承接请求后，才能按准确进程组停止它们，重新执行双机选择。
