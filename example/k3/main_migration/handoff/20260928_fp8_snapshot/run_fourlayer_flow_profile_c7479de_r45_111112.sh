@@ -29,6 +29,7 @@ python3 example/k3/main_migration/text_smoke.py \
   --chunk-tokens 65536 --require-mtp --rdma-prewarm-attempts 0 \
   --long-prefix-checkpoint "$checkpoint" \
   --long-prefix-tp-size 8 --long-prefix-kernel-page-size 128 \
+  --max-tokens 16 \
   --timeout 300 \
   > "$out/stdout.log" 2>&1
 status=$?
