@@ -51,3 +51,11 @@
 111 的 target loader 选择 FastSafetensors 后约 25 秒进入 MTP loader，112 约 41 秒；这段时间同时包含权重处理，不能当作纯 3FS 吞吐。112 服务总启动约 342 秒，后续还进行了模型初始化和 Decode CUDA Graph 相关工作。实际使用的是本任务进程的 64 线程 3FS 预读辅助库，没有改动机器或集群级 3FS 配置；本轮没有观察到需要先调整并发才能继续测试的权重读取阻塞。
 
 为检查 BF16 NCCL AllGather 是否有简单的环境配置收益，我在独占的 110 上用 `bench_bf16_nccl_allgather.py` 单独测了 TP8、每 rank 8,192×7,168 的 BF16 输入；这与四层 64K attention 输入形状相同。每组单独建进程，先做一次初始化，再完成 20–40 次预热，末三次所有 rank 均在各自中位数 ±5% 内，随后测 30 次。输出的 rank 标记也逐个核对。结果是默认 NCCL 配置 1.410 ms、强制 `NCCL_ALGO=NVLS` 1.626 ms、强制 `NCCL_PROTO=LL128` 1.486 ms，均为每次最慢 rank 的 CUDA event 中位数。原始逐 rank 数据、110 的独占选择快照及运行日志在本目录的 `bf16-nccl-ag-*` 文件中。这是同形状通信筛选，不包含模型计算或 PD 链路；所测两种覆盖配置都没有收益，因此本轮没有改服务的 NCCL 参数。
+
+## Paged convolution 元数据候选
+
+我用 `analyze_prefill_gpu_idle.py` 对上面的两组八 rank trace 逐个匹配 target 请求，并把 CUDA launch 关联到 GPU kernel，再求每个 rank 的 kernel 区间并集。候选版最慢 rank 的 GPU 空隙中位数为 4.880 ms，固定 feat 为 2.369 ms；相应的 GPU 忙碌并集为 67.372 ms 和 69.018 ms。这些数值只描述被 target CPU scope 发射的 kernel，不能把空隙直接当作 CPU 等待或某个算子耗时。逐请求、逐 rank 数据在 `target-gpu-idle.json.gz` 和 `feat-a9bf-target-gpu-idle.json.gz`。
+
+候选版的稳定大空隙集中在 embedding 前及首层 AttnRes 前。trace 中该阶段有一次 `aten::copy_`，输入为 8,192 个 `int32`，其中一个匹配请求耗时 2.460 ms。源码的 `prepare_causal_conv1d_metadata` 正好为 65,536 token 生成 8,192 项传统 convolution 索引；当前 FP8 cuLA paged convolution 的对齐无前缀路径读取的是另一份 1,024 项 paged 索引。因此我增加了一个保守的条件：所有 KDA 层都走 paged convolution、每层有 cache 且每层 prefix 按 64 token 对齐时，不再准备传统索引；任一条件不满足仍保留原来的 fallback。这个源码与 trace 的对应关系是性能假设，需由重启后的双机 flow 和热态 timeline 确认收益。
+
+111 的 CPU Bazel 测试先按旧代码运行，3 条中对齐 paged 路径的 1 条按预期失败；修改后 3 条通过。测试覆盖无前缀 paged 路径、未对齐 prefix 的传统 fallback 和缺失 cache 的 fallback。命令使用个人账号、容器内本地 ext4 源码和输出目录，以及 `--config=cuda13 --config=sm10x`。原始 red/green 日志在 `test-paged-conv-bazel-111.tar.gz`；`host-selection-unit-111.json` 记录测试前服务占用。此时尚未重启服务，也没有新候选的 GPU 性能或完整模型正确性结论。

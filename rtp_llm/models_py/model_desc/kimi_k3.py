@@ -278,6 +278,24 @@ class KimiK3Model(GptModelBase):
             )
         )
 
+    def _paged_conv_can_skip_classic_metadata(self, inputs):
+        if not self.use_paged_conv_prefill or self.kv_cache is None:
+            return False
+        for index, layer in enumerate(self.layers):
+            if layer.layer_type != HybridAttentionType.LINEAR:
+                continue
+            if not getattr(layer.attention.prefill, "use_paged_conv", False):
+                return False
+            if self.kv_cache.get_layer_cache(index) is None:
+                return False
+            layer_inputs = select_attention_inputs_for_layer(inputs, self.kv_cache, index)
+            prefixes = layer_inputs.prefix_lengths
+            if prefixes.device.type != "cpu" or any(
+                int(prefix) % 64 for prefix in prefixes.tolist()
+            ):
+                return False
+        return True
+
     def _forward_layers(self, hidden, inputs, fmha_impl, sequence_parallel_input=False):
         physical_rows = inputs.input_ids.shape[0]
         if physical_rows % self.tp_size:
@@ -307,16 +325,18 @@ class KimiK3Model(GptModelBase):
                 layer.layer_type == HybridAttentionType.LINEAR for layer in self.layers
             )
         ):
-            cu_seqlens_host = primary.cu_seqlens
-            conv_meta = prepare_causal_conv1d_metadata(
-                query_start_loc=(
-                    cu_seqlens_host
-                    if cu_seqlens_host is not None and cu_seqlens_host.numel()
-                    else primary.cu_seqlens_device
-                ),
-                device=hidden.device,
-            )
+            if not self._paged_conv_can_skip_classic_metadata(inputs):
+                cu_seqlens_host = primary.cu_seqlens
+                conv_meta = prepare_causal_conv1d_metadata(
+                    query_start_loc=(
+                        cu_seqlens_host
+                        if cu_seqlens_host is not None and cu_seqlens_host.numel()
+                        else primary.cu_seqlens_device
+                    ),
+                    device=hidden.device,
+                )
             if self.use_paged_conv_prefill:
+                cu_seqlens_host = primary.cu_seqlens
                 if cu_seqlens_host is None or cu_seqlens_host.device.type != "cpu":
                     raise ValueError("paged convolution requires host cu_seqlens")
                 paged_conv_meta = prepare_paged_short_conv_metadata(
