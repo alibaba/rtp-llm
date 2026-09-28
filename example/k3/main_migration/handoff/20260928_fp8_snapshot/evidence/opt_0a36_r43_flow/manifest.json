@@ -1,0 +1,17 @@
+{
+  "source_commit": "0a36d6d24829f79e06e229ed53feeefee8913172",
+  "prefill_service": "111/r43 detached Docker exec",
+  "decode_service": "112/r42",
+  "runner_output_name": "r42 (script label predates detached Prefill restart)",
+  "suite": "flow",
+  "cases": 11,
+  "runner_exit": 0,
+  "independent_audit_passed": true,
+  "max_case_elapsed_s": 88.296,
+  "replacement_characters_observed": 4,
+  "semantic_answer_claim": false,
+  "notes": [
+    "Four-layer random logits are only a flow check.",
+    "Short 57-token MTP case transfers zero complete 4096-token KV blocks."
+  ]
+}
