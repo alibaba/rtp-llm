@@ -1,0 +1,28 @@
+{
+  "date": "2026-09-29",
+  "selected_hosts": [
+    114,
+    115
+  ],
+  "cluster": "l20-a",
+  "container": "lhc_GPU",
+  "image": "hub.docker.alibaba-inc.com/isearch/rtp_llm_base_gpu_cuda13:2026_04_30_00_05_eba6d8a",
+  "image_digest": "sha256:571fec7608d58d6e2af343663598e4204c62398e62d3e2bd9926a46e0e9427b1",
+  "ddev_sha256": "91f8fe5ac526f4e0b4ec17dd4b0689de348df850b3031b670ab2764ec28e7032",
+  "fresh_ssh_docker_group_verified": true,
+  "personal_account_inside_container_verified": true,
+  "gpus_visible_per_host": 8,
+  "rdma_uverbs_visible_per_host": 12,
+  "active_rdma_bonds_per_host": 8,
+  "data_disk": "/data0, local XFS",
+  "checkpoint_mount": "/mnt/hf3fs/3fs, fuse.hf3fs",
+  "four_layer_target_config_sha256": "8754ec8b41ae59791aa6370386276467bde6e8ce8502915dcfb9769ba9990da8",
+  "four_layer_target_index_sha256": "eb064b56fc8a782b97594d9888314a430450128d1fe4a7da66662f6d641122b5",
+  "mtp_config_sha256": "6e5457c4113f59f28f9fd7323c89240fa14ce6f0108f43427579595417d2d45b",
+  "mtp_3fs_index_sha256": "12a705576dd2e39726d3d84f0652ffb6ce7874fb1d75591f4f693080ed1aeb8d",
+  "mtp_index_note": "3FS index metadata.total_size differs from the validated local view by 813400 bytes; all 5404 tensor-to-shard assignments match. Reuse validated local index metadata with symlinks to 3FS shards.",
+  "weight_loaded": false,
+  "new_gpu_experiment_started": false,
+  "host_change": "Added personal user to docker group on 114/115. Mounted previously empty /mnt/ram as 20 GiB ramfs on 115 for approved ddev; 114 already had ramfs.",
+  "rollback": "After task-owned lhc_GPU is no longer needed, stop/remove only that container. Unmount 115 /mnt/ram only after confirming it is empty and unused. Retain personal docker membership unless separately requested to reverse it."
+}
