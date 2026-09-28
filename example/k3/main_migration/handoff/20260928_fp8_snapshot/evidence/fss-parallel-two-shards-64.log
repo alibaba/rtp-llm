@@ -1,0 +1,31 @@
+[device0] 2026-09-28 15:02:03.065 - Successfully created shm[P308939F-preallocate] with size[2147483648]
+[device0] 2026-09-28 15:02:03.065 - Completed create_shm_and_pin, total time: 1292 ms
+task 3FS parallel pread: fd=70 bytes=16990911504 threads=64 ready
+set shm[1091593729] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+[device0] 2026-09-28 15:02:06.638 - Completed load_safetensors_to_device, readHeader time: 17 ms, bind fd time: 0 ms, read time: 2311 ms, copyToDevice time: 1022 ms, total time: 3353 ms
+unbind_shm failed for fd[70] err[22]
+[device0] 2026-09-28 15:02:06.638 - Failed to unbind shm[P308939F-preallocate]
+{"path": "/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/model-00002-of-000007.safetensors", "size": 16990911504, "seconds": 3.8041190523654222, "tensor_count": 5404, "samples": [{"key": "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight_packed", "shape": [3072, 1792], "dtype": "torch.uint8", "sample_sha256": "23cb64a1dc87301cf5d44da71a2c56ba70d35e35d60873db9b7ff1ac5d070e38"}, {"key": "language_model.model.layers.1.block_sparse_moe.experts.503.w2.weight_packed", "shape": [3584, 1536], "dtype": "torch.uint8", "sample_sha256": "253dede00508847bfe2d29139004f7677fbc2a7197749028e7754377b5e10d78"}, {"key": "language_model.model.layers.1.self_attn.v_proj.weight", "shape": [12288, 7168], "dtype": "torch.bfloat16", "sample_sha256": "e6929d9e68d03ce06b10a76ea3746876a7e80396ac693dccc88db63fd493abcd"}]}
+task 3FS parallel pread: fd=70 bytes=16990911504 threads=64 ready
+set shm[1091593729] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+copy to shm[1075340802] failed for fd[70], err[22]
+[device0] 2026-09-28 15:02:10.183 - Completed load_safetensors_to_device, readHeader time: 13 ms, bind fd time: 0 ms, read time: 2318 ms, copyToDevice time: 530 ms, total time: 2864 ms
+unbind_shm failed for fd[70] err[22]
+[device0] 2026-09-28 15:02:10.183 - Failed to unbind shm[P308939F-preallocate]
+{"path": "/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/model-00003-of-000007.safetensors", "size": 16990911504, "seconds": 3.374381512403488, "tensor_count": 5404, "samples": [{"key": "language_model.model.layers.2.block_sparse_moe.experts.0.w1.weight_packed", "shape": [3072, 1792], "dtype": "torch.uint8", "sample_sha256": "d03414f8a24fbddb84a53080c84a13a560f633dd5e27875958682aaa8603c267"}, {"key": "language_model.model.layers.2.block_sparse_moe.experts.503.w2.weight_packed", "shape": [3584, 1536], "dtype": "torch.uint8", "sample_sha256": "e224174091d4c8e630a1d9018f920fb509d1f346170b1837f7485315c1f9a3d5"}, {"key": "language_model.model.layers.2.self_attn.v_proj.weight", "shape": [12288, 7168], "dtype": "torch.bfloat16", "sample_sha256": "f3108317341585d750c49124ac626caefbc9e23c6a9d49a390eee4e60634c2f2"}]}
+[device0] 2026-09-28 15:02:10.979 - Releasing shm[P308939F-preallocate] with size[2147483648]

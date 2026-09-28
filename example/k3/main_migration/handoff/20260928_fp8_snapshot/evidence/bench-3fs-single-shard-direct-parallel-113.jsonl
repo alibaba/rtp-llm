@@ -1,0 +1,8 @@
+{"path": "/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/model-00002-of-000007.safetensors", "file_bytes": 16990911504, "block_bytes": 4194304, "scanned_bytes": 16986931200, "counts": [1, 8, 32, 64, 32, 8, 1]}
+{"workers": 1, "seconds": 17.138445733115077, "bytes": 16986931200, "MiB_per_s": 945.2432415559246, "checksum": 915473}
+{"workers": 8, "seconds": 2.514142172411084, "bytes": 16986931200, "MiB_per_s": 6443.549683773078, "checksum": 915473}
+{"workers": 32, "seconds": 0.8497129157185555, "bytes": 16986931200, "MiB_per_s": 19065.26274971418, "checksum": 915473}
+{"workers": 64, "seconds": 0.5545229110866785, "bytes": 16986931200, "MiB_per_s": 29214.302377972886, "checksum": 915473}
+{"workers": 32, "seconds": 0.8415126334875822, "bytes": 16986931200, "MiB_per_s": 19251.0478813139, "checksum": 915473}
+{"workers": 8, "seconds": 2.5229921210557222, "bytes": 16986931200, "MiB_per_s": 6420.9475189408295, "checksum": 915473}
+{"workers": 1, "seconds": 17.634458508342505, "bytes": 16986931200, "MiB_per_s": 918.6559367465754, "checksum": 915473}

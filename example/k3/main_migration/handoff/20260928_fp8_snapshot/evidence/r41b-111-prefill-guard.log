@@ -1,0 +1,3 @@
+[PASS] FastSafetensors startup evidence at /data6/luohaocheng.lhc/k3prefill-3fs-111-r41b/logs/main_0.log:783: [root][2026-09-28 15:04:05.779][325973][MainThread][/data6/luohaocheng.lhc/.cache/bazel/k3-integrated-20260928/17ffc866cdeb1fe99ee3b81e5216626a/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS

@@ -1,0 +1,20 @@
+Traceback (most recent call last):
+  File "/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/run_64k_pd_timeline_request.py", line 281, in <module>
+    main()
+  File "/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/run_64k_pd_timeline_request.py", line 216, in main
+    entry = request_one(f"warmup-{n+1:02d}", variants[n])
+  File "/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/run_64k_pd_timeline_request.py", line 161, in request_one
+    elapsed, status, body, raw = post(url, request_payload, args.timeout)
+  File "/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/run_64k_pd_timeline_request.py", line 24, in post
+    with NO_PROXY.open(request, timeout=timeout) as response:
+  File "/opt/conda310/lib/python3.10/urllib/request.py", line 525, in open
+    response = meth(req, response)
+  File "/opt/conda310/lib/python3.10/urllib/request.py", line 634, in http_response
+    response = self.parent.error(
+  File "/opt/conda310/lib/python3.10/urllib/request.py", line 563, in error
+    return self._call_chain(*args)
+  File "/opt/conda310/lib/python3.10/urllib/request.py", line 496, in _call_chain
+    result = func(*args)
+  File "/opt/conda310/lib/python3.10/urllib/request.py", line 643, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 500: Internal Server Error
