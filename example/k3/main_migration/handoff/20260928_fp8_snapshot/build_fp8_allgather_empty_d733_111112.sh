@@ -9,7 +9,7 @@ case "${1:-}" in
     ;;
   112)
     base=/data1/luohaocheng.lhc
-    pip_repos="$base/.cache/bazel/k3-integrated-20260928-112/dbf6ebb01707840f616367bd9b046564/external"
+    pip_repos="$base/artifacts/k3-fp8-main-20260926/pip-repositories"
     bazel="$base/tools/bazel-6.4.0"
     ;;
   *) echo 'usage: build_fp8_allgather_empty_d733_111112.sh 111|112' >&2; exit 2 ;;
