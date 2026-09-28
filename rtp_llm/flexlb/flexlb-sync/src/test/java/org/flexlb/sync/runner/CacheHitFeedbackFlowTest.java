@@ -180,6 +180,8 @@ class CacheHitFeedbackFlowTest {
         assertEquals(1000, comparison.path("inputTokens").asLong());
         assertEquals(500, comparison.path("actual").path("hit").asLong());
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_ACTUAL_RATIO), any(), eq(0.5));
+        verify(monitor).report(eq("app.engine.worker.status.running.to.first.token.ms"),
+                any(), eq(100.0));
         assertEquals(1, events("prefill_worker_status").size());
         JsonNode status = events("prefill_worker_status").getFirst();
         assertEquals(1000, status.path("inputTokens").asLong());

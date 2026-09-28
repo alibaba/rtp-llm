@@ -11,7 +11,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -298,18 +297,9 @@ class EngineHealthReporterTest {
 
     @Test
     void shouldReportPrefillWorkerStatusTaskMetrics() {
-        TaskInfo task = new TaskInfo();
-        task.setInputQueueEnqueueTimeMs(1000);
-        task.setInputQueueDrainTimeMs(1100);
-        task.setWaitingEnteredTimeMs(1200);
-        task.setRunningEnteredTimeMs(1600);
-        task.setRemoteKvWaitMs(200);
-        task.setFirstTokenTimeMs(1900);
-        task.setHbmLocalMatchTokens(512);
-        task.setRemoteKvAddedMatchTokens(256);
-        task.setPrefillStepCount(3);
-        task.setPrefillNonfinalChunkTokensMin(128);
-        task.setPrefillNonfinalChunkTokensMax(256);
+        WorkerStatus.TaskTelemetry task = new WorkerStatus.TaskTelemetry(
+                true, 900, 1000, 1100, 1200, 1600, 200, 1900,
+                512, 256, 1, 3, 3, 128, 256);
 
         reporter.reportPrefillWorkerStatusTask(
                 "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", task);
@@ -321,6 +311,8 @@ class EngineHealthReporterTest {
                 "group", "test-group");
         verify(monitor).report("app.engine.worker.status.input.queue.wait.ms", expectedTags, 100.0);
         verify(monitor).report("app.engine.worker.status.scheduler.to.running.ms", expectedTags, 400.0);
+        verify(monitor).report("app.engine.worker.status.engine.received.to.waiting.ms", expectedTags, 300.0);
+        verify(monitor).report("app.engine.worker.status.engine.waiting.to.running.ms", expectedTags, 400.0);
         verify(monitor).report("app.engine.worker.status.scheduler.wait.ms", expectedTags, 200.0);
         verify(monitor).report("app.engine.worker.status.remote.kv.wait.ms", expectedTags, 200.0);
         verify(monitor).report("app.engine.worker.status.running.to.first.token.ms", expectedTags, 300.0);
@@ -418,6 +410,17 @@ class EngineHealthReporterTest {
         verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
                 any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.cache.used.kv.cache.ratio"), any(FlexMetricTags.class), anyDouble());
+    }
+
+    @Test
+    void shouldReportLocalStandbyBlockSizeWithoutLegacyCacheStatus() {
+        localStandbyConfig.setBlockSize(4096);
+        WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL);
+
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, null, 0, 0);
+
+        verify(monitor).report("app.cache.local.standby.block.size", FlexMetricTags.of(
+                "model", "test-model", "engineIp", "10.0.0.1:8080", "role", "PREFILL"), 4096.0);
     }
 
     @Test

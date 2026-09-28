@@ -606,21 +606,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // reducer or prevent the remaining observations.
         try {
             reporter.reportBatchPredictedTimeMs(
-                    RoleType.PREFILL.name(), getStatus().getMetricIpPort(), predictedMs);
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), predictedMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch predicted-time metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
         }
         try {
             reporter.reportBatchActualTimeMs(
-                    RoleType.PREFILL.name(), getStatus().getMetricIpPort(), actualMs);
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), actualMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch actual-time metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
         }
         try {
             reporter.reportBatchPredictGapMs(
-                    RoleType.PREFILL.name(), getStatus().getMetricIpPort(), gapMs);
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), gapMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch prediction-gap metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
