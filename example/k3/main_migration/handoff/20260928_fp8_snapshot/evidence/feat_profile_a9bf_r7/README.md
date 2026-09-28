@@ -2,7 +2,7 @@
 
 固定源码为 `a9bf762e878fc54ee9176da5c34ffbe6babc8d45`，其父链包含固定的 `feat/k3_dev` 基线 `55641e09bc09cdafcf8f31b28aa55b18bc66d24b`。后续两次提交只增加可选的模型范围标记和可复现构建脚本。111 Prefill、112 Decode，均为 TP8/EP8、四层 FP8 target 加原生 MTP；Decode 启用 CUDA Graph。两端从已核实的 3FS 四层 target 用 FastSafetensors 直接加载，任务进程设置 64 线程预读；MTP checkpoint 视图在个人数据盘，shard 指向 3FS。`feat-profile-r7-*-evidence.tar.gz` 保留启动、RDMA、FP8 和逐 case 证据。GPU 筛选快照在 `fleet-selection.json`；测量时两端只有本次服务的八个 rank，利用率为 0%，没有其他活动计算进程。
 
-四层 flow 共 10 条请求。`independent-flow-audit.json` 独立解析原始 HTTP 响应，检查每条为 200、PD 路由指向 112、输出 16 token、耗时不超过 300 秒，结果均通过。这份旧 `feat/k3_dev` flow 没有要求 MTP 的专门 case，aux 也不暴露 draft 轮次或可靠的 Decode KV 交接长度，因此 flow 单独不证明这两项。四层权重输出不能用于答案语义判断。
+四层 flow 共 10 条请求。`independent-flow-audit.json` 独立解析原始 HTTP 响应，检查每条为 200、PD 路由指向 112、输出 16 token、耗时不超过 300 秒，结果均通过。这份旧 `feat/k3_dev` flow 没有要求 MTP 的专门 case，aux 也不暴露 draft 轮次或可靠的 Decode KV 交接长度，因此 flow 单独不证明这两项。四层权重输出不能用于答案语义判断。完成 timeline 归档后，主动终止本次任务保留的服务以释放 GPU；保留服务的角色脚本把这种退出记为错误，最终控制器退出码为 1。`controller-after-intentional-teardown.log` 保留了这一现场，不能把控制器退出码写作 0。
 
 64K 诊断使用固定输入 token SHA256 `97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee`，禁用前缀复用。先做 10 次同路径、8 token 请求预热；末三次首 token 时间为 138.680、137.774、139.176 ms，最大偏差 0.65%。随后 16 次请求均返回 HTTP 200 且复用长度为 0。八 rank 原始 trace 在 `timeline-64k-feat-profile-a9bf-r7-allrank.tar.gz`，请求在 `requests-64k-feat-profile-a9bf-r7.tar.gz`。`aligned-phase-audit.json` 匹配了 7 个共同请求，均可见 target 与 draft Prefill 范围，因此证实 MTP draft 实际运行。按每请求最慢 rank 的 GPU span 取中位：Prefill **135.266 ms**、target **71.556 ms**、draft **62.564 ms**。
 

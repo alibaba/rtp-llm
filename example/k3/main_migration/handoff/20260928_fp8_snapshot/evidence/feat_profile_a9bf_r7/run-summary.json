@@ -37,5 +37,7 @@
   "semantic_answer_claim": false,
   "full_model_claim": false,
   "legacy_aux_missing_mtp_counters": true,
-  "draft_execution_proof": "all-rank draft_model_forward scopes in matched traces"
+  "draft_execution_proof": "all-rank draft_model_forward scopes in matched traces",
+  "controller_exit_after_intentional_teardown": 1,
+  "service_teardown": "After trace archiving, sent TERM to task-owned service process groups; some ranks needed KILL after the grace interval. Role retain loop therefore exited nonzero; earlier flow accuracy and timeline artifacts remain the validation evidence."
 }
