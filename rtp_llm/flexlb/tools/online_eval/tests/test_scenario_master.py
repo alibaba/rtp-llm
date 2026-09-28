@@ -36,6 +36,29 @@ class MasterActionsTest(unittest.TestCase):
             {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
             {"http": "127.0.0.1:18083", "grpc": "127.0.0.1:18085"},
         ]}, json.loads(path.read_text()))
+        self.assertEqual("false", runner._overrides["LOOP"])
+
+    def test_ha_one_pass_rejects_trace_shorter_than_client_duration(self):
+        root = Path(self.tmp.name)
+        env = SimpleNamespace(master_specs={
+            "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=18080),
+            "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=18083),
+        })
+        manager = Mock()
+        manager.master_instance_target.side_effect = lambda _env, name: {
+            "A": "127.0.0.1:18082", "B": "127.0.0.1:18085"
+        }[name]
+
+        def short_trace(path, *_args, **_kwargs):
+            path.write_text('{"ts":0}\n{"ts":1000}\n')
+            return path
+
+        with patch("runtime.ha.ClientOps"), patch(
+            "traffic.traffic_source.materialize", side_effect=short_trace
+        ), self.assertRaisesRegex(ValueError, "one-pass HA trace ends"):
+            HaTrafficRunner(manager, env, root, "flow", [
+                "127.0.0.1:18082", "127.0.0.1:18085"
+            ], duration_s=10, replay_speed=2, source={"kind": "trace"})
 
     def test_ha_state_sampler_keeps_each_master_and_missing_inflight_distinct(self):
         root = Path(self.tmp.name)
@@ -578,7 +601,10 @@ class MasterActionsTest(unittest.TestCase):
                 self.assertIn("to_a_balance", ids)
                 flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
                 self.assertEqual("prefix_lineage", flow["params"]["source"]["model"])
-                self.assertEqual(10000, flow["params"]["max_requests"])
+                self.assertEqual(20000, flow["params"]["max_requests"])
+                self.assertEqual(240, flow["params"]["duration_s"])
+                self.assertEqual(5, flow["params"]["replay_speed"])
+                self.assertFalse(flow["params"]["loop"])
                 self.assertEqual(120000, flow["params"]["timeout_ms"])
                 self.assertEqual(125, plan["environment"]["n_prefill"])
                 self.assertEqual(536, plan["environment"]["n_decode"])

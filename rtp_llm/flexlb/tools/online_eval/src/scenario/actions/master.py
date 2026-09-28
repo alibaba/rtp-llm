@@ -523,6 +523,7 @@ def _ha_validate(params, plan):
             "replay_speed",
             "source",
             "max_requests",
+            "loop",
         },
     )
     environment = getattr(plan, "environment", {})
@@ -560,9 +561,12 @@ def _ha_validate(params, plan):
     if "max_requests" in p and (
         "source" not in p
         or type(p["max_requests"]) is not int
-        or not 1 <= p["max_requests"] <= 10000
+        or not 1 <= p["max_requests"] <= 20000
     ):
         raise ValueError("HA max_requests requires a bounded real trace")
+    p.setdefault("loop", False)
+    if type(p["loop"]) is not bool:
+        raise ValueError("HA loop must be boolean")
     p.setdefault("live_events", False)
     if type(p["live_events"]) is not bool:
         raise ValueError("live_events must be boolean")
@@ -705,6 +709,7 @@ def _ha_start(ctx, params, deadline):
             Path(ctx.instance["source_path"]).parent if params.get("source") else None
         ),
         max_requests=params.get("max_requests"),
+        loop=params["loop"],
         **(
             {"replay_speed": params["replay_speed"]} if "replay_speed" in params else {}
         ),

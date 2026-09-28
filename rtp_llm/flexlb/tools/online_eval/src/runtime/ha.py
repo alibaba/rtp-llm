@@ -121,11 +121,13 @@ class HaTrafficRunner:
         source: dict | None = None,
         source_dir: Path | None = None,
         max_requests: int | None = None,
+        loop: bool = False,
     ):
         self.manager = manager
         self.env = env
         self.name = name
         self.targets = list(targets)
+        self.loop = loop
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
         self.state_sampler = HaMasterStateSampler(env, case_dir / "master_states.jsonl")
@@ -153,6 +155,16 @@ class HaTrafficRunner:
                 source_dir,
                 max_requests=max_requests,
             )
+            if not loop:
+                first_ts = last_ts = None
+                with trace.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        ts = json.loads(line)["ts"]
+                        if first_ts is None:
+                            first_ts = ts
+                        last_ts = ts
+                if first_ts is None or (last_ts - first_ts) / replay_speed < duration_s * 1000:
+                    raise ValueError("one-pass HA trace ends before the requested duration")
         overrides = {
             "TRACE_FILE": str(trace),
             "LIVE_CLIENT_EVENTS": str(live_events).lower(),
@@ -162,7 +174,10 @@ class HaTrafficRunner:
             "REPLAY_SPEED": str(replay_speed),
             "MAX_CONCURRENCY": str(max_concurrency),
             "TIMEOUT_MS": str(int(timeout_ms)),
-            "LOOP": "true",
+            # A short capture repeated with structural relabeling destroys
+            # cross-lap cache reuse; repeating it without relabeling invents
+            # identical future users. HA defaults to one pass of a long trace.
+            "LOOP": str(loop).lower(),
             "N_CHANNELS": "8" if source is not None else "2",
             "EVENT_LOOP_THREADS": "8" if source is not None else "4",
             "SKIP_SERVER_LATENCY": "true",
