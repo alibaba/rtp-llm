@@ -27,8 +27,6 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       model_specific_config,
                       cache_manager,
                       metrics_reporter),
-    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
-                             && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     max_batch_tokens_without_cache_(static_cast<size_t>(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
@@ -40,7 +38,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      max_batch_tokens_without_cache_,
-                     cp_force_single_prefill_,
+                     force_single_prefill_,
                      prefill_cp_size_,
                      max_inited_kv_cache_streams_);
 }
@@ -142,7 +140,7 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
     }
     // Conservative CP prefill mode: cap at one stream per round unless
     // runtime config explicitly allows CP prefill batching.
-    if (cp_force_single_prefill_ && admitted_stream_count > 0) {
+    if (force_single_prefill_ && admitted_stream_count > 0) {
         return false;
     }
     if (running_streams_.size() + admitted_stream_count + 1 > max_generate_batch_size_) {
@@ -170,7 +168,7 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
     if (!running_streams_.empty()) {
         return false;
     }
-    if (cp_force_single_prefill_ && admitted_count > 0) {
+    if (force_single_prefill_ && admitted_count > 0) {
         return false;
     }
     if (running_streams_.size() + admitted_count + 1 > max_generate_batch_size_) {
