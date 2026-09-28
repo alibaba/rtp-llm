@@ -15,6 +15,18 @@
 
 更关键的是数据流：feat 的 `_project_tp_sp_inputs` 接收 producer 的 `QuantizedActivation`，`all_gather_gemm.py` 随后调用 `all_gather_fp8` 或分别 AllGather FP8 value 与 scale，再让 GEMM 消费量化输入。这个通信格式不满足本任务固定 **BF16 NCCL** 的要求。若只移植 producer，却在发送前反量化成 BF16，就失去其直接喂给融合 FP8 GEMM 的收益，还新增变换。因此暂不移植 AttnRes/MLA 输入 FP8 producer 或 feat 的 FP8 AllGather/GEMM 融合路径；这只是当前约束下的筛选结论，不是否定它们在 feat 原配置里的性能。
 
-当前可继续做的同条件实验是拆开 MLA core 的 cache/attention 子范围，记录相同张量形状与 FP8 KV 格式，再测等价 operator 的数值和热态耗时。KDA cuLA direct-output 的等形状 A/B 与四层 PD 验证已另存于 `evidence/kda_direct_candidate/`；它没有证明完整 93 层模型比 feat 或 vLLM 更快。vLLM `3df4` 历史 NIXL PD trace 的 HTTP 预热未收敛且 FlashInfer 64K 自动调优超时，不能纳入最终热态三方排序。
+MLA scope 的第一轮拆分可直接从已归档的 `module-target.json` 按 launch correlation 重算。每次请求取八 rank 中该内核族的最长累计时间，再取请求中位数：
+
+| MLA L3 scope 内核族 | 集成版 6 次匹配请求 | feat 版 7 次匹配请求 |
+| --- | ---: | ---: |
+| TokenSpeed | 5.402 | 5.342 |
+| Q/K/V FP8 quant | 0.248 | 0.262 |
+| KV-up DeepGEMM | 0.137 | 0.136 |
+| Tensor copy | 0.307 | 0.097 |
+| cache write 及其余内核 | 0.213 | 0.258 |
+
+两版都调用 TokenSpeed 的普通 E4M3 Prefill；主 attention kernel 差约 0.06 ms，现有数据不足以称 feat 的 attention 算法更优。较明显的差异在 copy。feat 的 `flashmla_dense_prefill.py` 可用 `forward_skip_head_mid` 一次产生打包的 K/V，而集成版 `mla_prefill.py` 先做 KV-up、拆 view、拼 K，并在 TokenSpeed 调用前整理 Q/K/V；这提供了可检验的解释，但尚未用同形状算子 A/B 证明因果。skip-head-mid 按计划留到性能锚点后的峰值激活阶段。cache write 的单个 symbol 时间在两个 scope 里也不同，须先核对写入字节数和 KV 布局，不能据此移植通信或 cache 代码。
+
+当前可继续做的同条件实验是逐项记录 MLA cache/attention 的实际张量形状与 FP8 KV 格式，再测等价 operator 的数值和热态耗时。KDA cuLA direct-output 的等形状 A/B 与四层 PD 验证已另存于 `evidence/kda_direct_candidate/`；它没有证明完整 93 层模型比 feat 或 vLLM 更快。vLLM `3df4` 历史 NIXL PD trace 的 HTTP 预热未收敛且 FlashInfer 64K 自动调优超时，不能纳入最终热态三方排序。
 
 本次是源码与既有 trace 核对，没有启动新 GPU 测试。性能锚点、93 层 FP8 smoke 和峰值激活锚点仍待完成。
