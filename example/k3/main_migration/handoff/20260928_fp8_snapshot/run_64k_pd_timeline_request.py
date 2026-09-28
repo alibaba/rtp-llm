@@ -21,10 +21,18 @@ def post(url, body, timeout):
     data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     start = time.perf_counter()
-    with NO_PROXY.open(request, timeout=timeout) as response:
+    try:
+        with NO_PROXY.open(request, timeout=timeout) as response:
+            raw = response.read()
+            status = response.status
+    except urllib.error.HTTPError as response:
         raw = response.read()
-        status = response.status
-    return time.perf_counter() - start, status, json.loads(raw) if raw.strip() else {}, raw
+        status = response.code
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        body = {"error": raw.decode("utf-8", errors="replace")}
+    return time.perf_counter() - start, status, body, raw
 
 
 def main():

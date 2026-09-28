@@ -1,0 +1,95 @@
+{
+  "target_tokens": 65536,
+  "fixtures": [
+    {
+      "file": "fixed.json.gz",
+      "source_file": "cf27f454ec3fe64259297f7087653726e53844de6d1753bbec1a934b48f316a5.json.gz",
+      "token_ids_sha256": "97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee",
+      "prompt_sha256": "00ddc45768d4802247761f9dc08671f7a22f10b2b2e1755002abc54ee5346514"
+    },
+    {
+      "file": "warmup-variant-01-20260926.json.gz",
+      "source_file": "warmup-variant-01-20260926.json.gz",
+      "token_ids_sha256": "87d13483b3381198c957cfb4d951984c2c36dda7bec6d7f08faf02537a3a8fca",
+      "prompt_sha256": "2815a393aa7333cfee838543042bb9993a2a5182b0b1291ef7fbab29954a0fdf"
+    },
+    {
+      "file": "warmup-variant-02-20260926.json.gz",
+      "source_file": "warmup-variant-02-20260926.json.gz",
+      "token_ids_sha256": "f31379122e620f1ca0efc9234e8b2d7feee6ca827d7f61542c856511670ff7b3",
+      "prompt_sha256": "ca7852230c253c0aeff8249d5496d56dda57d97a4524cea2a9e46b00d096ca05"
+    },
+    {
+      "file": "warmup-variant-03-20260926.json.gz",
+      "source_file": "warmup-variant-03-20260926.json.gz",
+      "token_ids_sha256": "52748d758190337cf2157cc6bd92ff7fdf058166e057474fba3a83477aa0f1e6",
+      "prompt_sha256": "240c277d7494c5832266f8b3832be3cdd8047d5b0806662b3fc6d0531f561cf5"
+    },
+    {
+      "file": "warmup-variant-04-20260926.json.gz",
+      "source_file": "warmup-variant-04-20260926.json.gz",
+      "token_ids_sha256": "4a12d971d9167cadad47d82c02b3489b861f4a38fae4ad37fcd70fa0a36c382f",
+      "prompt_sha256": "3b48537f600feeb836aca7bad8301a988d4ae0eab9453920201e0e28de112db2"
+    },
+    {
+      "file": "warmup-variant-05-20260926.json.gz",
+      "source_file": "warmup-variant-05-20260926.json.gz",
+      "token_ids_sha256": "7e7c643ca2f8f65ca67bc9241a831774a42fb61efc9b92f578dbff7eced074d3",
+      "prompt_sha256": "557af9c1d761cf4d2c02f3e85bbfaa47c3baf974a7b9b82d7faf3430b06aa502"
+    },
+    {
+      "file": "warmup-variant-06-20260926.json.gz",
+      "source_file": "warmup-variant-06-20260926.json.gz",
+      "token_ids_sha256": "38cbbb4790d8607ccbc263dea16c8fb6967b9f8e7d682252d6a271c6c78f9ae2",
+      "prompt_sha256": "8e545bf7ca1e0fa715beaea684505527efa9fdf98cab192efd016113d6f06872"
+    },
+    {
+      "file": "warmup-variant-07-20260926.json.gz",
+      "source_file": "warmup-variant-07-20260926.json.gz",
+      "token_ids_sha256": "1cb02a10596ec0d5964b886d9e8168652a4cd7178e1d6091b41d115eab285f24",
+      "prompt_sha256": "4287adf47016f24806274e5492274b91744abd9e56dfc41c4ecf6c30e8131e06"
+    },
+    {
+      "file": "warmup-variant-08-20260926.json.gz",
+      "source_file": "warmup-variant-08-20260926.json.gz",
+      "token_ids_sha256": "8b518a0a0a8e17ca3c366d756bb7c5edd68d630b3a29e3f0567750a0c8fe9994",
+      "prompt_sha256": "e962eaca6692b546ff7f4bf3befd169840225b75952a0a2d4fa54985cd6303be"
+    },
+    {
+      "file": "warmup-variant-09-20260926.json.gz",
+      "source_file": "warmup-variant-09-20260926.json.gz",
+      "token_ids_sha256": "88a84db5344fc2581aedcbbd2754efda69f471e966e056629a67f84570d6f8a7",
+      "prompt_sha256": "07e31c4be373828cd7e3ddb0f9cf87d10546f82a58079513da387abe1cf08ae6"
+    },
+    {
+      "file": "warmup-variant-10-20260926.json.gz",
+      "source_file": "warmup-variant-10-20260926.json.gz",
+      "token_ids_sha256": "3f40f1be0399da94c9e151dd8b601a3d4a2194323a9c164ee96f2dee72406034",
+      "prompt_sha256": "a1b4bfa6523b706762024a3bbed7cd5050b0f24eed62e102f057fc2164c3cb6d"
+    },
+    {
+      "file": "warmup-variant-11-20260926.json.gz",
+      "source_file": "warmup-variant-11-20260926.json.gz",
+      "token_ids_sha256": "29e10c20bfead45a2a260bc27f119b333baf7fb8029a84c7a0c323b9c142af52",
+      "prompt_sha256": "6a44f0bc773dc200c844ff7574247967f96f87d78eae0dd5489ec05b2b4dfc91"
+    },
+    {
+      "file": "warmup-variant-12-20260926.json.gz",
+      "source_file": "warmup-variant-12-20260926.json.gz",
+      "token_ids_sha256": "faf8627be146ee4d4696dcdf7636996bfc5deaf2e7e3f51bb625d935be070e2c",
+      "prompt_sha256": "db66d45d50d8fbb0d849c747f7f9684f2549ccafaa7dfa2c4e2a3cb8b3b50922"
+    },
+    {
+      "file": "warmup-variant-13-20260926.json.gz",
+      "source_file": "warmup-variant-13-20260926.json.gz",
+      "token_ids_sha256": "ab4549c70941dd2e7c868ca5fe534ee2591c8a5b41993a11a7402446c7a8122c",
+      "prompt_sha256": "bc4afe779e7868bcbb4cc305812d38e2e4dcdc876d3cdb40d7a2f8b51b163928"
+    },
+    {
+      "file": "warmup-variant-14-20260926.json.gz",
+      "source_file": "warmup-variant-14-20260926.json.gz",
+      "token_ids_sha256": "bfe4db5408213a101ee87e42770a630b1121b59c1f8acf6c43fb2231c2af375a",
+      "prompt_sha256": "6d66d1585c336298629ac515b7f03f37969c1b5e20772f0f00880bd7b075101a"
+    }
+  ]
+}
