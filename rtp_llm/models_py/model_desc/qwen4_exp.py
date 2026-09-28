@@ -730,14 +730,19 @@ class Qwen4ExpModel(Qwen35Model):
     ) -> bool:
         left = getattr(lhs, name, None)
         right = getattr(rhs, name, None)
+        if left is right:
+            return True
         if left is None or right is None:
             return left is right
-        return (
-            tuple(left.shape) == tuple(right.shape)
-            and left.dtype == right.dtype
-            and left.device == right.device
-            and bool(torch.equal(left, right))
-        )
+        if (
+            tuple(left.shape) != tuple(right.shape)
+            or left.dtype != right.dtype
+            or left.device != right.device
+        ):
+            return False
+        if left.stride() == right.stride() and left.data_ptr() == right.data_ptr():
+            return True
+        return bool(torch.equal(left, right))
 
     def _stage_ple_target_verify(
         self,

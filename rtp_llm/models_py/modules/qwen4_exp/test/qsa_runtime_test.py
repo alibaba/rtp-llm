@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.qwen4_exp.indexer import (
 from rtp_llm.models_py.modules.qwen4_exp.norm import exact_head_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.qsa_runtime import (
     Qwen4ExpQSARuntimeContext,
+    _same_tensor_metadata,
     _validate_required_blocks,
     select_qsa_paged_tokens,
 )
@@ -28,6 +29,18 @@ class Qwen4ExpQSARuntimeTest(TestCase):
     RATIO = 4
     KV_TOKENS_PER_BLOCK = 8
     STATE_TOKENS_PER_BLOCK = 8
+
+    def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
+        values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+        alias = values.view_as(values)
+        with patch.object(torch, "equal", wraps=torch.equal) as equal:
+            self.assertTrue(_same_tensor_metadata(values, alias))
+            equal.assert_not_called()
+
+            self.assertTrue(_same_tensor_metadata(values, values.clone()))
+            self.assertFalse(_same_tensor_metadata(values, values.T))
+            self.assertFalse(_same_tensor_metadata(values, values + 1))
+            self.assertEqual(equal.call_count, 3)
 
     def test_required_block_validation_preserves_error_cases(self):
         devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
