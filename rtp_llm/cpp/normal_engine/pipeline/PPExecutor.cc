@@ -590,8 +590,7 @@ void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPEx
         auto& state = sampling_states_.at(request_ids[stream_idx]);
 
         std::optional<ErrorInfo> error;
-        const auto num_new_tokens =
-            result.new_token_lengths.defined() ? result.new_token_lengths.data_ptr<int32_t>()[batch_idx] : 1;
+        const auto num_new_tokens = result.new_token_lengths.data_ptr<int32_t>()[batch_idx];
         /** Match the first stage's eventual write length without changing the returned acceptance count. */
         const auto num_committed_tokens =
             sp_enabled_ ? std::min(num_new_tokens, max_tokens[batch_idx] - sequence_lengths[batch_idx]) : num_new_tokens;
@@ -626,9 +625,10 @@ void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPEx
     }
 }
 
-void PPExecutor::verifyDraftTokens(const PPExecutionPlan& plan,
-                                   const torch::Tensor&   target_logits,
-                                   PPExecutionResult&     result) {
+void PPExecutor::verifyDraftTokens(const PPExecutionPlan&                 plan,
+                                   const torch::Tensor&                   target_logits,
+                                   SamplerOutput&                         target_sampler_output,
+                                   speculative::SpeculativeSamplerOutput& accepted) {
     const auto     batch_size         = plan.sampling_plan.request_ids.size(0);
     const auto     verify_token_count = static_cast<int64_t>(propose_step_ + 1);
     const auto     vocab_size         = target_logits.size(1);
@@ -678,24 +678,11 @@ void PPExecutor::verifyDraftTokens(const PPExecutionPlan& plan,
         SpecLogitsVerifyRunner::applyMaskToLogits(inputs.logits, verify_result, vocab_size);
     }
 
-    auto target_sampler_output = sampler_->forward(inputs);
+    target_sampler_output = sampler_->forward(inputs);
     target_sampler_output.all_probs =
         target_sampler_output.all_probs.reshape({batch_size, verify_token_count, vocab_size});
-    speculative::SpeculativeSamplerOutput accepted;
     mtp::runRejectionSampling(
         *speculative_sampler_, params, draft_sampler_output, target_sampler_output, verify_result, accepted);
-    auto host_accepted           = mtp::getHostAcceptedTokens(accepted);
-    result.new_token_ids         = std::move(host_accepted.token_ids);
-    result.new_token_lengths     = std::move(host_accepted.lengths);
-    for (int64_t row = 0; row < batch_size; ++row) {
-        auto& error = result.request_errors[row];
-        if (error.hasError()) {
-            continue;
-        }
-        if (static_cast<size_t>(row) < accepted.processor_errors.size() && accepted.processor_errors[row].has_value()) {
-            error = std::move(accepted.processor_errors[row].value());
-        }
-    }
 }
 
 void PPExecutor::prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_prefill_input,
@@ -768,24 +755,23 @@ void PPExecutor::sampleTokens(const PPExecutionPlan& plan,
     result.prompt_logits.resize(stream_count);
     if (plan.model_input.is_fake_stream) {
         /** Supply target-result shapes for the draft chain without creating request sampling state. */
-        if (sp_enabled_) {
-            const auto token_count   = static_cast<int64_t>(plan.is_decode ? propose_step_ + 1 : 1);
-            result.new_token_ids     = torch::zeros({stream_count, token_count}, torch::kInt32);
-            result.new_token_lengths = torch::full({stream_count}, token_count, torch::kInt32);
-        }
+        const auto token_count   = static_cast<int64_t>(sp_enabled_ && plan.is_decode ? propose_step_ + 1 : 1);
+        result.new_token_ids     = torch::zeros({stream_count, token_count}, torch::kInt32);
+        result.new_token_lengths = torch::full({stream_count}, token_count, torch::kInt32);
         return;
     }
     batch_stream_processor_->initSamplingStates(plan.sampling_plan, sampling_states_, result);
+
     if (sp_enabled_ && plan.is_decode) {
-        verifyDraftTokens(plan, model_output.logits, result);
+        SamplerOutput                         target_sampler_output;
+        speculative::SpeculativeSamplerOutput sp_output;
+        verifyDraftTokens(plan, model_output.logits, target_sampler_output, sp_output);
+        batch_stream_processor_->fillExecutionResult(plan, model_output, target_sampler_output, sp_output, result);
     } else {
         auto inputs = batch_stream_processor_->gatherSamplerInputs(
             plan.sampling_plan, plan.output_config, model_output.logits, sampling_states_);
-        auto sampler_output = sampler_->forward(inputs);
+        const auto sampler_output = sampler_->forward(inputs);
         batch_stream_processor_->fillExecutionResult(plan, model_output, sampler_output, result);
-    }
-    if (sp_enabled_ && !plan.is_decode) {
-        result.new_token_lengths = torch::ones({result.new_token_ids.size(0)}, torch::kInt32);
     }
 }
 

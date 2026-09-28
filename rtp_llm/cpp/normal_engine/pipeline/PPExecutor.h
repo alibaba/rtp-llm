@@ -116,7 +116,10 @@ private:
 
     absl::Status processExecutionResult(InflightBatch& batch);
 
-    void verifyDraftTokens(const PPExecutionPlan& plan, const torch::Tensor& target_logits, PPExecutionResult& result);
+    void verifyDraftTokens(const PPExecutionPlan&                 plan,
+                           const torch::Tensor&                   target_logits,
+                           SamplerOutput&                         target_sampler_output,
+                           speculative::SpeculativeSamplerOutput& accepted);
 
     void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_prefill_input,
                                                const torch::Tensor& target_hidden_states,

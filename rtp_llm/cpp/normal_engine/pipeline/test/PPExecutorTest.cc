@@ -958,6 +958,7 @@ TEST_F(PPExecutorTest, FirstConsumesEachBatchOnceAcrossSlotWraparound) {
         PPExecutionResult result;
         result.request_ids = torch::tensor({101 + index}, torch::kInt64);
         result.new_token_ids = intTensor({20 + index}).reshape({1, 1});
+        result.new_token_lengths = intTensor({1});
         result.request_errors.resize(1);
         result.prompt_logits.resize(1);
         wire->enqueueObject(pp_serialization::serializeExecutionResult(result));
@@ -1004,6 +1005,7 @@ TEST_F(PPExecutorTest, FirstCancelledAndTimedOutBatchesStillConsumeTheirResult) 
         PPExecutionResult result;
         result.request_ids = torch::tensor({101}, torch::kInt64);
         result.new_token_ids = intTensor({20}).reshape({1, 1});
+        result.new_token_lengths = intTensor({1});
         result.request_errors.resize(1);
         result.prompt_logits.resize(1);
         wire->enqueueObject(pp_serialization::serializeExecutionResult(result));
@@ -1034,6 +1036,7 @@ TEST_F(PPExecutorTest, FirstShutdownDrainsRealWorkAndAllowsEmptyOrFakeRounds) {
         PPExecutionResult result;
         result.request_ids = torch::tensor({101}, torch::kInt64);
         result.new_token_ids = intTensor({20}).reshape({1, 1});
+        result.new_token_lengths = intTensor({1});
         result.request_errors.resize(1);
         result.prompt_logits.resize(1);
         wire->enqueueObject(pp_serialization::serializeExecutionResult(result));
@@ -1084,6 +1087,7 @@ TEST_F(PPExecutorTest, FirstEmptyExecutionStillDispatchesThePreviousBatchOutside
         PPExecutionResult result;
         result.request_ids   = torch::tensor({202}, torch::kInt64);
         result.new_token_ids = intTensor({17}).reshape({1, 1});
+        result.new_token_lengths = intTensor({1});
         result.request_errors.resize(1);
         result.prompt_logits.resize(1);
         const auto payload = pp_serialization::serializeExecutionResult(result);
@@ -1318,6 +1322,7 @@ TEST_F(PPExecutorTest, FirstFakeResultIsConsumedWithoutDispatchOrMetrics) {
     PPExecutionResult next_result;
     next_result.request_ids = torch::tensor({101}, torch::kInt64);
     next_result.new_token_ids = intTensor({7}).reshape({1, 1});
+    next_result.new_token_lengths = intTensor({1});
     auto transport = std::make_unique<InMemoryPPTransport>();
     auto* recorded_transport = transport.get();
     for (const auto& result : {fake_result, next_result}) {
@@ -1763,7 +1768,7 @@ TEST_F(PPExecutorTest, LastSamplesAcrossRoundsWithoutReinitializingRequestState)
     EXPECT_EQ(tensorToVector<int32_t>(first.new_token_ids), (std::vector<int32_t>{7, 8}));
     EXPECT_TRUE(torch::equal(first.all_hidden_states, recorded->hidden_buffer.narrow(1, 0, 2).cpu()));
     EXPECT_TRUE(recorded->hidden_requests.empty());
-    EXPECT_FALSE(first.new_token_lengths.defined());
+    EXPECT_EQ(tensorToVector<int32_t>(first.new_token_lengths), (std::vector<int32_t>{1, 1}));
     EXPECT_FALSE(first.propose_token_ids.defined());
     const auto generator = executor.sampling_states_.at(101).generator;
     const auto rng_before = generator.get_state();
@@ -1802,8 +1807,9 @@ TEST_F(PPExecutorTest, LastUpdatesStatesAtRequestSequenceOffsetsAndPreservesEarl
     auto third = recordState(executor, 303);
     third->update_error = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "state update failed");
     auto result = makeInitializedResult(plan);
-    result.new_token_ids = intTensor({0, 0, 20, 21, 30}).reshape({5, 1});
-    result.cum_log_probs = torch::full({5}, -3.0, torch::kFloat32);
+    result.new_token_ids     = intTensor({0, 0, 20, 21, 30}).reshape({5, 1});
+    result.new_token_lengths = torch::ones({5}, torch::kInt32);
+    result.cum_log_probs     = torch::full({5}, -3.0, torch::kFloat32);
     result.request_errors[0] = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "sampling failed");
     executor.advanceSamplingStates(plan, result);
     EXPECT_TRUE(first->committed_tokens.empty());
@@ -2199,12 +2205,14 @@ TEST_F(PPExecutorTest, LastFakeExecutionKeepsDraftParticipationWithoutSamplingSt
             ASSERT_EQ(wire->sent_tensors.size(), 2u);
             EXPECT_TRUE(executor.sampling_states_.empty());
             const auto result = lastResult(*wire);
+            const int token_count = draft_inputs && decode ? 4 : 1;
+            EXPECT_EQ(result.new_token_ids.sizes().vec(), (std::vector<int64_t>{1, token_count}));
+            EXPECT_EQ(result.new_token_lengths.item<int32_t>(), token_count);
             if (draft_inputs) {
                 EXPECT_EQ(draft_inputs->size(), type == SP_TYPE_DSPARK ? 2u : 3u);
-                EXPECT_EQ(result.new_token_lengths.item<int32_t>(), decode ? 4 : 1);
                 EXPECT_EQ(result.propose_token_ids.sizes().vec(), (std::vector<int64_t>{1, 3}));
             } else {
-                EXPECT_FALSE(result.new_token_ids.defined());
+                EXPECT_FALSE(result.propose_token_ids.defined());
             }
         }
     }

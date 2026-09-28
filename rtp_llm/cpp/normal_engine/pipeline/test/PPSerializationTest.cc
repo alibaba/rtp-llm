@@ -48,7 +48,8 @@ TEST_F(PPSerializationTest, MixedReturnSequencesPlanAndResultRoundTrip) {
 
     PPExecutionResult result;
     result.request_ids = sampling_plan.request_ids;
-    result.new_token_ids = torch::tensor({{10}, {11}, {12}}, torch::kInt32);
+    result.new_token_ids     = torch::tensor({{10}, {11}, {12}}, torch::kInt32);
+    result.new_token_lengths = torch::ones({3}, torch::kInt32);
     result.request_errors.resize(2);
     result.prompt_logits.resize(2);
 
@@ -56,7 +57,7 @@ TEST_F(PPSerializationTest, MixedReturnSequencesPlanAndResultRoundTrip) {
         pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result));
     EXPECT_TRUE(torch::equal(round_trip_result.request_ids, result.request_ids));
     EXPECT_TRUE(torch::equal(round_trip_result.new_token_ids, result.new_token_ids));
-    EXPECT_FALSE(round_trip_result.new_token_lengths.defined());
+    EXPECT_TRUE(torch::equal(round_trip_result.new_token_lengths, result.new_token_lengths));
     ASSERT_EQ(round_trip_result.request_errors.size(), 2u);
     EXPECT_TRUE(round_trip_result.request_errors[0].ok());
     EXPECT_TRUE(round_trip_result.request_errors[1].ok());
@@ -89,6 +90,7 @@ TEST_F(PPSerializationTest, ResultRoundTripPreservesPromptLogitsAndHiddenStates)
     PPExecutionResult result;
     result.request_ids = torch::tensor({301, 302}, torch::kInt64);
     result.new_token_ids = torch::tensor({{10}, {11}}, torch::kInt32);
+    result.new_token_lengths = torch::ones({2}, torch::kInt32);
     result.hidden_states = torch::tensor({{5.0f, 6.0f}, {9.0f, 10.0f}});
     result.all_hidden_states = torch::arange(10, torch::kFloat32).reshape({5, 2});
     result.request_errors.resize(2);

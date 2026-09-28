@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/engine_base/stream/SamplingState.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
 namespace rtp_llm {
 
@@ -34,11 +35,16 @@ public:
                                       size_t                propose_step  = 0,
                                       const torch::Tensor&  verify_tokens = {}) const;
 
-    /** Fills sampling outputs while preserving the initialized request fields and earlier errors. */
     void fillExecutionResult(const PPExecutionPlan& plan,
                              const GptModelOutputs& model_output,
                              const SamplerOutput&   sampler_output,
                              PPExecutionResult&     result) const;
+
+    void fillExecutionResult(const PPExecutionPlan&                       plan,
+                             const GptModelOutputs&                       model_output,
+                             const SamplerOutput&                         target_sampler_output,
+                             const speculative::SpeculativeSamplerOutput& sp_output,
+                             PPExecutionResult&                           result) const;
 
     absl::Status dispatchExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
 
@@ -64,6 +70,12 @@ private:
                                                   const PPSamplingPlan&                sampling_plan,
                                                   int64_t                              stream_idx,
                                                   int64_t                              sequence_offset) const;
+
+    /** Softmax uses compact token ids, so call this before mapping output vocabulary ids. */
+    void fillOptionalOutputs(const PPExecutionPlan& plan,
+                             const GptModelOutputs& model_output,
+                             const SamplerOutput&   sampler_output,
+                             PPExecutionResult&     result) const;
 
     void validateExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
 
