@@ -14,6 +14,8 @@ DataStorageType DataStorageTypeFromString(const std::string& type) {
         return DataStorageType::DATA_STORAGE_TYPE_MOONCAKE;
     } else if (type == "pace") {
         return DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL;
+    } else if (type == "pace_ssd") {
+        return DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL_SSD;
     } else if (type == "file") {
         return DataStorageType::DATA_STORAGE_TYPE_NFS;
     } else {
@@ -33,6 +35,8 @@ std::string DataStorageTypeToString(const DataStorageType& type) {
             return "mooncake";
         case DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL:
             return "pace";
+        case DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL_SSD:
+            return "pace_ssd";
         case DataStorageType::DATA_STORAGE_TYPE_NFS:
             return "file";
         default:
@@ -88,7 +92,7 @@ void MooncakeSdkConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("put_replica_num", put_replica_num_, put_replica_num_);
 }
 
-TairMempoolSdkConfig::TairMempoolSdkConfig(): SdkBackendConfig(DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL) {}
+TairMempoolSdkConfig::TairMempoolSdkConfig(DataStorageType type): SdkBackendConfig(type) {}
 
 void TairMempoolSdkConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     SdkBackendConfig::Jsonize(json);
@@ -104,14 +108,17 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON) {
         json.Jsonize("thread_num", thread_num_, thread_num_);
         json.Jsonize("queue_size", queue_size_, queue_size_);
+        json.Jsonize("drain_on_timeout", drain_on_timeout_, drain_on_timeout_);
         json.Jsonize("sdk_backend_configs", sdk_backend_configs_);
         json.Jsonize("timeout_config", timeout_config_, timeout_config_);
     } else {
         uint32_t         parsed_thread_num     = thread_num_;
         uint32_t         parsed_queue_size     = queue_size_;
+        bool             parsed_drain_on_timeout = drain_on_timeout_;
         SdkTimeoutConfig parsed_timeout_config = timeout_config_;
         json.Jsonize("thread_num", parsed_thread_num, parsed_thread_num);
         json.Jsonize("queue_size", parsed_queue_size, parsed_queue_size);
+        json.Jsonize("drain_on_timeout", parsed_drain_on_timeout, parsed_drain_on_timeout);
         std::vector<Any> sdk_backend_configs;
         json.Jsonize("sdk_backend_configs", sdk_backend_configs);
         std::vector<std::shared_ptr<SdkBackendConfig>> parsed_backend_configs;
@@ -142,7 +149,8 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
                     sdk_backend_config = std::make_shared<MooncakeSdkConfig>();
                     break;
                 case DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL:
-                    sdk_backend_config = std::make_shared<TairMempoolSdkConfig>();
+                case DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL_SSD:
+                    sdk_backend_config = std::make_shared<TairMempoolSdkConfig>(type);
                     break;
                 case DataStorageType::DATA_STORAGE_TYPE_NFS:
                     sdk_backend_config = std::make_shared<NfsSdkConfig>();
@@ -157,9 +165,17 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
         json.Jsonize("timeout_config", parsed_timeout_config, parsed_timeout_config);
         thread_num_          = parsed_thread_num;
         queue_size_          = parsed_queue_size;
+        drain_on_timeout_    = parsed_drain_on_timeout;
         sdk_backend_configs_ = std::move(parsed_backend_configs);
         timeout_config_      = std::move(parsed_timeout_config);
     }
+}
+
+void SdkWrapperConfig::parseBackendConfigs(const std::string& config) {
+    // Use the same polymorphic parser as KVCM_CLIENT_CONFIG. Parsing directly
+    // into base-class pointers would discard backend-specific fields.
+    const auto wrapper_json = "{\"sdk_backend_configs\":" + config + "}";
+    FromJsonString(*this, wrapper_json);
 }
 
 void ModelDeployment::Jsonize(Jsonizable::JsonWrapper& json) {
@@ -185,6 +201,7 @@ void KVCMConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("instance_group", instance_group_);
     json.Jsonize("instance_id", instance_id_);
     json.Jsonize("block_size", block_size_);
+    json.Jsonize("default_query_type", default_query_type_, default_query_type_);
     json.Jsonize("location_spec_infos", location_spec_info_map_);
     json.Jsonize("address", addresses_);
     json.Jsonize("meta_channel_config", meta_channel_config_, meta_channel_config_);

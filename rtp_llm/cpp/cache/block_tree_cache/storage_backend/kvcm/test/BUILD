@@ -45,6 +45,7 @@ cc_test_wrapper(
 kvcm_backend_test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:client",
     "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend",
+    "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:group_policy",
     "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/model_rpc:model_rpc_pool",

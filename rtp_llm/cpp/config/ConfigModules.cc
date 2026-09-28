@@ -162,6 +162,11 @@ std::string KVCacheConfig::to_string() const {
         << "kv_cache_event_instance_group: " << kv_cache_event_instance_group << "\n"
         << "kv_cache_event_instance_id: " << kv_cache_event_instance_id << "\n"
         << "kv_cache_event_host_ip_port: " << kv_cache_event_host_ip_port << "\n"
+        << "kvcm_default_query_type: " << kvcm_default_query_type << "\n"
+        << "kvcm_query_type: " << kvcm_query_type << "\n"
+        << "kvcm_sw_size: " << kvcm_sw_size << "\n"
+        << "kvcm_read_backend_type: " << kvcm_read_backend_type << "\n"
+        << "kvcm_min_replica_count: " << kvcm_min_replica_count << "\n"
         << "block_tree_full_prefix_scan_interval_ms: " << block_tree_full_prefix_scan_interval_ms << "\n";
     return oss.str();
 }

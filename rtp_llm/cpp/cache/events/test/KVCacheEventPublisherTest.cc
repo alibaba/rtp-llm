@@ -28,9 +28,15 @@ public:
 
     bool post(const std::string& route, const std::string& request, std::string& response) noexcept override {
         bool fail_request = false;
+        std::string selected_response = R"({"header":{"status":{"code":"OK"}}})";
         {
             std::lock_guard<std::mutex> lock(mu_);
             requests_.push_back({route, request, std::chrono::steady_clock::now()});
+            if (!reply_body_.empty() && request.find(reply_body_) != std::string::npos) {
+                selected_response = reply_response_;
+                fail_request = reply_failure_;
+                reply_body_.clear();
+            }
             if (fail_body_count_ > 0 && !fail_body_.empty() && request.find(fail_body_) != std::string::npos) {
                 fail_request = true;
                 --fail_body_count_;
@@ -39,7 +45,7 @@ public:
                 }
             }
         }
-        response = R"({"header":{"status":{"code":"OK"}}})";
+        response = std::move(selected_response);
         cv_.notify_all();
         return !fail_request;
     }
@@ -80,6 +86,13 @@ public:
         fail_body_count_ = count;
     }
 
+    void replyNextBodyContaining(std::string text, std::string response, bool failure) {
+        std::lock_guard<std::mutex> lock(mu_);
+        reply_body_ = std::move(text);
+        reply_response_ = std::move(response);
+        reply_failure_ = failure;
+    }
+
     bool waitForBody(const std::string& text, std::chrono::milliseconds timeout) {
         std::unique_lock<std::mutex> lock(mu_);
         return cv_.wait_for(lock, timeout, [&] {
@@ -103,6 +116,9 @@ private:
     std::vector<Request>    requests_;
     std::string             fail_body_;
     size_t                  fail_body_count_{0};
+    std::string             reply_body_;
+    std::string             reply_response_;
+    bool                    reply_failure_{false};
 };
 
 class BlockingReporter final: public KVCacheEventReporter {
@@ -252,6 +268,71 @@ TEST(KVCacheEventPublisherTest, KVCMResponseValidationCoversProtocolVariantsAndF
     for (const auto& [response, expected] : cases) {
         EXPECT_EQ(expected, detail::kvcmResponseIsOk(response)) << response;
     }
+}
+
+TEST(KVCacheEventPublisherTest, ParsesSnapshotAndRetryFeedbackOnSuccessAndFailure) {
+    const auto success = detail::parseKVCMReportFeedback(
+        R"({"header":{"status":{"code":"OK"}},"snapshot_required":true,"retry_after_ms":"2500"})");
+    EXPECT_TRUE(success.valid);
+    EXPECT_TRUE(success.ok);
+    EXPECT_TRUE(success.snapshot_required);
+    EXPECT_FALSE(success.registration_required);
+    EXPECT_EQ(success.retry_after_ms, 2500u);
+
+    const auto throttled = detail::parseKVCMReportFeedback(
+        R"({"header":{"status":{"code":"SNAPSHOT_RATE_LIMITED"}},"retryAfterMs":125})");
+    EXPECT_TRUE(throttled.valid);
+    EXPECT_FALSE(throttled.ok);
+    EXPECT_FALSE(throttled.registration_required);
+    EXPECT_EQ(throttled.retry_after_ms, 125u);
+
+    const auto partial = detail::parseKVCMReportFeedback(
+        R"({"header":{"status":{"code":"OK"}},"item_results":[1,{"code":"SNAPSHOT_REQUIRED"}]})");
+    EXPECT_FALSE(partial.ok);
+    EXPECT_TRUE(partial.snapshot_required);
+    EXPECT_FALSE(detail::parseKVCMReportFeedback(
+        R"({"header":{"status":{"code":1}},"retry_after_ms":"-1"})").valid);
+}
+
+TEST(KVCacheEventPublisherTest, SnapshotBackoffIsCappedAndKeepsHeartbeatsRunning) {
+    KVCacheEventPublisherConfig config;
+    config.retry_interval_ms = 1;
+    config.heartbeat_interval_ms = 5;
+    config.max_retry_after_ms = 50;
+    config.snapshot_interval_ms = 60000;
+    auto reporter = std::make_shared<RecordingReporter>();
+    reporter->replyNextBodyContaining("EVENT_BLOCK_SNAPSHOT",
+        R"({"header":{"status":{"code":"SNAPSHOT_RATE_LIMITED"}},"retry_after_ms":"18446744073709551615"})",
+        true);
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {11}}; }, reporter);
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 2, kAsyncTestTimeout));
+    ASSERT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
+    publisher.stop();
+    const auto requests = reporter->requests();
+    bool between_snapshots = false;
+    bool heartbeat_during_backoff = false;
+    size_t snapshots = 0;
+    std::chrono::steady_clock::time_point first_snapshot;
+    std::chrono::steady_clock::time_point second_snapshot;
+    for (const auto& request : requests) {
+        if (request.body.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos) {
+            ++snapshots;
+            if (snapshots == 1) {
+                first_snapshot = request.recorded_at;
+                between_snapshots = true;
+            } else if (snapshots == 2) {
+                second_snapshot = request.recorded_at;
+                between_snapshots = false;
+            }
+        } else if (between_snapshots && request.body.find("EVENT_HEARTBEAT") != std::string::npos) {
+            heartbeat_during_backoff = true;
+        }
+    }
+    EXPECT_TRUE(heartbeat_during_backoff);
+    EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(second_snapshot - first_snapshot).count(), 50);
+    ASSERT_FALSE(requests.empty());
+    EXPECT_NE(requests.back().body.find("EVENT_HOST_DOWN"), std::string::npos);
 }
 
 TEST(KVCacheEventPublisherTest, KVCMPublisherRejectsIncompleteIdentity) {

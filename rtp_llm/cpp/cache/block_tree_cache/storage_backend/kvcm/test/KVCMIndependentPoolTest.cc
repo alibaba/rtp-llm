@@ -264,7 +264,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     proposal.write_session_id = "session";
     proposal.block_mask       = kv_cache_manager::BlockMaskOffset{0};
     proposal.locations        = {{{"tp0_Llinear0", "linear"}, {"tp0_Ffull1", "full1"}, {"tp0_Ffull0", "full0"}}};
-    EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _))
+    EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
     EXPECT_CALL(*meta_, FinishWrite(_, "session", _, _))
         .WillOnce(Invoke([&](const auto&, const auto&, const auto&, const auto& locations) {
@@ -308,7 +308,7 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesPins)
     proposal.write_session_id = "failed_session";
     proposal.block_mask       = kv_cache_manager::BlockMaskOffset{0};
     proposal.locations        = {{{"tp0_Llinear0", "linear"}, {"tp0_Ffull1", "full1"}, {"tp0_Ffull0", "full0"}}};
-    EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _))
+    EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
     EXPECT_CALL(*meta_,
                 FinishWrite(_,

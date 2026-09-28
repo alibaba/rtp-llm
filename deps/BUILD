@@ -4,6 +4,7 @@ load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load(":pip.bzl", "PIP_EXTRA_ARGS")
 exports_files([
     "http.bzl",
+    "kvcm.bzl",
     "requirements_base.txt",
     "requirements_lock_rocm.txt",
     "requirements_rocm.txt",

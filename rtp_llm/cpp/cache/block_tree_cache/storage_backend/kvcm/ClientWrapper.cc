@@ -364,8 +364,7 @@ ClientWrapper::match(const std::string&                      unique_id,
                      const std::vector<int64_t>&             keys,
                      const kv_cache_manager::BlockMask&      block_mask,
                      const kv_cache_manager::ForwardContext& forward_context) {
-    CHECK_INIT2(unique_id);
-    CALL_CLIENT2(MatchLocation, trace_id, query_type, keys, {}, block_mask, forward_context.sw_size, {});
+    return queryLocations(unique_id, trace_id, query_type, keys, {}, block_mask, forward_context.sw_size, {});
 }
 
 std::pair<bool, kv_cache_manager::WriteLocation>
@@ -374,9 +373,61 @@ ClientWrapper::getWriteLocation(const std::string&              unique_id,
                                 const std::vector<int64_t>&     keys,
                                 const std::vector<int64_t>&     tokens,
                                 const std::vector<std::string>& location_spec_group_names,
-                                int64_t                         write_timeout_seconds) {
+                                int64_t                         write_timeout_seconds,
+                                int32_t                         min_replica_count) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds);
+    CALL_CLIENT2(StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds, min_replica_count);
+}
+
+std::pair<bool, kv_cache_manager::Locations>
+ClientWrapper::queryLocations(const std::string& unique_id, const std::string& trace_id,
+                              kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
+                              const std::vector<int64_t>& tokens, const kv_cache_manager::BlockMask& block_mask,
+                              int32_t sw_size, const std::vector<std::string>& location_spec_names) {
+    CHECK_INIT2(unique_id);
+    CALL_CLIENT2(MatchLocation, trace_id, query_type, keys, tokens, block_mask, sw_size, location_spec_names);
+}
+
+std::pair<bool, int64_t>
+ClientWrapper::matchLocationLen(const std::string& unique_id, const std::string& trace_id,
+                                kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
+                                const std::vector<int64_t>& tokens, int32_t sw_size) {
+    CHECK_INIT2(unique_id);
+    CALL_CLIENT2(MatchLocationLen, trace_id, query_type, keys, tokens, sw_size);
+}
+
+std::pair<bool, kv_cache_manager::Metas>
+ClientWrapper::matchMeta(const std::string& unique_id, const std::string& trace_id,
+                         const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+                         const kv_cache_manager::BlockMask& block_mask, int32_t detail_level) {
+    CHECK_INIT2(unique_id);
+    CALL_CLIENT2(MatchMeta, trace_id, keys, tokens, block_mask, detail_level);
+}
+
+bool ClientWrapper::removeCache(const std::string& unique_id, const std::string& trace_id,
+                                const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+                                const kv_cache_manager::BlockMask& block_mask) {
+    CHECK_INIT1(unique_id);
+    return checkError(client->RemoveCache(trace_id, keys, tokens, block_mask));
+}
+
+std::pair<bool, kv_cache_manager::BackendLocations>
+ClientWrapper::getCacheLocationsByBackend(const std::string& unique_id, const std::string& trace_id,
+                                          const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+                                          const kv_cache_manager::BlockMask& block_mask,
+                                          const std::vector<std::string>& location_spec_names,
+                                          kv_cache_manager::StorageType backend_type) {
+    CHECK_INIT2(unique_id);
+    CALL_CLIENT2(GetCacheLocationsByBackend, trace_id, keys, tokens, block_mask, location_spec_names,
+                 backend_type, kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+}
+
+std::pair<bool, kv_cache_manager::HostCacheState>
+ClientWrapper::getHostCacheState(const std::string& unique_id, const std::string& trace_id,
+                                 kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
+                                 const std::vector<std::string>& medium, int32_t p2p_host_count) {
+    CHECK_INIT2(unique_id);
+    CALL_CLIENT2(GetHostCacheState, trace_id, query_type, keys, medium, p2p_host_count);
 }
 
 bool ClientWrapper::finishWrite(const std::string&                 unique_id,

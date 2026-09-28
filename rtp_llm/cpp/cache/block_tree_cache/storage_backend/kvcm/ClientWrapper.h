@@ -49,7 +49,35 @@ public:
                      const std::vector<int64_t>&     keys,
                      const std::vector<int64_t>&     tokens,
                      const std::vector<std::string>& location_spec_group_names,
-                     int64_t                         write_timeout_seconds);
+                     int64_t                         write_timeout_seconds,
+                     int32_t                         min_replica_count = 0);
+
+    virtual std::pair<bool, kv_cache_manager::Locations>
+    queryLocations(const std::string& unique_id, const std::string& trace_id,
+                   kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
+                   const std::vector<int64_t>& tokens, const kv_cache_manager::BlockMask& block_mask,
+                   int32_t sw_size, const std::vector<std::string>& location_spec_names);
+    virtual std::pair<bool, int64_t>
+    matchLocationLen(const std::string& unique_id, const std::string& trace_id,
+                     kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
+                     const std::vector<int64_t>& tokens, int32_t sw_size);
+    virtual std::pair<bool, kv_cache_manager::Metas>
+    matchMeta(const std::string& unique_id, const std::string& trace_id,
+              const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+              const kv_cache_manager::BlockMask& block_mask, int32_t detail_level);
+    virtual bool removeCache(const std::string& unique_id, const std::string& trace_id,
+                             const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+                             const kv_cache_manager::BlockMask& block_mask);
+    virtual std::pair<bool, kv_cache_manager::BackendLocations>
+    getCacheLocationsByBackend(const std::string& unique_id, const std::string& trace_id,
+                               const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+                               const kv_cache_manager::BlockMask& block_mask,
+                               const std::vector<std::string>& location_spec_names,
+                               kv_cache_manager::StorageType backend_type);
+    virtual std::pair<bool, kv_cache_manager::HostCacheState>
+    getHostCacheState(const std::string& unique_id, const std::string& trace_id,
+                      kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
+                      const std::vector<std::string>& medium, int32_t p2p_host_count);
 
     virtual bool finishWrite(const std::string&                 unique_id,
                              const std::string&                 trace_id,

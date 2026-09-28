@@ -140,8 +140,16 @@ public:
                  const std::vector<int64_t>&,
                  const std::vector<int64_t>&,
                  const std::vector<std::string>&,
-                 int64_t),
+                 int64_t,
+                 int32_t),
                 (override));
+    MOCK_METHOD((std::pair<bool, int64_t>), matchLocationLen,
+                (const std::string&, const std::string&, kv_cache_manager::QueryType,
+                 const std::vector<int64_t>&, const std::vector<int64_t>&, int32_t), (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::BackendLocations>), getCacheLocationsByBackend,
+                (const std::string&, const std::string&, const std::vector<int64_t>&,
+                 const std::vector<int64_t>&, const kv_cache_manager::BlockMask&,
+                 const std::vector<std::string>&, kv_cache_manager::StorageType), (override));
     MOCK_METHOD(bool,
                 finishWrite,
                 (const std::string&,

@@ -17,6 +17,7 @@ enum class DataStorageType : uint8_t {
     DATA_STORAGE_TYPE_MOONCAKE     = 3,
     DATA_STORAGE_TYPE_TAIR_MEMPOOL = 4,
     DATA_STORAGE_TYPE_NFS          = 5,
+    DATA_STORAGE_TYPE_TAIR_MEMPOOL_SSD = 9,
 };
 
 class LocationSpecInfo: public autil::legacy::Jsonizable {
@@ -82,7 +83,7 @@ private:
 
 class TairMempoolSdkConfig: public SdkBackendConfig {
 public:
-    TairMempoolSdkConfig();
+    explicit TairMempoolSdkConfig(DataStorageType type = DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL);
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
 };
 
@@ -101,10 +102,15 @@ public:
     auto& sdk_backend_configs() {
         return sdk_backend_configs_;
     }
+    void parseBackendConfigs(const std::string& config);
+    bool drain_on_timeout() const {
+        return drain_on_timeout_;
+    }
 
 private:
     uint32_t                                       thread_num_{4};
     uint32_t                                       queue_size_{2000};
+    bool                                           drain_on_timeout_{true};
     std::vector<std::shared_ptr<SdkBackendConfig>> sdk_backend_configs_;
     SdkTimeoutConfig                               timeout_config_;
 };
@@ -209,11 +215,21 @@ public:
     inline const auto& meta_channel_config() const {
         return meta_channel_config_;
     }
+    inline const auto& sdk_wrapper_config() const {
+        return sdk_wrapper_config_;
+    }
+    int32_t default_query_type() const {
+        return default_query_type_;
+    }
+    void set_default_query_type(int32_t query_type) {
+        default_query_type_ = query_type;
+    }
 
 private:
     bool                                 enable_vipserver_ = false;
     std::string                          vipserver_domain_ = "";
     int32_t                              block_size_       = -1;
+    int32_t                              default_query_type_ = 2;
     std::string                          instance_group_;
     std::string                          instance_id_;
     std::vector<std::string>             addresses_;

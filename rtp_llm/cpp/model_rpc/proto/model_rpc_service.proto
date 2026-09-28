@@ -773,6 +773,12 @@ enum RemoteOpType {
     REMOTE_OPERATION_UNSPECIFIED = 0;
     REMOTE_OPERATION_READ = 1;
     REMOTE_OPERATION_WRITE = 2;
+    REMOTE_OPERATION_MATCH_LOCATION_LEN = 3;
+    REMOTE_OPERATION_MATCH_META = 4;
+    REMOTE_OPERATION_REMOVE_CACHE = 5;
+    REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND = 6;
+    REMOTE_OPERATION_GET_HOST_CACHE_STATE = 7;
+    REMOTE_OPERATION_MATCH_LOCATION = 8;
 }
 
 message RemoteBoolMasksTypePB { repeated bool values = 1; }
@@ -802,11 +808,54 @@ message RemoteOperationRequestPB {
     repeated int32 block_ids = 4;
     repeated string uris = 5;
     repeated string group_tags = 6;
+    // Metadata operations are served by TP rank 0 for this backend's instance.
+    RemoteMetadataRequestPB metadata = 7;
+}
+
+message RemoteMetadataRequestPB {
+    // KVCM QueryType: 0=instance default, 1=batch, 2=prefix, 3=SWA, 4=Mamba.
+    int32 query_type = 1;
+    repeated int64 block_keys = 2;
+    repeated int64 token_ids = 3;
+    RemoteBlockMaskPB block_mask = 4;
+    int32 sw_size = 5; // cache keys, not tokens
+    int32 detail_level = 6;
+    int32 backend_type = 7; // KVCM StorageType; one backend per request
+    repeated string location_spec_names = 8;
+    repeated string medium = 9;
+    int32 p2p_host_count = 10;
+}
+
+message RemoteLocationSpecPB {
+    string name = 1;
+    string uri = 2;
+}
+
+message RemoteCacheLocationPB {
+    repeated RemoteLocationSpecPB specs = 1;
+    int32 backend_type = 2;
+    int32 spec_size = 3;
+}
+
+message RemoteBackendKeyLocationsPB {
+    repeated RemoteCacheLocationPB locations = 1;
+}
+
+message RemoteHostCacheMatchPB {
+    string host_ip_port = 1;
+    int64 local = 2;
+    int64 p2p_1_fetch = 3;
+    int64 p2p_1_total_match = 4;
 }
 
 message RemoteOperationResponsePB {
     RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
     repeated string actual_uris = 2; // only for write
+    int64 matched_blocks = 3;
+    repeated RemoteCacheLocationPB locations = 4;
+    repeated string metas = 5;
+    repeated RemoteBackendKeyLocationsPB backend_locations = 6;
+    repeated RemoteHostCacheMatchPB hosts = 7;
 }
 
 message FunctionResponsePB {
