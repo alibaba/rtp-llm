@@ -12,6 +12,7 @@
 - `run_fp8_3fs_*.sh`、`run_64k_*.sh`、`analyze_r41_aligned_phases.py`、`analyze_phase_by_launch_correlation.py`：当时的四层 Prefill 启动和 timeline 复现脚本。
 - `timeline-input-64k/`：固定 65,536 token 输入及 14 条独立预热变体；主输入 token ID SHA256 为 `97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee`。
 - `evidence/`：原始读速日志、guard 结果、逐 case flow 审计、全 rank 相位审计及冷编译失败日志；`r41b_retry2/` 保存新采集的压缩 trace 与请求响应。
+- `same-host-fourlayer-64k-candidates-20260928.md`：111/112 上集成版与固定 feat 的同输入、热态 FP8 + MTP PD 逐内核筛选及可迁移范围；对应全 rank trace 已归档在 `evidence/`。
 
 后续又在 113/114 测了更高读取并发：原始分片扫描在 256 线程最高，真实 FastSafetensors SHM 加载在 64、128、256 线程下的内部读取时间基本相同。记录和日志已附在本目录；任务进程仍选 64 线程。
 
