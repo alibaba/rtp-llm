@@ -80,7 +80,6 @@ import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_SUCCESS_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
-import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS;
@@ -168,7 +167,6 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_STATUS_AVAILABLE_CONCURRENCY, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_STATUS_VISITOR_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_STATUS_VISITOR_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_PREFILL_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_DECODE_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_ENCODER_WORKER_NUMBER, FlexMetricType.GAUGE);
@@ -291,8 +289,6 @@ public class EngineHealthReporter {
     private void reportEngineMetric() {
         String modelName = "engine_service";
         FlexMetricTags tags = FlexMetricTags.of("model", modelName);
-        monitor.report(ENGINE_WORKER_NUMBER, tags,
-                workerDirectory.discoveredCount());
         monitor.report(ENGINE_PREFILL_WORKER_NUMBER, tags,
                 workerDirectory.discoveredCount(RoleType.PREFILL));
         monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags,
