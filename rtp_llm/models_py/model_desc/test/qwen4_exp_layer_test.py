@@ -290,6 +290,23 @@ class Qwen4ExpSpecFaultInjectionTest(TestCase):
             call(stub, "commit")  # unset: inert
 
 
+class Qwen4ExpMetadataTest(TestCase):
+    def test_ple_region_alias_avoids_equality_sync_but_checks_distinct_values(self):
+        values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+        left = SimpleNamespace(input_lengths=values)
+        alias = SimpleNamespace(input_lengths=values.view_as(values))
+        different = SimpleNamespace(input_lengths=values + 1)
+        with patch.object(torch, "equal", wraps=torch.equal) as equal:
+            self.assertTrue(
+                qwen4_exp.Qwen4ExpModel._same_metadata(left, alias, "input_lengths")
+            )
+            equal.assert_not_called()
+            self.assertFalse(
+                qwen4_exp.Qwen4ExpModel._same_metadata(left, different, "input_lengths")
+            )
+            equal.assert_called_once()
+
+
 class Qwen4ExpModelConstructionTest(TestCase):
     """The real construction path: GptModelBase.__init__ then Qwen4ExpModel.
 
