@@ -57,7 +57,7 @@ std::vector<std::string> GroupBlockIds::orderedTags() const {
     return tags;
 }
 
-void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) {
+void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
     GroupBlockIds candidate;
     const auto& groups = topology->groups();
@@ -75,21 +75,24 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
     candidate.validate();
 
     std::vector<std::vector<std::string>> layer_tags;
-    layer_tags.reserve(topology->layers().size());
-    for (const auto& layer : topology->layers()) {
-        RTP_LLM_CHECK_WITH_INFO(layer.layer_id >= 0 && static_cast<size_t>(layer.layer_id) == layer_tags.size(),
-                                "KVCacheResource invalid layer_id=%d",
-                                layer.layer_id);
-        for (const auto& tag : layer.group_tags) {
-            (void)candidate.blockIds(tag);
+    if (materialize_layer_views) {
+        layer_tags.reserve(topology->layers().size());
+        for (const auto& layer : topology->layers()) {
+            RTP_LLM_CHECK_WITH_INFO(layer.layer_id >= 0 && static_cast<size_t>(layer.layer_id) == layer_tags.size(),
+                                    "KVCacheResource invalid layer_id=%d",
+                                    layer.layer_id);
+            for (const auto& tag : layer.group_tags) {
+                (void)candidate.blockIds(tag);
+            }
+            layer_tags.push_back(layer.group_tags);
         }
-        layer_tags.push_back(layer.group_tags);
     }
 
     // All throwing construction/validation finished; publish both views together.
     group_block_ids.tag_to_index_.swap(candidate.tag_to_index_);
     group_block_ids.rows_.swap(candidate.rows_);
     layer_group_tags_.swap(layer_tags);
+    topology_ = materialize_layer_views ? nullptr : std::move(topology);
 }
 
 size_t BlockIds::blocksNum() const {
@@ -275,6 +278,9 @@ void KVCacheResource::checkLayerTag(int layer_id, std::string_view tag) const {
 }
 
 const std::vector<std::string>& KVCacheResource::groupTagsForLayer(int layer_id) const {
+    if (topology_) {
+        return topology_->layer(layer_id).group_tags;
+    }
     RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_group_tags_.size(),
                             "KVCacheResource invalid layer_id=%d size=%zu",
                             layer_id,
@@ -290,12 +296,15 @@ const std::string& KVCacheResource::soleGroupTagForLayer(int layer_id) const {
 }
 
 bool KVCacheResource::hasOneGroupPerLayer() const {
+    if (topology_) {
+        return topology_->hasOneGroupPerLayer();
+    }
     return std::all_of(
         layer_group_tags_.begin(), layer_group_tags_.end(), [](const auto& tags) { return tags.size() == 1; });
 }
 
 int KVCacheResource::layerNum() const {
-    return static_cast<int>(layer_group_tags_.size());
+    return topology_ ? static_cast<int>(topology_->layers().size()) : static_cast<int>(layer_group_tags_.size());
 }
 
 int KVCacheResource::groupNums() const {
@@ -328,9 +337,9 @@ LayerBlockIds KVCacheResource::layerBlocks() const {
                             "KVCacheResource::layerBlocks is a deprecated single-group-per-layer projection; "
                             "use blockIdsForLayer(layer, tag) for multi-group layers");
     LayerBlockIds layer_blocks;
-    layer_blocks.reserve(layer_group_tags_.size());
-    for (const auto& tags : layer_group_tags_) {
-        layer_blocks.push_back(groupBlockIds(tags.front()));
+    layer_blocks.reserve(layerNum());
+    for (int layer = 0; layer < layerNum(); ++layer) {
+        layer_blocks.push_back(groupBlockIds(soleGroupTagForLayer(layer)));
     }
     return layer_blocks;
 }
