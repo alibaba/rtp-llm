@@ -61,6 +61,26 @@ class RoleAddrProtocolCompatibilityTest {
     }
 
     @Test
+    void encoderRoleAddrUsesNewEnumValueAndRoundTrips() throws Exception {
+        assertEquals(0, EngineRpcService.RoleAddrPB.RoleType.PDFUSION.getNumber());
+        assertEquals(1, EngineRpcService.RoleAddrPB.RoleType.PREFILL.getNumber());
+        assertEquals(2, EngineRpcService.RoleAddrPB.RoleType.DECODE.getNumber());
+        assertEquals(3, EngineRpcService.RoleAddrPB.RoleType.VIT.getNumber());
+        assertEquals(4, EngineRpcService.RoleAddrPB.RoleType.FRONTEND.getNumber());
+
+        EngineRpcService.RoleAddrPB addr = EngineRpcService.RoleAddrPB.newBuilder()
+                .setRole(RoleTypeProtoConverter.toLegacyProto(RoleType.ENCODER))
+                .setRoleStr("ENCODER")
+                .build();
+
+        assertEquals(5, addr.getRoleValue());
+        assertEquals(RoleType.ENCODER, RoleTypeProtoConverter.fromRoleAddr(addr));
+        assertEquals(RoleType.ENCODER,
+                RoleTypeProtoConverter.fromRoleAddr(
+                        EngineRpcService.RoleAddrPB.parseFrom(addr.toByteArray())));
+    }
+
+    @Test
     void currentRoleAddrReaderAcceptsDsv4PayloadAndRejectsConflict() throws Exception {
         Descriptors.Descriptor legacy = legacyRoleAddrDescriptor();
         for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
