@@ -1,11 +1,310 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "kmonitor/client/common/MinMaxCalculator.h"
+#include "kmonitor/client/core/MetricsCollector.h"
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace rtp_llm {
+namespace {
+
+class RtpLLMTokenPSMetricsReportTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        monitor_ = std::make_shared<kmonitor::KMonitor>("token_ps_report_test");
+        monitor_->SetServiceName("");
+        reporter_ = std::make_shared<kmonitor::MetricsReporter>(monitor_, "", kmonitor::MetricsTags());
+        metrics_  = reporter_->getMetricsGroup<RtpLLMTokenPSMetrics>();
+        ASSERT_NE(metrics_, nullptr);
+    }
+
+    void report(RtpLLMTokenPSMetricsCollector& collector, const std::string& priority = "30") {
+        kmonitor::MetricsTags tags("priority", priority);
+        metrics_->report(&tags, &collector);
+    }
+
+    void expectSnapshot(const std::map<std::string, std::vector<double>>& expected_samples,
+                        const std::string&                             priority = "30") {
+        kmonitor::MetricsCollector snapshot;
+        snapshot_time_ms_ += 10000;
+        monitor_->GetMetrics(&snapshot, {kmonitor::NORMAL}, snapshot_time_ms_);
+        std::map<std::string, std::string> actual;
+        for (const auto* record : snapshot.GetRecords().getRecords()) {
+            for (const auto* value : record->Values()) {
+                EXPECT_EQ(record->Tags()->FindTag("priority"), priority);
+                EXPECT_TRUE(actual.emplace(value->Name(), value->Value()).second);
+            }
+        }
+        ASSERT_EQ(actual.size(), expected_samples.size()) << ::testing::PrintToString(actual);
+        for (const auto& [name, samples] : expected_samples) {
+            SCOPED_TRACE(name);
+            ASSERT_FALSE(samples.empty());
+            const auto metric = actual.find(name);
+            ASSERT_NE(metric, actual.end());
+            // Let Kmonitor encode the expected samples instead of duplicating its snapshot format.
+            kmonitor::MinMaxCalculator expected;
+            for (double sample : samples) {
+                expected.Add(sample);
+            }
+            EXPECT_EQ(metric->second, expected.ToString());
+        }
+    }
+
+private:
+    kmonitor::KMonitorPtr        monitor_;
+    kmonitor::MetricsReporterPtr reporter_;
+    RtpLLMTokenPSMetrics*        metrics_          = nullptr;
+    int64_t                     snapshot_time_ms_ = 0;
+};
+
+struct TokenCountReport {
+    std::string priority;
+    int64_t     context_tokens;
+    int64_t     context_tokens_with_cache;
+};
+
+class RecordingTokenCountMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager*) override {
+        return true;
+    }
+
+    void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        TokenCountReport           report{
+            tags->FindTag("priority"), collector->contextTokens(), collector->contextTokensWithCache()};
+        last_report_was_idle_ = collector->reportZeroTPS();
+        if (last_report_was_idle_) {
+            idle_report_ = report;
+        } else {
+            data_reports_.push_back(report);
+        }
+        cv_.notify_all();
+    }
+
+    bool waitForIdleAfter(size_t count, std::vector<TokenCountReport>& reports, TokenCountReport& idle_report) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        // An idle report after the data proves that the real reporting loop drained its collector.
+        if (!cv_.wait_for(lock, std::chrono::seconds(5), [&] {
+                return data_reports_.size() >= count && last_report_was_idle_;
+            })) {
+            return false;
+        }
+        reports.swap(data_reports_);
+        idle_report = idle_report_;
+        return true;
+    }
+
+private:
+    std::mutex                    mutex_;
+    std::condition_variable       cv_;
+    std::vector<TokenCountReport> data_reports_;
+    TokenCountReport              idle_report_{};
+    bool                          last_report_was_idle_ = false;
+};
+
+template<typename Reporter>
+void checkReporterResetsTokenCounts() {
+    auto  monitor           = std::make_shared<kmonitor::KMonitor>("token_count_reset_test");
+    auto  metrics_reporter  = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto* recording_metrics = metrics_reporter->getMetricsGroup<RecordingTokenCountMetrics>();
+    ASSERT_NE(recording_metrics, nullptr);
+    Reporter reporter(metrics_reporter, 1);
+
+    using CountsByPriority = std::map<std::string, std::pair<int64_t, int64_t>>;
+    auto expect_window = [&](const CountsByPriority& expected) {
+        std::vector<TokenCountReport> reports;
+        TokenCountReport              idle_report;
+        ASSERT_TRUE(recording_metrics->waitForIdleAfter(expected.size(), reports, idle_report))
+            << "Reporter did not drain its data and emit an idle window";
+        ASSERT_EQ(reports.size(), expected.size());
+        CountsByPriority actual;
+        for (const auto& report : reports) {
+            EXPECT_TRUE(actual.emplace(report.priority,
+                                       std::make_pair(report.context_tokens, report.context_tokens_with_cache))
+                            .second);
+        }
+        EXPECT_EQ(actual, expected);
+        EXPECT_EQ(idle_report.priority, "0");
+        EXPECT_EQ(idle_report.context_tokens, 0);
+        EXPECT_EQ(idle_report.context_tokens_with_cache, 0);
+    };
+
+    RtpLLMTokenPSMetricsCollector first;
+    first.addTokenSize(400, 600, 0, 400, 1000000);
+    first.addPriorityTokenSize(30, 100, 150, 0, 100, 1000000);
+    first.addPriorityTokenSize(50, 300, 450, 0, 300, 1000000);
+    reporter.report(&first);
+    ASSERT_NO_FATAL_FAILURE(expect_window({{"30", {100, 150}}, {"50", {300, 450}}}));
+
+    // Reusing one priority must not retain either its old counts or the absent priority's bucket.
+    RtpLLMTokenPSMetricsCollector second;
+    second.addTokenSize(20, 30, 0, 20, 1000000);
+    second.addPriorityTokenSize(50, 20, 30, 0, 20, 1000000);
+    reporter.report(&second);
+    ASSERT_NO_FATAL_FAILURE(expect_window({{"50", {20, 30}}}));
+
+    // Exercise the untagged path after reporting priority buckets.
+    RtpLLMTokenPSMetricsCollector untagged;
+    untagged.addTokenSize(10, 15, 0, 10, 1000000);
+    reporter.report(&untagged);
+    ASSERT_NO_FATAL_FAILURE(expect_window({{"0", {10, 15}}}));
+
+    RtpLLMTokenPSMetricsCollector cache_only;
+    cache_only.addTokenSize(0, 25, 0, 0, 1000000);
+    cache_only.addPriorityTokenSize(70, 0, 25, 0, 0, 1000000);
+    reporter.report(&cache_only);
+    ASSERT_NO_FATAL_FAILURE(expect_window({{"70", {0, 25}}}));
+}
+
+}  // namespace
+
+TEST_F(RtpLLMTokenPSMetricsReportTest, DoesNotRepeatContextMetricsAfterUntimedBatch) {
+    RtpLLMTokenPSMetricsCollector prefill;
+    prefill.addTokenSize(100, 150, 0, 100, 1000000);
+    report(prefill);
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {100}},
+                                           {"rtp_llm_context_tokens_with_cache", {150}},
+                                           {"rtp_llm_context_tps", {100}},
+                                           {"rtp_llm_context_tps_with_cache", {150}},
+                                           {"rtp_llm_total_tps", {100}}}));
+
+    for (int64_t execute_time_us : {0, -1}) {
+        SCOPED_TRACE(execute_time_us);
+        // Production prefill also counts its executed tokens in total.
+        RtpLLMTokenPSMetricsCollector untimed;
+        untimed.addTokenSize(20, 30, 0, 20, execute_time_us);
+        untimed.markIdleWindow();
+        report(untimed);
+        ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_total_tps", {20}}}));
+        ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
+    }
+
+    RtpLLMTokenPSMetricsCollector idle;
+    idle.markIdleWindow();
+    report(idle, "0");
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {0}},
+                                           {"rtp_llm_context_tokens_with_cache", {0}},
+                                           {"rtp_llm_context_tps", {0}},
+                                           {"rtp_llm_context_tps_with_cache", {0}},
+                                           {"rtp_llm_generate_tps", {0}},
+                                           {"rtp_llm_total_tps", {0}}},
+                                          "0"));
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
+}
+
+TEST_F(RtpLLMTokenPSMetricsReportTest, ReportsCacheOnlyCountsOnlyWithValidTiming) {
+    for (int64_t execute_time_us : {0, -1}) {
+        SCOPED_TRACE(execute_time_us);
+        RtpLLMTokenPSMetricsCollector untimed;
+        untimed.addTokenSize(0, 25, 0, 0, execute_time_us);
+        report(untimed);
+        ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
+    }
+
+    RtpLLMTokenPSMetricsCollector timed;
+    timed.addTokenSize(0, 25, 0, 0, 1000000);
+    timed.markIdleWindow();
+    report(timed);
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens_with_cache", {25}},
+                                           {"rtp_llm_context_tps_with_cache", {25}}}));
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
+}
+
+TEST_F(RtpLLMTokenPSMetricsReportTest, KeepsDecodeCountsWithoutContextMetrics) {
+    for (int64_t execute_time_us : {1000000, 0, -1}) {
+        SCOPED_TRACE(execute_time_us);
+        RtpLLMTokenPSMetricsCollector decode;
+        decode.addTokenSize(0, 0, 7, 7, execute_time_us);
+        report(decode);
+        ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_generate_tps", {7}}, {"rtp_llm_total_tps", {7}}}));
+    }
+
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
+}
+
+TEST_F(RtpLLMTokenPSMetricsReportTest, DoesNotAddZeroTpsSamplesWithinSnapshot) {
+    RtpLLMTokenPSMetricsCollector prefill;
+    prefill.addTokenSize(100, 150, 0, 100, 1000000);
+    report(prefill);
+    RtpLLMTokenPSMetricsCollector untimed;
+    untimed.addTokenSize(20, 30, 0, 0, 0);
+    report(untimed);
+    RtpLLMTokenPSMetricsCollector decode;
+    decode.addTokenSize(0, 0, 7, 7, 1000000);
+    report(decode);
+
+    // Several reports share one snapshot: missing TPS must not dilute its valid samples with zeros.
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {100}},
+                                           {"rtp_llm_context_tokens_with_cache", {150}},
+                                           {"rtp_llm_context_tps", {100}},
+                                           {"rtp_llm_context_tps_with_cache", {150}},
+                                           {"rtp_llm_generate_tps", {7}},
+                                           {"rtp_llm_total_tps", {100, 7}}}));
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
+}
+
+TEST_F(RtpLLMTokenPSMetricsReportTest, PriorityTokenCountsUseTheSameSamplesAsTps) {
+    RtpLLMTokenPSMetricsCollector collector;
+    collector.addTokenSize(400, 600, 7, 407, 200000);
+    collector.addPriorityTokenSize(30, 400, 600, 0, 400, 200000);
+    collector.addPriorityTokenSize(50, 0, 0, 7, 7, 200000);
+    collector.addTokenSize(100, 150, 0, 100, 0);
+    collector.addPriorityTokenSize(70, 100, 150, 0, 100, 0);
+
+    auto priorities = collector.priorityCollectorsForReport();
+    ASSERT_EQ(priorities.size(), 3);
+    report(priorities.at(30), "30");
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {400}},
+                                           {"rtp_llm_context_tokens_with_cache", {600}},
+                                           {"rtp_llm_context_tps", {2000}},
+                                           {"rtp_llm_context_tps_with_cache", {3000}},
+                                           {"rtp_llm_total_tps", {400}}}));
+
+    // All priorities share the valid global execution window, including buckets with no valid context work.
+    report(priorities.at(50), "50");
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {0}},
+                                           {"rtp_llm_context_tokens_with_cache", {0}},
+                                           {"rtp_llm_context_tps", {0}},
+                                           {"rtp_llm_context_tps_with_cache", {0}},
+                                           {"rtp_llm_generate_tps", {7}},
+                                           {"rtp_llm_total_tps", {7}}},
+                                          "50"));
+    report(priorities.at(70), "70");
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {0}},
+                                           {"rtp_llm_context_tokens_with_cache", {0}},
+                                           {"rtp_llm_context_tps", {0}},
+                                           {"rtp_llm_context_tps_with_cache", {0}},
+                                           {"rtp_llm_total_tps", {100}}},
+                                          "70"));
+
+    report(collector, "0");
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {400}},
+                                           {"rtp_llm_context_tokens_with_cache", {600}},
+                                           {"rtp_llm_context_tps", {2000}},
+                                           {"rtp_llm_context_tps_with_cache", {3000}},
+                                           {"rtp_llm_generate_tps", {7}},
+                                           {"rtp_llm_total_tps", {507}}},
+                                          "0"));
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, LoopReporterResetsTokenCountsAfterReport) {
+    checkReporterResetsTokenCounts<MetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>();
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterResetsTokenCountsAfterReport) {
+    checkReporterResetsTokenCounts<
+        WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>();
+}
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
     RtpLLMTokenPSMetricsCollector collector;
@@ -54,6 +353,8 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsTimeWeightedTps) {
     EXPECT_NEAR(merged.contextTPS(), 10000.0, 1e-6);
     EXPECT_NEAR(merged.contextTPSWithCache(), 10000.0, 1e-6);
     EXPECT_NEAR(merged.totalTPS(), 10000.0, 1e-6);
+    EXPECT_EQ(merged.contextTokens(), 10000);
+    EXPECT_EQ(merged.contextTokensWithCache(), 10000);
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsPriorityMetrics) {
@@ -74,6 +375,12 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsPriorityMetrics) {
     EXPECT_NEAR(priority_collectors.at(50).contextTPS(), 6000.0, 1e-6);
     EXPECT_NEAR(priority_collectors.at(30).totalTPS(), 404.0, 1e-6);
     EXPECT_NEAR(priority_collectors.at(50).totalTPS(), 606.0, 1e-6);
+    EXPECT_EQ(priority_collectors.at(30).contextTokens(), 400);
+    EXPECT_EQ(priority_collectors.at(50).contextTokens(), 600);
+    EXPECT_EQ(priority_collectors.at(30).contextTokensWithCache(), 600);
+    EXPECT_EQ(priority_collectors.at(50).contextTokensWithCache(), 900);
+    EXPECT_EQ(merged.contextTokens(), 1000);
+    EXPECT_EQ(merged.contextTokensWithCache(), 1500);
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalAsTokenCounts) {
@@ -85,19 +392,30 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalAsTokenCounts) {
     EXPECT_NEAR(collector.contextTPSWithCache(), 15000.0, 1e-6);
     EXPECT_NEAR(collector.generateTPS(), 10.0, 1e-6);
     EXPECT_NEAR(collector.totalTPS(), 1010.0, 1e-6);
+    EXPECT_EQ(collector.contextTokens(), 1000);
+    EXPECT_EQ(collector.contextTokensWithCache(), 1500);
 }
 
-TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalWhenExecutionTimeIsZero) {
-    RtpLLMTokenPSMetricsCollector collector;
+TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalWhenExecutionTimeIsInvalid) {
+    for (int64_t execute_time_us : {0, -1}) {
+        SCOPED_TRACE(execute_time_us);
+        RtpLLMTokenPSMetricsCollector collector;
+        collector.addTokenSize(1000, 1500, 2, 1002, execute_time_us);
+        collector.addPriorityTokenSize(30, 1000, 1500, 2, 1002, execute_time_us);
 
-    collector.addTokenSize(1000, 1000, 2, 1002, 0);
-
-    EXPECT_FALSE(collector.hasContextTPS());
-    EXPECT_FALSE(collector.hasContextTPSWithCache());
-    EXPECT_TRUE(collector.hasGenerateTPS());
-    EXPECT_TRUE(collector.hasTotalTPS());
-    EXPECT_NEAR(collector.generateTPS(), 2.0, 1e-6);
-    EXPECT_NEAR(collector.totalTPS(), 1002.0, 1e-6);
+        auto priorities = collector.priorityCollectorsForReport();
+        ASSERT_EQ(priorities.size(), 1);
+        for (const auto* counts : {&collector, &priorities.at(30)}) {
+            EXPECT_EQ(counts->contextTokens(), 0);
+            EXPECT_EQ(counts->contextTokensWithCache(), 0);
+            EXPECT_FALSE(counts->hasContextTPS());
+            EXPECT_FALSE(counts->hasContextTPSWithCache());
+            EXPECT_TRUE(counts->hasGenerateTPS());
+            EXPECT_TRUE(counts->hasTotalTPS());
+            EXPECT_NEAR(counts->generateTPS(), 2.0, 1e-6);
+            EXPECT_NEAR(counts->totalTPS(), 1002.0, 1e-6);
+        }
+    }
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, MarksEmptyIdleWindowForZeroReport) {
@@ -106,6 +424,8 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MarksEmptyIdleWindowForZeroReport) {
     EXPECT_FALSE(collector.hasMetrics());
     EXPECT_FALSE(collector.reportZeroTPS());
 
+    // Discarded context counts leave the window empty.
+    collector.addTokenSize(1000, 1500, 0, 0, 0);
     collector.markIdleWindow();
 
     EXPECT_FALSE(collector.hasMetrics());
@@ -114,6 +434,8 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MarksEmptyIdleWindowForZeroReport) {
     EXPECT_NEAR(collector.contextTPSWithCache(), 0.0, 1e-6);
     EXPECT_NEAR(collector.generateTPS(), 0.0, 1e-6);
     EXPECT_NEAR(collector.totalTPS(), 0.0, 1e-6);
+    EXPECT_EQ(collector.contextTokens(), 0);
+    EXPECT_EQ(collector.contextTokensWithCache(), 0);
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, DoesNotMarkNonEmptyWindowAsIdle) {
@@ -130,6 +452,7 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsIdleZeroOnlyForEmptyMetrics) {
     RtpLLMTokenPSMetricsCollector idle;
     RtpLLMTokenPSMetricsCollector merged;
 
+    idle.addTokenSize(1000, 1500, 0, 0, -1);
     idle.markIdleWindow();
     merged.merge(&idle);
 
@@ -155,6 +478,14 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsContextWallTpsByReportWindow) {
     EXPECT_NEAR(collector.contextWallTPS(), 5000.0, 1e-6);
     EXPECT_NEAR(collector.contextWallTPSWithCache(), 7500.0, 1e-6);
     EXPECT_EQ(collector.reportWindowUs(), 200 * 1000);
+    EXPECT_EQ(collector.contextTokens(), 1000);
+    EXPECT_EQ(collector.contextTokensWithCache(), 1500);
+
+    collector.setReportWindowUs(1000 * 1000);
+    EXPECT_NEAR(collector.contextWallTPS(), 1000.0, 1e-6);
+    EXPECT_NEAR(collector.contextWallTPSWithCache(), 1500.0, 1e-6);
+    EXPECT_EQ(collector.contextTokens(), 1000);
+    EXPECT_EQ(collector.contextTokensWithCache(), 1500);
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, WallTpsUsesMergedTokens) {
@@ -236,6 +567,48 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, AddTokenSizeByPriorityMatchesUntaggedTot
         priority_collectors.at(30).totalTPS() + priority_collectors.at(50).totalTPS(), collector.totalTPS(), 1e-6);
     EXPECT_FALSE(priority_collectors.at(30).hasContextTPS());
     EXPECT_FALSE(priority_collectors.at(50).hasContextTPS());
+    EXPECT_EQ(collector.contextTokens(), 0);
+    EXPECT_EQ(collector.contextTokensWithCache(), 0);
+    for (const auto& [priority, priority_collector] : priority_collectors) {
+        EXPECT_EQ(priority_collector.contextTokens(), 0);
+        EXPECT_EQ(priority_collector.contextTokensWithCache(), 0);
+    }
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, MergingUntimedCountsPreservesTimeValidatedTps) {
+    RtpLLMTokenPSMetricsCollector timed;
+    timed.addTokenSize(700, 900, 0, 700, 100 * 1000);
+    timed.addPriorityTokenSize(30, 700, 900, 0, 700, 100 * 1000);
+    RtpLLMTokenPSMetricsCollector untimed;
+    untimed.addTokenSize(300, 500, 0, 300, 0);
+    untimed.addPriorityTokenSize(30, 300, 500, 0, 300, 0);
+    timed.merge(&untimed);
+    timed.setReportWindowUs(2 * 1000 * 1000);
+
+    auto priority_collectors = timed.priorityCollectorsForReport();
+    ASSERT_EQ(priority_collectors.size(), 1);
+    for (const auto* collector : {&timed, &priority_collectors.at(30)}) {
+        EXPECT_EQ(collector->contextTokens(), 700);
+        EXPECT_EQ(collector->contextTokensWithCache(), 900);
+        EXPECT_DOUBLE_EQ(collector->contextTPS(), 7000.0);
+        EXPECT_DOUBLE_EQ(collector->contextTPSWithCache(), 9000.0);
+        EXPECT_DOUBLE_EQ(collector->contextWallTPS(), 350.0);
+        EXPECT_DOUBLE_EQ(collector->contextWallTPSWithCache(), 450.0);
+    }
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, IgnoresNonPositiveContextTokenCounts) {
+    RtpLLMTokenPSMetricsCollector collector;
+    for (int64_t token_num : {0, -1}) {
+        collector.addTokenSize(token_num, token_num, 0, 0, 100 * 1000);
+        collector.addPriorityTokenSize(30, token_num, token_num, 0, 0, 100 * 1000);
+    }
+
+    EXPECT_EQ(collector.contextTokens(), 0);
+    EXPECT_EQ(collector.contextTokensWithCache(), 0);
+    EXPECT_FALSE(collector.hasMetrics());
+    EXPECT_EQ(collector.priorityCollectorsForReport().at(30).contextTokens(), 0);
+    EXPECT_EQ(collector.priorityCollectorsForReport().at(30).contextTokensWithCache(), 0);
 }
 
 }  // namespace rtp_llm
