@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include <vector>
 
 namespace rtp_llm {
 
@@ -55,6 +56,13 @@ public:
                                     const torch::Tensor& markov_w1,
                                     const torch::Tensor& markov_w2,
                                     size_t               draft_vocab_size) const;
+
+    static std::vector<int64_t> dsparkWarmupBatchSizes(int64_t max_batch_size);
+
+    void warmupDSparkDraft(int64_t              max_batch_size,
+                           const torch::Tensor& markov_w1,
+                           const torch::Tensor& markov_w2,
+                           size_t               draft_vocab_size) const;
 
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,

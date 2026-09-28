@@ -52,6 +52,9 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(warmup, "_DENSE_WARMED", set()))
         self.stack.enter_context(mock.patch.object(warmup, "_SHARED_WARMED", set()))
         self.stack.enter_context(mock.patch.object(warmup, "_ENGRAM_WARMED", set()))
+        self.stack.enter_context(
+            mock.patch.object(warmup, "_DECODE_QUERY_WARMED", set())
+        )
         # Fail immediately if this test accidentally touches the CUDA runtime.
         for name in ("_lazy_init", "init", "synchronize", "current_device"):
             self.stack.enter_context(
@@ -69,9 +72,12 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                 warmup.warmup_v41_shared_expert_jit(object(), max_m=8, device="cuda:0")
                 warmup.warmup_v41_engram_jit(object(), max_m=8, device="cuda:0")
                 warmup.warmup_v41_prefill_jit(object(), device="cuda:0")
+                warmup.warmup_v41_decode_jit(object(), device="cuda:0")
+                warmup.warmup_v41_decode_query_jit(object(), max_m=8, device="cuda:0")
         self.assertFalse(warmup._DENSE_WARMED)
         self.assertFalse(warmup._SHARED_WARMED)
         self.assertFalse(warmup._ENGRAM_WARMED)
+        self.assertFalse(warmup._DECODE_QUERY_WARMED)
 
     def test_cpu_and_decode_skip_before_launch(self):
         model = types.SimpleNamespace(_is_decode_role=False)
@@ -79,8 +85,11 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         warmup.warmup_v41_shared_expert_jit(model, max_m=8, device="cpu")
         warmup.warmup_v41_engram_jit(model, max_m=8, device="cpu")
         warmup.warmup_v41_prefill_jit(model, device="cpu")
+        warmup.warmup_v41_decode_jit(model, device="cuda:0")
+        warmup.warmup_v41_decode_query_jit(model, max_m=8, device="cpu")
         model._is_decode_role = True
         warmup.warmup_v41_prefill_jit(model, device="cuda:0")
+        warmup.warmup_v41_decode_jit(model, device="cpu")
 
     def test_collector_deduplicates_mxfp8_and_keeps_group128_out(self):
         model = nn.Module()
@@ -542,6 +551,145 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             )
         return model, silu, combine
 
+    def decode_fixture(self):
+        model, calls = self.prefill_fixture()
+        model._is_decode_role = True
+        model._is_speculative = False
+        model._gen_num_per_cycle = 5
+        calls["query"] = self.stack.enter_context(
+            mock.patch.object(warmup, "warmup_v41_decode_query_jit")
+        )
+        return model, calls
+
+    def test_decode_row_bound_covers_target_verify_and_draft(self):
+        model, _ = self.decode_fixture()
+        for batch, gamma, speculative, expected in (
+            (8, 5, False, 48),
+            (8, 5, True, 48),
+            (128, 5, False, 768),
+            (3, 0, False, 3),
+            (3, -1, False, 3),
+        ):
+            with self.subTest(batch=batch, gamma=gamma, speculative=speculative):
+                model._max_generate_batch_size = batch
+                model._gen_num_per_cycle = gamma
+                model._is_speculative = speculative
+                self.assertEqual(
+                    warmup.resolve_v41_decode_warmup_max_m(model), expected
+                )
+
+    def test_decode_local_families_warm_before_and_after_cache_binding(self):
+        model, calls = self.decode_fixture()
+        cache = mock.Mock()
+        cache.get_layer_cache.side_effect = AssertionError("live cache accessed")
+        for bound_cache in (None, cache):
+            model.kv_cache = bound_cache
+            warmup.warmup_v41_decode_jit(model, device="cuda:0")
+        for name in (
+            "warmup_v41_dense_jit",
+            "warmup_v41_shared_expert_jit",
+            "hc",
+            "query",
+        ):
+            self.assertEqual(calls[name].call_count, 2, name)
+            self.assertEqual(calls[name].call_args.kwargs["max_m"], 96, name)
+        calls["hc"].assert_called_with(
+            model.v4, max_m=96, device=torch.device("cuda:0")
+        )
+        calls["attention"].assert_not_called()
+        calls["warmup_prefill_cp_metadata_jit"].assert_not_called()
+        calls["warmup_v41_engram_jit"].assert_not_called()
+        cache.get_layer_cache.assert_not_called()
+        self.assertEqual(calls["_sync_cuda"].call_count, 2)
+
+    def test_decode_local_failure_does_not_report_completion(self):
+        model, calls = self.decode_fixture()
+        calls["hc"].side_effect = RuntimeError("HC compile failed")
+        with self.assertRaisesRegex(RuntimeError, "HC compile failed"):
+            warmup.warmup_v41_decode_jit(model, device="cuda:0")
+        calls["query"].assert_not_called()
+        calls["_sync_cuda"].assert_not_called()
+        calls["_release_cuda_cache"].assert_not_called()
+
+    def query_fixture(self):
+        model = nn.Module()
+        model.attn = shaped_module(
+            "AttentionV41FP8",
+            q_lora_rank=128,
+            q_norm=torch.ones(128, dtype=torch.bfloat16),
+            eps=1e-6,
+            wq_a_wkv=shaped_module("V41MXFP8Linear", N=640),
+            wq_b=shaped_module("V41MXFP8Linear"),
+        )
+        model.other = copy.deepcopy(model.attn)
+        operation = mock.Mock()
+        name = "rtp_llm.models_py.modules.dsv4._v41_query_quant"
+        self.stack.enter_context(
+            mock.patch.dict(
+                sys.modules, {name: fake_module(name, query_norm_quant=operation)}
+            )
+        )
+        for name, replacement in {
+            "_is_cuda_device": lambda device: True,
+            "_assert_not_capturing": lambda: None,
+            "_sync_cuda": lambda device: None,
+            "_run_triton_warmup_launch_with_retry": lambda label, desc, launch, **kw: launch(),
+        }.items():
+            self.stack.enter_context(
+                mock.patch.object(warmup.common, name, replacement)
+            )
+        factory = torch.zeros
+        self.stack.enter_context(
+            mock.patch.object(
+                torch,
+                "zeros",
+                side_effect=lambda *args, **kw: factory(
+                    *args,
+                    **{key: value for key, value in kw.items() if key != "device"},
+                ),
+            )
+        )
+        return model, operation
+
+    def test_decode_query_warms_private_strided_inputs_and_alignment_classes(self):
+        model, operation = self.query_fixture()
+        norm_before = model.attn.q_norm.clone()
+        warmup.warmup_v41_decode_query_jit(model, max_m=768, device="cuda:0")
+        self.assertEqual(
+            [call.args[0].shape[0] for call in operation.call_args_list],
+            [1, 2, 3, 4, 16, 17],
+        )
+        for call in operation.call_args_list:
+            query, norm, eps = call.args
+            self.assertEqual(query.shape[1], 128)
+            self.assertEqual(query.stride(), (640, 1))
+            self.assertEqual(query.dtype, torch.bfloat16)
+            self.assertIs(norm, model.attn.q_norm)
+            self.assertEqual(eps, 1e-6)
+            self.assertNotEqual(query.data_ptr(), norm.data_ptr())
+        torch.testing.assert_close(model.attn.q_norm, norm_before)
+        warmup.warmup_v41_decode_query_jit(model, max_m=768, device="cuda:0")
+        self.assertEqual(operation.call_count, 6)
+
+    def test_decode_query_disable_small_bound_and_failed_compile(self):
+        model, operation = self.query_fixture()
+        for env in (
+            {"DSV41_FUSED_QUERY_QUANT": "0"},
+            {"DSV4_FP8_QUANT_KERNEL": "v2"},
+        ):
+            with mock.patch.dict(os.environ, env):
+                warmup.warmup_v41_decode_query_jit(model, max_m=3, device="cuda:0")
+        operation.assert_not_called()
+        operation.side_effect = RuntimeError("query compile failed")
+        with self.assertRaisesRegex(RuntimeError, "query compile failed"):
+            warmup.warmup_v41_decode_query_jit(model, max_m=3, device="cuda:0")
+        self.assertFalse(warmup._DECODE_QUERY_WARMED)
+        operation.reset_mock(side_effect=True)
+        warmup.warmup_v41_decode_query_jit(model, max_m=3, device="cuda:0")
+        self.assertEqual(
+            [call.args[0].shape[0] for call in operation.call_args_list], [1, 2, 3]
+        )
+
     def test_shared_private_shapes_dtype_stride_and_success_memo(self):
         model, silu, combine = self.shared_fixture()
         # Another layer with the same kernel contract must not duplicate JIT.
@@ -686,6 +834,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         exec(compile(module, str(source), "exec"), namespace)
         instance = namespace["Extracted"]()
         instance._materialized = True
+        instance._is_decode_role = False
         for commit_only in (False, True):
             with self.subTest(commit_only=commit_only):
                 instance._v4_args = types.SimpleNamespace(
@@ -716,6 +865,70 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                         instance._initialize_impl(types.SimpleNamespace(kv_cache=cache))
                     )
                 self.assertEqual(seen, [(cache, "cuda:3" if commit_only else "cuda:0")])
+
+        instance._is_decode_role = True
+        instance._v4_args.commit_only = False
+        instance.v4.embed = types.SimpleNamespace(
+            weight=types.SimpleNamespace(device="cuda:1")
+        )
+        with mock.patch.object(
+            warmup, "warmup_v41_decode_jit"
+        ) as decode, mock.patch.object(warmup, "warmup_v41_prefill_jit") as prefill:
+            cache = object()
+            self.assertTrue(
+                instance._initialize_impl(types.SimpleNamespace(kv_cache=cache))
+            )
+        self.assertIs(instance.kv_cache, cache)
+        decode.assert_called_once_with(instance, device="cuda:1")
+        prefill.assert_not_called()
+
+    def test_initial_model_warmup_dispatches_by_role(self):
+        source = _REPO / "rtp_llm/models_py/model_desc/deepseek_v4_model.py"
+        tree = ast.parse(source.read_text())
+        branch = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.BoolOp)
+            and "device_str.startswith" in ast.unparse(node.test)
+            and "v41_config" in ast.unparse(node.test)
+            and any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "warmup_v41_decode_jit"
+                for child in ast.walk(node)
+            )
+        )
+        module = ast.fix_missing_locations(
+            ast.Module(body=[copy.deepcopy(branch)], type_ignores=[])
+        )
+        for decode_role in (False, True):
+            with self.subTest(decode_role=decode_role):
+                instance = types.SimpleNamespace(
+                    _is_decode_role=decode_role,
+                    _v4_args=types.SimpleNamespace(v41_config=object()),
+                )
+                with mock.patch.object(
+                    warmup, "warmup_v41_decode_jit"
+                ) as decode, mock.patch.object(
+                    warmup, "warmup_v41_prefill_jit"
+                ) as prefill:
+                    exec(
+                        compile(module, str(source), "exec"),
+                        {
+                            "self": instance,
+                            "torch": torch,
+                            "device_str": "cuda:2",
+                            "model_warm_up": True,
+                        },
+                    )
+                selected, skipped = (
+                    (decode, prefill) if decode_role else (prefill, decode)
+                )
+                selected.assert_called_once_with(
+                    instance, device=torch.device("cuda:2")
+                )
+                skipped.assert_not_called()
 
     def test_commit_initial_warmup_occurs_after_fc_load_and_buffer_bind(self):
         source = _REPO / "rtp_llm/models_py/model_desc/deepseek_v4_model.py"

@@ -713,6 +713,7 @@ class DeepSeekV4Model(GptModelBase):
             # here, before the startup health gate, rather than in forward.
             if self._v4_args.v41_config is not None:
                 from rtp_llm.models_py.modules.dsv4.dsv41_kernel_jit_warmup import (
+                    warmup_v41_decode_jit,
                     warmup_v41_prefill_jit,
                 )
 
@@ -721,7 +722,10 @@ class DeepSeekV4Model(GptModelBase):
                     if getattr(self._v4_args, "commit_only", False)
                     else self.v4.embed.weight.device
                 )
-                warmup_v41_prefill_jit(self, device=warmup_device)
+                if self._is_decode_role:
+                    warmup_v41_decode_jit(self, device=warmup_device)
+                else:
+                    warmup_v41_prefill_jit(self, device=warmup_device)
             return True
 
         device = (
@@ -1179,10 +1183,14 @@ class DeepSeekV4Model(GptModelBase):
             and self._v4_args.v41_config is not None
         ):
             from rtp_llm.models_py.modules.dsv4.dsv41_kernel_jit_warmup import (
+                warmup_v41_decode_jit,
                 warmup_v41_prefill_jit,
             )
 
-            warmup_v41_prefill_jit(self, device=torch.device(device_str))
+            if self._is_decode_role:
+                warmup_v41_decode_jit(self, device=torch.device(device_str))
+            else:
+                warmup_v41_prefill_jit(self, device=torch.device(device_str))
 
         self._bind_runtime_buffers(torch.device(device_str))
         logging.info(

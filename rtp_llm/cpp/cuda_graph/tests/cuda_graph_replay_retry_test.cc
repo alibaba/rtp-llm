@@ -1,7 +1,10 @@
+#include "rtp_llm/cpp/cuda_graph/ScopedPythonEnv.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include <c10/util/Exception.h>
@@ -14,6 +17,123 @@ namespace rtp_llm {
 namespace {
 
 static_assert(noexcept(dumpTorchCudaOomDiagnostics(0)), "OOM diagnostics must never replace the original exception");
+static_assert(std::is_nothrow_destructible<ScopedPythonEnvFlag>::value,
+              "Environment restoration must never replace the original exception");
+
+TEST(CudaGraphReplayRetryTest, ScopedPythonEnvFlagIsVisibleAndRestoresUnsetVariable) {
+    if (!Py_IsInitialized()) {
+        py::initialize_interpreter();
+    }
+    py::gil_scoped_acquire gil;
+    auto                   environ = py::module_::import("os").attr("environ");
+    constexpr auto         name    = "RTP_LLM_TEST_SCOPED_PYTHON_ENV_UNSET";
+    environ.attr("pop")(name, py::none());
+    {
+        ScopedPythonEnvFlag flag(name, "1");
+        EXPECT_EQ(environ.attr("get")(name, "0").cast<std::string>(), "1");
+        ASSERT_NE(std::getenv(name), nullptr);
+        EXPECT_STREQ(std::getenv(name), "1");
+    }
+    EXPECT_TRUE(environ.attr("get")(name).is_none());
+    EXPECT_EQ(std::getenv(name), nullptr);
+}
+
+TEST(CudaGraphReplayRetryTest, ScopedPythonEnvFlagRestoresExistingValueAndNestedScope) {
+    if (!Py_IsInitialized()) {
+        py::initialize_interpreter();
+    }
+    py::gil_scoped_acquire gil;
+    auto                   environ = py::module_::import("os").attr("environ");
+    constexpr auto         name    = "RTP_LLM_TEST_SCOPED_PYTHON_ENV_EXISTING";
+    ScopedPythonEnvFlag    original(name, "original");
+    {
+        ScopedPythonEnvFlag flag(name, "1");
+        {
+            ScopedPythonEnvFlag nested(name, "nested");
+            EXPECT_EQ(environ.attr("get")(name).cast<std::string>(), "nested");
+        }
+        EXPECT_EQ(environ.attr("get")(name).cast<std::string>(), "1");
+    }
+    EXPECT_EQ(environ.attr("get")(name).cast<std::string>(), "original");
+    EXPECT_STREQ(std::getenv(name), "original");
+}
+
+TEST(CudaGraphReplayRetryTest, ScopedPythonEnvFlagRestoresDuringExceptionUnwind) {
+    if (!Py_IsInitialized()) {
+        py::initialize_interpreter();
+    }
+    py::gil_scoped_acquire gil;
+    auto                   environ = py::module_::import("os").attr("environ");
+    constexpr auto         name    = "RTP_LLM_TEST_SCOPED_PYTHON_ENV_EXCEPTION";
+    environ.attr("pop")(name, py::none());
+    for (bool originally_set : {false, true}) {
+        if (originally_set) {
+            environ[py::str(name)] = "original";
+        }
+        try {
+            ScopedPythonEnvFlag flag(name, "1");
+            EXPECT_EQ(environ.attr("get")(name).cast<std::string>(), "1");
+            throw std::runtime_error("warmup failed");
+        } catch (const std::runtime_error& error) {
+            EXPECT_STREQ(error.what(), "warmup failed");
+        }
+        if (originally_set) {
+            EXPECT_EQ(environ.attr("get")(name).cast<std::string>(), "original");
+            EXPECT_STREQ(std::getenv(name), "original");
+        } else {
+            EXPECT_TRUE(environ.attr("get")(name).is_none());
+            EXPECT_EQ(std::getenv(name), nullptr);
+        }
+    }
+    environ.attr("pop")(name, py::none());
+}
+
+TEST(CudaGraphReplayRetryTest, ScopedPythonEnvFlagPreservesExistingLibcOnlyValue) {
+    if (!Py_IsInitialized()) {
+        py::initialize_interpreter();
+    }
+    py::gil_scoped_acquire gil;
+    auto                   environ = py::module_::import("os").attr("environ");
+    constexpr auto         name    = "RTP_LLM_TEST_SCOPED_PYTHON_ENV_LIBC";
+    environ.attr("pop")(name, py::none());
+    ASSERT_EQ(setenv(name, "libc-only", 1), 0);
+    EXPECT_TRUE(environ.attr("get")(name).is_none());
+    {
+        ScopedPythonEnvFlag flag(name, "1");
+        EXPECT_EQ(environ.attr("get")(name).cast<std::string>(), "1");
+        EXPECT_STREQ(std::getenv(name), "1");
+    }
+    EXPECT_TRUE(environ.attr("get")(name).is_none());
+    EXPECT_STREQ(std::getenv(name), "libc-only");
+    EXPECT_EQ(unsetenv(name), 0);
+}
+
+TEST(CudaGraphReplayRetryTest, ScopedPythonEnvFlagRestoreFailurePreservesOriginalException) {
+    if (!Py_IsInitialized()) {
+        py::initialize_interpreter();
+    }
+    py::gil_scoped_acquire gil;
+    auto                   os      = py::module_::import("os");
+    auto                   environ = os.attr("environ");
+    constexpr auto         name    = "RTP_LLM_TEST_SCOPED_PYTHON_ENV_RESTORE_ERROR";
+    environ.attr("pop")(name, py::none());
+    py::dict globals;
+    py::exec("class BrokenEnvironment(dict):\n"
+             "    def pop(self, *args):\n"
+             "        raise RuntimeError('injected environment restoration failure')\n",
+             globals);
+    try {
+        ScopedPythonEnvFlag flag(name, "1");
+        os.attr("environ") = globals["BrokenEnvironment"]();
+        throw std::runtime_error("original warmup failure");
+    } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), "original warmup failure");
+    }
+    os.attr("environ") = environ;
+    environ.attr("pop")(name, py::none());
+    EXPECT_FALSE(PyErr_Occurred());
+    EXPECT_EQ(std::getenv(name), nullptr);
+}
 
 TEST(CudaGraphReplayRetryTest, DetectsTorchAndDriverOomErrors) {
     try {

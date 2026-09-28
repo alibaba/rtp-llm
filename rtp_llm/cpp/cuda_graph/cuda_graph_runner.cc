@@ -1,10 +1,10 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cuda_graph/ScopedPythonEnv.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -18,31 +18,6 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 namespace {
-
-class ScopedEnvFlag {
-public:
-    ScopedEnvFlag(const char* name, const char* value): name_(name) {
-        const char* old_value = std::getenv(name_);
-        if (old_value != nullptr) {
-            had_old_value_ = true;
-            old_value_     = old_value;
-        }
-        setenv(name_, value, 1);
-    }
-
-    ~ScopedEnvFlag() {
-        if (had_old_value_) {
-            setenv(name_, old_value_.c_str(), 1);
-        } else {
-            unsetenv(name_);
-        }
-    }
-
-private:
-    const char* name_;
-    bool        had_old_value_ = false;
-    std::string old_value_;
-};
 
 constexpr const char* kCudaGraphVmmTag = "cuda_graph";
 
@@ -979,7 +954,7 @@ void CudaGraphRunner::initCapture() {
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
         {
-            ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            ScopedPythonEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
             py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
         }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
@@ -1016,7 +991,7 @@ void CudaGraphRunner::initCapture() {
             inputs.attention_inputs.kv_cache_kernel_block_id_host =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host.slice(0, 0, 1);
             try {
-                ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+                ScopedPythonEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
                 py_forward_method_(inputs);
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("initCapture prefill post-check forward failed: %s", e.what());
@@ -1070,6 +1045,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     warmup_inputs_ready.record(cuda_graph::graphGetCurrentStream());
     warmup_inputs_ready.block(capture_stream_);
     try {
+        // A new bucket can still compile local kernels. Rendezvous before
+        // MegaMoE while warming, then restore the flag before graph capture.
+        ScopedPythonEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
         CudaGraphStreamLife stream_life(capture_stream_);
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);

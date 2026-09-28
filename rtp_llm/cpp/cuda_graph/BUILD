@@ -1,6 +1,13 @@
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "scoped_python_env",
+    hdrs = ["ScopedPythonEnv.h"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_graph_base",
     hdrs = [
         "cuda_graph_base.h",
@@ -26,6 +33,7 @@ filegroup(
 filegroup(
     name = "cuda_graph_hdrs",
     srcs = [
+        "ScopedPythonEnv.h",
         "cuda_graph_base.h",
         "cuda_graph_device_shims.h",
         "cuda_graph_utils.h",
@@ -66,6 +74,7 @@ cc_library(
     deps = torch_deps() + [
         ":cuda_graph_base",
         ":cuda_graph_hdrs_lib",
+        ":scoped_python_env",
         "//rtp_llm/cpp/cache:kv_cache_physical_memory_controller",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",

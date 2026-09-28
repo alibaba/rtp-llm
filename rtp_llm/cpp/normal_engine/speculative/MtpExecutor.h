@@ -88,6 +88,10 @@ public:
 
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
+    static bool shouldWarmupDSparkSampler(const RuntimeConfig& runtime_config,
+                                          bool                 warm_up,
+                                          SpeculativeType      sp_type,
+                                          RoleType             role_type);
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;

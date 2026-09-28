@@ -1,4 +1,4 @@
-"""Startup warmup for the V4.1 prefill ABI (MXFP8 group32 and FP4 KV).
+"""Startup warmup for V4.1 local kernels (MXFP8 group32 and FP4 KV).
 
 Run from model initialization, including the second initialization that binds
 the real cache. Dummy launches use private outputs; model weights and KV data
@@ -21,6 +21,7 @@ from rtp_llm.utils.warmup import model_warm_up_enabled
 _DENSE_WARMED: set[tuple] = set()
 _SHARED_WARMED: set[tuple] = set()
 _ENGRAM_WARMED: set[tuple] = set()
+_DECODE_QUERY_WARMED: set[tuple] = set()
 
 
 def collect_v41_dense_shapes(model):
@@ -326,6 +327,120 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     _ENGRAM_WARMED.add(key)
     logging.info(
         "[DSV41 Engram] JIT warmup done; lookup grid covered through %d tokens", limit
+    )
+
+
+def _decode_query_quant_ms(max_m):
+    # SF stride is ceil(M / 4) * 4. Cover its scalar alignment classes without
+    # allocating the scheduler's maximum batch; M itself is only the grid size.
+    return tuple(m for m in (1, 2, 3, 4, 16, 17) if m <= int(max_m))
+
+
+@torch.inference_mode()
+def warmup_v41_decode_query_jit(model, *, max_m, device):
+    if (
+        not model_warm_up_enabled()
+        or not common._is_cuda_device(device)
+        or max_m <= 0
+        or os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1"
+        or os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        not in ("auto", "legacy")
+    ):
+        return
+    common._assert_not_capturing()
+    signatures = {}
+    for name, attn in model.named_modules():
+        if type(attn).__name__ != "AttentionV41FP8":
+            continue
+        linear = getattr(attn, "wq_a_wkv", None)
+        norm = getattr(attn, "q_norm", None)
+        rank = int(attn.q_lora_rank)
+        if (
+            type(linear).__name__ != "V41MXFP8Linear"
+            or type(attn.wq_b).__name__ != "V41MXFP8Linear"
+            or not isinstance(norm, torch.Tensor)
+            or norm.dtype != torch.bfloat16
+            or norm.shape != (rank,)
+            or not norm.is_contiguous()
+            or not 128 <= rank <= 8192
+            or rank % 32
+            or rank >= int(linear.N)
+        ):
+            continue
+        signatures.setdefault((rank, int(linear.N), float(attn.eps)), (name, norm))
+    if not signatures:
+        return
+    rows_grid = _decode_query_quant_ms(max_m)
+    key = (str(device), frozenset(signatures), rows_grid)
+    if key in _DECODE_QUERY_WARMED:
+        return
+    from rtp_llm.models_py.modules.dsv4._v41_query_quant import query_norm_quant
+
+    for (rank, width, eps), (name, norm) in signatures.items():
+        for rows in rows_grid:
+            projected = torch.zeros((rows, width), dtype=torch.bfloat16, device=device)
+            common._run_triton_warmup_launch_with_retry(
+                "DSV41 DecodeQuery",
+                f"{name} M={rows} rank={rank} stride={width}",
+                partial(query_norm_quant, projected[:, :rank], norm, eps),
+                device=device,
+            )
+    common._sync_cuda(device)
+    _DECODE_QUERY_WARMED.add(key)
+    logging.info(
+        "[DSV41 DecodeQuery] JIT warmup done; contracts=%d M=%s",
+        len(signatures),
+        rows_grid,
+    )
+
+
+def resolve_v41_decode_warmup_max_m(model):
+    gamma = max(int(model._gen_num_per_cycle), 0)
+    # Target verification also has gamma+1 rows even when this model is not
+    # marked as the speculative/draft model in its initialization resources.
+    return common.resolve_dense_gemm_warmup_max_m(
+        max_seq_len=int(model._v4_args.max_seq_len),
+        max_batch_size=int(model._max_generate_batch_size),
+        role_type_name="DECODE",
+        is_speculative=gamma > 0,
+        gen_num_per_cycle=gamma,
+    )
+
+
+@torch.inference_mode()
+def warmup_v41_decode_jit(model, *, device):
+    """Warm local decode kernels without executing MoE or touching live KV.
+
+    Cache-layout attention and stream-local overlap setup remain covered by
+    each CUDA graph bucket's eager forwards on the actual capture stream.
+    """
+    device = torch.device(device)
+    if (
+        not model_warm_up_enabled()
+        or not model._is_decode_role
+        or not common._is_cuda_device(device)
+    ):
+        return
+    common._assert_not_capturing()
+    from rtp_llm.models_py.modules.dsv4.hc.v41_jit_warmup import warmup_v41_hc_jit
+
+    max_m = resolve_v41_decode_warmup_max_m(model)
+    start = time.monotonic()
+    logging.info(
+        "[DSV41 Decode] local JIT warmup start max_m=%d cache_bound=%s",
+        max_m,
+        model.kv_cache is not None,
+    )
+    warmup_v41_dense_jit(model, max_m=max_m, device=device)
+    warmup_v41_shared_expert_jit(model, max_m=max_m, device=device)
+    warmup_v41_hc_jit(model.v4, max_m=max_m, device=device)
+    warmup_v41_decode_query_jit(model, max_m=max_m, device=device)
+    common._sync_cuda(device)
+    common._release_cuda_cache(device)
+    logging.info(
+        "[DSV41 Decode] local JIT warmup done in %.2fs cache_bound=%s",
+        time.monotonic() - start,
+        model.kv_cache is not None,
     )
 
 

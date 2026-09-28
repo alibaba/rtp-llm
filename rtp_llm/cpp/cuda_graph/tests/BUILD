@@ -48,6 +48,7 @@ cc_test(
     name = "cuda_graph_replay_retry_test",
     srcs = ["cuda_graph_replay_retry_test.cc"],
     deps = [
+        "//rtp_llm/cpp/cuda_graph:scoped_python_env",
         "//rtp_llm/cpp/utils:torch_cuda_oom",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

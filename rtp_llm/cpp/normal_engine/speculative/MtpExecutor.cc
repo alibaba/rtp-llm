@@ -39,6 +39,14 @@
 
 namespace rtp_llm {
 
+bool MtpExecutor::shouldWarmupDSparkSampler(const RuntimeConfig& runtime_config,
+                                            bool                 warm_up,
+                                            SpeculativeType      sp_type,
+                                            RoleType             role_type) {
+    return sp_type == SP_TYPE_DSPARK && role_type != RoleType::PREFILL && !warm_up && runtime_config.warm_up
+           && runtime_config.model_warm_up;
+}
+
 bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
     return !prefill_cp_config.is_enabled() || role_type == RoleType::PREFILL;
 }
@@ -772,6 +780,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     if (!is_dspark_) {
         fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+    }
+
+    if (shouldWarmupDSparkSampler(params.runtime_config, warm_up_, propose_params->sp_type, role_type_)) {
+        if (isTpRank0()) {
+            speculative_sampler_->warmupDSparkDraft(
+                params.runtime_config.max_generate_batch_size, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_);
+        }
+        // Model graph capture does not execute the C++ sampler. Keep every
+        // rank out of serving until each sampling rank has loaded its JIT module.
+        syncCudaGraphCaptureRanks(parallelism_config_, "DSpARK sampler warmup");
+        RTP_LLM_LOG_INFO("[speculative decoding] DSpARK sampler warmup complete");
     }
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);

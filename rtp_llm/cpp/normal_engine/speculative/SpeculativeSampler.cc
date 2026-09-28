@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
 #include <vector>
+#include <ATen/Context.h>
+#include <c10/util/ScopeExit.h>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -34,6 +36,41 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
 
     return output;
+}
+
+std::vector<int64_t> SpeculativeSampler::dsparkWarmupBatchSizes(int64_t max_batch_size) {
+    RTP_LLM_CHECK_WITH_INFO(max_batch_size > 0, "DSpARK sampler warmup requires a positive maximum batch size");
+    // FlashInfer's sampling module is shared across batch sizes. B=1 exercises
+    // torch softmax, B=2 reaches the fused path when the vocabulary supports it.
+    std::vector<int64_t> batch_sizes{1, std::min<int64_t>(2, max_batch_size), max_batch_size};
+    batch_sizes.erase(std::unique(batch_sizes.begin(), batch_sizes.end()), batch_sizes.end());
+    return batch_sizes;
+}
+
+void SpeculativeSampler::warmupDSparkDraft(int64_t              max_batch_size,
+                                           const torch::Tensor& markov_w1,
+                                           const torch::Tensor& markov_w2,
+                                           size_t               draft_vocab_size) const {
+    const auto batch_sizes = dsparkWarmupBatchSizes(max_batch_size);
+    auto       generator   = at::globalContext().defaultGenerator(markov_w1.device());
+    auto       rng_state   = generator.get_state();
+    auto       restore_rng = c10::make_scope_exit([&]() { generator.set_state(rng_state); });
+    const auto options     = torch::TensorOptions().dtype(torch::kFloat32).device(markov_w1.device());
+    for (const auto batch_size : batch_sizes) {
+        RTP_LLM_LOG_INFO("[speculative decoding] DSpARK sampler warmup batch=%ld gamma=%zu vocab=%zu",
+                         batch_size,
+                         propose_step_,
+                         draft_vocab_size);
+        auto logits = torch::zeros(
+            {batch_size * static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)}, options);
+        auto anchors     = torch::zeros({batch_size}, options.dtype(torch::kInt32));
+        auto temperature = torch::ones({batch_size}, options);
+        auto output      = sampleDSparkDraft(logits, anchors, temperature, markov_w1, markov_w2, draft_vocab_size);
+        (void)output;
+        // Complete local work before releasing its buffers or entering the
+        // startup rank rendezvous. There is no added synchronization at runtime.
+        cuda_graph::graphGetCurrentStream().synchronize();
+    }
 }
 
 SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_logits,

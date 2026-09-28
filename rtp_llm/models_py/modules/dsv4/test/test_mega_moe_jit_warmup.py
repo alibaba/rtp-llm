@@ -61,6 +61,7 @@ from rtp_llm.models_py.modules.dsv4.moe.strategies.mega import (
     _mega_moe_rank_nvcc_tmpdir,
     _restore_tmpdir,
 )
+from rtp_llm.models_py.modules.dsv4.moe.strategies.mega_se import MegaMoEStrategySE
 
 
 class MegaMoEJitWarmupTest(unittest.TestCase):
@@ -342,6 +343,61 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
         self.assertEqual(counts, [1, 5])
         for call in resolver.call_args_list:
             self.assertEqual(call.args[:3], (4, 384, 12))
+            self.assertEqual(call.args[4:], (6, "fp8xfp4"))
+
+    def test_se_warmup_covers_installed_dispatch_for_all_local_token_counts(self):
+        strategy = object.__new__(MegaMoEStrategySE)
+        strategy.cfg = types.SimpleNamespace(
+            layer_id=0,
+            ep_size=4,
+            n_routed_experts=384,
+            n_local_experts=96,
+            n_activated_experts=6,
+            dim=5120,
+            moe_inter_dim=2304,
+            max_tokens_per_rank=512,
+            swiglu_limit=7.0,
+            shared_fp8_block_size=32,
+        )
+
+        # The old heuristic's cap replacement loses the current runtime's
+        # BLOCK_M=32 bucket for this geometry and token cap.
+        def dispatch(tokens):
+            return 16 if tokens <= 160 else (32 if tokens <= 384 else 64)
+
+        resolver = mock.Mock(side_effect=lambda *args: dispatch(args[3]))
+        installed = types.SimpleNamespace(
+            get_num_sms=lambda: 148,
+            get_block_m_for_mega_moe=resolver,
+        )
+        strategy.warmup_jit = mock.Mock()
+        module = sys.modules["rtp_llm.models_py.modules.dsv4.moe.strategies.mega_se"]
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.dict(
+            sys.modules, {"deep_gemm": installed}
+        ), mock.patch.object(
+            module, "_MEGA_MOE_SE_JIT_WARMED_KEYS", set()
+        ), mock.patch.object(
+            module, "_activate_mega_moe_rank_nvcc_tmpdir", return_value=("/tmp", None)
+        ), mock.patch.object(module, "_restore_tmpdir"), mock.patch(
+            "torch.cuda.is_current_stream_capturing", return_value=False
+        ), mock.patch(
+            "torch.distributed.is_initialized", return_value=True
+        ), mock.patch(
+            "torch.distributed.get_rank", return_value=0
+        ):
+            legacy_counts = strategy._resolve_jit_warmup_token_counts(148)
+            self.assertNotIn(32, {dispatch(t) for t in legacy_counts})
+            strategy._maybe_warmup_jit_once()
+
+        strategy.warmup_jit.assert_called_once()
+        counts = strategy.warmup_jit.call_args.args[0]
+        self.assertEqual(counts, [1, 161, 512])
+        self.assertEqual(
+            {dispatch(t) for t in counts},
+            {dispatch(t) for t in range(1, 513)},
+        )
+        for call in resolver.call_args_list:
+            self.assertEqual(call.args[:3], (4, 384, 512))
             self.assertEqual(call.args[4:], (6, "fp8xfp4"))
 
 

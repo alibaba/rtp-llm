@@ -6,6 +6,7 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+#include <ATen/Context.h>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -51,6 +52,33 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillCPRequiresPrefillRole) {
     decode_cp_config.method = CPRotateMethod::ALL_GATHER;
     EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
     EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::PDFUSION));
+}
+
+TEST(MtpExecutorPolicyTest, DSparkSamplerWarmupHonorsRuntimeFlagsAndRole) {
+    RuntimeConfig runtime_config;
+    runtime_config.warm_up       = true;
+    runtime_config.model_warm_up = true;
+    for (const auto role : {RoleType::DECODE, RoleType::PDFUSION}) {
+        EXPECT_TRUE(MtpExecutor::shouldWarmupDSparkSampler(runtime_config, false, SP_TYPE_DSPARK, role));
+        EXPECT_FALSE(MtpExecutor::shouldWarmupDSparkSampler(runtime_config, true, SP_TYPE_DSPARK, role));
+        EXPECT_FALSE(MtpExecutor::shouldWarmupDSparkSampler(runtime_config, false, SP_TYPE_MTP, role));
+    }
+    EXPECT_FALSE(MtpExecutor::shouldWarmupDSparkSampler(runtime_config, false, SP_TYPE_DSPARK, RoleType::PREFILL));
+
+    runtime_config.warm_up = false;
+    EXPECT_FALSE(MtpExecutor::shouldWarmupDSparkSampler(runtime_config, false, SP_TYPE_DSPARK, RoleType::DECODE));
+    runtime_config.warm_up       = true;
+    runtime_config.model_warm_up = false;
+    EXPECT_FALSE(MtpExecutor::shouldWarmupDSparkSampler(runtime_config, false, SP_TYPE_DSPARK, RoleType::DECODE));
+}
+
+TEST(MtpExecutorPolicyTest, DSparkSamplerWarmupCoversBranchesWithinBatchLimit) {
+    EXPECT_EQ((std::vector<int64_t>{1}), spec::SpeculativeSampler::dsparkWarmupBatchSizes(1));
+    EXPECT_EQ((std::vector<int64_t>{1, 2}), spec::SpeculativeSampler::dsparkWarmupBatchSizes(2));
+    for (const int64_t max_batch_size : {3, 8, 11, 16, 32, 33, 64}) {
+        EXPECT_EQ((std::vector<int64_t>{1, 2, max_batch_size}),
+                  spec::SpeculativeSampler::dsparkWarmupBatchSizes(max_batch_size));
+    }
 }
 
 struct MtpExecutorTestConfig {
@@ -1255,6 +1283,33 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     EXPECT_TRUE(torch::allclose(output.all_probs, torch::softmax(base_logits / 0.5f, -1), 1e-5, 1e-6));
     auto sampled_q = output.all_probs.gather(2, output.token_ids.to(torch::kLong).unsqueeze(-1));
     EXPECT_TRUE(sampled_q.gt(0).all().item<bool>());
+}
+
+TEST_F(MtpExecutorTest, testDSparkSamplerWarmupPreservesSamplingAndRngState) {
+    // This native fixture has no Python interpreter. Exercise the C++ path;
+    // the fused Python softmax startup path is covered by service validation.
+    autil::EnvGuard          fused_softmax("DSV41_FUSED_DSPARK_SOFTMAX", "0");
+    constexpr int64_t        gamma = 2, vocab = 32768;
+    spec::SpeculativeSampler sampler(torch::Tensor(), gamma);
+    const auto               options     = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                     markov_w1   = torch::zeros({vocab, 1}, options.dtype(torch::kBFloat16));
+    auto                     markov_w2   = torch::zeros({vocab, 1}, options.dtype(torch::kBFloat16));
+    auto                     logits      = torch::zeros({gamma, vocab}, options);
+    auto                     anchors     = torch::zeros({1}, options.dtype(torch::kInt32));
+    auto                     temperature = torch::ones({1}, options);
+    auto                     generator   = at::globalContext().defaultGenerator(logits.device());
+    auto                     rng_state   = generator.get_state();
+    auto expected     = sampler.sampleDSparkDraft(logits, anchors, temperature, markov_w1, markov_w2, vocab);
+    auto expected_rng = generator.get_state();
+    generator.set_state(rng_state);
+
+    // Use the same representative batches as startup with a supported vocabulary.
+    sampler.warmupDSparkDraft(33, markov_w1, markov_w2, vocab);
+    EXPECT_TRUE(torch::equal(generator.get_state(), rng_state));
+    auto actual = sampler.sampleDSparkDraft(logits, anchors, temperature, markov_w1, markov_w2, vocab);
+    EXPECT_TRUE(torch::equal(actual.token_ids, expected.token_ids));
+    EXPECT_TRUE(torch::equal(actual.all_probs, expected.all_probs));
+    EXPECT_TRUE(torch::equal(generator.get_state(), expected_rng));
 }
 
 TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
