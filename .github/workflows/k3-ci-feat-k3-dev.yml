@@ -1,0 +1,80 @@
+name: K3 CI feat/k3_dev
+
+on:
+  push:
+    branches:
+      - feat/k3_dev
+
+permissions:
+  contents: read
+
+jobs:
+  enqueue:
+    name: K3 CI / enqueue
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .github/scripts
+    steps:
+      - name: Checkout exact pushed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Validate K3 CI configuration
+        env:
+          K3_AONE_PIPELINE_ID: ${{ vars.K3_AONE_PIPELINE_ID }}
+          K3_CI_SECRET: ${{ secrets.K3_CI_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "${K3_AONE_PIPELINE_ID}" || {
+            echo "K3_AONE_PIPELINE_ID repository variable is not configured" >&2
+            exit 2
+          }
+          test -n "${K3_CI_SECRET}" || {
+            echo "K3_CI_SECRET repository secret is not configured" >&2
+            exit 2
+          }
+          test "${GITHUB_REF_NAME}" = "feat/k3_dev"
+
+      - name: Enqueue two-host K3 smoke
+        id: enqueue
+        env:
+          K3_AONE_PIPELINE_ID: ${{ vars.K3_AONE_PIPELINE_ID }}
+          K3_CI_SECRET: ${{ secrets.K3_CI_SECRET }}
+        run: |
+          set -euo pipefail
+          chmod +x trigger-k3-ci.sh get-k3-ci-result.sh
+          ./trigger-k3-ci.sh \
+            "${GITHUB_SHA}" \
+            "${K3_CI_SECRET}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_REF_NAME}" \
+            "${GITHUB_RUN_ID}" \
+            "${GITHUB_RUN_ATTEMPT}"
+
+      - name: Record accepted task
+        env:
+          K3_AONE_PIPELINE_ID: ${{ vars.K3_AONE_PIPELINE_ID }}
+          K3_CI_SECRET: ${{ secrets.K3_CI_SECRET }}
+        run: |
+          set -euo pipefail
+          K3_STATUS_ONCE=1 ./get-k3-ci-result.sh \
+            "${GITHUB_SHA}" \
+            "${K3_CI_SECRET}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_REF_NAME}"
+
+      - name: Explain asynchronous result
+        run: |
+          {
+            echo "### K3 two-host smoke queued"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo "- Final status context: \`K3 CI / two-host smoke\`"
+            echo
+            echo "The Aone controller reports the final result asynchronously; this enqueue job does not hold a runner while 106/142 are busy."
+          } >> "${GITHUB_STEP_SUMMARY}"
