@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
@@ -7,7 +8,11 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_reduce,
+    all_reduce_async,
+)
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     get_layer_caches_for_groups,
@@ -32,6 +37,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config import TpMoeChunkConfig
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -57,6 +63,7 @@ class GenericMoeLayer(nn.Module):
         self.parallelism_config = parallelism_config
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
+        self.tp_chunk_config = TpMoeChunkConfig.from_env()
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -151,9 +158,11 @@ class GenericMoeLayer(nn.Module):
         hidden_states: torch.Tensor,
         experts_output: torch.Tensor,
         shared_expert_output: torch.Tensor,
+        gate_output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.shared_expert_gate is not None:
-            gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+            if gate_output is None:
+                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
             self.sigmoid_gate_scale_add(
                 gate_output, shared_expert_output, experts_output
             )
@@ -170,7 +179,89 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _can_chunk_tp_prefill(
+        self, hidden_states: torch.Tensor, allow_tp_chunking: bool
+    ) -> bool:
+        config = self.tp_chunk_config
+        return (
+            config.chunks > 0
+            and allow_tp_chunking
+            and self.use_unified_tp_allreduce
+            and self.ffn_tp_size == 2
+            and self.parallelism_config.dp_size == 1
+            and not self.parallelism_config.prefill_cp_config.is_enabled()
+            and hidden_states.shape[0] >= max(config.min_tokens, config.chunks)
+            and hidden_states.is_cuda
+            and torch.version.hip is None
+            and os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") != "1"
+            and not torch.cuda.is_current_stream_capturing()
+        )
+
+    def forward(
+        self, hidden_states: torch.Tensor, *, allow_tp_chunking: bool = False
+    ) -> torch.Tensor:
+        if self._can_chunk_tp_prefill(hidden_states, allow_tp_chunking):
+            return self._forward_tp_chunks(hidden_states)
+        return self._forward_impl(hidden_states)
+
+    def _forward_tp_chunks(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logger.debug(
+            "GenericMoE chunk prefill (tokens=%d, chunks=%d, mode=%s)",
+            hidden_states.shape[0],
+            self.tp_chunk_config.chunks,
+            self.tp_chunk_config.mode,
+        )
+        # A chunk's routed and gated shared outputs must both be complete
+        # locally before reduction. Keep every output alive until NCCL joins.
+        chunk_size = (
+            hidden_states.shape[0] + self.tp_chunk_config.chunks - 1
+        ) // self.tp_chunk_config.chunks
+        # Keep routing and scalar gate GEMM shapes identical to the full path.
+        # Recomputing top-k on smaller GEMMs can change near-tied expert choices.
+        topk_weights, topk_ids = self._route(hidden_states)
+        shared_gate = (
+            self.shared_expert_gate(hidden_states)
+            if self.shared_expert_gate is not None
+            else None
+        )
+        pending = []
+        outputs = []
+        joined = 0
+        try:
+            for start in range(0, hidden_states.shape[0], chunk_size):
+                chunk_slice = slice(start, start + chunk_size)
+                partial = self._forward_impl(
+                    hidden_states[chunk_slice],
+                    skip_final_allreduce=True,
+                    routing=(topk_weights[chunk_slice], topk_ids[chunk_slice]),
+                    shared_gate_output=(
+                        shared_gate[chunk_slice] if shared_gate is not None else None
+                    ),
+                )
+                handle = all_reduce_async(partial, Group.TP)
+                pending.append(handle)
+                if self.tp_chunk_config.mode == "serial":
+                    outputs.append(handle.wait())
+                    joined += 1
+            if self.tp_chunk_config.mode == "overlap":
+                for handle in pending:
+                    outputs.append(handle.wait())
+                    joined += 1
+            # Concatenation happens only after the consumer stream has joined
+            # every reduction; its cost is part of the end-to-end experiment.
+            return torch.cat(outputs, dim=0)
+        except BaseException:
+            # Try every outstanding handle even if one NCCL wait fails. Keep
+            # the original error instead of replacing it with a cleanup error;
+            # never fall back to a different collective sequence on one rank.
+            for handle in pending[joined:]:
+                try:
+                    handle.wait()
+                except BaseException:
+                    logger.exception("Failed to join a pending MoE TP reduction")
+            raise
+
+    def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
 
@@ -212,6 +303,20 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        return topk_weights, topk_ids
+
+    def _forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        skip_final_allreduce: bool = False,
+        routing: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        shared_gate_output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        topk_weights, topk_ids = (
+            self._route(hidden_states) if routing is None else routing
+        )
+
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
         # path separately.  This is especially important for decode, where the
@@ -237,9 +342,13 @@ class GenericMoeLayer(nn.Module):
                 # TP ranks, so it is safe to apply it before the single
                 # all-reduce.
                 experts_output = self._merge_shared_expert_output(
-                    hidden_states, experts_output, shared_expert_output
+                    hidden_states,
+                    experts_output,
+                    shared_expert_output,
+                    gate_output=shared_gate_output,
                 )
-                experts_output = all_reduce(experts_output, group=Group.TP)
+                if not skip_final_allreduce:
+                    experts_output = all_reduce(experts_output, group=Group.TP)
             elif self.use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).

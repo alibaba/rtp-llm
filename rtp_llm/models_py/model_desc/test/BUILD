@@ -62,6 +62,44 @@ py_test(
 )
 
 py_test(
+    name = "generic_moe_tp_chunking_test",
+    srcs = ["generic_moe_tp_chunking_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+)
+
+py_test(
+    name = "moe_tp_chunking_cuda_test",
+    srcs = ["moe_tp_chunking_cuda_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+)
+
+# Manual only: uses a real GenericMoeLayer with deterministic synthetic
+# Qwen-like BF16 or FP8 layer weights; this is not a serving benchmark.
+py_test(
+    name = "moe_tp_chunking_benchmark",
+    srcs = ["moe_tp_chunking_benchmark.py"],
+    main = "moe_tp_chunking_benchmark.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+)
+
+py_test(
     name = "attention_input_routing_test",
     srcs = ["attention_input_routing_test.py"],
     deps = [
