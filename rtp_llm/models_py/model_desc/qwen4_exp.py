@@ -1590,10 +1590,9 @@ class Qwen4ExpModel(Qwen35Model):
                 )
 
         if getattr(self, "_capture_mtp_target_hidden", False):
-            # Keep the exact pre-collapse tensor alive until MtpExecutor asks
-            # for it immediately after this forward.  Qwen4 currently rejects
-            # speculative CP and CUDA Graph, so a dynamic tensor is sufficient
-            # and does not advertise the fixed-buffer CP capability.
+            # The pre-collapse stream is the MTP input. Return it as a
+            # first-class output: graph replay does not rerun Python, so a
+            # mutable model attribute alone would expose the capture-time rows.
             self._mtp_target_hidden_states = hyper_states
         else:
             self._mtp_target_hidden_states = None
@@ -1605,4 +1604,6 @@ class Qwen4ExpModel(Qwen35Model):
                 float(hyper_states.float().norm()),
                 float(hidden_states.float().norm()),
             )
+        if self._mtp_target_hidden_states is not None:
+            return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
         return PyModelOutputs(hidden_states)
