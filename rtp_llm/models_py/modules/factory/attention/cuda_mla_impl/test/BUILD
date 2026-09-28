@@ -28,3 +28,13 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "mla_k_merge_non_power_two_heads_test",
+    srcs = ["mla_k_merge_non_power_two_heads_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {'gpu': 'H20'},
+)
