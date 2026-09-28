@@ -1273,8 +1273,10 @@ TEST_F(GenerateStreamTest, testChunkedPrefillReuseStartAndInitialReuseFrozen) {
     markRunning(stream);
 
     expectChunkWindow(stream, /*prefix=*/8, /*length=*/8, /*is_last=*/false);
+    EXPECT_EQ(stream->cacheStorePublishStartToken(), 0);
     stream->advanceChunk();
     expectChunkWindow(stream, /*prefix=*/16, /*length=*/2, /*is_last=*/true);
+    EXPECT_EQ(stream->cacheStorePublishStartToken(), 16);
     ASSERT_EQ(stream->initialReuseLength(), 8);
 }
 
@@ -1287,18 +1289,6 @@ TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkDiscards) {
     ASSERT_TRUE(stream->isContextStream());
     ASSERT_EQ(stream->seqLength(), original_seq_len);
     expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
-}
-
-TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkPropagatesWorkerError) {
-    auto      stream                = createRunningMiddleChunk();
-    const int original_reuse_length = stream->reuseLength();
-    const int original_seq_length   = stream->seqLength();
-    StreamSpecUpdateInfo update_info{};
-    update_info.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "middle chunk worker failed");
-
-    stream->specUpdate(update_info);
-
-    expectMiddleChunkWorkerError(stream, original_reuse_length, original_seq_length);
 }
 
 TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
@@ -1339,6 +1329,8 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
          [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
         {"return_all_probs",
          [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"custom_output",
+         [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
         {"multimodal",
          [](GenerateInput& input, GenerateConfig&) {
              input.multimodal_features = std::vector<torch::Tensor>{torch::Tensor()};

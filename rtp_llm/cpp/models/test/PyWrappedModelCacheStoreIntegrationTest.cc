@@ -292,6 +292,8 @@ GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
     inputs.lm_output_lengths   = pinnedTensor(output_lengths, {static_cast<int64_t>(batch_size)});
     inputs.lm_output_indexes   = pinnedTensor(output_indexes, {static_cast<int64_t>(batch_size)});
     inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
+    inputs.cache_store_publish_start_tokens =
+        pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
     inputs.kv_cache_block_id   = pinnedTensor(block_ids,
                                             {static_cast<int64_t>(group_tags.size()),
                                              static_cast<int64_t>(batch_size),

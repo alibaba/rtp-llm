@@ -274,6 +274,9 @@ public:
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
     bool checkChunkAlignment() const;
     void advanceChunk();  // reuse_length_ += currentChunkLen()
+    int  cacheStorePublishStartToken() const {
+        return chunk_advanced_ ? prefixLength() : 0;
+    }
     // Prompt token right after the current chunk; valid only for middle chunks.
     // Used as speculative draft prefill tail instead of a sampled token.
     int nextChunkBoundaryToken() const;
@@ -876,6 +879,7 @@ protected:
 
     int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
     bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void                     updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
@@ -928,6 +932,7 @@ protected:
     // Chunked prefill normally gates on RUNNING so admission-time calls keep whole-segment
     // semantics. Prefill warmup explicitly opts in because it bypasses the scheduler.
     int  chunk_size_          = 0;
+    bool chunk_advanced_      = false;
     bool warmup_chunk_window_ = false;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;

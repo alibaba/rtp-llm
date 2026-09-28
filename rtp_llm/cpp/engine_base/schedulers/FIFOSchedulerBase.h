@@ -59,9 +59,6 @@ protected:
     virtual bool        waitPredicate()                                                  = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
     virtual void        cancelExtraStreams() {}
-    virtual bool        hasExtraStreams() const {
-        return false;
-    }
     virtual int64_t extraOnflightStreams() const {
         return 0;
     }
@@ -94,6 +91,7 @@ protected:
     size_t                          max_generate_batch_size_ = 1;
     size_t                          max_inited_kv_cache_streams_ = 0;
     int64_t                         prefill_chunk_size_      = 0;
+    bool                            has_linear_attention_        = false;
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;

@@ -63,10 +63,6 @@ void FIFOScheduler::cancelExtraStreams() {
     cancelStreams(pending_decode_streams_);
 }
 
-bool FIFOScheduler::hasExtraStreams() const {
-    return !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty() || !pending_decode_streams_.empty();
-}
-
 int64_t FIFOScheduler::extraOnflightStreams() const {
     return groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_)
            + pending_decode_streams_.size();

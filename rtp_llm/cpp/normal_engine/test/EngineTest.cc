@@ -156,11 +156,11 @@ TEST_F(NormalEngineTest, testWarmUpInputLengthAccountsForReserve) {
 
 TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     CustomConfig config;
+    config.warm_up = true;
 
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    runtime_config.warm_up         = true;
     auto params                    = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     params.pd_sep_config.role_type = RoleType::DECODE;
 
@@ -310,11 +310,11 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
 
 TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     CustomConfig config;
+    config.warm_up = true;
 
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    runtime_config.warm_up = true;
     auto params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
 
     const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
@@ -493,7 +493,9 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
                   {4, 18, 4},
                   {7, 0, 1},
                   {7, 0, 1}}));
-    ASSERT_EQ(engine->resourceContext().cache_manager->cacheConfig().block_num, 100);
+    const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
+    ASSERT_EQ(cache_config.groups().size(), 1u);
+    ASSERT_EQ(cache_config.groups().front().block_num, 100u);
 }
 
 TEST_F(NormalEngineTest, testChunkedPrefillWarmupCapsIntMaxBudgetByContextBatchSize) {

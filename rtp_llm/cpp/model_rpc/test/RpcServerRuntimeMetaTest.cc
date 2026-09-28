@@ -44,6 +44,21 @@ public:
     }
 };
 
+std::shared_ptr<RuntimeMetaTestStream> makeInitialCacheHitTestStream(int64_t request_id) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->request_id      = request_id;
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::arange(1, 13, torch::TensorOptions().dtype(torch::kInt32));
+    return std::make_shared<RuntimeMetaTestStream>(input);
+}
+
+void advanceInitialCacheHit(const std::shared_ptr<RuntimeMetaTestStream>& stream) {
+    stream->setReuseLength(4);
+    stream->setInitialReuseLength(4);
+    stream->setChunkSize(4);
+    stream->advanceChunk();
+}
+
 }  // namespace
 
 TEST(RpcServerRuntimeMetaTest, EnqueueReadsBatchIdFromStreamInput) {
@@ -82,28 +97,22 @@ TEST(RpcServerRuntimeMetaTest, EnqueueConvertsWaitTimeFromMicrosecondsToMillisec
 
 TEST(RpcServerRuntimeMetaTest, RunningInfoRefreshesInitialCacheHitAfterEnqueue) {
     RpcServerRuntimeMeta meta;
-    auto                 input = std::make_shared<GenerateInput>();
-    input->request_id          = 104;
-    input->generate_config     = std::make_shared<GenerateConfig>();
-    input->input_ids = torch::arange(1, 13, torch::TensorOptions().dtype(torch::kInt32));
-    auto stream       = std::make_shared<RuntimeMetaTestStream>(input);
+    const int64_t        request_id = 104;
+    auto                 stream     = makeInitialCacheHitTestStream(request_id);
 
-    meta.enqueue(input->request_id, stream);
+    meta.enqueue(request_id, stream);
     auto before_cache_hit = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(before_cache_hit.running_task_info_list.size(), 1);
     EXPECT_EQ(before_cache_hit.running_task_info_list[0].prefix_length, 0);
 
-    stream->setReuseLength(4);
-    stream->setInitialReuseLength(4);
-    stream->setChunkSize(4);
-    stream->advanceChunk();
+    advanceInitialCacheHit(stream);
     ASSERT_EQ(stream->reuseLength(), 8);
 
     auto running = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(running.running_task_info_list.size(), 1);
     EXPECT_EQ(running.running_task_info_list[0].prefix_length, 4);
 
-    meta.dequeue(input->request_id, stream);
+    meta.dequeue(request_id, stream);
     auto finished = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(finished.finished_task_info_list.size(), 1);
     EXPECT_EQ(finished.finished_task_info_list[0].prefix_length, 4);
@@ -111,21 +120,15 @@ TEST(RpcServerRuntimeMetaTest, RunningInfoRefreshesInitialCacheHitAfterEnqueue) 
 
 TEST(RpcServerRuntimeMetaTest, FinishTaskRefreshesInitialCacheHitAfterEnqueue) {
     RpcServerRuntimeMeta meta;
-    auto                 input = std::make_shared<GenerateInput>();
-    input->request_id          = 105;
-    input->generate_config     = std::make_shared<GenerateConfig>();
-    input->input_ids = torch::arange(1, 13, torch::TensorOptions().dtype(torch::kInt32));
-    auto stream       = std::make_shared<RuntimeMetaTestStream>(input);
+    const int64_t        request_id = 105;
+    auto                 stream     = makeInitialCacheHitTestStream(request_id);
 
-    meta.enqueue(input->request_id, stream);
+    meta.enqueue(request_id, stream);
 
-    stream->setReuseLength(4);
-    stream->setInitialReuseLength(4);
-    stream->setChunkSize(4);
-    stream->advanceChunk();
+    advanceInitialCacheHit(stream);
     ASSERT_EQ(stream->reuseLength(), 8);
 
-    meta.finishTask(input->request_id,
+    meta.finishTask(request_id,
                     stream->inputLength(),
                     /*prefix_length=*/0,
                     /*error_code=*/14,

@@ -79,6 +79,7 @@ enum GptModelInputIndex : size_t {
     inputLengths,
     sequenceLengths,
     prefixLengths,
+    cacheStorePublishStartTokens,
     maxKernelBlocksPerBatch,
     maxBlocksPerBatch,
     cacheKeysWidth,
@@ -130,9 +131,8 @@ enum GptModelInputIndex : size_t {
 // 12288 = 3.2G elements).
 using GptModelInputShapeHints = std::array<int64_t, GptModelInputIndex::gptModelInputLength>;
 
-// Bit positions for `tensorDeviceMap`.  Keep this exhaustive with respect to
-// tpSyncModelInputs' broadcast set: a missing bit can make rank 0 and non-root
-// ranks classify one payload into different transports and deadlock TP.
+// CPU/CUDA placement bits for tensors whose device may vary during TP broadcast.
+// Missing bits can make ranks choose different transports and deadlock TP.
 enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitComboTokens         = 1u << 0,
     kDeviceBitInputLengths        = 1u << 1,
