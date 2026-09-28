@@ -15,5 +15,6 @@ void sgl_per_token_group_quant_8bit_v2(torch::Tensor                       input
                                        double                              max_8bit,
                                        bool                                scale_ue8m0,
                                        bool                                fuse_silu_and_mul,
-                                       const std::optional<torch::Tensor>& masked_m);
+                                       const std::optional<torch::Tensor>& masked_m,
+                                       bool                                fuse_silu_and_mul_up_gate);
 }

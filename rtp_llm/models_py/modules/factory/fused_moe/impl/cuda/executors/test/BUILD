@@ -262,3 +262,13 @@ dsv4_sm100_py_test(
     ],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "flashinfer_sm12x_fp8_test",
+    srcs = ["flashinfer_sm12x_fp8_test.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    env_inherit = ["HOME", "PYTHONPATH"],
+    tags = ["manual", "open_skip", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)

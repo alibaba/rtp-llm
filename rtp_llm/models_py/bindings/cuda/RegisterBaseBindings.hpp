@@ -135,7 +135,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("fp8_max"),
                   py::arg("scale_ue8m0"),
                   py::arg("fuse_silu_and_mul"),
-                  py::arg("masked_m"));
+                  py::arg("masked_m"),
+                  py::arg("fuse_silu_and_mul_up_gate") = false);
 
     rtp_ops_m.def("embedding",
                   &embedding,

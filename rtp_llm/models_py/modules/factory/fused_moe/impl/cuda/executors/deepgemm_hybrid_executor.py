@@ -21,7 +21,10 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_masked,
 )
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    sgl_per_token_group_quant_fp8,
+    silu_and_mul_up_gate_fp8_quant,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -179,6 +182,7 @@ def get_sm120_triton_fp8_config(
 
 
 class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
+    supports_tp_prefill_output = True
     BLOCK_SIZE = 128
     EXPERT_ALIGNMENT = 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
@@ -287,6 +291,34 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         token_num = payload.expert_x.shape[0]
+        tp_prefill = bool(
+            extra_expert_args
+            and (
+                extra_expert_args.get("tp_prefill_fused_quant", False)
+                or extra_expert_args.get("output_tensor") is not None
+            )
+        )
+        if tp_prefill:
+            if not (
+                self.is_sm120
+                and self.ep_size == 1
+                and activation == "SiGLU"
+                and expert_map is None
+                and not apply_router_weight_on_input
+                and payload.expert_x_origin_dtype == torch.bfloat16
+                and not _is_cuda_graph_warmup_or_capture()
+            ):
+                raise ValueError(
+                    "TP prefill fusion requires eager SM12x BF16 pure-TP MoE"
+                )
+            return self.execute_contiguous(
+                payload,
+                activation,
+                expert_map,
+                a2_scale,
+                apply_router_weight_on_input,
+                extra_expert_args,
+            )
         # This local routed path neither remaps partitioned expert ids nor
         # participates in an EP dispatch/combine collective.  expert_map=None
         # alone does not imply that the payload follows the non-EP contract.
@@ -825,33 +857,37 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
             )
         del input_tensor
-        down_input = torch.empty(
-            (
-                all_tokens,
-                N // 2,
-            ),
-            device=gateup_output.device,
-            dtype=torch.bfloat16,
-        )
         gateup_output = gateup_output.view(-1, N)
-        silu_and_mul(down_input, gateup_output)
+        if extra_expert_args and extra_expert_args.get("tp_prefill_fused_quant", False):
+            down_input_fp8, down_input_scale = silu_and_mul_up_gate_fp8_quant(
+                gateup_output, group_size=self.BLOCK_SIZE
+            )
+        else:
+            down_input = torch.empty(
+                (all_tokens, N // 2),
+                device=gateup_output.device,
+                dtype=torch.bfloat16,
+            )
+            silu_and_mul(down_input, gateup_output)
+            if is_deep_gemm_e8m0_used():
+                down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
+                    down_input,
+                    group_size=self.BLOCK_SIZE,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=is_deep_gemm_e8m0_used(),
+                )
+            else:
+                down_input_fp8, down_input_scale = trt_fp8_quantize_128(
+                    down_input, False
+                )
+            del down_input
         del gateup_output
         down_output = torch.empty(
             (all_tokens, K),
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-        if is_deep_gemm_e8m0_used():
-            down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
-                down_input,
-                group_size=self.BLOCK_SIZE,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                scale_ue8m0=is_deep_gemm_e8m0_used(),
-            )
-        else:
-            down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
-        del down_input
         if not is_deep_gemm_e8m0_used():
             down_input_scale = tma_align_input_scale(down_input_scale)
         if self.is_sm120:
@@ -869,10 +905,21 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
             )
         del down_input_fp8, down_input_scale
-        gather_out = torch.empty(
-            hidden_states_fp8_shape,
-            device=hidden_states_fp8_device,
-            dtype=torch.bfloat16,
-        )
+        gather_out = (extra_expert_args or {}).get("output_tensor")
+        if gather_out is None:
+            gather_out = torch.empty(
+                hidden_states_fp8_shape,
+                device=hidden_states_fp8_device,
+                dtype=torch.bfloat16,
+            )
+        elif (
+            gather_out.shape != hidden_states_fp8_shape
+            or gather_out.device != hidden_states_fp8_device
+            or gather_out.dtype != torch.bfloat16
+            or not gather_out.is_contiguous()
+        ):
+            raise ValueError(
+                "TP prefill output must be a contiguous BF16 slice matching input"
+            )
         ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
         return CombineForwardPayload(fused_expert_output=gather_out)

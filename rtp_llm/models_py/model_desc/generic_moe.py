@@ -37,7 +37,10 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.config import TpMoeChunkConfig
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
+    TpMoeChunkConfig,
+    TpMoePrefillConfig,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -64,6 +67,8 @@ class GenericMoeLayer(nn.Module):
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
         self.tp_chunk_config = TpMoeChunkConfig.from_env()
+        self.tp_prefill_config = TpMoePrefillConfig.from_env()
+        self.flashinfer_tp_prefill = None
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -139,6 +144,32 @@ class GenericMoeLayer(nn.Module):
             and self.ffn_tp_size == router_tp_size
             and router.supports_skip_tp_allreduce
         )
+        if self.tp_prefill_config.enabled:
+            executor = self.fused_moe.fused_experts
+            if not (
+                self.use_unified_tp_allreduce
+                and self.ffn_tp_size == 2
+                and parallelism_config.dp_size == 1
+                and not parallelism_config.prefill_cp_config.is_enabled()
+                and getattr(executor, "supports_tp_prefill_output", False) is True
+                and executor.is_sm120
+                and config.moe_w1_layout == "up_gate"
+            ):
+                raise ValueError(
+                    "MoE TP prefill fusion requires SM12x BF16/FP8_PER_BLOCK "
+                    "DeepGEMM, up_gate weights, TP2/EP1/DP1, shared expert and no prefill CP"
+                )
+            if self.tp_prefill_config.backend == "flashinfer_sm12x":
+                from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.flashinfer_sm12x_fp8 import (
+                    FlashInferSm12xFp8Moe,
+                )
+
+                self.flashinfer_tp_prefill = FlashInferSm12xFp8Moe(
+                    weights[W.moe_w1],
+                    weights[W.moe_s1_raw],
+                    weights[W.moe_w2],
+                    weights[W.moe_s2_raw],
+                )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "GenericMoE unified TP all-reduce %s "
@@ -159,6 +190,7 @@ class GenericMoeLayer(nn.Module):
         experts_output: torch.Tensor,
         shared_expert_output: torch.Tensor,
         gate_output: Optional[torch.Tensor] = None,
+        inplace: bool = False,
     ) -> torch.Tensor:
         if self.shared_expert_gate is not None:
             if gate_output is None:
@@ -167,6 +199,8 @@ class GenericMoeLayer(nn.Module):
                 gate_output, shared_expert_output, experts_output
             )
             return experts_output
+        if inplace:
+            return experts_output.add_(shared_expert_output)
         return experts_output + shared_expert_output
 
     def _gate_shared_expert_output(
@@ -200,16 +234,46 @@ class GenericMoeLayer(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, *, allow_tp_chunking: bool = False
     ) -> torch.Tensor:
+        use_fusion = self._can_fuse_tp_prefill(hidden_states, allow_tp_chunking)
         if self._can_chunk_tp_prefill(hidden_states, allow_tp_chunking):
+            if use_fusion:
+                return self._forward_tp_chunks(hidden_states, use_fusion=True)
             return self._forward_tp_chunks(hidden_states)
+        if use_fusion:
+            return self._forward_impl(
+                hidden_states, tp_prefill_backend=self.tp_prefill_config.backend
+            )
         return self._forward_impl(hidden_states)
 
-    def _forward_tp_chunks(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _can_fuse_tp_prefill(
+        self, hidden_states: torch.Tensor, allow_tp_prefill: bool
+    ) -> bool:
+        config = self.tp_prefill_config
+        return (
+            config.enabled
+            and allow_tp_prefill
+            and self.use_unified_tp_allreduce
+            and self.ffn_tp_size == 2
+            and self.parallelism_config.dp_size == 1
+            and not self.parallelism_config.prefill_cp_config.is_enabled()
+            and hidden_states.shape[0] >= config.min_tokens
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.is_cuda
+            and torch.version.hip is None
+            and os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") != "1"
+            and not torch.cuda.is_current_stream_capturing()
+        )
+
+    def _forward_tp_chunks(
+        self, hidden_states: torch.Tensor, *, use_fusion: bool = False
+    ) -> torch.Tensor:
         logger.debug(
-            "GenericMoE chunk prefill (tokens=%d, chunks=%d, mode=%s)",
+            "GenericMoE chunk prefill (tokens=%d, chunks=%d, mode=%s, backend=%s, direct_output=%s)",
             hidden_states.shape[0],
             self.tp_chunk_config.chunks,
             self.tp_chunk_config.mode,
+            self.tp_prefill_config.backend if use_fusion else "default",
+            use_fusion and self.tp_prefill_config.direct_output,
         )
         # A chunk's routed and gated shared outputs must both be complete
         # locally before reduction. Keep every output alive until NCCL joins.
@@ -226,10 +290,20 @@ class GenericMoeLayer(nn.Module):
         )
         pending = []
         outputs = []
+        output = (
+            torch.empty_like(hidden_states, memory_format=torch.contiguous_format)
+            if use_fusion and self.tp_prefill_config.direct_output
+            else None
+        )
         joined = 0
         try:
             for start in range(0, hidden_states.shape[0], chunk_size):
                 chunk_slice = slice(start, start + chunk_size)
+                fusion_args = {}
+                if use_fusion:
+                    fusion_args["tp_prefill_backend"] = self.tp_prefill_config.backend
+                if output is not None:
+                    fusion_args["output_tensor"] = output[chunk_slice]
                 partial = self._forward_impl(
                     hidden_states[chunk_slice],
                     skip_final_allreduce=True,
@@ -237,6 +311,7 @@ class GenericMoeLayer(nn.Module):
                     shared_gate_output=(
                         shared_gate[chunk_slice] if shared_gate is not None else None
                     ),
+                    **fusion_args,
                 )
                 handle = all_reduce_async(partial, Group.TP)
                 pending.append(handle)
@@ -247,9 +322,9 @@ class GenericMoeLayer(nn.Module):
                 for handle in pending:
                     outputs.append(handle.wait())
                     joined += 1
-            # Concatenation happens only after the consumer stream has joined
-            # every reduction; its cost is part of the end-to-end experiment.
-            return torch.cat(outputs, dim=0)
+            # Both output contracts become consumable only after every reduction
+            # joins this stream. Direct output avoids the final concatenation.
+            return output if output is not None else torch.cat(outputs, dim=0)
         except BaseException:
             # Try every outstanding handle even if one NCCL wait fails. Keep
             # the original error instead of replacing it with a cleanup error;
@@ -312,6 +387,8 @@ class GenericMoeLayer(nn.Module):
         skip_final_allreduce: bool = False,
         routing: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         shared_gate_output: Optional[torch.Tensor] = None,
+        tp_prefill_backend: str = "default",
+        output_tensor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids = (
             self._route(hidden_states) if routing is None else routing
@@ -322,13 +399,24 @@ class GenericMoeLayer(nn.Module):
         # path separately.  This is especially important for decode, where the
         # hidden dimension is small enough that collective launch latency
         # dominates the payload transfer.
-        experts_output = self.fused_moe(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation="SiGLU",
-            skip_tp_allreduce=self.use_unified_tp_allreduce,
-        )
+        if tp_prefill_backend == "flashinfer_sm12x":
+            experts_output = self.flashinfer_tp_prefill.forward(
+                hidden_states, topk_ids, topk_weights, output_tensor=output_tensor
+            )
+        else:
+            extra_args = {}
+            if tp_prefill_backend == "deepgemm_fused":
+                extra_args["tp_prefill_fused_quant"] = True
+            if output_tensor is not None:
+                extra_args["output_tensor"] = output_tensor
+            experts_output = self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+                skip_tp_allreduce=self.use_unified_tp_allreduce,
+                **({"extra_expert_args": extra_args} if extra_args else {}),
+            )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
@@ -346,6 +434,7 @@ class GenericMoeLayer(nn.Module):
                     experts_output,
                     shared_expert_output,
                     gate_output=shared_gate_output,
+                    inplace=output_tensor is not None,
                 )
                 if not skip_final_allreduce:
                     experts_output = all_reduce(experts_output, group=Group.TP)
@@ -365,7 +454,13 @@ class GenericMoeLayer(nn.Module):
                 experts_output = self._merge_shared_expert_output(
                     hidden_states, experts_output, shared_expert_output
                 )
-
+        if (
+            output_tensor is not None
+            and experts_output.data_ptr() != output_tensor.data_ptr()
+        ):
+            raise RuntimeError(
+                "MoE executor did not preserve the requested output slice"
+            )
         return experts_output
 
 
@@ -543,7 +638,9 @@ class GenericMoeModel(GptModelBase):
             attention_inputs = get_attention_inputs_value(inputs)
             if not isinstance(attention_inputs, Mapping) and self.kv_cache is None:
                 # Cacheless warmup shares one input and skips the indexer.
-                fmha_impl = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+                fmha_impl = super().prepare_fmha_impl(
+                    inputs, is_cuda_graph, cuda_graph_selection_mode
+                )
                 return {"default": fmha_impl, "indexer_kv": fmha_impl}
             raw_tags = (
                 list(attention_inputs) if isinstance(attention_inputs, Mapping) else []
@@ -554,7 +651,9 @@ class GenericMoeModel(GptModelBase):
                     "sparse MLA requires exactly attention input tags "
                     f"{sorted(required_tags)}; available tags={raw_tags}"
                 )
-        return super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        return super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
