@@ -22,7 +22,7 @@ case "$host_id" in
   *) echo 'usage: run_fp8_3fs_pagedmeta_b24_111112_r1.sh 111|112 config|run' >&2; exit 2 ;;
 esac
 
-repo="$base/worktrees/rtp-llm-k3-fp8-kmerge-3d7-20260929"
+repo="$base/worktrees/rtp-llm-k3-fp8-pagedmeta-b24-20260929"
 deps="$base/artifacts/k3-fp8-main-20260926"
 task="$base/artifacts/k3-fp8-opt-20260927"
 run="$base/k3${role,,}-3fs-${host_id}-pagedmeta-b24-r1"

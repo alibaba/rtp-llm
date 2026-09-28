@@ -11,12 +11,12 @@ case "${1:-}" in
   *) echo 'usage: build_fp8_pagedmeta_b24_111112.sh 111|112' >&2; exit 2 ;;
 esac
 
-repo="$base/worktrees/rtp-llm-k3-fp8-kmerge-3d7-20260929"
+repo="$base/worktrees/rtp-llm-k3-fp8-pagedmeta-b24-20260929"
 deps="$base/artifacts/k3-fp8-main-20260926"
 pip_repos="$deps/pip-repositories"
 bazel="$base/tools/bazel-6.4.0"
-root="$base/.cache/bazel/k3-fp8-kmerge-3d7-20260929-$1"
-export TMPDIR="$base/tmp/k3-fp8-kmerge-3d7-build-$1"
+root="$base/.cache/bazel/k3-fp8-pagedmeta-b24-20260929-$1"
+export TMPDIR="$base/tmp/k3-fp8-pagedmeta-b24-build-$1"
 
 test "$(id -un)" = luohaocheng.lhc
 test -f /.dockerenv
