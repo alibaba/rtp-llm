@@ -421,6 +421,16 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 engineHealthReporter.reportWorkerStepMetrics(
                         modelName, workerStatus, step);
             }
+            if (observation.role() == RoleType.PREFILL || observation.role() == RoleType.PDFUSION) {
+                for (WorkerStatus.TaskObservation task : observation.finishedTasks().values()) {
+                    if (task.telemetry() != null && task.telemetry().firstTokenTimeMs() > 0) {
+                        engineHealthReporter.reportPrefillWorkerStatusTask(
+                                modelName, workerStatus.getMetricIpPort(),
+                                observation.role().name(), workerStatus.getGroup(),
+                                task.telemetry());
+                    }
+                }
+            }
         } catch (Throwable telemetryFailure) {
             logger.warn("Worker status telemetry failed after commit for {}: {}",
                     ipPort, telemetryFailure.getMessage());
