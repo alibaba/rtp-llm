@@ -21,4 +21,4 @@
 
 这些是性能锚点前的筛选记录。完整 93 层对照、最终 FP8 双机 smoke 和峰值激活锚点尚未完成。
 
-后续集成版增加了默认关闭的 `RTP_LLM_PROFILE_MODEL_MODULES=1` 标记。采集时它给各层 attention、MoE、KDA/MLA 投影和通信调用加 CPU range，再通过 CUDA correlation 归属异步 kernel。关闭开关时不生成这些 range。该改动只通过语法检查和 CPU profiler 开关检查；尚未在四层 PD 服务里重建、复测，不能把它当作新的性能结果。
+后续集成版增加了默认关闭的 `RTP_LLM_PROFILE_MODEL_MODULES=1` 标记，并在同一 111/112 组合上用提交 `c7479de2` 重建四层 PD 服务。`evidence/integrated_c747_r45/` 保存了 10 次热态预热、16 次相同输入的请求及八 rank trace；其中 6 次可在八 rank 完整匹配。Prefill/target/draft 最慢 rank GPU span 中位数为 **138.230/74.344/63.907 ms**，与上面的旧版结果接近。所有匹配请求都能归属 target KDA 投影与 MoE 路由、draft MLA 投影与 MoE 路由。具体方法和原始记录见该目录的 `README.md`。这验证了集成版的模块标签；固定 feat 版仍需用相同归因口径重测，当前不能据此判定任何模块迁移收益。
