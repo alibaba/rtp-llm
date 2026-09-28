@@ -355,6 +355,68 @@ class TemplateTest(TestCase):
             rendered_prompt == "get_current_temperature:location=San Francisco, CA, USA"
         )
 
+    def test_qwen35_removes_only_legacy_inherited_extra_stop_ids(self):
+        user_stop_ids = [[248044], [248045], [248046], [900001, 900002]]
+        renderer = Qwen35Renderer(
+            _Qwen35ItemsTemplateTokenizer(),
+            RendererParams(
+                model_type="qwen35_dense",
+                max_seq_len=1024,
+                eos_token_id=0,
+                stop_word_ids_list=user_stop_ids,
+            ),
+            GenerateEnvConfig(),
+            RenderConfig(),
+        )
+
+        # Qwen3.5 must retain service/user stop IDs while removing only the
+        # QwenRenderer legacy extras that decode as ordinary Qwen3.5 text.
+        self.assertEqual(renderer.stop_words_id_list, user_stop_ids)
+        self.assertEqual(renderer.get_all_extra_stop_word_ids_list(), [])
+        self.assertEqual(
+            renderer._remove_stop_word_ids([1, 37763, 367, 25, 2], []),
+            [1, 37763, 367, 25, 2],
+        )
+        self.assertEqual(
+            renderer._remove_stop_word_ids([1, 151643, 2], []), [1, 151643, 2]
+        )
+        self.assertEqual(renderer._remove_stop_word_ids([1, 248044, 2], []), [1])
+        self.assertEqual(renderer._remove_stop_word_ids([1, 248045, 2], []), [1])
+        self.assertEqual(renderer._remove_stop_word_ids([1, 248046, 2], []), [1])
+        self.assertEqual(renderer._remove_stop_word_ids([1, 900001, 900002], []), [1])
+
+    def test_qwen35_preserves_explicit_legacy_id_stop(self):
+        renderer = Qwen35Renderer(
+            _Qwen35ItemsTemplateTokenizer(),
+            RendererParams(
+                model_type="qwen35_moe",
+                max_seq_len=1024,
+                eos_token_id=0,
+                stop_word_ids_list=[[151643], [37763, 367, 25]],
+            ),
+            GenerateEnvConfig(),
+            RenderConfig(),
+        )
+        self.assertEqual(renderer._remove_stop_word_ids([1, 151643, 2], []), [1])
+        self.assertEqual(
+            renderer._remove_stop_word_ids([1, 37763, 367, 25, 2], []), [1]
+        )
+
+    def test_legacy_qwen_still_adds_its_default_stop_ids(self):
+        renderer = QwenRenderer(
+            _Qwen35ItemsTemplateTokenizer(),
+            RendererParams(
+                model_type="qwen",
+                max_seq_len=1024,
+                eos_token_id=0,
+                stop_word_ids_list=[],
+            ),
+            GenerateEnvConfig(),
+            RenderConfig(),
+        )
+        self.assertIn([151643], renderer.get_all_extra_stop_word_ids_list())
+        self.assertIn([37763, 367, 25], renderer.get_all_extra_stop_word_ids_list())
+
     def test_qwen35_moe_mtp_uses_qwen35_renderer(self):
         assert _renderer_factory["qwen35_moe_mtp"] is Qwen35Renderer
 

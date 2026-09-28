@@ -266,6 +266,38 @@ class CacheConfigArgumentsTest(TestCase):
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
+    def test_vit_proxy_health_threshold_default_environment_and_cli(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_proxy_min_healthy_workers, 0
+            )
+        with patch.dict(os.environ, {"VIT_PROXY_MIN_HEALTHY_WORKERS": "3"}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_proxy_min_healthy_workers, 3
+            )
+            config = server_args.setup_args(["--vit_proxy_min_healthy_workers", "4"])
+            self.assertEqual(config.vit_config.vit_proxy_min_healthy_workers, 4)
+            self.assertIn(
+                "vit_proxy_min_healthy_workers: 4", config.vit_config.to_string()
+            )
+
+    def test_vit_proxy_health_threshold_rejects_invalid_cli_and_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("-1", "1.5", "nan", "abc"):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {}, clear=True
+            ), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args(["--vit_proxy_min_healthy_workers", value])
+            with self.subTest(env=value), patch.dict(
+                os.environ, {"VIT_PROXY_MIN_HEALTHY_WORKERS": value}, clear=True
+            ), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args([])
+
     def test_dsv4_mega_moe_public_choices(self):
         from rtp_llm.server.server_args import server_args
 
@@ -1673,6 +1705,61 @@ class ServerArgsGrammarConfigTest(TestCase):
                 sys.argv = ["prog", flag, "0"]
                 with self.assertRaises(SystemExit):
                     self._setup()
+
+
+
+
+class MaxGenerateBatchSizeArgumentsTest(TestCase):
+    """--max_generate_batch_size: scheduler-side decode running-batch cap.
+
+    The arg is a tri-state override (None = not provided) stored on
+    PyEnvConfigs; EngineConfig.create derives max_generate_batch_size from
+    concurrency_limit first, then applies the explicit override.
+    """
+
+    def _create_engine_config(self, args):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            configs = server_args.setup_args(args)
+        return configs, EngineConfig.create(configs)
+
+    def test_unspecified_value_keeps_concurrency_limit_derivation(self):
+        configs, engine_config = self._create_engine_config(
+            ["--concurrency_limit", "16"]
+        )
+        self.assertIsNone(configs.max_generate_batch_size_override)
+        self.assertEqual(engine_config.runtime_config.max_generate_batch_size, 16)
+
+    def test_explicit_cli_value_overrides_derivation(self):
+        configs, engine_config = self._create_engine_config(
+            ["--concurrency_limit", "32", "--max_generate_batch_size", "8"]
+        )
+        self.assertEqual(configs.max_generate_batch_size_override, 8)
+        self.assertEqual(engine_config.runtime_config.max_generate_batch_size, 8)
+
+    def test_explicit_env_value_overrides_derivation(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {"CONCURRENCY_LIMIT": "32", "MAX_GENERATE_BATCH_SIZE": "8"},
+            clear=True,
+        ):
+            configs = server_args.setup_args([])
+
+        self.assertEqual(configs.max_generate_batch_size_override, 8)
+
+    def test_non_positive_value_is_rejected(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            configs = server_args.setup_args(["--max_generate_batch_size", "0"])
+
+        with self.assertRaises(ValueError):
+            EngineConfig.create(configs)
 
 
 if __name__ == "__main__":

@@ -274,8 +274,10 @@ size_t SpeculativeExecutionConfig::speculativeReserveStep() const {
     const int64_t gamma = gen_num_per_cycle;
     const int64_t limit = std::numeric_limits<int>::max();
     RTP_LLM_CHECK_WITH_INFO(gamma >= 0, "speculative gen_num_per_cycle must be non-negative: %ld", gamma);
-    if (type == SP_TYPE_DSPARK) {
-        RTP_LLM_CHECK_WITH_INFO(gamma <= limit / 3, "DSpARK gen_num_per_cycle is too large: %ld", gamma);
+    // Block-draft models (DSpARK/DFlash) can expose one extra accepted window
+    // before host bookkeeping catches up, then seed the next gamma-wide block.
+    if (isBlockDraftType(type)) {
+        RTP_LLM_CHECK_WITH_INFO(gamma <= limit / 3, "block draft gen_num_per_cycle is too large: %ld", gamma);
         return static_cast<size_t>(3 * gamma);
     }
     RTP_LLM_CHECK_WITH_INFO(gamma < limit, "gen_num_per_cycle is too large: %ld", gamma);
@@ -297,6 +299,8 @@ SpeculativeType SpeculativeExecutionConfig::from_string(const std::string& str) 
         return SP_TYPE_DETERMINISTIC;
     } else if (str == "dspark") {
         return SP_TYPE_DSPARK;
+    } else if (str == "dflash") {
+        return SP_TYPE_DFLASH;
     } else {
         return SP_TYPE_NONE;  // Default to NONE for unknown values
     }
@@ -318,6 +322,8 @@ std::string SpeculativeExecutionConfig::to_string(SpeculativeType type) {
             return "deterministic";
         case SP_TYPE_DSPARK:
             return "dspark";
+        case SP_TYPE_DFLASH:
+            return "dflash";
         default:
             return "none";
     }
@@ -422,6 +428,7 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
+        << "force_single_prefill: " << force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
         << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache;
     return oss.str();

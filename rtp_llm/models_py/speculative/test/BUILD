@@ -26,3 +26,43 @@ py_test(
     ],
     exec_properties = {"gpu": "A10"},
 )
+
+py_test(
+    name = "test_qwen3_dflash",
+    srcs = ["test_qwen3_dflash.py"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
+    name = "test_qwen3_dflash_weights",
+    srcs = ["test_qwen3_dflash_weights.py"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
+    name = "test_qwen3_dspark_config",
+    srcs = ["test_qwen3_dspark_config.py"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
+    name = "test_qwen3_dspark_weights",
+    srcs = ["test_qwen3_dspark_weights.py"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
