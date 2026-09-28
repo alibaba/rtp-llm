@@ -109,3 +109,9 @@ r8 的 `concat_and_cache_mla_kernel` 在固定 feat trace 中每 rank 约 0.074 
 首条 65,537-token flow 请求返回 HTTP 500，runner 退出 1，没有发送其余十条。Prefill 日志显示它进入 65,536-token 和 1-token 两轮处理，随后 rank 7 在 06:10:35 意外退出，服务管理器停止了其余 rank。111 的内核日志另有同一批 rank 的 GPU MMU Xid 31，时间标记为 06:09:03；这一记录早于 HTTP 请求，现有证据不足以把 Xid 直接归因于哪一个算子或 CP 设置。原始失败请求、逐 rank 日志、启动配置及 Xid 摘录保存在 `cp8-r1-failure/`。该目录四份文件的 SHA256 依次为：`111-nvrm-xid.log` `c3be0fba4845a5bf64ededf4ddde7f872d53a2b49a07aef5843660daa7b642a4`、`111-prefill-startup.tar.gz` `a62da92c14b6da46fee07c8c85da31eaf459353743c876ece03533697722c3ad`、`112-decode-startup.tar.gz` `8590c3eefa63ed07fd9d5c5d6b79490de8b4dc19426409de892cb73d940c704c`、`flow-failed-raw.tar.gz` `8b12261b59e9da5b9ea6d32c49f764a2ca4fb6283e2dc88c35c0a147b9854e95`。
 
 源码检查还发现 Decode 的 `prefill_cp_kv_cache_sharded=0` 会让 `DecodeRpcServer::prepareGenerateContext()` 把 `prefill_cp_size` 设为 1，即使命令行另外传入 8。因此 r1 的 PD 参数本身也不匹配分片 Prefill，不能拿这轮结果判断 CP8 性能或正确性。`cp_rotate_method=DISABLED` 与分片缓存并存的行为仍需核对。失败后我只停止了本任务在 112 的 Decode 进程组；111 已由服务管理器自行退出。没有继续发请求或采集 timeline，也没有修改集群级 3FS 配置。
+
+### 现有 trace 可支持的算子筛选
+
+按相同名字的模块范围复算固定 feat r8 与集成版 b24 r2 的四层 target trace，共有 22 个可对齐的具名范围。下列数值是累计核时间，跨 stream 可能重叠。feat 仅在 KDA core、shared activation、routed down projection 和 MLA output gate 上快约 0.001–0.005 ms；这些量级不足以确认独立的算子收益。集成版的 routed experts 在 L1/L2/L3 分别快约 0.146/0.920/0.490 ms，router 每层快约 0.026–0.027 ms。两版 TokenSpeed MLA 主核按每次请求最慢 rank 取中位分别为 feat 5.342 ms、集成版 5.388 ms；两版使用同一类 TokenSpeed E4M3 算子，且 CP/SP 配置不同，不能把约 0.046 ms 差异当成可移植实现的收益。
+
+feat 的 FP8 AllGather/GEMM 和 GEMM/ReduceScatter 是不同的融合范围；它们发送 FP8，与最终 **BF16 NCCL** 契约冲突，不能只因 trace 较快而迁入。MLA cache writer 的单核差异也已被分片配置混淆。现有固定 vLLM `3df4` 的四层 NIXL PD target trace 中，TokenSpeed MLA 约 5.36 ms，但 routed MoE 实际选择 MXFP4，而且没有 MTP；它只提供 target 算子线索，不能用来替代普通 E4M3 + MTP 的整路径验收。下一轮比较须先让 CP/SP 和权重精度口径可核对，再做逐算子 A/B；目前没有足够证据从 feat 迁入新的性能模块。
