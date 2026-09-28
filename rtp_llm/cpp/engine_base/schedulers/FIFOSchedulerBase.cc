@@ -38,6 +38,10 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     prefill_chunk_size_(runtime_config.fifo_scheduler_config.prefill_chunk_size),
+    has_linear_attention_(std::find(model_config.hybrid_attention_config.hybrid_attention_types.begin(),
+                                    model_config.hybrid_attention_config.hybrid_attention_types.end(),
+                                    HybridAttentionType::LINEAR)
+                          != model_config.hybrid_attention_config.hybrid_attention_types.end()),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {}
 
@@ -241,6 +245,17 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         }
 
         stream->setChunkSize(static_cast<int>(grant));
+        // Admission reserves the prompt, but sparse linear groups only materialize
+        // its tail. The actual grant (including a short last chunk) owns another tail.
+        if (has_linear_attention_) {
+            const auto status = stream->incrKVBlock();
+            if (!status.ok()) {
+                it = finish_invalid_stream(it,
+                                           ErrorCode::MALLOC_FAILED,
+                                           "cannot materialize chunk boundary: " + std::string(status.message()));
+                continue;
+            }
+        }
         selected.push_back(stream);
         budget_left -= grant * rows;
         ++it;

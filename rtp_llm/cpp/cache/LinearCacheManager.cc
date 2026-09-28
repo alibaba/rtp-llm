@@ -310,4 +310,35 @@ void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     }
 }
 
+void LinearCacheManager::reuseSkippedBlocksBefore(
+    BlockIds& block_ids, int prefix_len, int next_seq_len, bool enable_reuse_cache) {
+    // Keep the last computed state for this forward and every state in the
+    // next grant's active tail. A short grant can need states older than the
+    // last computed block when active_tail_blocks is greater than two.
+    const int last_computed_position = needBlocksNum(prefix_len, 0) - 1;
+    const int first_tail_position    = std::max(0, needBlocksNum(next_seq_len, 0) - materializedTailBlockCount());
+    const int last_position          = std::min(last_computed_position, first_tail_position) - 1;
+
+    const auto& blocks     = block_ids.blocks();
+    const int   block_count = static_cast<int>(blocks.size());
+    const int   tail_end    = std::min(needBlocksNum(next_seq_len, 0), block_count);
+    const int   step        = std::max(1, linear_step_);
+    int         target_pos  = first_tail_position;
+    // Reuse exclusive storage for missing tail states; leave the other old states owned by this request.
+    for (int source_pos = 0; source_pos <= std::min(last_position, block_count - 1); ++source_pos) {
+        const auto block = blocks[static_cast<size_t>(source_pos)];
+        if (isNullBlockIdx(block) || (enable_reuse_cache && (source_pos + 1) % step == 0)
+            || !block_pool_->isExclusiveRequestBlock(block)) {
+            continue;
+        }
+        while (target_pos < tail_end && !isNullBlockIdx(blocks[static_cast<size_t>(target_pos)])) {
+            ++target_pos;
+        }
+        if (target_pos >= tail_end) {
+            break;
+        }
+        block_ids.swap(static_cast<size_t>(source_pos), static_cast<size_t>(target_pos++));
+    }
+}
+
 }  // namespace rtp_llm

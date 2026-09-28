@@ -641,6 +641,23 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
     const int   raw_seq_len  = malloc_info.incrSeqLen();
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
+    if (malloc_info.computed_prefix_len >= 0) {
+        for (int b = 0; b < batch_size; ++b) {
+            for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
+                const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
+                if (config_.group(tag).policy.group_type != CacheGroupType::LINEAR) {
+                    continue;
+                }
+                auto& group = static_cast<LinearCacheManager&>(*kv_cache_groups_[static_cast<size_t>(group_id)]);
+                const int prefix_len =
+                    cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, malloc_info.computed_prefix_len);
+                const int seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
+                group.reuseSkippedBlocksBefore(
+                    kv_resource->mutableBlockIds(b, tag), prefix_len, seq_len, malloc_info.reuse_cache);
+            }
+        }
+    }
+
     std::vector<std::vector<size_t>>              original_sizes(static_cast<size_t>(batch_size));
     std::vector<std::vector<std::vector<size_t>>> backfilled_positions(static_cast<size_t>(batch_size));
     for (int b = 0; b < batch_size; ++b) {

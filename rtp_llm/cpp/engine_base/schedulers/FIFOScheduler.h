@@ -108,7 +108,6 @@ private:
     void dispatchPreparedGroup(StreamGroup& group);
 
     void    cancelExtraStreams() override;
-    bool    hasExtraStreams() const override;
     int64_t extraOnflightStreams() const override;
     void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
     void    appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;

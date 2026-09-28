@@ -352,9 +352,7 @@ def derive_grammar_compile_threads(
 def finalize_scheduler_config(
     fifo_scheduler_config: Any,  # FIFOSchedulerConfig
     max_seq_len: int,
-    use_mla: bool,
-    use_hybrid_attention: bool,
-    role_type: Any,
+    role_type: RoleType,
     use_batch_decode_scheduler: bool = False,
     seq_size_per_block: int = 0,
 ) -> None:
@@ -363,8 +361,6 @@ def finalize_scheduler_config(
     Args:
         fifo_scheduler_config: FIFOSchedulerConfig instance to finalize
         max_seq_len: Maximum sequence length from model config
-        use_mla: Whether the model uses MLA, which is incompatible with chunked prefill.
-        use_hybrid_attention: Whether hybrid attention is enabled, which is incompatible with chunked prefill.
         role_type: Engine role; chunked prefill only applies to PREFILL and PDFUSION.
         use_batch_decode_scheduler: Whether BatchDecodeScheduler is enabled, which is incompatible with chunked prefill.
         seq_size_per_block: KV block size used to align the chunk budget; 0 skips normalization.
@@ -397,20 +393,6 @@ def finalize_scheduler_config(
             "prefill_chunk_size > 0 is not supported with use_batch_decode_scheduler=True; "
             "BatchDecodeScheduler forces streams onto the decode path. Disable chunked prefill "
             "or use the normal FIFO/PDFusion scheduler."
-        )
-
-    if use_mla:
-        raise ValueError(
-            "prefill_chunk_size > 0 is not supported for MLA models "
-            "(attn_config.use_mla=True); chunked KV write-back for the MLA layout is not "
-            "verified. Disable chunked prefill or use a non-MLA model."
-        )
-    if use_hybrid_attention:
-        raise ValueError(
-            "prefill_chunk_size > 0 is not supported for hybrid / linear-attention models "
-            "(hybrid_attention_config.enable_hybrid_attention=True); cross-chunk linear-state "
-            "snapshot/restore is not implemented. Disable chunked prefill or use a plain "
-            "attention model."
         )
 
     max_stream_chunk_size = 2**31 - 1
