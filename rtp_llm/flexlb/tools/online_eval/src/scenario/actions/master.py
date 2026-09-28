@@ -942,18 +942,18 @@ def _client_check(ctx, params, deadline):
             raise ValueError("successful HA requests lack known Prefill endpoints")
         actual = max(Counter(addresses).values()) / len(addresses)
     elif metric == "prefill_peak_skew":
-        from runtime.ha import prefill_assignment_buckets
+        from runtime.ha import prefill_assignment_windows
         from scenario.actions.master_observation import _pools
 
         pool = set(_pools(ctx, deadline)["prefill"])
-        buckets = prefill_assignment_buckets(rows)
-        assigned = {address for counts in buckets.values() for address in counts}
+        windows = prefill_assignment_windows(rows)
+        assigned = {row.get("prefill") for row in rows if row.get("prefill")}
         if not pool or not assigned <= pool:
             raise ValueError("HA requests reference unknown Prefill endpoints")
-        eligible = [counts for counts in buckets.values()
+        eligible = [counts for counts in windows.values()
                     if sum(counts.values()) >= params["min_samples"]]
         if not eligible:
-            raise ValueError("no HA send-second has enough assigned Prefill samples")
+            raise ValueError("no HA rolling 5-second window has enough assigned Prefill samples")
         actual = max(max(counts.values()) * len(pool) / sum(counts.values())
                      for counts in eligible)
     elif metric == "duplicate_ids":

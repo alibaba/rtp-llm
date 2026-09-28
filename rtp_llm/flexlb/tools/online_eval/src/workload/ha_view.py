@@ -7,7 +7,7 @@ from pathlib import Path
 
 from reporting import bundle_path, details, links, table, write_bundle
 from reporting.catalog import PALETTE
-from runtime.ha import prefill_assignment_buckets
+from runtime.ha import prefill_assignment_windows
 
 
 COLORS = {
@@ -76,15 +76,15 @@ def _state_series(rows, anchor):
 
 
 def _prefill_balance_series(rows, anchor, fleet_size):
-    buckets = prefill_assignment_buckets(rows)
+    windows = prefill_assignment_windows(rows)
     values = {field: [] for field in ("prefill_peak_qps", "prefill_mean_qps", "prefill_skew")}
-    for second, counts in sorted(buckets.items()):
+    for second, counts in sorted(windows.items()):
         total = sum(counts.values())
-        peak = max(counts.values())
+        peak = max(counts.values()) if counts else 0
         current = {
-            "prefill_peak_qps": peak,
-            "prefill_mean_qps": total / fleet_size,
-            "prefill_skew": peak * fleet_size / total,
+            "prefill_peak_qps": peak / 5,
+            "prefill_mean_qps": total / (5 * fleet_size),
+            "prefill_skew": peak * fleet_size / total if total >= 200 else None,
         }
         for field, value in current.items():
             values[field].append(dict(x=second - anchor, y=value))
@@ -127,7 +127,7 @@ def build_spec(payload, presentation, default_path):
                     name=name, group="Prefill 分配", axis=axis, color=color,
                     points=balance[field],
                     provenance=dict(kind="derived", source=str(request_path) if request_path else None,
-                                    calculation="assigned requests by send second; includes failed requests",
+                                    calculation="assigned requests over trailing 5 seconds, sampled each second; includes failed requests",
                                     fleet_size=fleet_size),
                 ))
             else:

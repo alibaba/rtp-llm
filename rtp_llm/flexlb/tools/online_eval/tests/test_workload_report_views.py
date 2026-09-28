@@ -10,6 +10,7 @@ from reporting.view_config import DEFAULT_VIEW, declaration, view
 from scenario.loader import ScenarioError, load_document
 from workload.report import write_report, write_views
 from workload.report_panels import build_panels
+from workload.ha_view import _prefill_balance_series
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,10 +58,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][3]["points"]])
             self.assertEqual([3, None], [point["y"] for point in panels["inflight"]["series"][0]["points"]])
             self.assertEqual([1, 0], [point["y"] for point in panels["inflight"]["series"][-2]["points"]])
-            balance = panels["prefill_balance"]["series"]
-            self.assertEqual([2, 1], [point["y"] for point in balance[0]["points"]])
-            self.assertEqual([1, 0.5], [point["y"] for point in balance[1]["points"]])
-            self.assertEqual([2, 2], [point["y"] for point in balance[2]["points"]])
+            self.assertTrue(all(not curve["points"] for curve in panels["prefill_balance"]["series"]))
             self.assertTrue(all(panel["axes"]["up"]["position"] == "right"
                                 and panel["events"] for panel in panels.values()))
             self.assertEqual(1, panels["request_qps"]["events"][0]["t"])
@@ -68,6 +66,18 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertIn("../ha/report.html", json.dumps(spec["sections"]))
             default = json.loads((paths["workload.yaml"].parent / "report-spec.json").read_text())
             self.assertIn("../ha-ha-core/report.html", json.dumps(default["sections"]))
+
+    def test_ha_balance_chart_matches_five_second_gate_window(self):
+        rows = [
+            {"send_start_epoch_ms": 11_000 + (i // 60) * 1000,
+             "status": "exception" if i < 30 else "ok",
+             "prefill": f"P{i % 125}"}
+            for i in range(300)
+        ]
+        series = _prefill_balance_series(rows, 10, 125)
+        self.assertEqual([dict(x=5, y=0.6)], series["prefill_peak_qps"])
+        self.assertEqual([dict(x=5, y=0.48)], series["prefill_mean_qps"])
+        self.assertEqual([dict(x=5, y=1.25)], series["prefill_skew"])
 
     def test_per_engine_metrics_share_one_chart_with_switchable_detail(self):
         series = {

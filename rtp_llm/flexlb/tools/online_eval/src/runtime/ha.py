@@ -277,6 +277,21 @@ def prefill_assignment_buckets(rows: list) -> dict:
     return dict(buckets)
 
 
+def prefill_assignment_windows(rows: list, seconds: int = 5) -> dict:
+    """Rolling Prefill counts at one-second steps over complete windows."""
+    from collections import Counter
+
+    buckets = prefill_assignment_buckets(rows)
+    if not buckets:
+        return {}
+    first, last = min(buckets), max(buckets)
+    return {
+        end: sum((buckets.get(second, Counter())
+                  for second in range(end - seconds + 1, end + 1)), Counter())
+        for end in range(first + seconds - 1, last + 1)
+    }
+
+
 class LiveClientEvents:
     """Incremental journal reader; incomplete trailing writes are retried, not lost."""
 

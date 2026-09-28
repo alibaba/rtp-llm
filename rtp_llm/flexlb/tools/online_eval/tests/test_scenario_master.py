@@ -646,7 +646,8 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_ha_handover_peak_balance_counts_failed_assigned_requests(self):
         rows = self.ctx.register_resource("ha_rows", [
-            {"send_start_epoch_ms": 11_000 + i, "status": "exception" if i < 5 else "ok",
+            {"send_start_epoch_ms": 11_000 + (i % 5) * 1000,
+             "status": "exception" if i < 5 else "ok",
              "prefill": "P0" if i < 6 else "P1"}
             for i in range(8)
         ] + [{"send_start_epoch_ms": 11_020, "status": "schedule_error", "prefill": None}])
@@ -659,6 +660,21 @@ class MasterActionsTest(unittest.TestCase):
             self.assertEqual(3.0, result.output["actual"])
             with self.assertRaisesRegex(ValueError, "enough assigned"):
                 master._client_check(self.ctx, {**params, "min_samples": 10}, self.deadline)
+
+    def test_ha_handover_balance_uses_five_seconds_at_lower_qps(self):
+        pool = [f"P{i}" for i in range(125)]
+        rows = self.ctx.register_resource("ha_rows", [
+            {"send_start_epoch_ms": 11_000 + (i // 60) * 1000,
+             "status": "ok", "prefill": pool[i % len(pool)]}
+            for i in range(300)
+        ])
+        params = dict(rows=rows, metric="prefill_peak_skew", op="le",
+                      expected=4.0, min_samples=200)
+        with patch("scenario.actions.master_observation._pools",
+                   return_value={"prefill": pool}):
+            result = master._client_check(self.ctx, params, self.deadline)
+        self.assertEqual("PASS", result.checks[0].status)
+        self.assertEqual(1.25, result.output["actual"])
 
     def test_short_hang_empty_send_window_still_requires_real_recovery_burst(self):
         self.manager.master_instance_target.return_value = "B:18085"
