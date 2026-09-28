@@ -216,6 +216,7 @@ torch_ext::PyCacheStoreInputs makeSingleBlockWriteInputs(int64_t cache_key, int 
     torch_ext::PyCacheStoreInputs inputs;
     inputs.input_lengths_host    = torch::tensor({tokens_per_block}, torch::kInt32);
     inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
+    inputs.publish_start_tokens  = torch::tensor({0}, torch::kInt32);
     inputs.host_kv_cache_offset  = torch::tensor({{1}}, torch::kInt32);
     inputs.request_id            = torch::tensor({(int64_t)request_id_val}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
@@ -257,6 +258,7 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
     torch_ext::PyCacheStoreInputs inputs;
     inputs.input_lengths_host    = torch::tensor({input_length}, torch::kInt32);
     inputs.prefix_lengths_host   = torch::tensor({prefix_length}, torch::kInt32);
+    inputs.publish_start_tokens  = torch::tensor({0}, torch::kInt32);
     inputs.host_kv_cache_offset  = block_ids;
     inputs.request_id            = torch::tensor({request_id}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);

@@ -219,7 +219,7 @@ class MlaFlashInferPrefillOp(object):
             use_cuda_graph=False,
         )
 
-    def plan(self, mla_params: Any):
+    def plan(self, mla_params: Any, block_table: torch.Tensor):
         self.prefill_wrapper.plan(
             mla_params.qo_indptr_d,
             mla_params.prefill_ragged_kv_len_indptr_d,
@@ -237,11 +237,10 @@ class MlaFlashInferPrefillOp(object):
         self.qo_indptr = mla_params.qo_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
         self.total_kv_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
-        self.block_table = mla_params.page_indice_d.unsqueeze(0)
-        self.workspace_starts = torch.zeros(
-            1, dtype=torch.int32, device=self.block_table.device
-        )
-        self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
+        # Keep request boundaries: a request's last page may be only partly full.
+        self.block_table = block_table
+        self.workspace_starts = mla_params.prefill_ragged_kv_len_indptr_d[:-1]
+        self.seq_lens = mla_params.kvlen_d
 
     def _reuse_kv_cache_indexed_batched(
         self,
@@ -277,7 +276,7 @@ class MlaFlashInferPrefillOp(object):
                 self.block_table,
                 self.seq_lens,
                 self.workspace_starts,
-                batch_size=1,  # ragged
+                batch_size=self.seq_lens.numel(),
             )
             return final_compressed_kv, final_k_pe
 

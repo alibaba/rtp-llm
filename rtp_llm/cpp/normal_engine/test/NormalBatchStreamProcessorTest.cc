@@ -768,7 +768,7 @@ protected:
         BatchKVCacheResource kv_cache;
         kv_cache.resetBatchSize(1);
         kv_cache.initGroups(cache_config_.topologyPtr());
-        kv_cache.setBatchBlocks(0, 0, blocks);
+        kv_cache.setBatchBlocks(0, "default", blocks);
         stream->setKVCache(kv_cache);
     }
 
