@@ -125,16 +125,19 @@ def select_qsa_paged_tokens(
 
 
 def _same_tensor_metadata(lhs: Any, rhs: Any) -> bool:
+    if lhs is rhs:
+        return True
     if lhs is None or rhs is None:
         return lhs is rhs
     if not isinstance(lhs, torch.Tensor) or not isinstance(rhs, torch.Tensor):
         return lhs == rhs
-    return (
-        lhs.shape == rhs.shape
-        and lhs.dtype == rhs.dtype
-        and lhs.device == rhs.device
-        and bool(torch.equal(lhs, rhs))
-    )
+    if lhs.shape != rhs.shape or lhs.dtype != rhs.dtype or lhs.device != rhs.device:
+        return False
+    # Tagged attention inputs normally share the same tensor storage. Avoid a
+    # CUDA equality kernel and host synchronization for that exact alias.
+    if lhs.stride() == rhs.stride() and lhs.data_ptr() == rhs.data_ptr():
+        return True
+    return bool(torch.equal(lhs, rhs))
 
 
 def _transported_logical_positions(
