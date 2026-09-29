@@ -6,23 +6,21 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-    is_deep_gemm_e8m0_used,
-)
-from rtp_llm.models_py.modules.dsv4.moe.expert import Expert
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.dsv4.moe._shared_expert_triton import (
     quant_bf16_fp8_packed_ue8m0,
 )
 from rtp_llm.models_py.modules.dsv4.moe._silu_mul_fp8_quant_triton import (
     silu_mul_fp8_quant_packed_from_parts,
 )
+from rtp_llm.models_py.modules.dsv4.moe.expert import Expert
 from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
+    _SHARED_EXPERT_STREAM_CACHE,
     FusedSharedExpertExecutor,
     FusedSharedExpertFastPath,
     OverlapSharedExpertExecutor,
     SequentialSharedExpertExecutor,
     W13SharedExpert,
-    _SHARED_EXPERT_STREAM_CACHE,
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
@@ -224,13 +222,21 @@ class TestSharedExpertExecutor(unittest.TestCase):
 
     def test_executor_dispatch(self):
         os.environ.pop("DSV4_SHARED_EXPERT_MODE", None)
-        self.assertIsInstance(get_shared_expert_executor(), SequentialSharedExpertExecutor)
+        self.assertIsInstance(
+            get_shared_expert_executor(), SequentialSharedExpertExecutor
+        )
         with _env("DSV4_SHARED_EXPERT_MODE", "sequential"):
-            self.assertIsInstance(get_shared_expert_executor(), SequentialSharedExpertExecutor)
+            self.assertIsInstance(
+                get_shared_expert_executor(), SequentialSharedExpertExecutor
+            )
         with _env("DSV4_SHARED_EXPERT_MODE", "overlap"):
-            self.assertIsInstance(get_shared_expert_executor(), OverlapSharedExpertExecutor)
+            self.assertIsInstance(
+                get_shared_expert_executor(), OverlapSharedExpertExecutor
+            )
         with _env("DSV4_SHARED_EXPERT_MODE", "auto"):
-            self.assertIsInstance(get_shared_expert_executor(), OverlapSharedExpertExecutor)
+            self.assertIsInstance(
+                get_shared_expert_executor(), OverlapSharedExpertExecutor
+            )
 
     def test_sequential_executor(self):
         x = torch.randn(3, 4, dtype=torch.bfloat16)
@@ -297,7 +303,9 @@ class TestSharedExpertExecutor(unittest.TestCase):
             "torch.cuda.is_current_stream_capturing",
             return_value=True,
         ):
-            with self.assertRaisesRegex(RuntimeError, "not created before CUDA graph capture"):
+            with self.assertRaisesRegex(
+                RuntimeError, "not created before CUDA graph capture"
+            ):
                 executor.start(shared, x)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
@@ -378,7 +386,9 @@ class TestSharedExpertExecutor(unittest.TestCase):
                 gemm_calls = []
 
                 def fake_with_record(a, b, output, *args, **kwargs):
-                    gemm_calls.append((tuple(a[0].shape), tuple(b[0].shape), tuple(output.shape)))
+                    gemm_calls.append(
+                        (tuple(a[0].shape), tuple(b[0].shape), tuple(output.shape))
+                    )
                     _fake_fp8_gemm_nt(a, b, output, *args, **kwargs)
 
                 with mock.patch(
@@ -427,6 +437,236 @@ class TestSharedExpertExecutor(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "loader-prepared w13"):
             executor.prepare(shared)
+
+
+def _make_shared_expert_e8m0(
+    dim: int = 256,
+    inter: int = 256,
+    swiglu_limit: float = 0.0,
+) -> W13SharedExpert:
+    """Shared expert whose scales use the checkpoint UE8M0 (e8m0) format —
+    the format the SM120 fused path repacks from at prepare() time."""
+    torch.manual_seed(777)
+    device = torch.device("cuda")
+
+    def q(w_bf16: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        w8 = w_bf16.to(torch.float8_e4m3fn)
+        s = torch.ones(
+            w8.shape[0] // 128,
+            w8.shape[1] // 128,
+            device=device,
+            dtype=torch.float32,
+        ).to(torch.float8_e8m0fnu)
+        return w8, s
+
+    w13_w = torch.randn((2 * inter, dim), device=device, dtype=torch.bfloat16) * 0.05
+    w2_w = torch.randn((dim, inter), device=device, dtype=torch.bfloat16) * 0.05
+    w13_w, w13_s = q(w13_w)
+    w2_w, w2_s = q(w2_w)
+    return W13SharedExpert(
+        dim,
+        inter,
+        expert_weights={"w13_w": w13_w, "w13_s": w13_s, "w2_w": w2_w, "w2_s": w2_s},
+        swiglu_limit=swiglu_limit,
+    )
+
+
+class TestSharedExpertSM120FusedPath(unittest.TestCase):
+    """SM120 fused shared expert: capability gating + real-kernel numerics."""
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        from rtp_llm.models_py.utils.arch import is_sm120
+
+        if not is_sm120(torch.device("cuda")):
+            self.skipTest("SM120-only capability path")
+        enabled = mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.shared_expert._SM120_FUSED_ENABLED",
+            True,
+        )
+        enabled.start()
+        self.addCleanup(enabled.stop)
+
+    def test_disabled_preserves_sm120_fallback(self):
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.shared_expert._SM120_FUSED_ENABLED",
+            False,
+        ):
+            shared = _make_shared_expert_e8m0()
+            fp = FusedSharedExpertFastPath(dim=256, inter_dim=256)
+            fp.prepare(shared)
+            x = torch.randn((4, 256), device="cuda", dtype=torch.bfloat16)
+            self.assertIsNone(getattr(shared.w13, "_dsv4_sm120_packed_scale", None))
+            self.assertFalse(fp.can_run(shared, x))
+
+    def test_can_run_requires_packed_scales(self):
+        # Without e8m0 originals (the generic fixture) nothing is packed, so
+        # the SM120 gate stays closed and the generic fallback is preserved.
+        shared, _ = _make_shared_expert()
+        fp = FusedSharedExpertFastPath(dim=256, inter_dim=256)
+        fp.prepare(shared)
+        x = torch.randn((4, 256), device="cuda", dtype=torch.bfloat16)
+        self.assertIsNone(getattr(shared.w13, "_dsv4_sm120_packed_scale", None))
+        self.assertFalse(FusedSharedExpertFastPath.can_run(shared, x))
+
+    def test_prepare_builds_packed_scales_idempotent(self):
+        shared = _make_shared_expert_e8m0()
+        fp = FusedSharedExpertFastPath(dim=256, inter_dim=256)
+        fp.prepare(shared)
+        p13 = shared.w13._dsv4_sm120_packed_scale
+        p2 = shared.w2._dsv4_sm120_packed_scale
+        self.assertIsNotNone(p13)
+        self.assertIsNotNone(p2)
+        self.assertEqual(p13.dtype, torch.int32)
+        # packed [N, K/512] int32 views: w13 N=512,K=256 -> k_packed 1; w2 N=256,K=256 -> 1
+        self.assertEqual(p13.shape[0], 512)
+        self.assertEqual(p2.shape[0], 256)
+        x = torch.randn((4, 256), device="cuda", dtype=torch.bfloat16)
+        self.assertTrue(FusedSharedExpertFastPath.can_run(shared, x))
+        fp.prepare(shared)  # idempotent: same object, no rebuild
+        self.assertIs(shared.w13._dsv4_sm120_packed_scale, p13)
+
+    def test_linear_parts_prefers_packed_scale(self):
+        shared = _make_shared_expert_e8m0()
+        FusedSharedExpertFastPath(dim=256, inter_dim=256).prepare(shared)
+        _, scale = FusedSharedExpertFastPath._linear_parts(shared.w13)
+        self.assertIs(scale, shared.w13._dsv4_sm120_packed_scale)
+
+    def test_sm120_fused_real_kernel_numerics(self):
+        # Real kernels end-to-end (no mocked GEMM), compared against a
+        # same-weights, same-quantizer-contract split reference: the merged
+        # w13 is split back into w1/w3 halves, all scales are repacked from
+        # the same e8m0 originals, and the reference runs the same real
+        # fp8_gemm_nt + silu_mul_fp8_quant_packed kernels. Same-contract
+        # comparisons use the established FP8 tolerance 0.0011; declared
+        # before seeing results.
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+        from rtp_llm.models_py.modules.dsv4.utils import _repack_v4_fp8_scale_to_int32
+
+        swiglu_limit = 1.5
+        dim = inter = 256
+        shared = _make_shared_expert_e8m0(swiglu_limit=swiglu_limit)
+        executor = FusedSharedExpertExecutor(
+            max_tokens_per_rank=64, dim=dim, inter_dim=inter, swiglu_limit=swiglu_limit
+        )
+        executor.prepare(shared)
+        self.assertTrue(
+            FusedSharedExpertFastPath.can_run(
+                shared, torch.randn((1, dim), device="cuda", dtype=torch.bfloat16)
+            )
+        )
+        # same-weight split parts from the checkpoint originals (the linear
+        # keeps the fp8 weight verbatim; the e8m0 scales are the stashed ones)
+        w13_w = shared.w13.weight
+        w13_s = shared._dsv4_w13_scale_e8m0
+        w2_w = shared.w2.weight
+        w2_s = shared._dsv4_w2_scale_e8m0
+        w1_w, w3_w = w13_w[:inter], w13_w[inter:]
+        w1_s = _repack_v4_fp8_scale_to_int32(w13_s[: inter // 128])
+        w3_s = _repack_v4_fp8_scale_to_int32(w13_s[inter // 128 :])
+        w2_sp = _repack_v4_fp8_scale_to_int32(w2_s)
+
+        for tokens in (1, 33, 64):
+            with self.subTest(tokens=tokens):
+                torch.manual_seed(2000 + tokens)
+                x = torch.randn((tokens, dim), device="cuda", dtype=torch.bfloat16)
+                got = executor.run(shared, x)
+
+                # split reference, same kernels and contract
+                x_fp8 = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+                xs_st = FusedSharedExpertFastPath._scale_storage(
+                    (dim // 128 + 3) // 4, max(tokens, 1), x.device
+                )
+                xs = FusedSharedExpertFastPath._scale_view(xs_st, tokens)
+                quant_bf16_fp8_packed_ue8m0(x, x_fp8, xs, group_size=128, eps=1.0e-4)
+                gate = torch.empty((tokens, inter), dtype=torch.bfloat16, device="cuda")
+                up = torch.empty((tokens, inter), dtype=torch.bfloat16, device="cuda")
+                fp8_gemm_nt((x_fp8, xs), (w1_w, w1_s), gate, disable_ue8m0_cast=False)
+                fp8_gemm_nt((x_fp8, xs), (w3_w, w3_s), up, disable_ue8m0_cast=False)
+                h_fp8 = torch.empty(
+                    (tokens, inter), dtype=torch.float8_e4m3fn, device="cuda"
+                )
+                hs_st = FusedSharedExpertFastPath._scale_storage(
+                    (inter // 128 + 3) // 4, max(tokens, 1), x.device
+                )
+                hs = FusedSharedExpertFastPath._scale_view(hs_st, tokens)
+                silu_mul_fp8_quant_packed_from_parts(
+                    gate,
+                    up,
+                    clamp_limit=swiglu_limit,
+                    group_size=128,
+                    output_q=h_fp8,
+                    output_scale=hs,
+                )
+                ref = torch.empty((tokens, dim), dtype=torch.bfloat16, device="cuda")
+                fp8_gemm_nt((h_fp8, hs), (w2_w, w2_sp), ref, disable_ue8m0_cast=False)
+
+                diff = calc_diff(got, ref)
+                print(
+                    f"sm120 fused vs same-contract split calc_diff tokens={tokens}: {diff:.6f}"
+                )
+                self.assertLess(diff, 0.0011)
+
+    def test_sm120_overlap_matches_sequential(self):
+        # The overlap executor must produce the same outputs as sequential
+        # when the fused path is engaged on SM120 (producer/consumer stream
+        # ordering is the only difference).
+        swiglu_limit = 1.5
+        shared = _make_shared_expert_e8m0(swiglu_limit=swiglu_limit)
+        seq = SequentialSharedExpertExecutor(
+            FusedSharedExpertExecutor(
+                max_tokens_per_rank=64,
+                dim=256,
+                inter_dim=256,
+                swiglu_limit=swiglu_limit,
+            )
+        )
+        ovl = OverlapSharedExpertExecutor(
+            FusedSharedExpertExecutor(
+                max_tokens_per_rank=64,
+                dim=256,
+                inter_dim=256,
+                swiglu_limit=swiglu_limit,
+            )
+        )
+        seq.prepare(shared)
+        ovl.prepare(shared)
+        for tokens in (1, 33, 64):
+            with self.subTest(tokens=tokens):
+                torch.manual_seed(3000 + tokens)
+                x = torch.randn((tokens, 256), device="cuda", dtype=torch.bfloat16)
+                seq.start(shared, x)
+                seq_out = seq.finish()
+                ovl.start(shared, x)
+                ovl_out = ovl.finish()
+                self.assertTrue(
+                    torch.equal(seq_out, ovl_out),
+                    f"overlap != sequential at tokens={tokens}",
+                )
+
+    def test_sm120_workspace_grow_shrink_reuse(self):
+        # Grow-only workspace: outputs must stay correct when the token count
+        # grows past the initial capacity and shrinks again (buffer reuse).
+        swiglu_limit = 1.5
+        shared = _make_shared_expert_e8m0(swiglu_limit=swiglu_limit)
+        executor = FusedSharedExpertExecutor(
+            max_tokens_per_rank=8, dim=256, inter_dim=256, swiglu_limit=swiglu_limit
+        )
+        executor.prepare(shared)
+        outs = {}
+        for tokens in (4, 64, 3, 48, 1):  # grow, grow, shrink, grow, shrink
+            with self.subTest(tokens=tokens):
+                torch.manual_seed(4000 + tokens)
+                x = torch.randn((tokens, 256), device="cuda", dtype=torch.bfloat16)
+                got = executor.run(shared, x)
+                self.assertEqual(tuple(got.shape), (tokens, 256))
+                self.assertTrue(torch.isfinite(got.float()).all())
+                outs[tokens] = got
+        # deterministic: re-running a size reproduces the earlier output
+        torch.manual_seed(4003)
+        x = torch.randn((3, 256), device="cuda", dtype=torch.bfloat16)
+        self.assertTrue(torch.equal(executor.run(shared, x), outs[3]))
 
 
 if __name__ == "__main__":

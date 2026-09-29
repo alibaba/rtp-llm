@@ -8,6 +8,7 @@ and only fuses the final add+cast when possible.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 
@@ -23,6 +24,11 @@ _SHARED_EXPERT_WORKSPACE_CACHE: dict[
     tuple, dict[str, torch.Tensor | int | torch.device]
 ] = {}
 _SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
+
+logger = logging.getLogger(__name__)
+_SM120_FUSED_LOGGED = False
+# Opt in per process; preserve the existing SM120 fallback by default.
+_SM120_FUSED_ENABLED = os.environ.get("DSV4_SM120_FUSED_SHARED_EXPERT", "0") == "1"
 
 
 def _mode() -> str:
@@ -126,6 +132,18 @@ class W13SharedExpert(nn.Module):
         self.w13 = _v4_fp8_linear(w13_w, w13_s)
         self.w2 = _v4_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
         self.swiglu_limit = swiglu_limit
+        # Keep the original checkpoint UE8M0 scales for the SM120 fused path:
+        # the CUTLASS linear decodes its scales to fp32, while the fused path's
+        # fp8_gemm_nt needs the DeepGEMM int32-packed UE8M0 layout, which is
+        # repacked from these originals at prepare() time (lossless, once).
+        self._dsv4_w13_scale_e8m0 = (
+            w13_s if w13_s.dtype == torch.float8_e8m0fnu else None
+        )
+        self._dsv4_w2_scale_e8m0 = (
+            expert_weights["w2_s"]
+            if expert_weights["w2_s"].dtype == torch.float8_e8m0fnu
+            else None
+        )
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if x.dim() > 2:
@@ -189,6 +207,11 @@ class FusedSharedExpertFastPath:
     def _linear_parts(linear: nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
         weight = getattr(linear, "weight", None)
         scale = getattr(linear, "weight_scales", None)
+        # The SM120 fused path binds the DeepGEMM-packed scale prepared by
+        # prepare(); the CUTLASS-decoded fp32 scale stays the generic fallback.
+        packed = getattr(linear, "_dsv4_sm120_packed_scale", None)
+        if packed is not None:
+            scale = packed
         if weight is None or scale is None:
             raise RuntimeError("shared expert FP8 linear does not expose weight/scale")
         return weight, scale
@@ -198,7 +221,21 @@ class FusedSharedExpertFastPath:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
             return False
         if _requires_sm120_linear(x):
-            return False
+            if not _SM120_FUSED_ENABLED:
+                return False
+            # SM120 capability decision: the fused path engages only when both
+            # shared linears carry DeepGEMM-packed (int32 UE8M0) weight scales
+            # prepared from the checkpoint originals. Otherwise the generic
+            # CUTLASS path is used (preserved fallback, no silent wrong run).
+            return all(
+                getattr(
+                    getattr(shared_experts, name, None),
+                    "_dsv4_sm120_packed_scale",
+                    None,
+                )
+                is not None
+                for name in ("w13", "w2")
+            )
         return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
 
     @classmethod
@@ -245,13 +282,40 @@ class FusedSharedExpertFastPath:
         """Validate the loader-prepared merged w13; no runtime concatenation."""
         if not hasattr(shared_experts, "w13"):
             raise RuntimeError("DSV4 shared expert requires loader-prepared w13")
-        w13_w, w13_s = self._linear_parts(shared_experts.w13)
+        # Validate against the loader scale layout (weight_scales), never the
+        # SM120 packed variant that _linear_parts may already have preferred.
+        w13_w = getattr(shared_experts.w13, "weight", None)
+        w13_s = getattr(shared_experts.w13, "weight_scales", None)
+        if w13_w is None or w13_s is None:
+            raise RuntimeError("shared expert FP8 linear does not expose weight/scale")
         if w13_w.dim() != 2:
             raise RuntimeError(f"shared w13 weight must be 2D, got {w13_w.dim()}D")
         if w13_s.dim() != 2:
             raise RuntimeError(f"shared w13 scale must be 2D, got {w13_s.dim()}D")
         if w13_w.shape[0] % 2 != 0:
             raise RuntimeError(f"shared w13 rows must be even, got {w13_w.shape[0]}")
+        self._prepare_sm120_packed_scales(shared_experts)
+
+    @staticmethod
+    def _prepare_sm120_packed_scales(shared_experts: nn.Module) -> None:
+        """Repack checkpoint UE8M0 scales to the DeepGEMM int32-packed layout
+        for the SM120 fused path. Idempotent; skipped silently when the
+        original e8m0 scales were not retained (fused path then stays off via
+        can_run, preserving the generic fallback)."""
+        if not _SM120_FUSED_ENABLED or not _requires_sm120_linear(
+            shared_experts.w13.weight
+        ):
+            return
+        from rtp_llm.models_py.modules.dsv4.utils import _repack_v4_fp8_scale_to_int32
+
+        for name in ("w13", "w2"):
+            linear = getattr(shared_experts, name)
+            if getattr(linear, "_dsv4_sm120_packed_scale", None) is not None:
+                continue
+            raw = getattr(shared_experts, f"_dsv4_{name}_scale_e8m0", None)
+            if raw is None:
+                continue
+            linear._dsv4_sm120_packed_scale = _repack_v4_fp8_scale_to_int32(raw)
 
     @staticmethod
     def _tma_aligned_rows(rows: int, element_size: int) -> int:
@@ -370,6 +434,13 @@ class FusedSharedExpertFastPath:
                 "loader-merged shared w13/w2 weights"
             )
         self._shared = shared_experts
+        global _SM120_FUSED_LOGGED
+        if _requires_sm120_linear(x) and not _SM120_FUSED_LOGGED:
+            _SM120_FUSED_LOGGED = True
+            logger.info(
+                "DSV4 fused shared expert engaged on SM120 "
+                "(packed-UE8M0 scales, fp8_gemm_nt)"
+            )
         self._ensure_workspace(x)
         T = x.size(0)
         assert self._x_fp8 is not None
