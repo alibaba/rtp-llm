@@ -71,7 +71,7 @@ class FlexlbScheduleLocalStandbyTest {
         CompletableFuture<LocalStandbyHashResult> pendingHash = new CompletableFuture<>();
         when(hashes.getHashResult("warmup", null, 4096)).thenReturn(pendingHash);
         LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                configuration, manager, hashes, mock(org.flexlb.metric.FlexMonitor.class));
+                configuration, manager, hashes, mock(org.flexlb.cache.telemetry.CacheMetricsReporter.class));
         RequestBlockHashService requestHashes = mock(RequestBlockHashService.class);
         when(requestHashes.prepareBlockCacheKeys(any())).thenAnswer(invocation -> {
             BalanceContext context = invocation.getArgument(0);

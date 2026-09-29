@@ -8,8 +8,6 @@ import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -46,7 +44,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBA
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
-import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_VISITOR_RT;
@@ -118,8 +115,6 @@ public class EngineHealthReporter {
 
     private final CacheMetricsReporter cacheMetricsReporter;
 
-    private final CacheMatchConfiguration cacheMatchConfiguration;
-
     private final EngineGrpcClient engineGrpcClient;
 
     private final WorkerDirectory workerDirectory;
@@ -129,13 +124,11 @@ public class EngineHealthReporter {
     @Autowired
     public EngineHealthReporter(FlexMonitor monitor,
                                 CacheMetricsReporter cacheMetricsReporter,
-                                CacheMatchConfiguration cacheMatchConfiguration,
                                 EngineGrpcClient engineGrpcClient,
                                 LoopResources serverLoopResources,
                                 WorkerDirectory workerDirectory) {
         this.monitor = monitor;
         this.cacheMetricsReporter = cacheMetricsReporter;
-        this.cacheMatchConfiguration = cacheMatchConfiguration;
         this.engineGrpcClient = engineGrpcClient;
         this.workerDirectory = workerDirectory;
         this.eventLoopGroupMap = Map.of(
@@ -226,7 +219,6 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS);
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
-        this.monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_INPUT_TOKENS,
@@ -549,7 +541,6 @@ public class EngineHealthReporter {
                     ep == null ? 0 : ((EncoderEndpoint) ep).inflightUncachedTokenEstimate());
         }
         reportKvCacheCapacity(metricTags, status);
-        reportLocalStandbyBlockSize(metricTags, status.blockSize());
     }
 
     public void reportCacheStatusCheckerSuccess(String modelName,
@@ -569,14 +560,12 @@ public class EngineHealthReporter {
                     (double) successfulPollIntervalUs);
         }
         if (cacheStatus != null) {
-            long blockSize = cacheStatus.getBlockSize();
             long cacheKeySize = cacheStatus.getCacheKeySize();
             FlexMetricTags engineMetricTags = FlexMetricTags.of(
                     "model", modelName,
                     "engineIp", workerStatus.getMetricIpPort(),
                     "role", status.role().name());
             monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
-            reportLocalStandbyBlockSize(engineMetricTags, blockSize);
         }
 
     }
@@ -600,25 +589,6 @@ public class EngineHealthReporter {
         monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS, metricTags, totalKvCacheTokens);
         monitor.report(CACHE_USED_KV_CACHE_RATIO, metricTags,
                 (usedKvCacheTokens * 100.0) / totalKvCacheTokens);
-    }
-
-    private void reportLocalStandbyBlockSize(
-            FlexMetricTags metricTags, long engineBlockSize) {
-        if (!cacheMatchConfiguration.isLocalStandbyEnabled()) {
-            return;
-        }
-        LocalStandbyConfig localStandbyConfig =
-                cacheMatchConfiguration.getLocalStandbyConfig();
-        if (localStandbyConfig == null) {
-            return;
-        }
-        long configuredBlockSize = localStandbyConfig.getBlockSize();
-        long effectiveBlockSize = configuredBlockSize > 0
-                ? configuredBlockSize : engineBlockSize;
-        if (effectiveBlockSize > 0) {
-            monitor.report(CACHE_LOCAL_STANDBY_BLOCK_SIZE,
-                    metricTags, effectiveBlockSize);
-        }
     }
 
     public void reportBalancingService(BalanceContext ctx) {
