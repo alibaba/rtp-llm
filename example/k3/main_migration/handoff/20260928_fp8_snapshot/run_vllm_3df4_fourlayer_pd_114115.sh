@@ -13,8 +13,19 @@ esac
 
 image='mirrors-ssl.aliyuncs.com/vllm/vllm-openai@sha256:dfaab3570be5b1f66c21e60c60f1616ad3a0143f9899b8738257004f289979fd'
 model='/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers'
-name="lhc_k3_vllm_3df4_${role}_114115_20260929"
-task_dir="/data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/vllm-pd-3df4-114115-${role}-20260929"
+run_id=${K3_VLLM_RUN_ID:-20260929}
+profile_with_stack=${K3_VLLM_PROFILE_WITH_STACK:-false}
+if [[ ! "$run_id" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+  echo "invalid task run ID: $run_id" >&2
+  exit 2
+fi
+case "$profile_with_stack" in
+  true|false) ;;
+  *) echo "K3_VLLM_PROFILE_WITH_STACK must be true or false" >&2; exit 2 ;;
+esac
+name="lhc_k3_vllm_3df4_${role}_114115_${run_id}"
+task_dir="/data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/vllm-pd-3df4-114115-${role}-${run_id}"
+profiler_config="{\"profiler\":\"torch\",\"torch_profiler_dir\":\"/task/profiles\",\"torch_profiler_with_stack\":${profile_with_stack},\"torch_profiler_use_gzip\":false}"
 
 test "$(id -u)" = 19357313
 hostname -I | tr ' ' '\n' | grep -qx "$host_ip"
@@ -66,5 +77,5 @@ docker run -d \
   --max-num-seqs 1 --gpu-memory-utilization 0.8 \
   --no-enable-prefix-caching \
   --load-format safetensors --trust-remote-code \
-  --profiler-config '{"profiler":"torch","torch_profiler_dir":"/task/profiles","torch_profiler_with_stack":false,"torch_profiler_use_gzip":false}' \
+  --profiler-config "$profiler_config" \
   --kv-transfer-config "$kv_config"

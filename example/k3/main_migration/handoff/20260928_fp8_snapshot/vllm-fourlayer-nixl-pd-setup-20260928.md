@@ -21,3 +21,9 @@
 两次共 28 条代表性 64K 预热请求的 HTTP 完整耗时波动明显。第一次 14 条未通过脚本末三次 ±5% 的 HTTP 门槛，因此没有开始 profiler；第二次保留异常标记并在 14 条预热后捕获三次全 rank Prefill。GPU 注释区间的关键 rank 耗时 118.040、112.159、113.652 ms，相对中位数最大偏差 3.861%。八个 rank 原始 trace、请求记录、SHA256 与内核族汇总位于 `timeline-64k-vllm-3df4-fourlayer-nixl-pd-pynccl-profile-20260928/`。该区间标记 `execute_context_1(65535)_generation_0(0)`，即 Prefill 计算 65,535 个 token，把最后一个 token 留给 Decode；与 RTP 对照解释时要注明这一 token 的差别。
 
 八个 rank 的远端与 115 本地 trace SHA256 逐文件一致。采集完成后已保存两端完整启动与运行日志，并停止本任务的 producer、consumer 和 proxy 容器，释放 111/112 GPU。再测时须重做独占检查和同路径预热。
+
+## 114/115 复测准备与模块归因
+
+9 月 29 日，114、115 拉取了相同 digest 的固定 vLLM 镜像；任务专用启动脚本为 `run_vllm_3df4_fourlayer_pd_114115.sh`。启动前两端读四层 target 的小型配置文件均进入 3FS 内核等待，因此没有启动服务。存储侧证据见 `3fs-mtp-first-read-stall-20260929.md`，恢复后要先复查读取，再运行脚本。
+
+现有全 rank vLLM trace 的 `user_annotation` 只有请求级 `execute_context`，CPU `aten::linear` 等记录没有调用栈；虽然能按 CUDA correlation 找到 GEMM 的发射事件，但不能把 NVJet GEMM 可靠归到某一层的具体投影。114/115 脚本新增 `K3_VLLM_PROFILE_WITH_STACK=true` 和 `K3_VLLM_RUN_ID=<独立标识>`，供后续单独采一次带栈诊断 trace；默认仍关闭调用栈，沿用原来的计时配置。带栈 trace 是否足以归因须实际检查，采集开销可能影响耗时，不能直接拿它与默认设置的正式性能 trace 比较。
