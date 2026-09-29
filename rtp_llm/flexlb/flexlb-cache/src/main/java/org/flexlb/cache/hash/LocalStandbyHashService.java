@@ -46,7 +46,9 @@ public class LocalStandbyHashService {
     private final boolean enabled;
     private final FlexMonitor monitor;
     private final BlockHashStrategy blockHashStrategy;
-    private final ThreadPoolExecutor executor;
+    private final int threadCount;
+    private final int queueCapacity;
+    private volatile ThreadPoolExecutor executor;
     private final Cache<String, CompletableFuture<LocalStandbyHashResult>> tasksByRequestId;
 
     public LocalStandbyHashService(CacheMatchConfiguration configuration,
@@ -56,28 +58,10 @@ public class LocalStandbyHashService {
         this.enabled = configuration.isLocalStandbyEnabled();
         this.monitor = monitor;
         this.blockHashStrategy = blockHashStrategy;
-        int threadCount = enabled ? config.getHashThreadCount() : LocalStandbyConfig.DEFAULT_HASH_THREAD_COUNT;
-        int queueCapacity = enabled ? config.getHashQueueCapacity() : LocalStandbyConfig.DEFAULT_HASH_QUEUE_CAPACITY;
-        AtomicInteger threadNumber = new AtomicInteger();
-        this.executor = new ThreadPoolExecutor(
-                threadCount,
-                threadCount,
-                0,
-                TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(queueCapacity),
-                runnable -> {
-                    Thread thread = new Thread(
-                            runnable,
-                            "local-standby-hash-" + threadNumber.incrementAndGet());
-                    thread.setDaemon(true);
-                    thread.setPriority(Math.max(
-                            Thread.MIN_PRIORITY,
-                            Thread.NORM_PRIORITY - 1));
-                    return thread;
-                },
-                new ThreadPoolExecutor.AbortPolicy());
+        this.threadCount = enabled ? config.getHashThreadCount() : LocalStandbyConfig.DEFAULT_HASH_THREAD_COUNT;
+        this.queueCapacity = enabled ? config.getHashQueueCapacity() : LocalStandbyConfig.DEFAULT_HASH_QUEUE_CAPACITY;
         this.tasksByRequestId = Caffeine.newBuilder()
-                .maximumSize(Math.max(1L, queueCapacity))
+                .maximumSize(Math.max(1L, this.queueCapacity))
                 .expireAfterAccess(RESULT_RETENTION_SECONDS, TimeUnit.SECONDS)
                 .build();
     }
@@ -111,7 +95,7 @@ public class LocalStandbyHashService {
 
         long submittedAt = System.nanoTime();
         try {
-            executor.execute(() -> calculate(
+            executor().execute(() -> calculate(
                     request,
                     inputIds,
                     blockSize,
@@ -124,6 +108,36 @@ public class LocalStandbyHashService {
             complete(request, task, LocalStandbyHashResult.empty());
         }
         return task;
+    }
+
+    private ThreadPoolExecutor executor() {
+        ThreadPoolExecutor current = executor;
+        if (current != null) {
+            return current;
+        }
+        synchronized (this) {
+            if (executor == null) {
+                AtomicInteger threadNumber = new AtomicInteger();
+                executor = new ThreadPoolExecutor(
+                        threadCount,
+                        threadCount,
+                        0,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(queueCapacity),
+                        runnable -> {
+                            Thread thread = new Thread(
+                                    runnable,
+                                    "local-standby-hash-" + threadNumber.incrementAndGet());
+                            thread.setDaemon(true);
+                            thread.setPriority(Math.max(
+                                    Thread.MIN_PRIORITY,
+                                    Thread.NORM_PRIORITY - 1));
+                            return thread;
+                        },
+                        new ThreadPoolExecutor.AbortPolicy());
+            }
+            return executor;
+        }
     }
 
     /**
@@ -176,10 +190,14 @@ public class LocalStandbyHashService {
 
     @Scheduled(fixedRate = 2000)
     void reportThreadPoolMetrics() {
-        reportThreadPoolMetric("executingTaskThreadSize", executor.getActiveCount());
-        reportThreadPoolMetric("queueSize", executor.getQueue().size());
-        reportThreadPoolMetric("remainingQueueCapacity", executor.getQueue().remainingCapacity());
-        reportThreadPoolMetric("threadPoolSize", executor.getPoolSize());
+        ThreadPoolExecutor current = executor;
+        if (current == null) {
+            return;
+        }
+        reportThreadPoolMetric("executingTaskThreadSize", current.getActiveCount());
+        reportThreadPoolMetric("queueSize", current.getQueue().size());
+        reportThreadPoolMetric("remainingQueueCapacity", current.getQueue().remainingCapacity());
+        reportThreadPoolMetric("threadPoolSize", current.getPoolSize());
     }
 
     private void reportThreadPoolMetric(String type, int value) {
@@ -188,7 +206,10 @@ public class LocalStandbyHashService {
 
     @PreDestroy
     public void shutdown() {
-        executor.shutdown();
+        ThreadPoolExecutor current = executor;
+        if (current != null) {
+            current.shutdown();
+        }
         tasksByRequestId.invalidateAll();
     }
 }
