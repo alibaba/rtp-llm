@@ -142,6 +142,9 @@ class CaseRunner(object):
         try:
             return self._run_impl()
         finally:
+            if self.remote_kvcm_server is not None:
+                self.remote_kvcm_server.stop_server()
+                self.remote_kvcm_server.copy_logs()
             summarize_and_cleanup_coredumps(
                 os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
             )
@@ -155,7 +158,7 @@ class CaseRunner(object):
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            env_dict["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            env_dict.update(self.remote_kvcm_server.client_env())
         task_states = TaskStates()
         logging.info(f"smoke_args_str: {self.smoke_args_str}")
         server_manager = self.start_server(
@@ -173,6 +176,20 @@ class CaseRunner(object):
         if task_states.ret != True:
             return task_states
         assert server_manager is not None, "server manager should not be None"
+        metadata_check = str_to_bool(self.kvcm_config.get("PACE_METADATA_CHECK", "false"))
+        model_events_check = str_to_bool(self.kvcm_config.get("PACE_MODEL_EVENTS_CHECK", "false"))
+        if metadata_check or model_events_check:
+            from smoke.pace_rtp_metadata import check_metadata_rpc, check_model_events
+            try:
+                if self.remote_kvcm_server is None or self.remote_kvcm_server.pace_fixture is None:
+                    raise RuntimeError("PACE checks require an enabled remote cache and a PACE fixture")
+                if metadata_check:
+                    check_metadata_rpc(server_manager, self.remote_kvcm_server.pace_fixture.storage_type)
+                if model_events_check:
+                    check_model_events(server_manager, self.remote_kvcm_server)
+            except BaseException:
+                server_manager.stop_server()
+                raise
         server_manager.stop_server()
         if enable_remote_cache and self.remote_kvcm_server is not None:
             self.remote_kvcm_server.stop_server()
@@ -290,6 +307,9 @@ class CaseRunner(object):
             raise FileNotFoundError(
                 "kv_cache_manager_bin is absent from Bazel runfiles"
             )
+        if str_to_bool(self.kvcm_config.get("PACE_REQUIRED", "false")):
+            # PACE startup configuration is stored beside the paired server binary.
+            server_path = os.path.realpath(server_path)
         server_path = os.path.dirname(os.path.dirname(server_path))
         kvcm_src_logs_path = os.path.join(os.environ["TEST_SRCDIR"], "rtp_llm/logs")
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())

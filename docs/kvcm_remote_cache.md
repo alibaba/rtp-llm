@@ -4,7 +4,7 @@
 
 来源 commit 统一记录在 `deps/kvcm.bzl`，已包含本次 SDK／内源适配。客户端 RPM 和服务器包须从同一内源／开源 SDK／真实 PACE 组合产出；RPM 必须包含匹配的头文件和动态库。新增虚接口与 StartWrite 参数改变 ABI，旧 RPM 和开源 PACE stub 均不兼容。
 
-制品记录尚未填写。依赖 KVCM 的目标（含 remote smoke 的全量 `//...` 构建）会被门禁拦截，普通无 KVCM 依赖的目标不受影响。产出后填写真实 URL、SHA256 和按 `_source_id()` 拼接的来源标识。
+默认制品记录尚未填写。可填写真实 URL、SHA256 和按 `_source_id()` 拼接的来源标识，或通过 `--repo_env=KVCM_ARTIFACT_MANIFEST=/absolute/path/MANIFEST.json` 提供配套制品清单，客户端使用 `--repo_env=KVCM_CLIENT_VARIANT=cpu|cuda` 选择。门禁同时检查配套来源和下载哈希；不接受旧 RPM。详见 [P1 smoke](kvcm_remote_cache_smoke.md)。
 
 使用上述 commit 构建无需再应用已合入的补丁；基线至提交的 diff 归档仅用于审计。
 
@@ -79,4 +79,4 @@ Publisher 状态机、完整性和拓扑限制见 [事件上报](backend/kv_cach
 
 ## 验收边界
 
-本补丁仅经静态审查，未编译、未测试或运行真实 PACE I/O。实际 ABI、超时／DMA／TP 时序和端到端响应未验证；完整 remote-cache smoke 属于后续验收。
+本补丁仅经静态审查，未编译、未测试或运行真实 PACE I/O。新增 P1 smoke 入口与覆盖边界见 [P1 smoke](kvcm_remote_cache_smoke.md)；实际 ABI、超时／DMA／TP 时序和端到端响应仍待运行验收。

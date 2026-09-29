@@ -146,6 +146,19 @@ public:
     MOCK_METHOD((std::pair<bool, int64_t>), matchLocationLen,
                 (const std::string&, const std::string&, kv_cache_manager::QueryType,
                  const std::vector<int64_t>&, const std::vector<int64_t>&, int32_t), (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::Locations>), queryLocations,
+                (const std::string&, const std::string&, kv_cache_manager::QueryType,
+                 const std::vector<int64_t>&, const std::vector<int64_t>&,
+                 const kv_cache_manager::BlockMask&, int32_t, const std::vector<std::string>&), (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::Metas>), matchMeta,
+                (const std::string&, const std::string&, const std::vector<int64_t>&,
+                 const std::vector<int64_t>&, const kv_cache_manager::BlockMask&, int32_t), (override));
+    MOCK_METHOD(bool, removeCache,
+                (const std::string&, const std::string&, const std::vector<int64_t>&,
+                 const std::vector<int64_t>&, const kv_cache_manager::BlockMask&), (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::HostCacheState>), getHostCacheState,
+                (const std::string&, const std::string&, kv_cache_manager::QueryType,
+                 const std::vector<int64_t>&, const std::vector<std::string>&, int32_t), (override));
     MOCK_METHOD((std::pair<bool, kv_cache_manager::BackendLocations>), getCacheLocationsByBackend,
                 (const std::string&, const std::string&, const std::vector<int64_t>&,
                  const std::vector<int64_t>&, const kv_cache_manager::BlockMask&,
