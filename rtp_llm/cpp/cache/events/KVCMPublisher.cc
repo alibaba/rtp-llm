@@ -47,6 +47,12 @@ bool jsonCodeIsOk(const rapidjson::Value& code) {
     return jsonCodeMatches(code, 1, "OK");
 }
 
+bool jsonCodeRequiresRegistration(const rapidjson::Value& code) {
+    return jsonCodeMatches(code, 8, "INSTANCE_NOT_EXIST")
+           || jsonCodeMatches(code, 9, "SERVER_NOT_LEADER")
+           || jsonCodeMatches(code, 10, "NODE_NOT_REGISTERED");
+}
+
 }  // namespace
 
 namespace detail {
@@ -70,9 +76,7 @@ KVCMReportFeedback parseKVCMReportFeedback(const std::string& response) {
     feedback.ok = jsonCodeIsOk(status["code"]);
     const auto& code = status["code"];
     if (code.IsInt() || code.IsString()) {
-        feedback.registration_required = jsonCodeMatches(code, 8, "INSTANCE_NOT_EXIST")
-                                         || jsonCodeMatches(code, 9, "SERVER_NOT_LEADER")
-                                         || jsonCodeMatches(code, 10, "NODE_NOT_REGISTERED");
+        feedback.registration_required = jsonCodeRequiresRegistration(code);
         feedback.snapshot_required = jsonCodeMatches(code, 14, "SNAPSHOT_REQUIRED");
     }
     const char* snapshot_key = document.HasMember("snapshot_required") ? "snapshot_required" :
@@ -113,9 +117,7 @@ KVCMReportFeedback parseKVCMReportFeedback(const std::string& response) {
                 feedback.ok = false;
                 feedback.snapshot_required = feedback.snapshot_required || jsonCodeMatches(item, 14, "SNAPSHOT_REQUIRED");
                 feedback.registration_required = feedback.registration_required
-                    || jsonCodeMatches(item, 8, "INSTANCE_NOT_EXIST")
-                    || jsonCodeMatches(item, 9, "SERVER_NOT_LEADER")
-                    || jsonCodeMatches(item, 10, "NODE_NOT_REGISTERED");
+                                                 || jsonCodeRequiresRegistration(item);
             }
         }
     }

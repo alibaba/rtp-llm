@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -131,8 +132,7 @@ public:
         }
         const auto& config = client_config_map.at("");
         default_query_type_ = config->default_query_type();
-        const int query_type = kv_cache_config_.kvcm_query_type == 0 ? default_query_type_ :
-                                                                     kv_cache_config_.kvcm_query_type;
+        const int query_type = resolveQueryType(kv_cache_config_.kvcm_query_type);
         if (default_query_type_ < 1 || default_query_type_ > 4 || query_type < 1 || query_type > 4
             || kv_cache_config_.kvcm_min_replica_count < 0
             || (query_type == 3 && kv_cache_config_.kvcm_sw_size <= 0)
@@ -182,7 +182,7 @@ public:
         }
         const auto trace_id       = nextTraceId("match", match_trace_sequence_);
         const auto query_type = static_cast<kv_cache_manager::QueryType>(
-            kv_cache_config_.kvcm_query_type == 0 ? default_query_type_ : kv_cache_config_.kvcm_query_type);
+            resolveQueryType(kv_cache_config_.kvcm_query_type));
         bool success = false;
         kv_cache_manager::Locations locations;
         bool positional = query_type == kv_cache_manager::QueryType::QT_BATCH_GET
@@ -387,6 +387,10 @@ public:
         }
     }
 
+    bool ownsAllocator() const {
+        return parallelism_config_.tp_rank == 0;
+    }
+
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
         if (request.op() != REMOTE_OPERATION_READ && request.op() != REMOTE_OPERATION_WRITE) {
             return executeMetadata(request, response);
@@ -413,6 +417,10 @@ public:
     }
 
 private:
+    int resolveQueryType(int query_type) const {
+        return query_type == 0 ? default_query_type_ : query_type;
+    }
+
     static bool isPayloadBackend(int type) {
         return type == 1 || type == 2 || type == 3 || type == 4 || type == 5 || type == 9;
     }
@@ -488,7 +496,7 @@ private:
             return false;
         }
         const auto& query = request.metadata();
-        const int type = query.query_type() == 0 ? default_query_type_ : query.query_type();
+        const int type = resolveQueryType(query.query_type());
         if (type < 1 || type > 4 || query.detail_level() < 0 || query.p2p_host_count() < 0) {
             return false;
         }
@@ -506,7 +514,7 @@ private:
         if (query.block_mask().has_bool_masks()) {
             mask = kv_cache_manager::BlockMaskVector(query.block_mask().bool_masks().values().begin(),
                                                       query.block_mask().bool_masks().values().end());
-        } else if (query.block_mask().has_offset()) {
+        } else if (query.block_mask().info_case() == RemoteBlockMaskPB::kOffset) {
             if (query.block_mask().offset() < 0) {
                 return false;
             }
@@ -812,10 +820,20 @@ private:
                            grpc::CompletionQueue*                      queue) {
             return stub->AsyncExecuteFunction(context.get(), request, queue);
         };
-        auto result =
-            broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout_ms, rpc_call);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        // A gRPC deadline completes the client while a peer may still use its
+        // physical blocks. Keep the controller's pins until peer I/O drains.
+        auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+            requests, timeout_ms, rpc_call, /*enforce_rpc_deadline=*/false);
         RTP_LLM_CHECK_WITH_INFO(result != nullptr, "KVCM broadcast dispatch failed");
-        result->waitDone();
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        const bool in_budget = remaining > 0 && result->waitDone(static_cast<int>(remaining));
+        if (!in_budget) {
+            RTP_LLM_LOG_WARNING("KVCM broadcast exceeded %d ms; waiting for peer I/O to drain", timeout_ms);
+            result->waitDone();
+        }
+        RTP_LLM_CHECK_WITH_INFO(in_budget, "KVCM broadcast timed out after peer I/O drained, timeout_ms=%d", timeout_ms);
         RTP_LLM_CHECK_WITH_INFO(result->success(), "KVCM broadcast transfer failed");
         return result->responses();
     }
@@ -913,6 +931,7 @@ void KVCMStorageBackend::shutdownImpl() noexcept {
 bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
     try {
         StorageWriteTask pins;
+        std::vector<DeviceBlockPoolPtr> follower_pools;
         if ((request.op() == REMOTE_OPERATION_READ || request.op() == REMOTE_OPERATION_WRITE)
             && request.group_tags_size() == request.block_ids_size()
             && request.block_ids_size() == request.uris_size()) {
@@ -921,10 +940,19 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
             transfer.handles.resize(request.block_ids_size());
             for (int i = 0; i < request.block_ids_size(); ++i) {
                 transfer.handles[i].push_back({request.group_tags(i), request.block_ids(i)});
+                if (!impl_->ownsAllocator()) {
+                    const auto& pool = devicePool(request.group_tags(i));
+                    RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(request.block_ids(i))
+                                               && pool->validBlock(request.block_ids(i)),
+                                            "KVCM follower received an invalid physical block [%d]", request.block_ids(i));
+                    follower_pools.push_back(pool);
+                }
             }
-            // Every executing rank owns its pins until its SDK has drained.
-            // The coordinator's RPC deadline cannot release these references.
-            pins = prepareWrite(std::move(transfer));
+            // Only the controller owns allocation metadata. Followers retain
+            // their backing pools while the controller pins the shared IDs.
+            if (impl_->ownsAllocator()) {
+                pins = prepareWrite(std::move(transfer));
+            }
         }
         return impl_->execute(request, response);
     } catch (const std::exception& error) {

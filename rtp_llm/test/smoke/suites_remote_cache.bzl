@@ -1,9 +1,5 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
-load("//deps:kvcm.bzl", "KVCM_SOURCE_LOCK")
-
-_PACE_SOURCE_ID = ":".join([KVCM_SOURCE_LOCK[key] for key in [
-    "internal_commit", "opensource_commit", "pace_commit",
-]])
+load("@rtp_deps//:kvcm.bzl", "KVCM_SOURCE_ID")
 
 def _pace_smoke(name, task_info, smoke_args, gpu_type="L20_CU13", backend="pace",
                 kvcm_envs=[], kill_remote=False, metadata_check=True, sleep_time_qr=10,
@@ -16,19 +12,15 @@ def _pace_smoke(name, task_info, smoke_args, gpu_type="L20_CU13", backend="pace"
         tags = ["requires-pace", "no-remote"],
         data = [
             "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
-            "@remote_kv_cache_manager_server//:KVCM_SOURCE_ID",
-            "@remote_kv_cache_manager_server//:KVCM_ARTIFACT_SHA256",
-            "@remote_kv_cache_manager_server//:etc/default_startup_config.json",
-            "@remote_kv_cache_manager_client_rpm//:KVCM_SOURCE_ID",
-            "@remote_kv_cache_manager_client_rpm//:KVCM_ARTIFACT_SHA256",
-            "@remote_kv_cache_manager_client_rpm//:KVCM_CLIENT_VARIANT",
+            "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_metadata",
+            "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_metadata",
         ],
         kvcm_envs = ["PACE_REQUIRED=true", "PACE_BACKEND=" + backend,
                      "PACE_METADATA_CHECK=" + str(metadata_check),
                      "PACE_MODEL_EVENTS_CHECK=" + str(model_events_check), "KVCM_LOG_LEVEL=DEBUG"] + kvcm_envs,
         kill_remote = kill_remote,
         sleep_time_qr = sleep_time_qr,
-        test_env = {"KVCM_EXPECTED_SOURCE_ID": _PACE_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cuda"},
+        test_env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cuda"},
         env_inherit = ["KVCM_PACE_FIXTURE"],
         deps = ["//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto", "//rtp_llm/cpp/model_rpc:grpcio"],
     )

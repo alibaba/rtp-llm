@@ -1,82 +1,112 @@
 # KVCM remote cache
 
-## 版本与制品
+## Dependencies and artifacts
 
-来源 commit 统一记录在 `deps/kvcm.bzl`，已包含本次 SDK／内源适配。客户端 RPM 和服务器包须从同一内源／开源 SDK／真实 PACE 组合产出；RPM 必须包含匹配的头文件和动态库。新增虚接口与 StartWrite 参数改变 ABI，旧 RPM 和开源 PACE stub 均不兼容。
+`deps/kvcm.bzl` pins the internal KVCM, public SDK/Manager, and PACE revisions. Build the client RPM and server archive from the same source combination, with matching SDK headers and shared libraries. The updated virtual interfaces and StartWrite arguments change the ABI; legacy RPMs and the public PACE stub are incompatible.
 
-默认制品记录尚未填写。可填写真实 URL、SHA256 和按 `_source_id()` 拼接的来源标识，或通过 `--repo_env=KVCM_ARTIFACT_MANIFEST=/absolute/path/MANIFEST.json` 提供配套制品清单，客户端使用 `--repo_env=KVCM_CLIENT_VARIANT=cpu|cuda` 选择。门禁同时检查配套来源和下载哈希；不接受旧 RPM。详见 [P1 smoke](kvcm_remote_cache_smoke.md)。
+The built-in artifact records are empty. Supply URLs, SHA256 hashes, and the matching `KVCM_SOURCE_ID` in those records, or pass `--repo_env=KVCM_ARTIFACT_MANIFEST=/absolute/path/MANIFEST.json`. Client and server selection follows the BUILD configuration:
 
-使用上述 commit 构建无需再应用已合入的补丁；基线至提交的 diff 归档仅用于审计。
+| Build configuration | Client manifest variant | Server manifest variant |
+|---|---|---|
+| CUDA 13 x86 | `cuda130_x86` | `server_cuda130` |
+| CUDA 13 ARM | `cuda130_arm` | `server_cuda130` |
+| Other configurations | `cpu` or `cuda`, selected by `--repo_env=KVCM_CLIENT_VARIANT=cpu\|cuda` | `server` |
 
-## 配置
+CUDA 13 variants are selected by Bazel and are not overridden by `KVCM_CLIENT_VARIANT`. Each artifact record must contain the corresponding platform build; absent variants fail instead of falling back to another architecture.
 
-| 参数／环境变量 | 默认 | 语义 |
+The manifest requires exactly one entry for the selected client variant and its server variant. All source IDs must match `internal_commit:opensource_commit:pace_commit` from the source lock:
+
+```json
+{
+  "source_id": "<internal commit>:<opensource commit>:<pace commit>",
+  "artifacts": [
+    {"variant": "cpu", "source_id": "<same source_id>", "url": "<CPU RPM URL>", "sha256": "<SHA256>"},
+    {"variant": "cuda", "source_id": "<same source_id>", "url": "<CUDA RPM URL>", "sha256": "<SHA256>"},
+    {"variant": "server", "source_id": "<same source_id>", "url": "<server archive URL>", "sha256": "<SHA256>"},
+    {"variant": "cuda130_x86", "source_id": "<same source_id>", "url": "<CUDA 13 x86 RPM URL>", "sha256": "<SHA256>"},
+    {"variant": "cuda130_arm", "source_id": "<same source_id>", "url": "<CUDA 13 ARM RPM URL>", "sha256": "<SHA256>"},
+    {"variant": "server_cuda130", "source_id": "<same source_id>", "url": "<CUDA 13 server archive URL>", "sha256": "<SHA256>"}
+  ]
+}
+```
+
+Bazel validates the source IDs and download hashes. The server archive must also contain the matching `KVCM_SOURCE_ID` marker.
+
+SDK packaging must isolate its internal autil/gRPC symbols from RTP to avoid symbol interposition and duplicate destruction. Link with `-Wl,-Bsymbolic` and a version script exporting only the KVCM API (`_ZN16kv_cache_manager*`, `_ZNK16kv_cache_manager*`, `_ZTVN16kv_cache_manager*`, `_ZTIN16kv_cache_manager*`, and `_ZTSN16kv_cache_manager*`), with all other symbols local. Update the RPM hash in the manifest after relinking.
+
+## Configuration
+
+| Argument / environment variable | Default | Meaning |
 |---|---:|---|
-| `kvcm_default_query_type`／`KVCM_DEFAULT_QUERY_TYPE` | 2 | Instance 默认模式：1=batch、2=prefix、3=SWA、4=Mamba |
-| `kvcm_query_type`／`KVCM_QUERY_TYPE` | 0 | 请求模式；0 使用 Instance 默认值 |
-| `kvcm_sw_size`／`KVCM_SW_SIZE` | 0 | SWA 窗口大小，单位为 cache key／block，SWA 模式必须大于 0 |
-| `kvcm_read_backend_type`／`KVCM_READ_BACKEND_TYPE` | 0 | 0=普通查询；1=3fs、2=mooncake、3=PACE DRAM、4=NFS、5=VCNS 3fs、9=PACE SSD |
-| `kvcm_min_replica_count`／`KVCM_MIN_REPLICA_COUNT` | 0 | StartWrite 最少可读副本数；0 由服务端按 1 处理 |
+| `kvcm_default_query_type` / `KVCM_DEFAULT_QUERY_TYPE` | 2 | Instance default: 1=batch, 2=prefix, 3=SWA, 4=Mamba |
+| `kvcm_query_type` / `KVCM_QUERY_TYPE` | 0 | Request mode; 0 uses the Instance default |
+| `kvcm_sw_size` / `KVCM_SW_SIZE` | 0 | SWA window in cache keys/blocks; must be positive for SWA |
+| `kvcm_read_backend_type` / `KVCM_READ_BACKEND_TYPE` | 0 | 0=regular query; 1=3fs, 2=mooncake, 3=PACE DRAM, 4=NFS, 5=VCNS 3fs, 9=PACE SSD |
+| `kvcm_min_replica_count` / `KVCM_MIN_REPLICA_COUNT` | 0 | Minimum readable replicas for StartWrite; the server treats 0 as 1 |
 
-`KVCM_CLIENT_CONFIG` 的显式 JSON 优先于自动生成的 Instance 配置，`default_query_type` 缺省为 2；请求仍可通过 `kvcm_query_type` 覆盖。每个 backend 绑定一个默认 Instance。按后端查询固定 batch，此时显式 `kvcm_query_type` 只允许 0 或 1；普通 Mamba／SWA 查询使用 `kvcm_read_backend_type=0`。
+Explicit `KVCM_CLIENT_CONFIG` JSON takes precedence over the generated Instance configuration; an omitted `default_query_type` defaults to 2. Requests can override it with `kvcm_query_type`. Each backend binds to one default Instance. Backend-specific queries use batch mode and accept only `kvcm_query_type=0` or `1`; use `kvcm_read_backend_type=0` for regular Mamba/SWA queries.
 
-`--kvcm_model_sdk_config`（环境变量 `RECO_MODEL_SDK_CONFIG`）分别配置单一 DRAM 或 SSD：
+Set `--kvcm_model_sdk_config` (environment variable `RECO_MODEL_SDK_CONFIG`) for one data backend:
 
-- DRAM：`[{"type":"pace","sdk_log_level":"INFO"}]`。
-- SSD：`[{"type":"pace_ssd","sdk_log_level":"INFO"}]`；读取可设 `kvcm_read_backend_type=9`，服务端须用 `ST_TAIRMEMPOOL_SSD`、`media_type=5`。
+- DRAM: `[{"type":"pace","sdk_log_level":"INFO"}]`.
+- SSD: `[{"type":"pace_ssd","sdk_log_level":"INFO"}]`. Reads can select `kvcm_read_backend_type=9`; the server must use `ST_TAIRMEMPOOL_SSD` and `media_type=5`.
 
-存储地址／媒体由服务端 storage config 下发。正常写入候选只配置所选数据后端；事件存储单列在 `event_report_storage_candidates`。
+The server storage configuration supplies addresses and media. Regular write candidates should contain only the selected data backend. Configure event storage separately in `event_report_storage_candidates`.
 
-PACE 固定到本次核实的 `master`（`770bd4df`），支持 TENT TCP 数据传输。默认仍使用旧 AFT；需要 TCP 的 provider／consumer sidecar 均须使用该版本并配置：
+The pinned PACE revision (`770bd4df`) supports TENT TCP transfers, but defaults to AFT. To use TCP, both provider and consumer sidecars must use that revision and receive:
 
 ```sh
 export TAIR_MEMPOOL_ENABLE_TENT=1
 export MC_TENT_CONF='{"transports":{"tcp":{"enable":true},"aft":{"enable":false},"rdma":{"enable":false},"barex":{"enable":false},"shm":{"enable":false}},"policy":[{"name":"tcp_default","segment_type":"memory","transports":["tcp"]}]}'
 ```
 
-TENT 使用 RDMA 设备槽位，`--no_rdma` 会将其禁用。以上环境变量须注入 sidecar；更新 SDK 依赖本身不会切换传输协议。
+TENT uses an RDMA device slot, so `--no_rdma` disables it. Updating the SDK dependency alone does not change the transport.
 
-SWA／batch 的 miss 保留原 key 位置。复用要求：FULL 完整前缀、LINEAR 最终状态、SWA 完整窗口，并满足所有 TP rank；缺失 URI 不算命中。混合 LINEAR＋SWA 可先写 FULL＋LINEAR 部分，读取仍要求 SWA 完整。原有 IOV、多 pool/group、FULL＋LINEAR、同布局 TP 沿用。
+Batch/SWA misses preserve their original key positions. Reuse requires a complete FULL prefix, final LINEAR state, and complete SWA window across every TP rank; missing URIs do not count as hits. Mixed LINEAR+SWA writes may store the FULL+LINEAR portion first, but reads still require the complete SWA window. Existing IOV, pool/group, FULL+LINEAR, and same-layout TP support is retained.
 
-自动 Instance identity 包含默认模式和注册 group 配置，升级可能切换缓存命名空间；自定义 ID 须与服务端现存配置一致。`KVCacheConfig` pickle 为版本 8／74 项，读取兼容 1～7，进程间须同一构建。
+Generated Instance identities include the default query mode and registered group configuration, so an upgrade may select a new cache namespace. Custom IDs must match the existing server configuration. `KVCacheConfig` uses pickle version 8 with 74 items and reads versions 1-7; communicating processes must use the same build.
 
-## RPC 入口
+## RPC interface
 
-`RpcService/ExecuteFunction` → `KVCacheManager::executeFunction` → `KVCMStorageBackend::execute`，只接受 TP0、本 backend 的 Instance；SDK 失败返回非 OK RPC 状态。
+Metadata requests follow `RpcService/ExecuteFunction` -> `KVCacheManager::executeFunction` -> `KVCMStorageBackend::execute`. They must target TP0 and use this backend's Instance. Payload I/O runs on the corresponding TP rank. SDK errors return a non-OK RPC status.
 
-| `RemoteOperationRequestPB.op` | SDK 方法 | 返回 |
+| `RemoteOperationRequestPB.op` | SDK method | Result |
 |---|---|---|
-| `REMOTE_OPERATION_MATCH_LOCATION_LEN` | `MatchLocationLen` | `matched_blocks`，单位为 block |
-| `REMOTE_OPERATION_MATCH_META` | `MatchMeta` | `locations`、原始 `metas` 字符串 |
-| `REMOTE_OPERATION_REMOVE_CACHE` | `RemoveCache` | 成功／失败 |
-| `REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND` | `GetCacheLocationsByBackend` | key 对齐的 `backend_locations`，含空项、type、spec size、URI |
-| `REMOTE_OPERATION_GET_HOST_CACHE_STATE` | `GetHostCacheState` | host、本地长度、P2P 拉取及最终长度 |
-| `REMOTE_OPERATION_MATCH_LOCATION` | `MatchLocation` | 原始位置，batch／SWA 保留空项 |
+| `REMOTE_OPERATION_MATCH_LOCATION_LEN` | `MatchLocationLen` | `matched_blocks`, in blocks |
+| `REMOTE_OPERATION_MATCH_META` | `MatchMeta` | `locations` and the original `metas` string |
+| `REMOTE_OPERATION_REMOVE_CACHE` | `RemoveCache` | Success or failure |
+| `REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND` | `GetCacheLocationsByBackend` | Key-aligned `backend_locations`, including empty entries, type, spec size, and URI |
+| `REMOTE_OPERATION_GET_HOST_CACHE_STATE` | `GetHostCacheState` | Hosts, local length, P2P fetch length, and final length |
+| `REMOTE_OPERATION_MATCH_LOCATION` | `MatchLocation` | Original locations, preserving empty batch/SWA entries |
 
-protobuf JSON 示例：
+Example protobuf JSON:
 
 ```json
 {"remote_request":{"op":"REMOTE_OPERATION_MATCH_LOCATION_LEN","trace_id":"cache-length","metadata":{"query_type":2,"block_keys":[101,102,103]}}}
 ```
 
-`metadata` 支持 token、offset／bool mask、窗口、detail level、backend、spec name、medium、P2P host count。backend 查询只支持 batch，非空 spec-name 列表须与 key 一一对应；host-state 只支持 prefix／Mamba，提供元数据查询。
+`metadata` accepts tokens, offset/bool masks, window size, detail level, backend, spec names, medium, and P2P host count. Backend queries support batch mode only; nonempty spec-name lists must align with the keys. Host-state queries support prefix and Mamba modes and return metadata.
 
-设置 `kvcm_read_backend_type` 后，位置经 group／rank 映射进入 TP payload 请求，URI 交给 `TransferClient::LoadKvCaches`。事件 URI 仅描述位置，不作为本次 payload 后端。
+With `kvcm_read_backend_type` set, locations are mapped by group/rank into TP payload requests, and their URIs are passed to `TransferClient::LoadKvCaches`. Event URIs describe locations and are not used as payload backends by this integration.
 
-## I/O 契约
+## I/O lifetime
 
-RTP 要求 `sdk_config.drain_on_timeout=true`：deadline 阻止排队 I/O，已提交任务收尾后才释放调用方引用。SDK 默认预算 12s、TP 广播 15s、PACE 内部同步兜底 10s，起点不同；排队及 drain 可能使返回超出外层预算。每个执行 rank 持本地 block pin 至 SDK 返回。其他后端的底层取消能力仍受 SDK 契约限制，尤其是 Mooncake soft timeout。
+RTP requires `sdk_config.drain_on_timeout=true`: the deadline prevents queued I/O from starting, while submitted work finishes before caller references are released. The SDK, TP broadcast, and PACE internal synchronous fallback use default budgets of 12s, 15s, and 10s, respectively, with different start times. Queuing and draining can exceed the outer budget. If a backend never returns, the call, its block references, and shutdown continue waiting.
 
-写入按 offset／bool mask 映射原 key，actual URI 必须同序回填 spec；失败走 FinishWrite 中止，空 session 尽力关闭，失败由服务端短时过期兜底。PACE fallback 保留 hostname：DRAM 沿用 `PREFER_LOCAL`（0），避免媒体值 2 碰撞旧 `ONLY_REMOTE`；SSD 用 `LOC_DEFAULT | MEDIA_TYPE_LOCALSSD`（5）。
+The controller rank retains allocation pins until every peer payload RPC completes. Followers do not maintain the controller's allocation bookkeeping; they validate physical block ranges and retain the backing pool until local SDK I/O returns. Broadcast timeouts remain failures, but references are released only after peer completion. Cancellation remains subject to the backend contract, especially for Mooncake soft timeouts: SDK future completion alone does not guarantee that a backend has stopped accessing buffers.
 
-## 服务端事件配置
+Writes map offset/bool masks back to the original keys and fill actual URIs into specs in the same order. Failed writes abort through FinishWrite; empty sessions are closed on a best-effort basis, with server expiry as a fallback. PACE fallback preserves the hostname. DRAM uses `PREFER_LOCAL` (0) to avoid colliding with the legacy `ONLY_REMOTE` value 2; SSD uses `LOC_DEFAULT | MEDIA_TYPE_LOCALSSD` (5).
 
-Publisher 状态机、完整性和拓扑限制见 [事件上报](backend/kv_cache_event_publisher.md)。对应 storage 必须放入 Instance Group 的 `event_report_storage_candidates`：
+## Server event configuration
+
+See [KV cache event publisher](backend/kv_cache_event_publisher.md) for publisher lifecycle and topology limits. Add the event storage to the Instance Group's `event_report_storage_candidates`:
 
 ```json
 {"global_unique_name":"rtp_hbm_events","storage_type":"ST_EVENT_REPORT_L1P5","event_report":{"heartbeat_timeout_ms":30000,"cleanup_grace_ms":300000,"liveness_check_interval_ms":5000,"snapshot_min_interval_ms":1000},"check_storage_available_when_open":false}
 ```
 
-## 验收边界
+## Supported scope
 
-本补丁仅经静态审查，未编译、未测试或运行真实 PACE I/O。新增 P1 smoke 入口与覆盖边界见 [P1 smoke](kvcm_remote_cache_smoke.md)；实际 ABI、超时／DMA／TP 时序和端到端响应仍待运行验收。
+The integration supports SDK query/management interfaces, backend-specific reads, replica controls, same-layout TP payload routing, and cache event reporting. It uses the existing DEVICE block IOV/group layout. RTP CPU/HOST-source writes, zero-copy, asymmetric TP/CP, and GDR are outside this integration.
+
+Models require matching client/server artifacts and an attention backend and page size supported by the target GPU. Publisher topology limits are documented in [KV cache event publisher](backend/kv_cache_event_publisher.md).

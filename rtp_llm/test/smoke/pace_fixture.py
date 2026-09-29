@@ -8,14 +8,29 @@ from urllib.request import urlopen
 
 def runfile(repository, relative):
     root = Path(os.environ["TEST_SRCDIR"])
-    candidates = [
-        root / repository / relative,
-        root / os.environ["TEST_WORKSPACE"] / "external" / repository / relative,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    raise RuntimeError(f"Missing runfile: {repository}/{relative}")
+    repositories = {
+        "remote_kv_cache_manager_client_rpm": [
+            "remote_kv_cache_manager_client_rpm",
+            "remote_kv_cache_manager_client_rpm_cuda130_x86",
+            "remote_kv_cache_manager_client_rpm_cuda130_arm",
+        ],
+        "remote_kv_cache_manager_server": [
+            "remote_kv_cache_manager_server",
+            "remote_kv_cache_manager_server_cuda130",
+        ],
+    }.get(repository, [repository])
+    candidates = {
+        candidate.resolve()
+        for repo in repositories
+        for candidate in (
+            root / repo / relative,
+            root / os.environ["TEST_WORKSPACE"] / "external" / repo / relative,
+        )
+        if candidate.exists()
+    }
+    if len(candidates) != 1:
+        raise RuntimeError(f"Expected one selected runfile: {repository}/{relative}, found {len(candidates)}")
+    return candidates.pop()
 
 
 def require_ok(response):
@@ -47,7 +62,7 @@ class PaceFixture:
         variant = runfile("remote_kv_cache_manager_client_rpm", "KVCM_CLIENT_VARIANT").read_text().strip()
         expected_variant = os.environ.get("KVCM_SMOKE_CLIENT_VARIANT")
         if expected_variant and variant != expected_variant:
-            raise RuntimeError(f"This smoke requires --repo_env=KVCM_CLIENT_VARIANT={expected_variant}")
+            raise RuntimeError(f"This smoke requires a {expected_variant} SDK; select the matching build configuration and artifact")
         if backend not in ("pace", "pace_ssd"):
             raise ValueError("PACE_BACKEND must be pace or pace_ssd")
         domain = self.config.get("domain", "")

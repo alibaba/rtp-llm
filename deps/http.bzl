@@ -1,5 +1,5 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
-load("//deps:kvcm.bzl", "kvcm_deps")
+load(":kvcm.bzl", "kvcm_deps")
 
 def clean_dep(dep):
     return str(Label(dep))

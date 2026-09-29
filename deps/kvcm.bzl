@@ -1,20 +1,30 @@
 """Pinned KVCM/PACE sources and the paired binary artifact gate."""
 
 # The SDK changes virtual interfaces. The April RPM cannot provide this ABI.
-# Populate both artifact records only after packaging these source commits.
+# Populate artifact records only after packaging these source commits.
 KVCM_SOURCE_LOCK = {
     "internal_commit": "32dc3162ec4f9f981617f8d82f9696a4faa2fe5b",
     "opensource_commit": "6015fca48a091dc18ea9497518138cb58959c3f2",
     "pace_commit": "770bd4df361f86cd937f9144e910d202e1a7401f",
 }
 
+KVCM_SOURCE_ID = ":".join([KVCM_SOURCE_LOCK[key] for key in [
+    "internal_commit", "opensource_commit", "pace_commit",
+]])
+
 KVCM_CLIENT_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
 KVCM_SERVER_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
+KVCM_CLIENT_CUDA130_X86_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
+KVCM_CLIENT_CUDA130_ARM_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
+KVCM_SERVER_CUDA130_ARTIFACT = {"urls": [], "sha256": "", "source_id": ""}
 
-def _source_id():
-    return ":".join([KVCM_SOURCE_LOCK[key] for key in [
-        "internal_commit", "opensource_commit", "pace_commit",
-    ]])
+def _client_variant(ctx):
+    if ctx.attr.client_variant:
+        return ctx.attr.client_variant
+    variant = ctx.os.environ.get("KVCM_CLIENT_VARIANT", "cuda")
+    if variant not in ["cpu", "cuda"]:
+        fail("KVCM_CLIENT_VARIANT must be cpu or cuda")
+    return variant
 
 def _artifact_from_manifest(ctx):
     manifest_path = ctx.os.environ.get("KVCM_ARTIFACT_MANIFEST", "")
@@ -23,12 +33,12 @@ def _artifact_from_manifest(ctx):
     manifest = json.decode(ctx.read(ctx.path(manifest_path)))
     if manifest.get("source_id") != ctx.attr.expected_source_id:
         fail("KVCM_ARTIFACT_MANIFEST does not match KVCM_SOURCE_LOCK")
-    variant = ctx.os.environ.get("KVCM_CLIENT_VARIANT", "cuda")
-    if variant not in ["cpu", "cuda"]:
-        fail("KVCM_CLIENT_VARIANT must be cpu or cuda")
-    # Validate the pair even when only the client repository is requested.
+    # A client validates its server pair; platform-specific variants come from BUILD selects.
+    wanted_variants = [ctx.attr.server_variant]
+    if ctx.attr.kind == "client":
+        wanted_variants.append(_client_variant(ctx))
     selected = {}
-    for kind, wanted in [("client", variant), ("server", "server")]:
+    for wanted in wanted_variants:
         matches = [item for item in manifest.get("artifacts", []) if item.get("variant") == wanted]
         if len(matches) != 1:
             fail("KVCM manifest must contain exactly one %s artifact" % wanted)
@@ -38,8 +48,8 @@ def _artifact_from_manifest(ctx):
             len(digest) != 64 or [char for char in digest.elems() if char not in "0123456789abcdef"] or
             not item.get("url")):
             fail("KVCM manifest artifact requires a matching source_id, SHA256 and URL")
-        selected[kind] = {"urls": [item["url"]], "sha256": digest, "source_id": item["source_id"]}
-    return selected[ctx.attr.kind]
+        selected[wanted] = {"urls": [item["url"]], "sha256": digest, "source_id": item["source_id"]}
+    return selected[_client_variant(ctx) if ctx.attr.kind == "client" else ctx.attr.server_variant]
 
 def _kvcm_artifact_impl(ctx):
     artifact = _artifact_from_manifest(ctx)
@@ -52,7 +62,8 @@ def _kvcm_artifact_impl(ctx):
     if ctx.attr.kind == "client":
         ctx.download(url = artifact["urls"], output = "file/kv-cache-manager-client.rpm", sha256 = artifact["sha256"])
         ctx.file("BUILD.bazel", 'exports_files(["KVCM_SOURCE_ID", "KVCM_CLIENT_VARIANT", "KVCM_ARTIFACT_SHA256"])\n')
-        ctx.file("KVCM_CLIENT_VARIANT", ctx.os.environ.get("KVCM_CLIENT_VARIANT", "cuda") + "\n")
+        variant = _client_variant(ctx)
+        ctx.file("KVCM_CLIENT_VARIANT", ("cuda" if variant.startswith("cuda") else variant) + "\n")
         ctx.file("file/BUILD.bazel", """
 filegroup(
     name = "file",
@@ -73,6 +84,8 @@ _kvcm_artifact = repository_rule(
     environ = ["KVCM_ARTIFACT_MANIFEST", "KVCM_CLIENT_VARIANT"],
     attrs = {
         "kind": attr.string(mandatory = True),
+        "client_variant": attr.string(),
+        "server_variant": attr.string(default = "server"),
         "urls": attr.string_list(),
         "sha256": attr.string(),
         "source_id": attr.string(),
@@ -81,15 +94,20 @@ _kvcm_artifact = repository_rule(
 )
 
 def kvcm_deps():
-    for name, kind, artifact in [
-        ("remote_kv_cache_manager_client_rpm", "client", KVCM_CLIENT_ARTIFACT),
-        ("remote_kv_cache_manager_server", "server", KVCM_SERVER_ARTIFACT),
+    for name, kind, client_variant, server_variant, artifact in [
+        ("remote_kv_cache_manager_client_rpm", "client", "", "server", KVCM_CLIENT_ARTIFACT),
+        ("remote_kv_cache_manager_client_rpm_cuda130_x86", "client", "cuda130_x86", "server_cuda130", KVCM_CLIENT_CUDA130_X86_ARTIFACT),
+        ("remote_kv_cache_manager_client_rpm_cuda130_arm", "client", "cuda130_arm", "server_cuda130", KVCM_CLIENT_CUDA130_ARM_ARTIFACT),
+        ("remote_kv_cache_manager_server", "server", "", "server", KVCM_SERVER_ARTIFACT),
+        ("remote_kv_cache_manager_server_cuda130", "server", "", "server_cuda130", KVCM_SERVER_CUDA130_ARTIFACT),
     ]:
         _kvcm_artifact(
             name = name,
             kind = kind,
+            client_variant = client_variant,
+            server_variant = server_variant,
             urls = artifact["urls"],
             sha256 = artifact["sha256"],
             source_id = artifact["source_id"],
-            expected_source_id = _source_id(),
+            expected_source_id = KVCM_SOURCE_ID,
         )

@@ -1,9 +1,109 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <tuple>
+#include <thread>
 
 namespace rtp_llm {
 namespace {
+
+TEST(KVCMMockOnlyFullTest, TPFollowerUsesControllerBlockIdsWithoutLocalAllocationMetadata) {
+    auto environment = makeBackendEnvironment("kvcm_follower_physical_blocks");
+    auto client = std::make_shared<MockClientWrapper>();
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.tp_rank = 1;
+    parallelism.local_rank = 0;
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    auto backend = makeBackend(environment, parallelism, client);
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
+        [&](int layer, const std::string&, int block) {
+            return environment.device_pool->convertIndexToBuffer(layer, block);
+        }));
+    environment.device_pool->decRef(environment.block_id);
+    ASSERT_FALSE(environment.device_pool->isAllocated(environment.block_id));
+    EXPECT_CALL(*client, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
+        .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{})));
+    RemoteOperationRequestPB request;
+    request.set_op(REMOTE_OPERATION_WRITE);
+    request.add_group_tags("default");
+    request.add_block_ids(environment.block_id);
+    request.add_uris("write_uri");
+    RemoteOperationResponsePB response;
+    EXPECT_TRUE(backend->execute(request, response));
+    EXPECT_FALSE(environment.device_pool->isAllocated(environment.block_id));
+    request.set_block_ids(0, static_cast<int32_t>(environment.device_pool->totalBlocksNum() + 1));
+    EXPECT_FALSE(backend->execute(request, response));
+}
+
+TEST(KVCMMockOnlyFullTest, TPWriteTimeoutKeepsControllerPinsUntilPeerIoCompletes) {
+    auto environment = makeBackendEnvironment("kvcm_tp_write_drain");
+    auto client = std::make_shared<MockClientWrapper>();
+    std::promise<void> peer_entered;
+    auto entered = peer_entered.get_future();
+    std::promise<void> release_peer;
+    auto release = release_peer.get_future().share();
+    std::vector<std::shared_ptr<KVCMBroadcastState>> states;
+    std::vector<std::unique_ptr<KVCMBroadcastRpcServer>> servers;
+    std::vector<std::string> addresses;
+    for (size_t rank = 0; rank < 2; ++rank) {
+        auto state = std::make_shared<KVCMBroadcastState>();
+        if (rank == 1) {
+            state->before_reply = [&peer_entered, release] {
+                peer_entered.set_value();
+                EXPECT_EQ(release.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+            };
+        }
+        auto server = std::make_unique<KVCMBroadcastRpcServer>(rank, state);
+        ASSERT_TRUE(server->start());
+        addresses.push_back(server->address());
+        states.push_back(std::move(state));
+        servers.push_back(std::move(server));
+    }
+    auto broadcaster = std::make_shared<BroadcastManager>(addresses);
+    ASSERT_TRUE(broadcaster->init());
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.tp_rank = 0;
+    parallelism.local_rank = 0;
+    KVCacheConfig config;
+    config.kvcm_server_address = "unused-test-address";
+    config.kvcm_put_broadcast_timeout = 20;
+    RuntimeConfig runtime;
+    runtime.model_name = "kvcm_test_model";
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
+        parallelism, SpeculativeExecutionConfig{}, broadcaster, client));
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
+        [&](int layer, const std::string&, int block) {
+            return environment.device_pool->convertIndexToBuffer(layer, block);
+        }));
+    kv_cache_manager::WriteLocation location;
+    location.write_session_id = "drained_timeout";
+    location.block_mask = kv_cache_manager::BlockMaskOffset{0};
+    location.locations = {{{"tp0_Fdefault", "rank0_uri"}, {"tp1_Fdefault", "rank1_uri"}}};
+    EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
+        .WillOnce(Return(std::make_pair(true, location)));
+    EXPECT_CALL(*client, finishWrite(_, _, "drained_timeout", _, _))
+        .WillOnce(Invoke([](const auto&, const auto&, const auto&, const auto& mask, const auto& locations) {
+            EXPECT_TRUE(std::holds_alternative<kv_cache_manager::BlockMaskOffset>(mask));
+            EXPECT_EQ(std::get<kv_cache_manager::BlockMaskOffset>(mask), 0u);
+            EXPECT_TRUE(locations.empty());
+            return true;
+        }));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    environment.device_pool->decRef(environment.block_id);
+    const bool peer_started = entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    EXPECT_TRUE(peer_started);
+    if (peer_started) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        EXPECT_TRUE(environment.device_pool->isAllocated(environment.block_id));
+    }
+    release_peer.set_value();
+    EXPECT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+    EXPECT_FALSE(environment.device_pool->isAllocated(environment.block_id));
+}
 
 TEST(KVCMMockOnlyFullTest, MetadataLengthRpcUsesTheInstanceDefaultAndReturnsTheSdkResult) {
     auto environment = makeBackendEnvironment("kvcm_metadata_length");

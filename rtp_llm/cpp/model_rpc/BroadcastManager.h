@@ -189,7 +189,10 @@ public:
 
     template<typename RequestPB, typename ResponsePB, typename RpcCall>
     std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>>
-    broadcast(const std::vector<RequestPB>& requests, int timeout_ms, const RpcCall& rpc_call) const {
+    broadcast(const std::vector<RequestPB>& requests,
+              int                           timeout_ms,
+              const RpcCall&                rpc_call,
+              bool                          enforce_rpc_deadline = true) const {
         const auto worker_size = worker_addrs_.size();
         if (requests.size() != worker_size) {
             RTP_LLM_LOG_WARNING(
@@ -221,7 +224,9 @@ public:
             ctx->server_addr    = addr;
             ctx->timeout_ms     = timeout_ms;
             ctx->client_context = std::make_shared<grpc::ClientContext>();
-            ctx->client_context->set_deadline(deadline);
+            if (enforce_rpc_deadline) {
+                ctx->client_context->set_deadline(deadline);
+            }
         }
 
         auto result = std::make_shared<ResultT>(std::move(contexts));

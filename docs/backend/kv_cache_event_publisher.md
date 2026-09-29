@@ -1,35 +1,57 @@
-# KV cache 事件上报
+# KV cache event publisher
 
-RTP 可将完整的可复用 HBM 前缀 key 上报给 KVCM。默认 `none` 不创建队列、线程或连接；`kvcm` 启用 reporter。
+RTP-LLM can publish reusable HBM prefix-cache keys directly to KVCM. It is disabled by default: `none` creates no
+queue, worker, or connection; `kvcm` enables publishing.
 
-## 状态语义
+## Semantics
 
-事件使用逻辑 cache key。参与前缀复用的 DEVICE group 均完整且可读、没有未完成 transfer 时才发布；任一必需 group 失效会删除 key。重复 put 和 LRU touch 不产生事件。
+Events describe logical reusable keys, not physical block indices. A key is added only after every DEVICE cache group
+that participates in prefix reuse is complete and matchable, with no pending transfers. Removing any required group
+deletes the key. Duplicate puts and LRU touches do not produce events.
 
-推理线程只做有界非阻塞入队，网络请求在后台执行。队列溢出、请求失败、心跳失败、定期对账以及服务端 `snapshot_required` 会安排完整快照；publisher 失败不会阻塞推理、分配或驱逐。
+Cache mutations only attempt a bounded non-blocking enqueue; network I/O runs on the publisher worker. Queue overflow,
+request failure, heartbeat failure, periodic reconciliation, and the server's `snapshot_required` feedback trigger an
+authoritative snapshot. Publishing is fail-open and never affects allocation, eviction, readiness, or inference responses.
 
-当前 emitter 仅追踪完整 DEVICE 前缀链。虽然新版协议可以表达 FULL／LINEAR 组件，当前快照没有完整 tail-state／HOST／DISK 状态，所以 tail-sparse 和非 DEVICE 可复用组仍禁用。多个 FULL DEVICE group 聚合成一个 HBM spec。
+Only `tp_rank=0` publishes when `pp_size=1`. Pipeline parallelism and CP-sharded KV cache are unsupported because the
+runtime cannot assign an unambiguous external owner and block granularity. Each DP replica needs a distinct
+`KV_CACHE_EVENT_HOST_IP_PORT`; sharing one lets an authoritative snapshot from one replica replace another replica's
+host state. When the value is empty, RTP-LLM derives a per-rank endpoint as
+`server_ip:(start_port + rank_id * worker_info_port_num)`.
 
-只在 `pp_size=1`、`tp_rank=0`、非 CP 分片时发布。每个 DP replica 的 host identity 必须唯一；未填写时由 server IP 和 rank 端口派生。同一 host identity 的快照会替换该 reporter 的全部 medium 状态。
+The emitter tracks complete DEVICE prefix chains only. Tail-sparse and non-DEVICE reusable groups remain disabled
+because snapshots do not include complete tail-state, HOST, or DISK state. Multiple FULL DEVICE groups are aggregated
+into one HBM spec.
 
-## 协议与生命周期
+## KVCM lifecycle
 
-使用 `ST_EVENT_REPORT_L1P5`、medium `hbm` 和含聚合字节 size 的 `event_report://host/hbm?size=...` URI。Instance 显式注册为 prefix 模式。服务端必须配置对应的 L1P5 event storage，并将其加入 Instance Group 的 `event_report_storage_candidates`。
+The publisher registers the instance in prefix mode and registers the node, sends an `EVENT_BLOCK_SNAPSHOT`, then sends
+batched `EVENT_BLOCK_ADD`/`EVENT_BLOCK_DELETE` changes and independent `EVENT_HEARTBEAT` requests. It joins the worker
+before sending best-effort `EVENT_HOST_DOWN` during engine shutdown. Snapshots replace all medium state for that host
+identity; failed snapshot payloads are retained for retry. The endpoint must support snapshot fencing and crash-safe
+commit semantics.
 
-启动注册 Instance／node，提交完整快照，再发送 ADD／DELETE 和独立心跳。失败的快照 payload 保留用于重试。成功或失败响应的 `snapshot_required` 触发对账，`retry_after_ms` 推迟后续数据事件请求（默认最多 5 分钟），心跳独立刷新存活；快照限流保留注册状态，Instance／节点缺失和 leader 错误重新注册。停止时结束工作线程，再尽力发送最终 HOST_DOWN。
+`snapshot_required` triggers reconciliation on both successful and failed responses. `retry_after_ms` delays subsequent
+data-event requests, capped at five minutes by default, while heartbeats continue independently. Snapshot throttling
+preserves registration; missing instances/nodes and leader errors trigger re-registration.
 
-## 配置
+Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and an `event_report://host/hbm?size=...` URI containing the aggregate
+byte size. Configure the corresponding L1P5 event storage on the server and add it to the Instance Group's
+`event_report_storage_candidates`.
 
-参数有对应的大写环境变量。
+## Configuration
 
-| 参数 | 默认 | 语义 |
-|---|---|---|
-| `kv_cache_event_publisher_type` | `none` | `none`／`kvcm` |
-| `kv_cache_event_manager_endpoint` | 空 | KVCM Meta HTTP endpoint |
-| `kv_cache_event_instance_group` | 空 | 回退到 `kvcm_instance_group` |
-| `kv_cache_event_instance_id` | 空 | 与注册配置一致的稳定 Instance ID |
-| `kv_cache_event_host_ip_port` | 自动派生 | 每个 DP replica 唯一的稳定 endpoint |
+Arguments have equivalent upper-case environment variables.
 
-配置非法只禁用 publisher。endpoint 须已解析；当前 reporter 不新增服务发现或自动 leader 切换策略。
+| Argument | Default | Meaning |
+|---|---:|---|
+| `--kv_cache_event_publisher_type` | `none` | `none` or `kvcm` |
+| `--kv_cache_event_manager_endpoint` | empty | KVCM Meta HTTP endpoint |
+| `--kv_cache_event_instance_group` | empty | group; falls back to `kvcm_instance_group` |
+| `--kv_cache_event_instance_id` | empty | stable deployment-level instance ID matching the registration configuration |
+| `--kv_cache_event_host_ip_port` | empty (auto-derived) | stable endpoint; must be unique for every DP replica when `dp_size>1` |
 
-配套制品、pickle 兼容和验收边界见 [KVCM remote cache](../kvcm_remote_cache.md)。
+Invalid configuration disables publishing without disabling inference. The KVCM manager endpoint must already be
+resolved; service discovery and leader switching are outside this version.
+
+See [KVCM remote cache](../kvcm_remote_cache.md) for paired artifacts, pickle compatibility, and supported configurations.

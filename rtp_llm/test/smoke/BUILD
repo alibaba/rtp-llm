@@ -99,22 +99,14 @@ py_library(
     deps = ["//rtp_llm:psutil", "//rtp_llm:requests", "//rtp_llm/test/utils:test_util"],
 )
 
-load("//deps:kvcm.bzl", "KVCM_SOURCE_LOCK")
-
-_KVCM_SMOKE_SOURCE_ID = ":".join([KVCM_SOURCE_LOCK[key] for key in [
-    "internal_commit", "opensource_commit", "pace_commit",
-]])
+load("@rtp_deps//:kvcm.bzl", "KVCM_SOURCE_ID")
 
 _PACE_SMOKE_DATA = [
     ":pace_sdk_smoke",
     ":pace_publisher_smoke",
-    "@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin",
-    "@remote_kv_cache_manager_server//:KVCM_SOURCE_ID",
-    "@remote_kv_cache_manager_server//:KVCM_ARTIFACT_SHA256",
-    "@remote_kv_cache_manager_server//:etc/default_startup_config.json",
-    "@remote_kv_cache_manager_client_rpm//:KVCM_SOURCE_ID",
-    "@remote_kv_cache_manager_client_rpm//:KVCM_ARTIFACT_SHA256",
-    "@remote_kv_cache_manager_client_rpm//:KVCM_CLIENT_VARIANT",
+    "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
+    "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_metadata",
+    "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_metadata",
 ]
 
 py_test(
@@ -124,7 +116,7 @@ py_test(
     deps = [":pace_smoke_fixture"],
     data = _PACE_SMOKE_DATA,
     args = ["--sdk", "$(location :pace_sdk_smoke)", "--publisher", "$(location :pace_publisher_smoke)", "--backend", "pace"],
-    env = {"KVCM_EXPECTED_SOURCE_ID": _KVCM_SMOKE_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cpu"},
+    env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cpu"},
     env_inherit = ["KVCM_PACE_FIXTURE"],
     tags = ["manual", "smoke_case", "no-remote", "requires-pace"],
     timeout = "long",
@@ -138,7 +130,7 @@ py_test(
     deps = [":pace_smoke_fixture"],
     data = _PACE_SMOKE_DATA,
     args = ["--sdk", "$(location :pace_sdk_smoke)", "--publisher", "$(location :pace_publisher_smoke)", "--backend", "pace_ssd"],
-    env = {"KVCM_EXPECTED_SOURCE_ID": _KVCM_SMOKE_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cpu"},
+    env = {"KVCM_EXPECTED_SOURCE_ID": KVCM_SOURCE_ID, "KVCM_SMOKE_CLIENT_VARIANT": "cpu"},
     env_inherit = ["KVCM_PACE_FIXTURE"],
     tags = ["manual", "smoke_case", "no-remote", "requires-pace-ssd"],
     timeout = "long",
