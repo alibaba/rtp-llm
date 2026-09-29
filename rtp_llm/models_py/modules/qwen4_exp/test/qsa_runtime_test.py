@@ -722,6 +722,36 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         torch.testing.assert_close(state_pool[7, 0], raw_keys[1].float())
         torch.testing.assert_close(state_pool[7, 2], raw_keys[3].float())
 
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for target preflight")
+    def test_target_preflight_plan_is_consumed_once(self):
+        self.kv_base = self.kv_base.cuda()
+        self.state_base = self.state_base.cuda()
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
+        q_len = self.RATIO
+        context = self._target_verify_context(q_len=q_len, committed_length=7)
+        indexer = self._decode_indexer()
+        raw_keys = torch.randn(q_len, self.D, dtype=torch.bfloat16, device="cuda")
+        q = torch.randn(q_len, 2, self.D, dtype=torch.bfloat16, device="cuda")
+        original = Qwen4ExpQSARuntimeContext._target_verify_geometry
+        with patch.object(
+            Qwen4ExpQSARuntimeContext,
+            "_target_verify_geometry",
+            autospec=True,
+            side_effect=original,
+        ) as geometry, patch(
+            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            return_value=torch.zeros(q_len, 2, device="cuda"),
+        ):
+            context.validate_before_projection(
+                indexer=indexer, token_count=q_len, device=raw_keys.device
+            )
+            context.select_target_verify_tokens(
+                q, raw_keys, indexer=indexer, rope_config=self.rope_config
+            )
+        self.assertEqual(geometry.call_count, 1)
+        self.assertIsNone(context._target_verify_plan)
+
     @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
     def test_target_verify_never_overwrites_the_committed_partial_group(self):
         self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
