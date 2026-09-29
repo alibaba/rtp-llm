@@ -120,9 +120,25 @@ class Qwen4ExpGatedResidual(nn.Module):
         normed = self._norm(hyper_input)
 
         mix = F.silu(F.linear(normed, self.mix_down) / self.hc_mult)
-        mix = torch.sigmoid(F.linear(mix, self.mix_up))
+        mix_logits = F.linear(mix, self.mix_up)
         branches = (self.hc_mult, self.hidden_size)
-        mixed = (mix.unflatten(-1, branches) * normed.unflatten(-1, branches)).mean(-2)
+        fused_mix = os.environ.get(
+            "RTP_LLM_QWEN4_FUSED_MIX_REDUCE", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        if fused_mix:
+            from rtp_llm.models_py.modules.qwen4_exp.gated_residual_mix_triton import (
+                fused_mix_reduce,
+                is_supported,
+            )
+
+            fused_mix = is_supported(mix_logits, normed, self.hc_mult)
+        if fused_mix:
+            mixed = fused_mix_reduce(mix_logits, normed, self.hc_mult)
+        else:
+            mix = torch.sigmoid(mix_logits)
+            mixed = (
+                mix.unflatten(-1, branches) * normed.unflatten(-1, branches)
+            ).mean(-2)
 
         if self.inject is None:
             return mixed, hyper_input, None
