@@ -631,6 +631,18 @@ def fused_pack_mega_moe_inputs_legacy(
     )
 
 
+def _ordinary_pack_block_m(tokens: int) -> int:
+    block_m_env = os.environ.get("MEGA_MOE_PACK_BLOCK_M")
+    block_m = (
+        int(block_m_env) if block_m_env is not None else (8 if tokens >= 2048 else 2)
+    )
+    if block_m not in (1, 2, 4, 8):
+        raise ValueError(
+            f"invalid MEGA_MOE_PACK_BLOCK_M={block_m}; expected 1, 2, 4, or 8"
+        )
+    return block_m
+
+
 def fused_pack_mega_moe_inputs_optimized(
     x: torch.Tensor,
     weights: torch.Tensor,
@@ -647,12 +659,7 @@ def fused_pack_mega_moe_inputs_optimized(
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     block_k = triton.next_power_of_2(topk)
-    block_m_env = os.environ.get("MEGA_MOE_PACK_BLOCK_M")
-    block_m = int(block_m_env) if block_m_env is not None else (8 if T >= 2048 else 2)
-    if block_m not in (1, 2, 4, 8):
-        raise ValueError(
-            f"invalid MEGA_MOE_PACK_BLOCK_M={block_m}; expected 1, 2, 4, or 8"
-        )
+    block_m = _ordinary_pack_block_m(T)
     grid = (triton.cdiv(T, block_m), triton.cdiv(D, 128))
     _pack_mega_moe_inputs_optimized_kernel[grid](
         x,
@@ -980,3 +987,16 @@ def fused_pack_mega_moe_gate_inputs(
         BLOCK_K=block_k,
         num_warps=4,
     )
+
+
+def mega_moe_input_pack_warmup_token_counts(max_tokens: int) -> list[int]:
+    """Cover ordinary and gate pack tiling using the launchers' own selectors.
+
+    Token count itself is not specialized. Strides/dtypes are supplied by the
+    executor using contiguous SelectTopk outputs and the real symmetric buffer.
+    """
+    representatives = {}
+    for tokens in range(1, max_tokens + 1):
+        signature = (_ordinary_pack_block_m(tokens), _gate_pack_block_m(tokens))
+        representatives.setdefault(signature, tokens)
+    return list(representatives.values())

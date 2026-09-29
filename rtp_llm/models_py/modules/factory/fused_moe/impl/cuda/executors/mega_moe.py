@@ -273,6 +273,20 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._input_packer = get_mega_moe_input_packer()
         self._maybe_warmup_jit_once()
 
+    def _block_m(self, tokens: int) -> int:
+        import deep_gemm
+
+        return int(
+            deep_gemm.get_block_m_for_mega_moe(
+                self.cfg.ep_size,
+                self.cfg.n_routed_experts,
+                self._mega_buf.num_max_tokens_per_rank,
+                tokens,
+                self.cfg.n_activated_experts,
+                "fp8xfp4",
+            )
+        )
+
     def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
         cfg = self.cfg
         # Use the logical model/runtime token cap, not DeepGEMM's internally
@@ -282,20 +296,25 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         override = parse_mega_moe_jit_warmup_tokens_override()
         if override is not None:
+            logging.warning(
+                "[MegaMoE] explicit warmup tokens override automatic JIT coverage"
+            )
             return clamp_token_counts(override, max_tokens_per_rank)
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.n_routed_experts,
-            num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
-            intermediate_hidden=cfg.moe_inter_dim,
-            num_sms=num_sms,
+            get_block_m=self._block_m,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=cfg.warmup_include_capacity,
         )
 
     def _jit_warmup_variant(self) -> tuple:
-        return ()
+        return (
+            self._input_packer.name,
+            os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized"),
+            os.environ.get("MEGA_MOE_PACK_BLOCK_M"),
+        )
 
     def _maybe_warmup_jit_once(self) -> None:
         if not mega_moe_jit_warmup_enabled():
@@ -365,10 +384,35 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 format_token_counts(token_counts),
             )
 
+    def _warmup_gate_payloads(self, tokens, scores, device):
+        cfg = self.cfg
+        local_ids = cfg.local_expert_start + torch.arange(
+            cfg.n_activated_experts, dtype=torch.long, device=device
+        ) % max(cfg.n_local_experts, 1)
+        return [
+            ExpertGatePayload(
+                scores=scores,
+                topk=cfg.n_activated_experts,
+                score_func="sqrtsoftplus",
+                route_scale=cfg.route_scale,
+                bias=torch.zeros(
+                    cfg.n_routed_experts, dtype=torch.float32, device=device
+                ),
+            ),
+            ExpertGatePayload(
+                scores=scores,
+                topk=cfg.n_activated_experts,
+                score_func="sqrtsoftplus",
+                route_scale=cfg.route_scale,
+                input_ids=torch.zeros(tokens, dtype=torch.long, device=device),
+                tid2eid=local_ids.view(1, -1).contiguous(),
+            ),
+        ]
+
     @torch.inference_mode()
     def warmup_jit(self, token_counts: list[int]) -> None:
-        """Compile MegaMoE JIT buckets with synthetic rank-local tokens."""
-        if not mega_moe_jit_warmup_enabled():
+        """Warm local packers first, then execute the pinned DeepGEMM buckets."""
+        if not mega_moe_jit_warmup_enabled() or not token_counts:
             return
         import torch.distributed as dist
 
@@ -376,8 +420,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         device = self._mega_l1_w.device
         max_tokens = max(token_counts)
         x = torch.zeros((max_tokens, cfg.dim), dtype=torch.bfloat16, device=device)
-        weights = torch.zeros(
+        weights = torch.full(
             (max_tokens, cfg.n_activated_experts),
+            1.0 / cfg.n_activated_experts,
             dtype=torch.float32,
             device=device,
         )
@@ -390,47 +435,25 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             dtype=torch.bfloat16,
             device=device,
         )
-        bias = torch.zeros(
-            cfg.n_routed_experts,
-            dtype=torch.float32,
-            device=device,
-        )
-        input_ids = torch.zeros(max_tokens, dtype=torch.long, device=device)
-        tid2eid = local_expert_ids.view(1, -1).contiguous()
-
-        for token_count in token_counts:
-            dist.barrier()
-            self.forward(
-                x[:token_count],
-                weights[:token_count],
-                indices[:token_count],
-            )
-            torch.cuda.synchronize(device)
-            if self.supports_gate_pack:
-                self.forward_gate_pack(
-                    x[:token_count],
-                    ExpertGatePayload(
-                        scores=scores[:token_count],
-                        topk=cfg.n_activated_experts,
-                        score_func="sqrtsoftplus",
-                        route_scale=cfg.route_scale,
-                        bias=bias,
-                    ),
-                )
-                torch.cuda.synchronize(device)
-                self.forward_gate_pack(
-                    x[:token_count],
-                    ExpertGatePayload(
-                        scores=scores[:token_count],
-                        topk=cfg.n_activated_experts,
-                        score_func="sqrtsoftplus",
-                        route_scale=cfg.route_scale,
-                        input_ids=input_ids[:token_count],
-                        tid2eid=tid2eid,
-                    ),
-                )
-                torch.cuda.synchronize(device)
-        dist.barrier()
+        try:
+            for pack_only in (True, False):
+                self._jit_pack_only = pack_only
+                for token_count in token_counts:
+                    if not pack_only and dist.is_initialized():
+                        dist.barrier(group=self._mega_group)
+                    self.forward(
+                        x[:token_count], weights[:token_count], indices[:token_count]
+                    )
+                    if self.supports_gate_pack:
+                        for payload in self._warmup_gate_payloads(
+                            token_count, scores[:token_count], device
+                        ):
+                            self.forward_gate_pack(x[:token_count], payload)
+                    torch.cuda.synchronize(device)
+                if dist.is_initialized():
+                    dist.barrier(group=self._mega_group)
+        finally:
+            self._jit_pack_only = False
 
     def _validate_capacity(self, tokens: int) -> None:
         buf = self._mega_buf
@@ -448,6 +471,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
+        if getattr(self, "_jit_pack_only", False):
+            return
         import deep_gemm
 
         self._maybe_pre_kernel_barrier(tokens)

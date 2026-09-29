@@ -85,6 +85,13 @@ class MegaMoeFp8ImplTest(unittest.TestCase):
                 executor, object(), 1, "cuda:0", shared_expert_gates=object()
             )
             self.assertEqual(kernel.call_count, 5)
+            barrier_calls = executor._maybe_pre_kernel_barrier.call_count
+            executor._jit_pack_only = True
+            mega_moe_fp8.MegaMoeFp8Executor._launch(executor, object(), 1, "cuda:0")
+            self.assertEqual(kernel.call_count, 5)
+            self.assertEqual(
+                executor._maybe_pre_kernel_barrier.call_count, barrier_calls
+            )
 
     def test_warmup_cache_separates_implementations(self):
         executor = mega_moe_fp8.MegaMoeFp8Executor.__new__(
@@ -104,6 +111,9 @@ class MegaMoeFp8ImplTest(unittest.TestCase):
             max_tokens_per_rank=32,
             moe_strategy="mega_moe_fp8",
         )
+        executor.uses_shared_expert_gates = False
+        executor._input_packer = SimpleNamespace(name="fused")
+        executor._mega_buf = SimpleNamespace(num_max_tokens_per_rank=1440)
         executor.warmup_jit = Mock()
         executor._resolve_jit_warmup_token_counts = Mock(return_value=[1, 32])
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
@@ -122,6 +132,13 @@ class MegaMoeFp8ImplTest(unittest.TestCase):
                 executor._maybe_warmup_jit_once()
             self.assertEqual(executor.warmup_jit.call_count, 2)
             self.assertEqual(len(mega_moe._MEGA_MOE_JIT_WARMED_KEYS), 2)
+            os.environ["MEGA_MOE_INPUT_PACKER_IMPL"] = "legacy"
+            executor._maybe_warmup_jit_once()
+            os.environ["MEGA_MOE_PACK_BLOCK_M"] = "1"
+            executor._maybe_warmup_jit_once()
+            executor._mega_buf.num_max_tokens_per_rank = 2880
+            executor._maybe_warmup_jit_once()
+            self.assertEqual(executor.warmup_jit.call_count, 5)
 
 
 if __name__ == "__main__":

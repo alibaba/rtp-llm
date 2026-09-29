@@ -42,7 +42,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.input_packer imp
     get_mega_moe_input_packer,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
-    mega_moe_jit_warmup_enabled,
+    clamp_token_counts,
+    generate_mega_moe_jit_token_counts,
+    parse_mega_moe_jit_warmup_tokens_override,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.snapshot import (
     mega_moe_snapshot_active,
@@ -116,7 +118,50 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         checker.check(mega_moe_fp8_available())
 
     def _jit_warmup_variant(self) -> tuple:
-        return ("fp8", mega_moe_fp8_impl())
+        import os
+
+        return (
+            "fp8",
+            mega_moe_fp8_impl(),
+            self._num_shared_experts,
+            self.uses_shared_expert_gates,
+            self._input_packer.name,
+            os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized"),
+            os.environ.get("MEGA_MOE_PACK_BLOCK_M"),
+            os.environ.get("MEGA_MOE_FP8_RESERVE_SM", "0"),
+            self._mega_buf.num_max_tokens_per_rank,
+        )
+
+    def _block_m(self, tokens: int) -> int:
+        from deep_gemm import mega_fp8
+
+        return int(
+            mega_fp8.get_block_m_for_mega_moe_fp8(
+                self.cfg.ep_size,
+                self.cfg.n_routed_experts,
+                self._mega_buf.num_max_tokens_per_rank,
+                tokens,
+                self.cfg.n_activated_experts,
+            )
+        )
+
+    def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
+        cfg = self.cfg
+        override = parse_mega_moe_jit_warmup_tokens_override()
+        if override is not None:
+            logging.warning(
+                "[MegaMoE FP8] explicit warmup tokens override automatic JIT coverage"
+            )
+            return clamp_token_counts(override, cfg.max_tokens_per_rank)
+        return generate_mega_moe_jit_token_counts(
+            num_ranks=cfg.ep_size,
+            num_experts=cfg.n_routed_experts,
+            num_topk=cfg.n_activated_experts,
+            get_block_m=self._block_m,
+            max_tokens_per_rank=cfg.max_tokens_per_rank,
+            fp8_weights=True,
+            include_cap=cfg.warmup_include_capacity,
+        )
 
     def setup_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         impl = mega_moe_fp8_impl()
@@ -192,30 +237,6 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
             )
         ]
 
-    @torch.inference_mode()
-    def warmup_jit(self, token_counts: list[int]) -> None:
-        if not mega_moe_jit_warmup_enabled() or not token_counts:
-            return
-        cfg = self.cfg
-        device = self._mega_l1_w.device
-        max_tokens = max(token_counts)
-        x = torch.zeros((max_tokens, cfg.dim), dtype=torch.bfloat16, device=device)
-        scores = torch.zeros(
-            (max_tokens, cfg.n_routed_experts),
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        for token_count in token_counts:
-            if dist.is_initialized():
-                dist.barrier()
-            for payload in self._warmup_gate_payloads(
-                token_count, scores[:token_count], device
-            ):
-                self.forward_gate_pack(x[:token_count], payload)
-                torch.cuda.synchronize(device)
-        if dist.is_initialized():
-            dist.barrier()
-
     def _validate_capacity(self, tokens: int) -> None:
         if tokens > self._mega_buf.num_max_tokens_per_rank:
             raise RuntimeError(
@@ -236,6 +257,8 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         diagnostic_inputs=None,
         **kwargs,
     ):
+        if getattr(self, "_jit_pack_only", False):
+            return
         import deep_gemm
         from deep_gemm import mega_fp8
 

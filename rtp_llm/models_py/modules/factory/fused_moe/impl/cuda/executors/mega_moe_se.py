@@ -204,14 +204,15 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         override = parse_mega_moe_se_jit_warmup_tokens_override()
         if override is not None:
+            logging.warning(
+                "[MegaMoE SE] explicit warmup tokens override automatic JIT coverage"
+            )
             return clamp_token_counts(override, max_tokens_per_rank)
         return generate_mega_moe_se_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.n_routed_experts,
-            num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
-            intermediate_hidden=cfg.moe_inter_dim,
-            num_sms=num_sms,
+            get_block_m=self._block_m,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=cfg.warmup_include_capacity,
         )
@@ -234,6 +235,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             return
         warmup_key = (
             "mega_moe_se",
+            self._jit_warmup_variant(),
             cfg.ep_size,
             cfg.n_routed_experts,
             cfg.n_local_experts,
@@ -301,6 +303,8 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
+        if getattr(self, "_jit_pack_only", False):
+            return
         import deep_gemm
 
         self._maybe_pre_kernel_barrier(tokens)
