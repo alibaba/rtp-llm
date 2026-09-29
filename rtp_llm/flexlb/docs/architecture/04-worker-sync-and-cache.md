@@ -215,7 +215,9 @@ hash 不同）和 `querySucceeded`。空匹配是成功结果，查询失败的�
 - 配置解析：`WorkerBlockHashConfigResolver` 每 1 分钟从存活 PREFILL（退化 PDFUSION）worker
   的 `blockSize` + `blockHashLookaheadTokens` 刷新，不可用时保留上次有效值。
 - 执行：`BlockHashExecutor` 专用线程池（默认 core 8 / max 32 / 队列 16384，
-  `flexlb.block-hash.*` 可调），出队等待/执行耗时指标，完成后 `publishOn(parallel)` 不占
+  `flexlb.block-hash.*` 可调），首次订阅服务端哈希计算时才创建线程池、队列和 Scheduler；
+  直接复用非空 `block_cache_keys` 时不创建，定时监控也不触发创建，未初始化时不上报线程池状态。
+  出队等待/执行耗时指标，完成后 `publishOn(parallel)` 不占
   hash 线程。非空 `block_cache_keys` 直接采用，不再计算；未提供 key 但提供 `input_ids` 时由
   Master 按当前 worker hash 配置生成；两者都为空时按零 cache block 继续路由，以兼容不足一个
   完整 block 的请求。
