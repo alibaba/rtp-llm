@@ -1223,6 +1223,13 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self.assertIsNone(captured.prepared_writes)
         self.assertFalse(captured.tentative_committed)
 
+    def test_side_cache_requires_exact_cuda_graph_batch(self):
+        self.assertTrue(self.model.requires_exact_cuda_graph_batch())
+        self.model.ple_layers = nn.ModuleDict()
+        self.assertFalse(self.model.requires_exact_cuda_graph_batch())
+        self.model.config.enable_qwen4_qsa = True
+        self.assertTrue(self.model.requires_exact_cuda_graph_batch())
+
     def test_graph_physical_blocks_replay_uses_updated_table_and_pages(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required for Graph replay")
