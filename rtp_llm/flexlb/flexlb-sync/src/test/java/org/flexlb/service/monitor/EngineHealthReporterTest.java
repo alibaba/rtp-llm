@@ -87,7 +87,7 @@ class EngineHealthReporterTest {
         reporter.init();
 
         verify(monitor).register("app.cache.hit.comparison.input.tokens", FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        verify(monitor).register("app.cache.hit.comparison.actual.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.actual.tokens", FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.delta.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.kvcm.local.delta.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
