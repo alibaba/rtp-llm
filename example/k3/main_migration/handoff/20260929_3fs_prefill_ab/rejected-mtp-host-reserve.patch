@@ -1,0 +1,32 @@
+diff --git a/rtp_llm/models_py/modules/kimi_k3/mla_verify.py b/rtp_llm/models_py/modules/kimi_k3/mla_verify.py
+index f26c9da28..8703ff7a0 100644
+--- a/rtp_llm/models_py/modules/kimi_k3/mla_verify.py
++++ b/rtp_llm/models_py/modules/kimi_k3/mla_verify.py
+@@ -12,6 +12,13 @@ from rtp_llm.utils.model_weight import W
+ _workspaces = {}
+ 
+ 
++def _reserve_mla_capacity_lengths(input_lengths, has_prefix, max_seq_len):
++    lengths_host = input_lengths.to(device="cpu", dtype=torch.int32)
++    if not has_prefix:
++        lengths_host = torch.ones_like(lengths_host)
++    return max_seq_len - lengths_host, lengths_host
++
++
+ class KimiK3MlaVerifyImpl(MlaImplBase):
+     """Decode and compact native-MTP queries, with fixed replay metadata."""
+ 
+@@ -63,8 +70,11 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
+         # The shared planner otherwise reserves reuse-page metadata only for
+         # the capture prefix. A later page crossing must not reallocate it.
+         self.block_tables_h.zero_()
+-        reserve_lengths = inputs.input_lengths if inputs.prefix_lengths is not None and inputs.prefix_lengths.numel() else torch.ones_like(inputs.input_lengths)
+-        reserve_prefix = torch.full_like(reserve_lengths, self.max_seq_len) - reserve_lengths
++        reserve_prefix, reserve_lengths = _reserve_mla_capacity_lengths(
++            inputs.input_lengths,
++            inputs.prefix_lengths is not None and inputs.prefix_lengths.numel() > 0,
++            self.max_seq_len,
++        )
+         self.fmha_params.fill_params(
+             reserve_prefix, torch.empty(0, dtype=torch.int32), reserve_lengths,
+             self.block_tables_h, self.native.page_size, False,

@@ -1,0 +1,157 @@
+{
+  "timing_basis": "median over eight requests of maximum rank GPU kernel span/union/sum; phases mapped by GPU launch correlation to enclosing CPU target/draft scopes",
+  "fixed_token_ids_sha256": "97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee",
+  "input_tokens_submitted": 65536,
+  "max_output_tokens": 8,
+  "runs": {
+    "integrated_r2": {
+      "prefill_host": 114,
+      "decode_host": 115,
+      "model_layers": 4,
+      "ranks": 8,
+      "traced_requests": 8,
+      "phases": {
+        "prefill": {
+          "gpu_span_ms": 134.84719970703125,
+          "gpu_union_ms": 127.93622216796874,
+          "gpu_kernel_sum_ms": 127.9762475,
+          "idle_span_minus_union_ms": 6.9109775390625146
+        },
+        "target": {
+          "gpu_span_ms": 71.61141357421874,
+          "gpu_union_ms": 67.36555615234374,
+          "gpu_kernel_sum_ms": 67.3942745,
+          "idle_span_minus_union_ms": 4.245857421875002
+        },
+        "draft": {
+          "gpu_span_ms": 63.387165527343754,
+          "gpu_union_ms": 60.53927490234375,
+          "gpu_kernel_sum_ms": 60.54989449999999,
+          "idle_span_minus_union_ms": 2.847890625000005
+        }
+      },
+      "missing_launch": 0,
+      "ambiguous_launch": 0,
+      "request_audit": {
+        "passed": true,
+        "warmup_count": 12,
+        "profiled_count": 16,
+        "replacement_characters_observed": 0,
+        "mtp_execution_claim": true,
+        "decode_handoff_length_claim": true,
+        "errors": []
+      }
+    },
+    "feat_r12": {
+      "prefill_host": 114,
+      "decode_host": 115,
+      "model_layers": 4,
+      "ranks": 8,
+      "traced_requests": 8,
+      "phases": {
+        "prefill": {
+          "gpu_span_ms": 132.08178369140626,
+          "gpu_union_ms": 129.43091162109374,
+          "gpu_kernel_sum_ms": 130.1958115,
+          "idle_span_minus_union_ms": 2.6508720703125164
+        },
+        "target": {
+          "gpu_span_ms": 70.94599169921875,
+          "gpu_union_ms": 69.21039404296874,
+          "gpu_kernel_sum_ms": 69.710122,
+          "idle_span_minus_union_ms": 1.7355976562500075
+        },
+        "draft": {
+          "gpu_span_ms": 60.624126953125,
+          "gpu_union_ms": 60.06984912109375,
+          "gpu_kernel_sum_ms": 60.335629,
+          "idle_span_minus_union_ms": 0.5542778320312465
+        }
+      },
+      "missing_launch": 0,
+      "ambiguous_launch": 0,
+      "request_audit": {
+        "passed": true,
+        "warmup_count": 11,
+        "profiled_count": 16,
+        "mtp_execution_claim": false,
+        "decode_handoff_length_claim": false,
+        "errors": []
+      },
+      "mtp_draft_proof": "each of eight rank traces has eight target_model_forward and eight draft_model_forward scopes"
+    },
+    "hostreserve_r3": {
+      "prefill_host": 114,
+      "decode_host": 115,
+      "model_layers": 4,
+      "ranks": 8,
+      "traced_requests": 8,
+      "phases": {
+        "prefill": {
+          "gpu_span_ms": 135.36792431640623,
+          "gpu_union_ms": 128.23339111328124,
+          "gpu_kernel_sum_ms": 128.2717245,
+          "idle_span_minus_union_ms": 7.134533203124988
+        },
+        "target": {
+          "gpu_span_ms": 71.749404296875,
+          "gpu_union_ms": 67.5246357421875,
+          "gpu_kernel_sum_ms": 67.553045,
+          "idle_span_minus_union_ms": 4.2247685546875005
+        },
+        "draft": {
+          "gpu_span_ms": 63.668424316406245,
+          "gpu_union_ms": 60.77595117187499,
+          "gpu_kernel_sum_ms": 60.78460750000001,
+          "idle_span_minus_union_ms": 2.8924731445312517
+        }
+      },
+      "missing_launch": 0,
+      "ambiguous_launch": 0,
+      "request_audit": {
+        "passed": true,
+        "warmup_count": 12,
+        "profiled_count": 16,
+        "replacement_characters_observed": 0,
+        "mtp_execution_claim": true,
+        "decode_handoff_length_claim": true,
+        "errors": []
+      }
+    }
+  },
+  "vllm_prior": {
+    "prefill_host": 111,
+    "decode_host": 112,
+    "source_commit": "3df4ae153eb385e27b52f26c81f8edb9e20b9984",
+    "target_gpu_scope_span_median_ms": 111.38633,
+    "traced_requests": 3,
+    "no_native_mtp": true,
+    "routed_moe_format": "MXFP4"
+  },
+  "hostreserve_flow": {
+    "passed": true,
+    "checked": 11,
+    "errors": []
+  },
+  "archives": {
+    "hostreserve-flow-r5-114115.tar.gz": {
+      "sha256": "45bc609f48ce2b2beef7a211840805d99ba326d69489cdee05a132e22f092001",
+      "bytes": 48910
+    },
+    "hostreserve-r3-114115.tar.gz": {
+      "sha256": "fa4d565235950a5cadbcb95119e554ba61af1f459f6a8ad0e0afb3f63097cd10",
+      "bytes": 7101299
+    },
+    "integrated-r2-114115.tar.gz": {
+      "sha256": "b2bbd66f35275ec653378ab40ad14365cfa2395309c683f3100974b3ead67fbc",
+      "bytes": 7163219
+    }
+  },
+  "limitations": [
+    "feat target computes 65533 tokens despite 65536 submitted; integration computes 65536",
+    "feat uses FP8 value/scale NCCL for some target collectives; fixed integration contract requires BF16 NCCL",
+    "vLLM target scope annotation differs and its routed MoE uses MXFP4; no direct all-model win claim",
+    "four-layer outputs do not establish semantic correctness for the 93-layer model",
+    "hostreserve candidate reverted after slower same-host PD timeline"
+  ]
+}
