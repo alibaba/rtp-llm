@@ -12,6 +12,15 @@ numerical checks with generation-prefill CUDA graphs. It asserts real replay,
 clearing between embedding and token-only requests. Both variants also compare
 three-token decode outputs exactly.
 
+`input_embedding_reuse_cache_rpc_test` and
+`input_embedding_reuse_cache_prefill_cuda_graph_rpc_test` additionally verify
+embedding-content cache identity, isolation from token-only requests, full and
+partial prefix reuse, cache-switch behavior, and full prompt hidden-state
+recomputation. They compare logits against equivalent token-only requests with
+the same cached prefix length. The graph variant requires replay for cold
+requests and the existing `prefix_cache_not_supported` eager fallback on hits.
+All four variants are included in the H20 dense smoke suite.
+
 Supply a local pretrained Qwen2.5-0.5B-Instruct checkpoint when running outside
 the CI model mount:
 

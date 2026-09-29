@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "torch/all.h"
 
@@ -12,7 +13,11 @@ public:
     CompleteTokenIds(const CompleteTokenIds& other, bool share = false, int shift_token_num = 0);
 
 public:
-    void init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num = 0);
+    void         init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num = 0);
+    absl::Status initInputEmbeddingHashes(const GenerateInput& input);
+
+    // Hash cache identity without changing token IDs used by the model, sampler or response.
+    int64_t cacheHash(int batch_id, int64_t seed, int offset, int length) const;
 
     std::vector<int> completeTokenIdsVec(int batch_id);
     std::vector<int> commonCompleteTokenIdsVec(int batch_id);
@@ -80,6 +85,7 @@ private:
     torch::Tensor                           complete_token_ids_;
     std::shared_ptr<const V41RequestInputs> v41_inputs_;
     int                                     canonical_offset_ = 0;
+    std::vector<std::pair<int, uint64_t>> input_embedding_hashes_;
 };
 
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
