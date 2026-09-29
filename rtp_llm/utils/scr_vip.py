@@ -73,6 +73,13 @@ def validate_device(address: str) -> None:
         for item in row.get("addr_info", [])
     ):
         raise RuntimeError(f"SCR interface {device} does not own {address}")
+    ready_socket = Path(
+        os.environ.get("RTP_LLM_SCR_NETWORK_READY_SOCKET", "/scr-share/snm/daemon.sock")
+    )
+    if not ready_socket.is_socket():
+        raise RuntimeError(
+            f"SCR network manager has not published readiness socket {ready_socket}"
+        )
     # Binding checks the current namespace, including after CRIU restore.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind((address, 0))

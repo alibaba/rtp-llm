@@ -72,6 +72,14 @@ class ScrVipTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "does not own"):
                 scr_vip.validate_device("22.0.1.3")
 
+    def test_interface_alone_does_not_prove_network_ready(self):
+        addresses = json.dumps([{"addr_info": [{"local": "22.0.1.3"}]}])
+        with patch.object(
+            scr_vip.subprocess, "check_output", return_value=addresses
+        ), patch.object(scr_vip.Path, "is_socket", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "readiness socket"):
+                scr_vip.validate_device("22.0.1.3")
+
     def test_non_uniform_world_fails(self):
         with self.assertRaises(ValueError):
             scr_vip.read_topology(5, 2)
