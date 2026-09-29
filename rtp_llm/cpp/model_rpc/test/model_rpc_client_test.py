@@ -12,6 +12,17 @@ mock_ops = MagicMock()
 mock_comm = MagicMock()
 mock_nccl_op = MagicMock()
 mock_compute_ops = MagicMock()
+
+
+class MockRoleType(Enum):
+    PDFUSION = 0
+    PREFILL = 1
+    DECODE = 2
+    VIT = 3
+    FRONTEND = 4
+
+
+mock_ops.RoleType = MockRoleType
 mock_comm.nccl_op = mock_nccl_op
 mock_ops.comm = mock_comm
 mock_ops.compute_ops = mock_compute_ops
@@ -27,6 +38,7 @@ from typing import AsyncGenerator
 from unittest import TestCase, main
 
 import torch
+
 from rtp_llm.config.generate_config import (
     GenerateConfig,
     RoleAddr,
@@ -432,29 +444,41 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(elements[0]["type"], "tag")
         self.assertEqual(elements[1]["type"], "json_schema")
 
-    @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()
-        generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False)
+        generate_config = GenerateConfig(
+            using_hf_sampling=False,
+            is_streaming=True,
+            return_incremental=False,
+            aux_info=True,
+        )
         input = GenerateInput(
             token_ids=torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]),
             generate_config=generate_config,
+            request_id=123,
+            mm_inputs=[],
         )
+
         res = asyncio.run(self._run(client, input))
+
         self.assertEqual(len(res), 3)
-        self.assertEqual(list(res[0].output_ids.shape), [1, 1])
-        self.assertEqual(res[0].output_ids.tolist(), [[0]])
-        self.assertEqual(res[0].finished, False)
-        self.assertEqual(res[0].aux_info.iter_count, 2)
+        self.assertEqual(list(res[0].output_ids.shape), [1])
+        self.assertEqual(res[0].output_ids.tolist(), [0])
+        self.assertFalse(res[0].finished)
+        self.assertEqual(res[0].aux_info.iter_count, 1)
         self.assertEqual(res[0].aux_info.output_len, 1)
 
-        self.assertEqual(list(res[1].output_ids.shape), [1, 2])
-        self.assertEqual(res[1].output_ids.tolist(), [[0, 1]])
-        self.assertEqual(res[1].finished, False)
-        self.assertEqual(res[1].aux_info.iter_count, 3)
+        self.assertEqual(list(res[1].output_ids.shape), [2])
+        self.assertEqual(res[1].output_ids.tolist(), [0, 1])
+        self.assertFalse(res[1].finished)
+        self.assertEqual(res[1].aux_info.iter_count, 2)
         self.assertEqual(res[1].aux_info.output_len, 2)
 
-        self.assertEqual(res[2].finished, True)
+        self.assertEqual(res[2].output_ids.tolist(), [0, 1])
+        self.assertTrue(res[2].finished)
+        self.assertEqual(res[2].aux_info.iter_count, 2)
+        self.assertEqual(res[2].aux_info.output_len, 2)
+        self.assertEqual(res[2].input_ids.tolist(), [[1, 2, 3, 4, 5, 6, 7, 8]])
 
     def test_generate_stream_with_logits_index(self):
         client = FakeModelRpcClient()
@@ -553,24 +577,56 @@ class ModelRpcClientTest(TestCase):
             input_pb.request_info.request_id, "4bf92f3577b34da6a3ce929d0e0e4736"
         )
 
-    def test_enqueue_fetches_response_when_master_already_enqueued(self):
+    class _ResponseIterator:
+        def __init__(self, responses):
+            self._responses = iter(responses)
+            self.responses_seen = 0
+            self.cancelled = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                response = next(self._responses)
+            except StopIteration as error:
+                raise StopAsyncIteration from error
+            self.responses_seen += 1
+            return response
+
+        def cancel(self):
+            self.cancelled = True
+
+    @staticmethod
+    def _make_response(finished: bool, token_id: int) -> GenerateOutputsPB:
+        response = GenerateOutputsPB()
+        output = response.flatten_output
+        output.finished.append(finished)
+        output.output_ids.data_type = TensorPB.DataType.INT32
+        output.output_ids.shape.extend([1, 1])
+        output.output_ids.int32_data = struct.pack("<i", token_id)
+        return response
+
+    @staticmethod
+    def _role_addr(role: RoleType, host: str, port: int) -> RoleAddr:
+        return RoleAddr(role=role, ip=host, http_port=0, grpc_port=port)
+
+    def test_enqueue_uses_configured_address_and_generate_stream(self):
         client = ModelRpcClient(
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
             decode_entrance=False,
         )
-        client._channel_pool = _FakeChannelPool()
-        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        client._channel_pool.get = AsyncMock(return_value=object())
+        response_iterator = self._ResponseIterator([self._make_response(True, 11)])
+        stub = MagicMock()
+        stub.GenerateStreamCall.return_value = response_iterator
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(
-                timeout_ms=1000,
-                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
-            ),
+            generate_config=GenerateConfig(timeout_ms=1000),
             request_id=321,
             mm_inputs=[],
-            enqueued_by_master=True,
         )
 
         with patch(
@@ -580,24 +636,32 @@ class ModelRpcClientTest(TestCase):
             responses = asyncio.run(self._run(client, input_py))
 
         self.assertEqual(len(responses), 1)
-        self.assertEqual(client._channel_pool.targets, ["prefill-worker:9000"])
-        self.assertEqual(len(stub.fetch_calls), 1)
-        self.assertEqual(stub.fetch_calls[0][0].request_id, 321)
-        self.assertEqual(stub.fetch_calls[0][1]["timeout"], 1.0)
-        self.assertEqual(stub.generate_calls, [])
+        self.assertEqual(responses[0].output_ids.tolist(), [11])
+        client._channel_pool.get.assert_awaited_once_with("worker:9000")
+        request_pb = stub.GenerateStreamCall.call_args.args[0]
+        self.assertIsInstance(request_pb, GenerateInputPB)
+        self.assertEqual(request_pb.request_id, 321)
+        self.assertEqual(stub.GenerateStreamCall.call_args.kwargs, {"timeout": 1.0})
+        self.assertTrue(response_iterator.cancelled)
 
-    def test_enqueue_uses_generate_stream_without_master_enqueue(self):
+    def test_enqueue_routes_prefill_role_to_generate_stream(self):
         client = ModelRpcClient(
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
             decode_entrance=False,
         )
-        client._channel_pool = _FakeChannelPool()
-        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
+        client._channel_pool.get = AsyncMock(return_value=object())
+        stub = MagicMock()
+        stub.GenerateStreamCall.return_value = self._ResponseIterator(
+            [self._make_response(True, 12)]
+        )
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(timeout_ms=1000),
+            generate_config=GenerateConfig(
+                timeout_ms=1000,
+                role_addrs=[self._role_addr(RoleType.PREFILL, "prefill-worker", 9001)],
+            ),
             request_id=322,
             mm_inputs=[],
         )
@@ -609,11 +673,44 @@ class ModelRpcClientTest(TestCase):
             responses = asyncio.run(self._run(client, input_py))
 
         self.assertEqual(len(responses), 1)
-        self.assertEqual(len(stub.generate_calls), 1)
-        self.assertEqual(stub.generate_calls[0][0].request_id, 322)
-        self.assertEqual(stub.fetch_calls, [])
+        client._channel_pool.get.assert_awaited_once_with("prefill-worker:9001")
+        stub.GenerateStreamCall.assert_called_once()
 
-    def test_enqueue_cancels_fetch_stream_on_early_close(self):
+    def test_enqueue_routes_decode_role_for_decode_entrance(self):
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=True,
+        )
+        client._channel_pool.get = AsyncMock(return_value=object())
+        stub = MagicMock()
+        stub.GenerateStreamCall.return_value = self._ResponseIterator(
+            [self._make_response(True, 13)]
+        )
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                role_addrs=[
+                    self._role_addr(RoleType.PREFILL, "prefill-worker", 9001),
+                    self._role_addr(RoleType.DECODE, "decode-worker", 9002),
+                ]
+            ),
+            request_id=323,
+            mm_inputs=[],
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        client._channel_pool.get.assert_awaited_once_with("decode-worker:9002")
+        self.assertEqual(stub.GenerateStreamCall.call_args.kwargs, {})
+
+    def test_enqueue_cancels_generate_stream_on_early_close(self):
         async def run_and_close():
             gen = client.enqueue(input_py)
             first = await gen.__anext__()
@@ -626,102 +723,58 @@ class ModelRpcClientTest(TestCase):
             max_rpc_timeout_ms=0,
             decode_entrance=False,
         )
-        client._channel_pool = _FakeChannelPool()
-        stub = _RoutingStub(
-            fetch_responses=[
-                _make_response(finished=False),
-                _make_response(finished=True),
-            ]
+        client._channel_pool.get = AsyncMock(return_value=object())
+        response_iterator = self._ResponseIterator(
+            [self._make_response(False, 14), self._make_response(True, 15)]
         )
+        stub = MagicMock()
+        stub.GenerateStreamCall.return_value = response_iterator
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(
-                timeout_ms=1000,
-                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
-            ),
-            request_id=323,
+            generate_config=GenerateConfig(timeout_ms=1000),
+            request_id=324,
             mm_inputs=[],
-            enqueued_by_master=True,
         )
 
         with patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
             return_value=stub,
         ):
-            asyncio.run(run_and_close())
+            first = asyncio.run(run_and_close())
 
-        self.assertTrue(stub.fetch_iterator.cancelled)
+        self.assertFalse(first.generate_outputs[0].finished)
+        self.assertTrue(response_iterator.cancelled)
+        self.assertEqual(response_iterator.responses_seen, 1)
 
-    def test_enqueue_fetch_uses_prefill_when_decode_entrance(self):
-        async def run_and_close():
-            gen = client.enqueue(input_py)
-            await gen.__anext__()
-            await gen.aclose()
-
-        client = ModelRpcClient(
-            addresses=["worker:9000"],
-            client_config={},
-            max_rpc_timeout_ms=0,
-            decode_entrance=True,
-        )
-        client._channel_pool = _FakeChannelPool()
-        stub = _RoutingStub(fetch_responses=[_make_response(finished=False)])
-        input_py = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(
-                timeout_ms=1000,
-                role_addrs=[
-                    _prefill_role_addr("prefill-worker", 9000),
-                    _decode_role_addr("decode-worker", 9001),
-                ],
-            ),
-            request_id=325,
-            mm_inputs=[],
-            enqueued_by_master=True,
-        )
-
-        with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-            return_value=stub,
-        ):
-            asyncio.run(run_and_close())
-
-        self.assertEqual(client._channel_pool.targets, ["prefill-worker:9000"])
-        self.assertEqual(len(stub.fetch_calls), 1)
-
-    def test_enqueue_does_not_cancel_after_finished_response_is_seen(self):
-        async def run_and_close_after_finished():
-            gen = client.enqueue(input_py)
-            first = await gen.__anext__()
-            self.assertTrue(first.generate_outputs[0].finished)
-            await gen.aclose()
-
+    def test_enqueue_delivers_finished_response_and_cleans_up_stream(self):
         client = ModelRpcClient(
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
             decode_entrance=False,
         )
-        client._channel_pool = _FakeChannelPool()
-        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        client._channel_pool.get = AsyncMock(return_value=object())
+        response_iterator = self._ResponseIterator([self._make_response(True, 16)])
+        stub = MagicMock()
+        stub.GenerateStreamCall.return_value = response_iterator
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(
-                timeout_ms=1000,
-                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
-            ),
-            request_id=324,
+            generate_config=GenerateConfig(timeout_ms=1000),
+            request_id=325,
             mm_inputs=[],
-            enqueued_by_master=True,
         )
 
         with patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
             return_value=stub,
         ):
-            asyncio.run(run_and_close_after_finished())
+            responses = asyncio.run(self._run(client, input_py))
 
-        self.assertFalse(stub.fetch_iterator.cancelled)
+        self.assertEqual(len(responses), 1)
+        self.assertTrue(responses[0].finished)
+        self.assertEqual(responses[0].output_ids.tolist(), [16])
+        self.assertTrue(response_iterator.cancelled)
+        self.assertEqual(response_iterator.responses_seen, 1)
 
     def test_enqueue_serializes_input_once(self):
         class EmptyResponseIterator:
