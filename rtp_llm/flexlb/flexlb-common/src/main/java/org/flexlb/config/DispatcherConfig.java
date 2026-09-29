@@ -3,12 +3,15 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Per-Prefill concurrency: batches for BATCH, requests for NON_BATCH. */
+/**
+ * Per-worker concurrency limits for dispatch decisions.
+ */
 @Getter
 @Setter
 public final class DispatcherConfig {
 
     public static final int DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER = 2;
+    public static final int DEFAULT_MAX_INFLIGHT_PER_ENCODER_WORKER = Integer.MAX_VALUE;
     public static final int DEFAULT_FETCH_ATTACH_TIMEOUT_MS = 3_000;
 
     public enum Type {
@@ -18,6 +21,7 @@ public final class DispatcherConfig {
 
     private Type type = Type.BATCH;
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
+    private int maxInflightPerEncoderWorker = DEFAULT_MAX_INFLIGHT_PER_ENCODER_WORKER;
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;
 
@@ -44,6 +48,10 @@ public final class DispatcherConfig {
         }
         if (maxInflightPerPrefillWorker <= 0) {
             throw new ConfigValidationException("dispatcher.maxInflightPerPrefillWorker",
+                    "must be greater than zero");
+        }
+        if (maxInflightPerEncoderWorker <= 0) {
+            throw new ConfigValidationException("dispatcher.maxInflightPerEncoderWorker",
                     "must be greater than zero");
         }
         if (fetchAttachTimeoutMs <= 0) {

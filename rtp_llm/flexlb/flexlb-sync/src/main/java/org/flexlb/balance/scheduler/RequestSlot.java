@@ -1210,6 +1210,8 @@ public final class RequestSlot {
                 diagnostics = Map.of("cause", message);
             } else if (item != null && item.prefillEp() != null) {
                 diagnostics = item.prefillEp().queueWaitDiagnostics();
+            } else if (requestPhase == RequestPhase.ENCODER) {
+                diagnostics = Map.of("cause", "waiting for Encoder placement");
             } else if (globalQueue != null) {
                 diagnostics = globalQueue.waitDiagnostics();
             } else {

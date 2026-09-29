@@ -167,7 +167,9 @@ UniConfig / Nacos 的 v1 部分更新示例：
 公共 schema 当前为 version 1，按责任分区：
 
 - `scheduler`：`DIRECT` / `QUEUE`；QUEUE 拥有 ordering、capacity 和 lifecycle。
-- `dispatcher`：`BATCH` / `NON_BATCH`。
+- `dispatcher`：`BATCH` / `NON_BATCH`。QUEUE 模式可用
+  `maxInflightPerEncoderWorker` 限制每台 Encoder 的在途请求数；未配置时不设额外上限，
+  不影响 DIRECT 或未配置 Encoder 的模型。
 - `router`：角色 availability、execution estimator、selector、cache affinity 和
   group selector。
 - `workerRegistry`：worker health 与 cache-status 刷新策略。
