@@ -1013,6 +1013,8 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self.model = qwen4_exp.Qwen4ExpModel.__new__(qwen4_exp.Qwen4ExpModel)
         nn.Module.__init__(self.model)
         self.model.ple_layers = nn.ModuleDict({"1": self.ple})
+        self.model._ple_target_transaction = None
+        self.model._ple_graph_target_transactions = {}
         self.model.kv_cache = _Cache(self)
         self.model.config = SimpleNamespace(
             special_tokens=SimpleNamespace(eos_token_id=7)
@@ -1172,6 +1174,54 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             self.state_base[[1, 2]].view_as(expected_state), expected_state
         )
         torch.testing.assert_close(self.ctx_base[[3, 4]], decode_ids.view(2, 1))
+
+    def test_target_graph_transaction_survives_replay_commit_and_rollback(self):
+        prefixes = (self._PAGE - 1, self._PAGE)
+        query_len = 5
+        self._seed_target_history(prefixes)
+        ids = torch.tensor([[4, 5, 6, 8, 9], [3, 4, 5, 6, 8]], dtype=torch.long)
+        hyper = torch.randn(2, query_len, _HC * _HIDDEN, dtype=torch.bfloat16)
+        inputs = self._target_inputs(prefixes, query_len)
+
+        # Capture warmup must not leave an active transaction behind.
+        self.model._apply_ple(1, hyper.flatten(0, 1), ids.flatten(), inputs)
+        self.model.clear_speculative_target_graph_capture()
+        self.assertIsNone(self.model._ple_target_transaction)
+
+        self.model._apply_ple(1, hyper.flatten(0, 1), ids.flatten(), inputs)
+        self.model.save_speculative_target_graph_capture(2)
+        captured = self.model._ple_graph_target_transactions[2]
+        self.assertIsNone(self.model._ple_target_transaction)
+        with self.assertRaisesRegex(RuntimeError, "missing for replay batch"):
+            self.model.activate_speculative_target_graph_replay(1)
+
+        state_before = self.state_base.clone()
+        context_before = self.ctx_base.clone()
+        self.model.activate_speculative_target_graph_replay(2)
+        with self.assertRaisesRegex(RuntimeError, "still active"):
+            self.model.activate_speculative_target_graph_replay(2)
+        self.model.prepare_speculative_target_commit(
+            torch.tensor([1, 5], dtype=torch.int32)
+        )
+        self.model.finish_speculative_target_commit(True)
+        self.model.finish_speculative_target_commit(False)
+        torch.testing.assert_close(self.state_base, state_before)
+        torch.testing.assert_close(self.ctx_base, context_before)
+        self.assertIsNone(captured.prepared_writes)
+        self.assertFalse(captured.commit_started)
+
+        # A second replay selects the same graph-owned stage after the first
+        # invocation has released its transient undo buffers.
+        self.model.activate_speculative_target_graph_replay(2)
+        self.model.prepare_speculative_target_commit(
+            torch.tensor([2, 3], dtype=torch.int32)
+        )
+        self.model.finish_speculative_target_commit(True)
+        self.model.finalize_speculative_target_commit()
+        self.assertIsNone(self.model._ple_target_transaction)
+        self.assertIs(self.model._ple_graph_target_transactions[2], captured)
+        self.assertIsNone(captured.prepared_writes)
+        self.assertFalse(captured.tentative_committed)
 
     def test_target_verify_commit_finalize_and_next_decode_match_baseline(self):
         prefixes = (self._PAGE - 1, self._PAGE)
