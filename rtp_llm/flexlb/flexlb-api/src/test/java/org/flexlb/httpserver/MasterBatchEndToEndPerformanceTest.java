@@ -28,7 +28,6 @@ import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -432,7 +431,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return new EngineHealthReporter(
                 new NoOpFlexMonitor(),
                 constructorOnlyCacheMetricsReporter,
-                mock(CacheMatchConfiguration.class, withSettings().stubOnly()),
                 grpcClient,
                 constructorOnlyLoopResources,
                 engineWorkerStatus);

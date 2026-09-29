@@ -4,9 +4,7 @@ import io.netty.channel.EventLoopGroup;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -47,11 +45,9 @@ class EngineHealthReporterTest {
 
     private final FlexMonitor monitor = mock(FlexMonitor.class);
     private final CacheMetricsReporter cacheMetricsReporter = mock(CacheMetricsReporter.class);
-    private final CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
     private final EngineGrpcClient engineGrpcClient = mock(EngineGrpcClient.class);
     private final LoopResources loopResources = mock(LoopResources.class);
     private final WorkerDirectory workerDirectory = mock(WorkerDirectory.class);
-    private final LocalStandbyConfig localStandbyConfig = new LocalStandbyConfig();
 
     private EngineHealthReporter reporter;
 
@@ -60,10 +56,8 @@ class EngineHealthReporterTest {
         when(loopResources.onServer(true)).thenReturn(mock(EventLoopGroup.class));
         when(loopResources.onServerSelect(true)).thenReturn(mock(EventLoopGroup.class));
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(mock(EventLoopGroup.class));
-        when(cacheMatchConfiguration.isLocalStandbyEnabled()).thenReturn(true);
-        when(cacheMatchConfiguration.getLocalStandbyConfig()).thenReturn(localStandbyConfig);
         reporter = new EngineHealthReporter(
-                monitor, cacheMetricsReporter, cacheMatchConfiguration, engineGrpcClient,
+                monitor, cacheMetricsReporter, engineGrpcClient,
                 loopResources, workerDirectory);
     }
 
@@ -103,7 +97,6 @@ class EngineHealthReporterTest {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.actual.ratio",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register("app.cache.local.standby.block.size", FlexMetricType.GAUGE);
     }
 
     @Test
@@ -437,14 +430,13 @@ class EngineHealthReporterTest {
     }
 
     @Test
-    void shouldReportLocalStandbyBlockSizeWithoutLegacyCacheStatus() {
-        localStandbyConfig.setBlockSize(4096);
+    void shouldNotReportLocalStandbyBlockSizeFromWorkerStatus() {
         WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL);
 
         reporter.reportStatusCheckerSuccess("test-model", workerStatus, null, 0, 0);
 
-        verify(monitor).report("app.cache.local.standby.block.size", FlexMetricTags.of(
-                "model", "test-model", "engineIp", "10.0.0.1:8080", "role", "PREFILL"), 4096.0);
+        verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
+                any(FlexMetricTags.class), anyDouble());
     }
 
     @Test
@@ -474,8 +466,7 @@ class EngineHealthReporterTest {
     }
 
     @Test
-    void shouldReportConfiguredLocalStandbyBlockSize() {
-        localStandbyConfig.setBlockSize(4096);
+    void shouldNotReportLocalStandbyBlockSizeFromCacheStatus() {
         WorkerStatus workerStatus = workerStatusWithCacheStatus();
 
         reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus, 0L);
@@ -484,12 +475,12 @@ class EngineHealthReporterTest {
                 "model", "test-model",
                 "engineIp", "10.0.0.1:8080",
                 "role", "PREFILL");
-        verify(monitor).report("app.cache.local.standby.block.size", expectedTags, 4096.0);
+        verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
+                any(FlexMetricTags.class), anyDouble());
     }
 
     @Test
     void shouldNotReportLocalStandbyBlockSizeWhenStandbyIsDisabled() {
-        when(cacheMatchConfiguration.isLocalStandbyEnabled()).thenReturn(false);
         WorkerStatus workerStatus = workerStatusWithCacheStatus();
 
         reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus, 0L);
