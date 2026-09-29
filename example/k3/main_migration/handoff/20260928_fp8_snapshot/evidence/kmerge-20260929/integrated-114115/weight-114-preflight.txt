@@ -1,0 +1,26 @@
+8754ec8b41ae59791aa6370386276467bde6e8ce8502915dcfb9769ba9990da8  /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/config.json
+eb064b56fc8a782b97594d9888314a430450128d1fe4a7da66662f6d641122b5  /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/model.safetensors.index.json
+6e5457c4113f59f28f9fd7323c89240fa14ce6f0108f43427579595417d2d45b  /data0/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927/config.json
+5260339557ff62bffbbae35a7ca3a623d7d214db308653db8fce421665193180  /data0/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927/model.safetensors.index.json
+[INFO] checkpoint requested=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
+[INFO] checkpoint realpath=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
+[INFO] mount target=/mnt/hf3fs/3fs source=hf3fs.three_node_dev_20260922 fstype=fuse.hf3fs stat_fstype=fuseblk options=rw,nosuid,nodev,relatime,user_id=0,group_id=0,default_permissions,allow_other,max_read=1048576
+[INFO] stat device=67 inode=2894675 kind=directory; df size=90703260549120 used=47779730685952 available=42923529863168 (39.04 TiB)
+[PASS] checkpoint resolves under allowed 3FS root /mnt/hf3fs/3fs/models/kimi
+[PASS] index metadata.total_size matches shard payloads: 58480464384 bytes
+[PASS] checkpoint structure: index=model.safetensors.index.json, shards=7, tensors=16402, bytes=58482942648 (54.47 GiB)
+[PASS] all Safetensors headers and index-to-tensor mappings are structurally valid
+[PASS] explicit load method from environment LOAD_METHOD: fastsafetensors
+[INFO] checkpoint tree bytes=58487884774 (54.47 GiB); weight shard bytes=58482942648 (54.47 GiB)
+[RESULT] PASS warnings=0
+[INFO] checkpoint requested=/data0/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
+[INFO] checkpoint realpath=/data0/luohaocheng.lhc/models/kimi-k3-mtp-3fs-view-20260927
+[INFO] mount target=/data0 source=/dev/md0 fstype=xfs stat_fstype=xfs options=rw,relatime,attr2,inode64,logbufs=8,logbsize=32k,sunit=1024,swidth=4096,noquota
+[INFO] stat device=2304 inode=30180958704 kind=directory; df size=15360340262912 used=2478632398848 available=12881707864064 (11.72 TiB)
+[PASS] checkpoint resolves to an allowed local data-disk mount
+[PASS] index metadata.total_size matches shard payloads: 21469868544 bytes
+[PASS] checkpoint structure: index=model.safetensors.index.json, shards=9, tensors=5404, bytes=21470681944 (20.00 GiB)
+[PASS] all Safetensors headers and index-to-tensor mappings are structurally valid
+[PASS] explicit load method from environment LOAD_METHOD: fastsafetensors
+[INFO] checkpoint tree bytes=21474396410 (20.00 GiB); weight shard bytes=21470681944 (20.00 GiB)
+[RESULT] PASS warnings=0
