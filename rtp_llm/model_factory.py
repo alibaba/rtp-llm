@@ -228,6 +228,50 @@ class ModelFactory:
         return None
 
     @staticmethod
+    def _configure_fp8_eagle3(
+        model_config: ModelConfig,
+        engine_config: EngineConfig,
+        propose_model_config: Optional[ModelConfig],
+    ) -> None:
+        configs = [c for c in (model_config, propose_model_config) if c is not None]
+        for config in configs:
+            config.fp8_kv_cache_eagle3 = False
+        if (
+            not any(
+                getattr(getattr(c, "attn_config", None), "fp8_kv_cache_mode", 0) == 2
+                for c in configs
+            )
+            or engine_config.sp_config.type == SpeculativeType.NONE
+        ):
+            return
+
+        sp_config = engine_config.sp_config
+        if (
+            sp_config.type != SpeculativeType.EAGLE3
+            or model_config.model_type != "qwen_3"
+            or propose_model_config is None
+            or propose_model_config.model_type != "angelslim_qwen3_eagle3"
+            or sp_config.gen_num_per_cycle <= 0
+            or sp_config.tree_decode_config
+        ):
+            raise ValueError(
+                "FP8 KV cache mode 2 speculative execution supports only linear "
+                "Qwen3 + AngelSlim Eagle3 with a positive gen_num_per_cycle; "
+                "tree decode and other speculative models are not supported"
+            )
+        hw_config = engine_config.hw_kernel_config
+        if hw_config.enable_native_cuda_graph:
+            raise ValueError(
+                "FP8 KV cache mode 2 Eagle3 does not support native CUDA graph; "
+                "use enable_cuda_graph and set enable_native_cuda_graph=0"
+            )
+        for config in configs:
+            config.fp8_kv_cache_eagle3 = True
+        logging.info(
+            "FP8 KV cache mode 2: enabling linear AngelSlim Qwen3 Eagle3 attention"
+        )
+
+    @staticmethod
     def from_model_configs(
         model_config: ModelConfig,
         engine_config: EngineConfig,
@@ -255,9 +299,14 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
-        # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
-        # for RoPE cache sizing in speculative decoding
-        model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
+        model_config.gen_num_per_cycle = (
+            engine_config.sp_config.gen_num_per_cycle
+            if engine_config.sp_config.type != SpeculativeType.NONE
+            else 0
+        )
+        ModelFactory._configure_fp8_eagle3(
+            model_config, engine_config, propose_model_config
+        )
 
         model = ModelFactory._create_model(
             model_config=model_config,

@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import flashinfer
@@ -579,6 +580,16 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_configs.size_per_head
         self.dynamic_fp8 = _is_dynamic_fp8(attn_configs)
+        self.direct_scale_fp8 = self.dynamic_fp8 and (
+            attn_inputs.is_target_verify or attn_inputs.is_spec_draft_prefill
+        )
+        self._graph_state = None
+        self._graph_capacity = None
+        self._graph_role = (
+            bool(attn_inputs.is_target_verify),
+            bool(attn_inputs.is_spec_draft_prefill),
+        )
+        self._graph_query_len = getattr(attn_configs, "gen_num_per_cycle", 0) + 1
         (
             self.physical_page_size,
             self.page_size,
@@ -587,6 +598,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.dtype = attn_configs.dtype
         self.kv_dtype = attn_kv_dtype(attn_configs)
         self.q_dtype = attn_q_dtype(attn_configs)
+        if self.direct_scale_fp8:
+            self.kv_dtype = torch.float8_e4m3fn
         self.max_seq_len = attn_configs.max_seq_len
         self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
@@ -604,7 +617,13 @@ class PyFlashinferPrefillPagedAttnOp(object):
             "HND",
             backend="fa2" if self.dynamic_fp8 else backend,
         )
-        if self.dynamic_fp8:
+        if self.direct_scale_fp8:
+            module, tensor_names = _get_dynamic_fp8_jit_module(
+                _dynamic_fp8_decode_jit_args(self.q_dtype, self.dtype, self.head_dim_qk)
+            )
+            self.prefill_wrapper._jit_module = module
+            self.prefill_wrapper._jit_additional_tensor_names = list(tensor_names)
+        elif self.dynamic_fp8:
             _bind_dynamic_fp8_prefill_module(
                 self.prefill_wrapper, self.dtype, self.head_dim_qk
             )
@@ -614,7 +633,160 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
     def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
         """Set the params object to be used by this op."""
+        if self._graph_state is not None:
+            raise RuntimeError(
+                "FP8 verify graph params cannot be replaced after binding"
+            )
         self.fmha_params = params
+
+    def _prepare_direct_scale_graph(
+        self, inputs: PyAttentionInputs, forbid_realloc: bool
+    ):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("FP8 verify graph planning must run outside capture")
+        role = (bool(inputs.is_target_verify), bool(inputs.is_spec_draft_prefill))
+        if role != self._graph_role:
+            raise ValueError("FP8 verify graph role changed")
+        lengths, prefixes = inputs.input_lengths, inputs.prefix_lengths
+        table = inputs.kv_cache_kernel_block_id
+        for name, tensor in (
+            ("input_lengths", lengths),
+            ("prefix_lengths", prefixes),
+            ("page table", table),
+        ):
+            if (
+                tensor is None
+                or tensor.is_cuda
+                or tensor.dtype != torch.int32
+                or not tensor.is_contiguous()
+            ):
+                raise ValueError(
+                    f"FP8 verify graph requires contiguous host int32 {name}"
+                )
+        batch_size = lengths.numel()
+        if (
+            lengths.dim() != 1
+            or prefixes.shape != lengths.shape
+            or table.dim() != 2
+            or table.size(0) != batch_size
+        ):
+            raise ValueError("FP8 verify graph metadata shapes do not match")
+        query_lengths = lengths.tolist()
+        if any(n not in (0, self._graph_query_len) for n in query_lengths):
+            raise ValueError("FP8 verify graph requires fixed-width Eagle3 query rows")
+        live_tokens = sum(query_lengths)
+        if live_tokens <= 0:
+            raise ValueError("FP8 verify graph requires at least one active query")
+        if self._graph_capacity is None:
+            if forbid_realloc or inputs.total_tokens != live_tokens:
+                raise ValueError(
+                    "FP8 verify graph must initialize at its capture token capacity"
+                )
+            self._graph_capacity = (batch_size, live_tokens)
+            self._graph_positions_h = torch.empty(
+                live_tokens, dtype=torch.int32, pin_memory=True
+            )
+            self._graph_pages_h = torch.empty_like(
+                self._graph_positions_h, pin_memory=True
+            )
+            self._graph_offsets_h = torch.empty_like(
+                self._graph_positions_h, pin_memory=True
+            )
+            self.graph_positions = torch.empty(
+                live_tokens, dtype=torch.int32, device=self.g_workspace_buffer.device
+            )
+            self.graph_pages = torch.empty_like(self.graph_positions)
+            self.graph_offsets = torch.empty_like(self.graph_positions)
+        if (
+            batch_size != self._graph_capacity[0]
+            or live_tokens > self._graph_capacity[1]
+        ):
+            raise ValueError("FP8 verify graph batch/token capacity changed")
+        self._graph_positions_h.zero_()
+        self._graph_pages_h.fill_(-1)
+        self._graph_offsets_h.fill_(-1)
+        offset = 0
+        for batch, (length, prefix) in enumerate(zip(query_lengths, prefixes.tolist())):
+            if prefix < 0 or prefix + length > self.max_seq_len + self._graph_query_len:
+                raise ValueError("FP8 verify graph sequence length is out of bounds")
+            if not length:
+                continue
+            positions = torch.arange(prefix, prefix + length, dtype=torch.int32)
+            slots = positions.long() // self.page_size
+            if slots[-1].item() >= table.size(1):
+                raise ValueError("FP8 verify graph page table is too short")
+            kernel_pages = table[batch, slots]
+            if (kernel_pages < 0).any().item():
+                raise ValueError("FP8 verify graph has a negative live page id")
+            self._graph_positions_h[offset : offset + length].copy_(positions)
+            self._graph_pages_h[offset : offset + length].copy_(
+                kernel_pages // self.subdivision
+            )
+            self._graph_offsets_h[offset : offset + length].copy_(
+                kernel_pages.remainder(self.subdivision) * self.page_size
+                + positions.remainder(self.page_size)
+            )
+            offset += length
+        for device, host in (
+            (self.graph_positions, self._graph_positions_h),
+            (self.graph_pages, self._graph_pages_h),
+            (self.graph_offsets, self._graph_offsets_h),
+        ):
+            device.copy_(host, non_blocking=True)
+
+        # The runner completes producer D2H before calling us. Never silently
+        # transfer metadata here; capture and replay use the same host planner.
+        self.fmha_params.fill_params(
+            prefixes,
+            torch.empty(0, dtype=torch.int32),
+            lengths,
+            table,
+            self.page_size,
+            forbid_realloc,
+        )
+        params = self.fmha_params
+        wrapper = self.prefill_wrapper
+        if wrapper._qo_indptr_buf is None:
+            wrapper._use_cuda_graph = True
+            wrapper._qo_indptr_buf = params.qo_indptr_d
+            wrapper._paged_kv_indptr_buf = params.decode_page_indptr_d
+            wrapper._paged_kv_indices_buf = params.page_indice_d
+            wrapper._paged_kv_last_page_len_buf = params.paged_kv_last_page_len_d
+            wrapper._fixed_batch_size = batch_size
+        # Replan before every replay; topology and last-page lengths may change.
+        wrapper.plan(
+            params.qo_indptr_h,
+            params.decode_page_indptr_h,
+            params.page_indice_d,
+            params.paged_kv_last_page_len_h,
+            self.local_head_num,
+            self.local_kv_head_num,
+            self.head_dim_qk,
+            self.page_size,
+            causal=self.is_causal,
+            q_data_type=self.q_dtype,
+            kv_data_type=self.kv_dtype,
+            o_data_type=self.dtype,
+            non_blocking=True,
+        )
+        state = (
+            tuple(wrapper._plan_info),
+            wrapper._fixed_batch_size,
+            wrapper._float_workspace_buffer.data_ptr(),
+            wrapper._int_workspace_buffer.data_ptr(),
+            wrapper._qo_indptr_buf.data_ptr(),
+            wrapper._paged_kv_indptr_buf.data_ptr(),
+            wrapper._paged_kv_indices_buf.data_ptr(),
+            wrapper._paged_kv_last_page_len_buf.data_ptr(),
+            self.graph_positions.data_ptr(),
+            self.graph_pages.data_ptr(),
+            self.graph_offsets.data_ptr(),
+        )
+        if self._graph_state is None:
+            self._graph_state = state
+        elif state != self._graph_state:
+            raise RuntimeError("FP8 verify graph plan or buffer addresses changed")
+        return params
 
     def prepare(
         self,
@@ -626,6 +798,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
+        if self.direct_scale_fp8 and self.enable_cuda_graph:
+            return self._prepare_direct_scale_graph(attn_inputs, forbid_realloc)
         check_attention_inputs(attn_inputs)
         block_id_host = attn_inputs.kv_cache_kernel_block_id
         if block_id_host is None or block_id_host.numel() == 0:
@@ -715,7 +889,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             qo_indptr = self.qo_indptr
 
         plan_page_indices = self.fmha_params.page_indice_d
-        if self.dynamic_fp8:
+        if self.dynamic_fp8 and not self.direct_scale_fp8:
             self._active_source_page_indices = _active_page_indices(
                 plan_page_indices, self.fmha_params.decode_page_indptr_d
             )
@@ -765,6 +939,15 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
+        if self.direct_scale_fp8:
+            if self.enable_cuda_graph and q.size(0) != self._graph_capacity[1]:
+                raise ValueError("FP8 verify graph query token capacity changed")
+            # Match decode's scale application without rounding dequantized KV
+            # through a BF16 scratch cache before the attention dot products.
+            scales = _validate_dynamic_fp8_scale(
+                kv_cache, self.local_kv_head_num, self.page_size
+            )
+            return self.prefill_wrapper.run(q, kv_cache.kv_cache_base, scales)
         if self.dynamic_fp8:
             if self._active_source_page_indices is None:
                 raise RuntimeError("paged prefill must be prepared before forward")
@@ -1254,6 +1437,20 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         )
         self.create_params(attn_inputs)
         self.fmha_impl.prepare(attn_inputs)
+        if (
+            isinstance(self.fmha_impl, PyFlashinferPrefillPagedAttnOp)
+            and self.fmha_impl.direct_scale_fp8
+            and self.fmha_impl.enable_cuda_graph
+        ):
+            # Fixed-capacity RoPE/slot metadata includes safe padded rows even
+            # when the C++ planner shrinks its active-token views at replay.
+            if self.rope_impl is not None:
+                self.rope_impl.set_params(
+                    SimpleNamespace(positions_d=self.fmha_impl.graph_positions)
+                )
+            self.kv_cache_write_op.set_graph_slot_mapping(
+                self.fmha_impl.graph_pages, self.fmha_impl.graph_offsets
+            )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
@@ -1409,7 +1606,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         )
 
     def support_cuda_graph(self) -> bool:
-        return not self.dynamic_fp8
+        return not self.dynamic_fp8 or self.fmha_impl.direct_scale_fp8
 
 
 class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
@@ -1876,13 +2073,22 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
                 self.dynamic_rope_config.style = RopeStyle.No
             self.dynamic_rope_cache = None
             if self.dynamic_rope_config.style in (RopeStyle.Base, RopeStyle.Yarn):
+                proposal_tokens = getattr(attn_configs, "gen_num_per_cycle", 0)
+                max_positions = attn_configs.max_seq_len + (
+                    proposal_tokens + 1 if proposal_tokens > 0 else 0
+                )
                 rope_cache = get_rope_cache_once(
                     self.dynamic_rope_config,
-                    attn_configs.max_seq_len,
+                    max_positions,
                     is_cuda=True,
                     interleave=True,
                 )
-                if check_rope_cache(self.dynamic_rope_config, rope_cache):
+                # Match proposal-aware prefill capacity. A singleton initialized
+                # with fewer rows must use the kernel's uncached RoPE.
+                if (
+                    check_rope_cache(self.dynamic_rope_config, rope_cache)
+                    and rope_cache.data.size(0) >= max_positions
+                ):
                     self.dynamic_rope_cache = rope_cache.data
         else:
             self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)

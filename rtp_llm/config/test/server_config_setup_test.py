@@ -3,6 +3,7 @@ import io
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -12,7 +13,14 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import CPRotateMethod, KvCacheDataType, NcclCommConfig, RoleType
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.ops import (
+    CPRotateMethod,
+    KvCacheDataType,
+    NcclCommConfig,
+    RoleType,
+    SpeculativeType,
+)
 from rtp_llm.server.server_args.server_args import setup_args
 
 # clear=True must preserve gpu_lock isolation across Torch lazy initialization.
@@ -54,6 +62,96 @@ class ServerConfigPortLayoutTest(TestCase):
         config.worker_info_port_num = 8
 
         config.validate_port_layout(dash_sc_enabled=False)
+
+
+class Fp8Eagle3ConfigTest(TestCase):
+    @staticmethod
+    def configs():
+        from rtp_llm.config.model_config import ModelConfig
+
+        target, draft = ModelConfig(), ModelConfig()
+        target.model_type = "qwen_3"
+        draft.model_type = "angelslim_qwen3_eagle3"
+        target.attn_config.fp8_kv_cache_mode = 2
+        draft.attn_config.fp8_kv_cache_mode = 2
+        engine = SimpleNamespace(
+            sp_config=SimpleNamespace(
+                type=SpeculativeType.EAGLE3, gen_num_per_cycle=5, tree_decode_config=""
+            ),
+            hw_kernel_config=SimpleNamespace(
+                enable_cuda_graph=False, enable_native_cuda_graph=False
+            ),
+        )
+        return target, engine, draft
+
+    def test_eagle3_eager_authorizes_both_models(self):
+        target, engine, draft = self.configs()
+        self.assertFalse(target.fp8_kv_cache_eagle3)
+        self.assertFalse(draft.fp8_kv_cache_eagle3)
+        ModelFactory._configure_fp8_eagle3(target, engine, draft)
+        self.assertTrue(target.fp8_kv_cache_eagle3)
+        self.assertTrue(draft.fp8_kv_cache_eagle3)
+
+    def test_graph_authorized_but_native_graph_rejected_before_weights(self):
+        target, engine, draft = self.configs()
+        engine.hw_kernel_config.enable_cuda_graph = True
+        ModelFactory._configure_fp8_eagle3(target, engine, draft)
+        self.assertTrue(target.fp8_kv_cache_eagle3)
+        for graph in (False, True):
+            with self.subTest(graph=graph):
+                target, engine, draft = self.configs()
+                engine.hw_kernel_config.enable_cuda_graph = graph
+                engine.hw_kernel_config.enable_native_cuda_graph = True
+                with patch.object(ModelFactory, "_create_model") as create_model:
+                    with self.assertRaisesRegex(
+                        ValueError, "does not support native CUDA graph"
+                    ):
+                        ModelFactory.from_model_configs(
+                            target, engine, world_info=None, propose_model_config=draft
+                        )
+                    create_model.assert_not_called()
+
+    def test_unsupported_speculative_configurations_fail_closed(self):
+        changes = (
+            ("sp", "type", SpeculativeType.EAGLE),
+            ("sp", "type", SpeculativeType.MTP),
+            ("sp", "type", SpeculativeType.DSPARK),
+            ("sp", "tree_decode_config", "tree.json"),
+            ("sp", "gen_num_per_cycle", 0),
+            ("sp", "gen_num_per_cycle", -1),
+            ("target", "model_type", "qwen_2"),
+            ("draft", "model_type", "qwen_3_moe-mtp"),
+        )
+        for owner, field, value in changes:
+            with self.subTest(owner=owner, field=field, value=value):
+                target, engine, draft = self.configs()
+                setattr(
+                    {"sp": engine.sp_config, "target": target, "draft": draft}[owner],
+                    field,
+                    value,
+                )
+                with self.assertRaisesRegex(ValueError, "supports only linear"):
+                    ModelFactory._configure_fp8_eagle3(target, engine, draft)
+                self.assertFalse(target.fp8_kv_cache_eagle3)
+                self.assertFalse(draft.fp8_kv_cache_eagle3)
+        target, engine, _ = self.configs()
+        with self.assertRaisesRegex(ValueError, "supports only linear"):
+            ModelFactory._configure_fp8_eagle3(target, engine, None)
+
+    def test_non_speculative_resets_authorization_and_legacy_modes_are_unchanged(self):
+        target, engine, draft = self.configs()
+        ModelFactory._configure_fp8_eagle3(target, engine, draft)
+        engine.sp_config.type = SpeculativeType.NONE
+        engine.hw_kernel_config.enable_cuda_graph = True
+        ModelFactory._configure_fp8_eagle3(target, engine, draft)
+        self.assertFalse(target.fp8_kv_cache_eagle3)
+        self.assertFalse(draft.fp8_kv_cache_eagle3)
+        for mode in (0, 1):
+            target.attn_config.fp8_kv_cache_mode = mode
+            draft.attn_config.fp8_kv_cache_mode = mode
+            engine.sp_config.type = SpeculativeType.MTP
+            ModelFactory._configure_fp8_eagle3(target, engine, draft)
+            self.assertFalse(target.fp8_kv_cache_eagle3)
 
 
 class GenerateConfigTest(TestCase):
@@ -161,6 +259,36 @@ class GenerateConfigTest(TestCase):
         kv_cache_config.fp8_kv_cache = 3
         with self.assertRaisesRegex(ValueError, "one of 0, 1, or 2"):
             ModelConfig().init_precision_config(kv_cache_config, "BF16")
+
+    def test_model_factory_propagates_only_effective_speculative_tokens(self):
+        for sp_type, configured_tokens, expected_tokens in (
+            (SpeculativeType.NONE, 1, 0),
+            (SpeculativeType.NONE, 5, 0),
+            (SpeculativeType.MTP, 1, 1),
+            (SpeculativeType.EAGLE, 5, 5),
+        ):
+            with self.subTest(
+                sp_type=sp_type,
+                configured_tokens=configured_tokens,
+            ):
+                model_config = SimpleNamespace()
+                engine_config = SimpleNamespace(
+                    sp_config=SimpleNamespace(
+                        type=sp_type,
+                        gen_num_per_cycle=configured_tokens,
+                    )
+                )
+                with patch.object(
+                    ModelFactory,
+                    "_create_model",
+                    side_effect=RuntimeError("stop after propagation"),
+                ), self.assertRaisesRegex(RuntimeError, "stop after propagation"):
+                    ModelFactory.from_model_configs(
+                        model_config,
+                        engine_config,
+                        world_info=None,
+                    )
+                self.assertEqual(model_config.gen_num_per_cycle, expected_tokens)
 
     def test_jit_config(self):
         valid = (

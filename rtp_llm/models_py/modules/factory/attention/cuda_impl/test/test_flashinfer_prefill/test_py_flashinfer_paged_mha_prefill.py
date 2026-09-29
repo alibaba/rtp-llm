@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op imp
     KVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferHybridPrefillAttnOp,
     PyFlashinferPagedPrefillImpl,
     PyFlashinferPrefillPagedAttnOp,
     attn_kv_dtype,
@@ -709,6 +710,7 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
         op.q_dtype = torch.bfloat16
         op.is_causal = True
         op.dynamic_fp8 = True
+        op.direct_scale_fp8 = False
         op.enable_cuda_graph = False
         op.prefill_cuda_graph_copy_params = None
         op.fmha_params = params
@@ -746,6 +748,7 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
         op = _NoReleasePagedAttnOp.__new__(_NoReleasePagedAttnOp)
         op.g_workspace_buffer = torch.empty(0)
         op.dynamic_fp8 = True
+        op.direct_scale_fp8 = False
         op.dtype = torch.bfloat16
         op.local_kv_head_num = 2
         op.head_dim_qk = 4
@@ -785,6 +788,320 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
         self.assertEqual(gather_args[3].shape, (2, 2, 2, 8, 4))
         self.assertEqual(gather_args[3].dtype, torch.bfloat16)
         self.assertEqual(gather_args[4:], (32, 8, 4))
+
+    def test_eagle3_direct_scale_binding_for_eager_and_graph(self):
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha"
+        )
+        config = self._config()
+        config.max_seq_len = 128
+        for role in ("is_target_verify", "is_spec_draft_prefill"):
+            inputs = SimpleNamespace(
+                is_target_verify=False, is_spec_draft_prefill=False, is_cuda_graph=False
+            )
+            setattr(inputs, role, True)
+            wrapper = SimpleNamespace()
+            jit_module = object()
+            with self.subTest(role=role), mock.patch(
+                f"{module}.get_py_flashinfer_workspace_buffer",
+                return_value=torch.empty(0),
+            ), mock.patch(
+                f"{module}.BatchPrefillWithPagedKVCacheWrapper", return_value=wrapper
+            ), mock.patch(
+                f"{module}._get_dynamic_fp8_jit_module",
+                return_value=(jit_module, ["kv_scale"]),
+            ) as get_module, mock.patch(
+                f"{module}._bind_dynamic_fp8_prefill_module"
+            ) as bind_gather:
+                op = _NoReleasePagedAttnOp(config, inputs)
+                self.assertTrue(op.direct_scale_fp8)
+                self.assertIs(wrapper._jit_module, jit_module)
+                self.assertEqual(wrapper._jit_additional_tensor_names, ["kv_scale"])
+                self.assertEqual(get_module.call_args.args[0][2], torch.float8_e4m3fn)
+                bind_gather.assert_not_called()
+                inputs.is_cuda_graph = True
+                graph_op = _NoReleasePagedAttnOp(config, inputs)
+                self.assertTrue(graph_op.direct_scale_fp8)
+                self.assertTrue(graph_op.enable_cuda_graph)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_eagle3_graph_replay_updates_pages_and_skips_padding(self):
+        from rtp_llm.ops import RopeStyle
+
+        torch.manual_seed(2026)
+        harness = BaseAttentionTest()
+        harness.device = torch.device("cuda")
+        for role, capture_lengths in (
+            ("is_target_verify", [6, 6, 6, 6]),
+            ("is_spec_draft_prefill", [6, 6, 0, 0]),
+        ):
+            with self.subTest(role=role):
+                config = harness._create_config(
+                    head_num=10,
+                    head_num_kv=2,
+                    size_per_head=64,
+                    seq_size_per_block=8,
+                    data_type="bf16",
+                ).attn_configs
+                config.tokens_per_block = 16
+                config.fp8_kv_cache_mode = 2
+                config.kv_cache_dtype = KvCacheDataType.FP8
+                config.gen_num_per_cycle = 5
+                config.max_seq_len = 128
+                config.need_rope_kv_cache = True
+                config.is_causal = True
+                config.rope_config.style = RopeStyle.Base
+                config.rope_config.dim = 64
+                config.rope_config.base = 10000
+                table = torch.randperm(32, dtype=torch.int32).reshape(4, 8)
+                table = (
+                    table[..., None] * 2 + torch.arange(2, dtype=torch.int32)
+                ).reshape(4, 16)
+
+                def inputs_for(lengths, prefixes, table, graph):
+                    inputs = harness._create_chunked_prefill_attention_inputs(
+                        lengths,
+                        prefixes,
+                        8,
+                        dtype=torch.bfloat16,
+                        kv_cache_block_id=table,
+                        is_cuda_graph=graph,
+                    )
+                    inputs.sequence_lengths = torch.empty(
+                        0, dtype=torch.int32
+                    ).pin_memory()
+                    setattr(inputs, role, True)
+                    return inputs
+
+                cache = LayerKVCache()
+                payload = (torch.randn(64, 2, 2, 8, 64, device="cuda") * 8).to(
+                    torch.float8_e4m3fn
+                )
+                scales = torch.rand(64, 32, device="cuda") * 0.02 + 0.001
+                cache.kv_cache_base = payload.clone()
+                cache.kv_scale_base = scales.clone()
+                reference_cache = LayerKVCache()
+                reference_cache.kv_cache_base = payload.clone()
+                reference_cache.kv_scale_base = scales.clone()
+                inputs = inputs_for(capture_lengths, [122] * 4, table, True)
+                impl = PyFlashinferPagedPrefillImpl(config, inputs)
+                qkv = torch.randn(
+                    sum(capture_lengths), 14 * 64, dtype=torch.bfloat16, device="cuda"
+                )
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(2):
+                        impl.forward(qkv, cache)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = impl.forward(qkv, cache)
+                state = impl.fmha_impl._graph_state
+                cases = [
+                    ([6, 0, 0, 0], [7, 0, 0, 0]),
+                    (capture_lengths, [15, 31, 63, 94]),
+                    ([6, 6, 0, 0], [8, 16, 0, 0]),
+                ]
+                if role == "is_target_verify":
+                    cases.append(([6, 6, 6, 0], [63, 64, 65, 0]))
+                for index, (lengths, prefixes) in enumerate(cases):
+                    live = sum(lengths)
+                    live_table = table.roll(index + 1, dims=1).contiguous()
+                    inputs = inputs_for(lengths, prefixes, live_table, True)
+                    qkv.normal_()
+                    # RoPE updates the packed Q/K views in place on both paths.
+                    reference_qkv = qkv[:live].clone()
+                    cache.kv_cache_base.copy_(payload)
+                    cache.kv_scale_base.copy_(scales)
+                    reference_cache.kv_cache_base.copy_(payload)
+                    reference_cache.kv_scale_base.copy_(scales)
+                    with mock.patch(
+                        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha._host_i32",
+                        side_effect=AssertionError(
+                            "graph requires producer-owned host mirrors"
+                        ),
+                    ):
+                        impl.prepare_cuda_graph(inputs)
+                    self.assertEqual(impl.fmha_impl._graph_state, state)
+                    torch.testing.assert_close(
+                        impl.fmha_impl.graph_pages[live:].cpu(),
+                        torch.full((qkv.size(0) - live,), -1, dtype=torch.int32),
+                    )
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    reference = PyFlashinferPagedPrefillImpl(
+                        config, inputs_for(lengths, prefixes, live_table, False)
+                    )
+                    expected = reference.forward(reference_qkv, reference_cache)
+                    torch.testing.assert_close(
+                        output[:live], expected, rtol=0.03, atol=0.02
+                    )
+                    # Whole-cache equality detects writes by padded rows, including page 0.
+                    torch.testing.assert_close(
+                        cache.kv_cache_base.view(torch.uint8),
+                        reference_cache.kv_cache_base.view(torch.uint8),
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        cache.kv_scale_base,
+                        reference_cache.kv_scale_base,
+                        rtol=0,
+                        atol=0,
+                    )
+                bad = inputs_for(capture_lengths, [0] * 4, table, True)
+                bad.input_lengths = bad.input_lengths.cuda()
+                with self.assertRaisesRegex(ValueError, "requires contiguous host"):
+                    impl.prepare_cuda_graph(bad)
+                with self.assertRaisesRegex(RuntimeError, "cannot be replaced"):
+                    impl.fmha_impl.set_params(object())
+                impl.fmha_impl.prefill_wrapper._int_workspace_buffer = (
+                    impl.fmha_impl.prefill_wrapper._int_workspace_buffer.clone()
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "plan or buffer addresses changed"
+                ):
+                    impl.prepare_cuda_graph(
+                        inputs_for(capture_lengths, [0] * 4, table, True)
+                    )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_eagle3_direct_scale_qwen3_geometry_causal_and_decode_agree(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+            PyFlashinferDecodeAttnOp,
+        )
+
+        torch.manual_seed(2026)
+        harness = BaseAttentionTest()
+        harness.device = torch.device("cuda")
+        for dtype in (torch.bfloat16, torch.float16):
+            for role in ("is_target_verify", "is_spec_draft_prefill"):
+                with self.subTest(dtype=dtype, role=role):
+                    config = harness._create_config(
+                        head_num=40,
+                        head_num_kv=8,
+                        size_per_head=128,
+                        seq_size_per_block=64,
+                    ).attn_configs
+                    config.dtype = dtype
+                    config.fp8_kv_cache_mode = 2
+                    config.kv_cache_dtype = KvCacheDataType.FP8
+                    config.is_causal = True
+                    config.gen_num_per_cycle = 5
+                    lengths, prefixes = [6, 17], [61, 113]
+                    totals = [p + n for p, n in zip(prefixes, lengths)]
+                    inputs = harness._create_chunked_prefill_attention_inputs(
+                        lengths, prefixes, 64, dtype=dtype
+                    )
+                    inputs.sequence_lengths = torch.empty(
+                        0, dtype=torch.int32
+                    ).pin_memory()
+                    setattr(inputs, role, True)
+                    pages = int(inputs.kv_cache_kernel_block_id.max()) + 1
+                    cache = LayerKVCache()
+                    # Deliberately vary each token/head scale across powers of two.
+                    cache.kv_cache_base = (
+                        torch.randn(pages, 2, 8, 64, 128, device="cuda") * 16
+                    ).to(torch.float8_e4m3fn)
+                    cache.kv_scale_base = (
+                        2.0 ** torch.randint(-7, -2, (pages, 2 * 8 * 64), device="cuda")
+                    ).float()
+                    query = torch.randn(
+                        sum(lengths), 40, 128, dtype=dtype, device="cuda"
+                    )
+                    op = PyFlashinferPrefillPagedAttnOp(config, inputs)
+                    self.assertTrue(op.direct_scale_fp8)
+                    self.assertEqual(op.kv_dtype, torch.float8_e4m3fn)
+                    op.prepare(inputs)
+                    self.assertIsNone(op._active_source_page_indices)
+                    with mock.patch(
+                        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha._gather_dynamic_fp8_cache",
+                        side_effect=AssertionError(
+                            "direct-scale verify must not gather/dequantize"
+                        ),
+                    ):
+                        output = op.forward(query, cache)
+                    restored = cache.kv_cache_base.float() * cache.kv_scale_base.view(
+                        pages, 2, 8, 64, 1
+                    )
+                    references = []
+                    start = 0
+                    for batch_idx, (prefix, length, total) in enumerate(
+                        zip(prefixes, lengths, totals)
+                    ):
+                        ids = (
+                            inputs.kv_cache_kernel_block_id[
+                                batch_idx, : math.ceil(total / 64)
+                            ]
+                            .long()
+                            .cuda()
+                        )
+                        keys, values = [
+                            restored[ids, kv]
+                            .permute(1, 0, 2, 3)
+                            .reshape(8, -1, 128)[:, :total]
+                            .repeat_interleave(5, dim=0)
+                            for kv in (0, 1)
+                        ]
+                        mask = (
+                            torch.arange(total, device="cuda")[None]
+                            <= prefix + torch.arange(length, device="cuda")[:, None]
+                        )
+                        references.append(
+                            torch.nn.functional.scaled_dot_product_attention(
+                                query[start : start + length].transpose(0, 1).float(),
+                                keys,
+                                values,
+                                attn_mask=mask,
+                            ).transpose(0, 1)
+                        )
+                        start += length
+                    torch.testing.assert_close(
+                        output.float(), torch.cat(references), rtol=0.04, atol=0.025
+                    )
+                    decode_inputs = harness._create_attention_inputs_base(
+                        2, totals, 64, dtype=dtype
+                    )
+                    decode = PyFlashinferDecodeAttnOp(config, decode_inputs)
+                    decode.prepare(decode_inputs)
+                    last_rows = torch.tensor([5, 22], device="cuda")
+                    decode_output = decode.forward(
+                        query[last_rows], cache, decode.fmha_params
+                    )
+                    torch.testing.assert_close(
+                        output[last_rows], decode_output, rtol=0.03, atol=0.02
+                    )
+                    # Large negative logits must still honor per-row causal ends.
+                    cache.kv_cache_base[:, 0].fill_(-32)
+                    cache.kv_scale_base.view(pages, 2, 8, 64)[:, 0].fill_(1)
+                    query.fill_(32)
+                    output = op.forward(query, cache)
+                    self.assertTrue(torch.isfinite(output).all().item())
+                    refs = []
+                    restored = cache.kv_cache_base.float() * cache.kv_scale_base.view(
+                        pages, 2, 8, 64, 1
+                    )
+                    for b, (prefix, length, total) in enumerate(
+                        zip(prefixes, lengths, totals)
+                    ):
+                        ids = (
+                            inputs.kv_cache_kernel_block_id[b, : math.ceil(total / 64)]
+                            .long()
+                            .cuda()
+                        )
+                        values = (
+                            restored[ids, 1]
+                            .permute(1, 0, 2, 3)
+                            .reshape(8, -1, 128)[:, :total]
+                            .repeat_interleave(5, dim=0)
+                        )
+                        refs.extend(
+                            values[:, : prefix + j + 1].mean(1) for j in range(length)
+                        )
+                    torch.testing.assert_close(
+                        output.float(), torch.stack(refs), rtol=0.04, atol=0.025
+                    )
 
     def test_mode2_end_to_end_attention_matches_base_reference(self):
         if not torch.cuda.is_available():
@@ -879,6 +1196,202 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
             causal=True,
         )
         torch.testing.assert_close(output, reference, rtol=0.06, atol=0.04)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_eagle3_verify_rejection_overwrites_payload_and_scales(self):
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        harness = BaseAttentionTest()
+        harness.device = device
+        torch.manual_seed(42)
+
+        def quantized(tensor):
+            scale = tensor.float().abs().amax(-1) / 448.0
+            scale = torch.where(scale == 0, 1.0, scale)
+            payload = (
+                (tensor.float() * scale.reciprocal().unsqueeze(-1))
+                .clamp(-448, 448)
+                .to(torch.float8_e4m3fn)
+            )
+            return payload.float() * scale.unsqueeze(-1), scale
+
+        for subdivision in (1, 2):
+            for hybrid in (False, True):
+                with self.subTest(subdivision=subdivision, hybrid=hybrid):
+                    physical_size, page_size = 8, 8 // subdivision
+                    config = harness._create_config(
+                        head_num=4,
+                        head_num_kv=2,
+                        size_per_head=64,
+                        seq_size_per_block=page_size,
+                        data_type="bf16",
+                    )
+                    config.attn_configs.tokens_per_block = physical_size
+                    config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+                    config.attn_configs.fp8_kv_cache_mode = 2
+                    config.attn_configs.gen_num_per_cycle = 5
+                    config.attn_configs.is_causal = True
+                    # Noncontiguous physical pages; all three streams can cross pages.
+                    physical_ids = torch.tensor(
+                        [[11, 1, 9, 3], [6, 4, 10, 0], [7, 2, 8, 5]], dtype=torch.int32
+                    )
+                    block_table = (
+                        physical_ids[..., None] * subdivision
+                        + torch.arange(subdivision)
+                    ).reshape(3, -1)
+                    page_count = 12 * subdivision
+                    cache = LayerKVCache()
+                    cache.kv_cache_base = torch.zeros(
+                        page_count,
+                        2,
+                        2,
+                        page_size,
+                        64,
+                        dtype=torch.float8_e4m3fn,
+                        device=device,
+                    )
+                    cache.kv_scale_base = torch.ones(
+                        page_count,
+                        2 * 2 * page_size,
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    writer = KVCacheWriteOp(
+                        num_kv_heads=2,
+                        head_size=64,
+                        physical_page_size=physical_size,
+                        kernel_page_size=page_size,
+                        dynamic_mode=True,
+                    )
+
+                    def inputs_for(prefixes, lengths):
+                        inputs = harness._create_chunked_prefill_attention_inputs(
+                            lengths,
+                            prefixes,
+                            page_size,
+                            dtype=dtype,
+                            kv_cache_block_id=block_table,
+                        )
+                        inputs.sequence_lengths = torch.empty(
+                            0, dtype=torch.int32
+                        ).pin_memory()
+                        inputs.is_target_verify = True
+                        return inputs
+
+                    prefixes = [7, 10, 15]
+                    keys = [
+                        torch.randn(n, 2, 64, dtype=dtype, device=device)
+                        for n in prefixes
+                    ]
+                    values = [torch.randn_like(k) for k in keys]
+                    bootstrap_inputs = inputs_for([0, 0, 0], prefixes)
+                    bootstrap = PyFlashinferPrefillPagedAttnOp(
+                        config.attn_configs, bootstrap_inputs
+                    )
+                    writer.set_params(bootstrap.prepare(bootstrap_inputs))
+                    writer.forward(torch.cat(keys), torch.cat(values), cache)
+                    op = None
+                    for round_id, magnitude in enumerate((8.0, 0.125)):
+                        inputs = inputs_for(prefixes, [6, 6, 6])
+                        if op is None:
+                            op = (
+                                PyFlashinferHybridPrefillAttnOp(
+                                    config.attn_configs, inputs
+                                )
+                                if hybrid
+                                else PyFlashinferPrefillPagedAttnOp(
+                                    config.attn_configs, inputs
+                                )
+                            )
+                        writer.set_params(op.prepare(inputs))
+                        new_k = (
+                            torch.randn(18, 2, 64, dtype=dtype, device=device)
+                            * magnitude
+                        )
+                        new_v = torch.randn_like(new_k) * magnitude
+                        q = (
+                            torch.randn(18, 4, 64, dtype=dtype, device=device)
+                            / magnitude
+                        )
+                        if hybrid:
+                            output = op.forward(q, new_k, new_v, cache, writer)
+                        else:
+                            writer.forward(new_k, new_v, cache)
+                            output = op.forward(q, cache)
+                        expected_outputs = []
+                        scale_view = cache.kv_scale_base.view(
+                            page_count, 2, 2, page_size
+                        )
+                        for batch_idx, prefix in enumerate(prefixes):
+                            k_chunk = new_k[batch_idx * 6 : (batch_idx + 1) * 6]
+                            v_chunk = new_v[batch_idx * 6 : (batch_idx + 1) * 6]
+                            keys[batch_idx] = torch.cat(
+                                (keys[batch_idx][:prefix], k_chunk)
+                            )
+                            values[batch_idx] = torch.cat(
+                                (values[batch_idx][:prefix], v_chunk)
+                            )
+                            positions = torch.arange(prefix + 6, device=device)
+                            pages = block_table[batch_idx].to(device)[
+                                positions // page_size
+                            ]
+                            offsets = positions % page_size
+                            restored = []
+                            for kv, full in enumerate(
+                                (keys[batch_idx], values[batch_idx])
+                            ):
+                                expected, scales = quantized(full)
+                                actual_scales = scale_view[pages, kv, :, offsets]
+                                actual = cache.kv_cache_base[
+                                    pages, kv, :, offsets
+                                ].float() * actual_scales.unsqueeze(-1)
+                                torch.testing.assert_close(
+                                    actual_scales, scales, rtol=1e-6, atol=1e-7
+                                )
+                                torch.testing.assert_close(
+                                    actual, expected, rtol=1e-5, atol=1e-5
+                                )
+                                # Direct-scale verify applies FP32 scales in the
+                                # attention kernel, without a BF16 KV round-trip.
+                                restored.append(
+                                    expected.to(dtype) if hybrid else expected
+                                )
+                            k_ref, v_ref = restored
+                            if hybrid:
+                                k_ref = torch.cat((k_ref[:prefix], k_chunk))
+                                v_ref = torch.cat((v_ref[:prefix], v_chunk))
+                            mask = (
+                                positions[None, :]
+                                <= prefix + torch.arange(6, device=device)[:, None]
+                            )
+                            reference = (
+                                torch.nn.functional.scaled_dot_product_attention(
+                                    q[batch_idx * 6 : (batch_idx + 1) * 6]
+                                    .transpose(0, 1)
+                                    .float(),
+                                    k_ref.repeat_interleave(2, dim=1)
+                                    .transpose(0, 1)
+                                    .float(),
+                                    v_ref.repeat_interleave(2, dim=1)
+                                    .transpose(0, 1)
+                                    .float(),
+                                    attn_mask=mask,
+                                ).transpose(0, 1)
+                            )
+                            expected_outputs.append(reference)
+                        self.assertTrue(torch.isfinite(output).all().item())
+                        torch.testing.assert_close(
+                            output.float(),
+                            torch.cat(expected_outputs),
+                            rtol=0.03,
+                            atol=0.05,
+                        )
+                        # Keep the mandatory target token plus 0, 2, or all 5 proposals.
+                        # The next round must overwrite rejected payload AND scales.
+                        if round_id == 0:
+                            prefixes = [
+                                p + accepted for p, accepted in zip(prefixes, (1, 3, 6))
+                            ]
 
     def test_mode2_large_negative_logits_preserve_constant_values_with_subdivision(
         self,

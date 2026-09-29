@@ -49,12 +49,23 @@ def _validate_dynamic_fp8_config(
     attn_configs: AttentionConfigs,
     is_cuda_graph: bool,
     attn_inputs: Optional[PyAttentionInputs] = None,
+    fp8_eagle3: bool = False,
 ) -> None:
     """Reject mode-2 configurations before any attention backend is created."""
     if getattr(attn_configs, "fp8_kv_cache_mode", 0) != 2:
         return
-    if is_cuda_graph and (
-        attn_inputs is None or getattr(attn_inputs, "is_prefill", True)
+    eagle3_prefill = (
+        fp8_eagle3
+        and attn_inputs is not None
+        and (
+            getattr(attn_inputs, "is_target_verify", False)
+            or getattr(attn_inputs, "is_spec_draft_prefill", False)
+        )
+    )
+    if (
+        is_cuda_graph
+        and not eagle3_prefill
+        and (attn_inputs is None or getattr(attn_inputs, "is_prefill", True))
     ):
         raise ValueError("FP8 KV cache mode 2 supports CUDA graph for decode only")
     if attn_configs.use_mla:
@@ -63,10 +74,23 @@ def _validate_dynamic_fp8_config(
         raise ValueError("FP8 KV cache mode 2 does not support MRoPE")
     if attn_configs.use_logn_attn:
         raise ValueError("FP8 KV cache mode 2 does not support use_logn_attn")
-    if getattr(attn_configs, "gen_num_per_cycle", 1) > 1:
-        raise ValueError(
-            "FP8 KV cache mode 2 does not support speculative or multi-token decode"
-        )
+    if getattr(attn_configs, "gen_num_per_cycle", 0) > 0:
+        if not fp8_eagle3:
+            raise ValueError(
+                "FP8 KV cache mode 2 does not support speculative or multi-token "
+                "decode without a validated Eagle3 configuration"
+            )
+        if (
+            attn_inputs is not None
+            and not attn_inputs.is_prefill
+            and (
+                getattr(attn_inputs, "is_target_verify", False)
+                or getattr(attn_inputs, "is_spec_draft_prefill", False)
+            )
+        ):
+            raise ValueError(
+                "FP8 KV cache mode 2 Eagle3 verify/commit requires prefill attention"
+            )
 
 
 def get_mla_impl(
@@ -78,8 +102,9 @@ def get_mla_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    fp8_eagle3: bool = False,
 ) -> MlaImplBase:
-    _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs)
+    _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs, fp8_eagle3)
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
@@ -201,10 +226,11 @@ def get_fmha_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    fp8_eagle3: bool = False,
 ) -> FMHAImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
-    _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs)
+    _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs, fp8_eagle3)
 
     dynamic_fp8 = getattr(attn_configs, "fp8_kv_cache_mode", 0) == 2
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
@@ -213,6 +239,13 @@ def get_fmha_impl(
         if attn_inputs.is_prefill
         else DYNAMIC_FP8_DECODE_IMPLS
     )
+    if fp8_eagle3 and (
+        getattr(attn_inputs, "is_target_verify", False)
+        or getattr(attn_inputs, "is_spec_draft_prefill", False)
+    ):
+        # Verify/commit must read newly written quantized KV as decode does.
+        # Hybrid prefill instead attends to the new chunk at base precision.
+        allowed_dynamic_impls = {"PyFlashinferPagedPrefillImpl"}
     strict_impl_selection = dynamic_fp8 or (
         VALIDATE_FMHA_CONFIG is not None
         and VALIDATE_FMHA_CONFIG(attn_configs, attn_inputs, fmha_config)
@@ -302,7 +335,10 @@ class AttnImplFactory(object):
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
-        _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs)
+        fp8_eagle3 = getattr(model_config, "fp8_kv_cache_eagle3", False)
+        _validate_dynamic_fp8_config(
+            attn_configs, is_cuda_graph, attn_inputs, fp8_eagle3
+        )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
@@ -315,6 +351,7 @@ class AttnImplFactory(object):
             is_cuda_graph,
             model_config.max_seq_len,
             parallelism_config,
+            fp8_eagle3=fp8_eagle3,
         )
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance

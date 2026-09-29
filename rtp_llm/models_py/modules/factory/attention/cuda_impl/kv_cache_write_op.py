@@ -48,10 +48,15 @@ class KVCacheWriteOp:
         # Keep the old attribute for warmup and compatibility users.
         self.token_per_block = kernel_page_size
         self.params = None
+        self.graph_slot_mapping = None
 
     def set_params(self, params: Any):
         """Set the params object to be used by this op."""
         self.params = params
+
+    def set_graph_slot_mapping(self, page_ids: torch.Tensor, offsets: torch.Tensor):
+        """Bind fixed-capacity mappings, including (-1, -1) for padded rows."""
+        self.graph_slot_mapping = (page_ids, offsets)
 
     def forward(
         self,
@@ -68,6 +73,27 @@ class KVCacheWriteOp:
             kv_cache: KV cache [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
         """
         if kv_cache is not None:
+            if self.dynamic_mode and self.graph_slot_mapping is not None:
+                page_ids, offsets = self.graph_slot_mapping
+                if key.size(0) != page_ids.numel() or value.size(0) != offsets.numel():
+                    raise ValueError("FP8 graph KV write token capacity changed")
+                scales = getattr(kv_cache, "kv_scale_base", None)
+                if scales is None or scales.numel() == 0:
+                    raise ValueError(
+                        "FP8 KV cache mode 2 requires a non-empty kv_scale_base"
+                    )
+                rtp_llm_ops.quantize_and_write_fp8_kv_cache(
+                    key.contiguous(),
+                    value.contiguous(),
+                    kv_cache.kv_cache_base,
+                    scales,
+                    page_ids,
+                    offsets,
+                    self.physical_page_size,
+                    self.kernel_page_size,
+                    self.subdivision,
+                )
+                return
             # FlashInfer requires batch_indices/positions size == nnz. Device
             # planner buffers can be oversized, so narrow without a host sync.
             nnz = key.size(0)
