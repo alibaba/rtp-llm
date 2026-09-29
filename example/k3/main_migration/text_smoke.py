@@ -1298,6 +1298,45 @@ class Runner:
                 self.stages.append({"name": f"decode_page_cross_0_{suffix}", "passed": False,
                                     "skipped": True, "case_names":
                                     [f"decode-page-cross-{b}-{suffix}" for b in decode_boundaries]})
+            # Cross one committed Decode page start with a short exact answer.
+            # The original multi-page long-output cases remain explicitly skipped.
+            for boundary in decode_boundaries:
+                tag = f"BND-{boundary}"
+                prompt, ids = self.fit_prompt(
+                    f"ID:{self.args.namespace}/decode-page-short-{boundary}\n",
+                    f'\n记录 value={tag}。只输出 JSON {{"value":"{tag}"}}，不要解释。',
+                    boundary - 1,
+                )
+                cold = Case(
+                    f"decode-page-short-{boundary}-cold",
+                    prompt,
+                    "",
+                    "miss",
+                    require_mtp_draft=True,
+                    expected_json={"value": tag},
+                    expected_input_len=len(ids),
+                    expected_reuse_len=0,
+                    cache_block_boundary=boundary,
+                    cache_block_phase="decode-short-cold",
+                    decode_crossings=(boundary,),
+                    max_tokens=256,
+                    decode_owner_rank=(boundary // page) % owners,
+                )
+                self.run_stage(f"decode_page_short_{boundary}_cold", [cold])
+                reuse = (len(ids) - 1) // unit * unit
+                self.run_stage(
+                    f"decode_page_short_{boundary}_repeat",
+                    [
+                        replace(
+                            cold,
+                            name=f"decode-page-short-{boundary}-repeat",
+                            reuse="hit" if reuse else "miss",
+                            expected_reuse_len=reuse,
+                            cache_block_phase="decode-short-repeat",
+                            decode_owner_rank=(cold.decode_owner_rank + 1) % owners,
+                        )
+                    ],
+                )
             return
         expected = " ".join(f"{i:03d}" for i in range(max(64, page // 2)))
         last_number = max(64, page // 2) - 1
