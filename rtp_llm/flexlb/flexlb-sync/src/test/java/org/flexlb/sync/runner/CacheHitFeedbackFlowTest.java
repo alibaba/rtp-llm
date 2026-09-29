@@ -128,7 +128,7 @@ class CacheHitFeedbackFlowTest {
         when(loops.onServer(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         when(loops.onServerSelect(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         reporter = new EngineHealthReporter(
-                monitor, cacheMetrics, cacheConfig, engineClient, loops, directory);
+                monitor, cacheMetrics, engineClient, loops, directory);
         strategy = new CostBasedPrefillStrategy(directory, cache, reporter);
         pv.start();
         ((ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger")).addAppender(pv);
