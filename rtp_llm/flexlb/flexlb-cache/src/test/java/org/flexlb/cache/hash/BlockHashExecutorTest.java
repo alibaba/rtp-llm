@@ -11,9 +11,15 @@ import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -23,30 +29,123 @@ import static org.flexlb.constant.MetricConstant.BLOCK_HASH_QUEUE_WAIT_TIME_US;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.util.ReflectionTestUtils.getField;
 
 class BlockHashExecutorTest {
 
     private final FlexMonitor monitor = mock(FlexMonitor.class);
     private BlockHashExecutor executor;
     private BlockHashStrategy strategy;
+    private final Map<TokenIds, Callable<?>> hashTasks = new ConcurrentHashMap<>();
 
     @BeforeEach
     void setUp() {
         strategy = spy(new VllmBlockHashStrategy());
+        doAnswer(invocation -> {
+            Callable<?> task = hashTasks.get(invocation.getArgument(0));
+            if (task == null) {
+                return invocation.callRealMethod();
+            }
+            task.call();
+            return List.of(1L);
+        }).when(strategy).calculate(any(TokenIds.class), eq(1L), eq(0));
         executor = new BlockHashExecutor(monitor, strategy, 1, 2, 60, 1);
     }
 
     @AfterEach
     void tearDown() {
         executor.shutdown();
+    }
+
+    @Test
+    void allocatesResourcesOnlyWhenHashCalculationIsSubscribed() {
+        Mono<BlockHashCalculationResult> calculation =
+                executor.calculate(TokenIds.wrap(new int[]{1, 2, 3, 4}), 4, 0);
+        executor.reportThreadPoolMetrics();
+
+        assertNull(getField(executor, "executor"));
+        assertNull(getField(executor, "scheduler"));
+        verifyNoInteractions(monitor, strategy);
+
+        assertNotNull(calculation.block(Duration.ofSeconds(5)));
+        assertNotNull(getField(executor, "executor"));
+        assertNotNull(getField(executor, "scheduler"));
+    }
+
+    @Test
+    void shutdownBeforeFirstSubscriptionDoesNotAllocateResources() {
+        Mono<BlockHashCalculationResult> calculation =
+                executor.calculate(TokenIds.wrap(new int[]{1}), 1, 0);
+        executor.shutdown();
+        executor.shutdown();
+        executor.reportThreadPoolMetrics();
+
+        StepVerifier.create(calculation)
+                .expectError(RejectedExecutionException.class)
+                .verify(Duration.ofSeconds(5));
+        assertNull(getField(executor, "executor"));
+        assertNull(getField(executor, "scheduler"));
+        verifyNoInteractions(strategy);
+    }
+
+    @Test
+    void concurrentFirstSubscriptionsShareOneThreadPool() throws Exception {
+        Set<Thread> workers = ConcurrentHashMap.newKeySet();
+        BlockHashStrategy concurrentStrategy = mock(BlockHashStrategy.class);
+        TokenIds inputIds = TokenIds.wrap(new int[]{1});
+        when(concurrentStrategy.calculate(inputIds, 1, 0)).thenAnswer(invocation -> {
+            workers.add(Thread.currentThread());
+            return List.of(1L);
+        });
+        BlockHashExecutor concurrentExecutor =
+                new BlockHashExecutor(monitor, concurrentStrategy, 1, 1, 60, 64);
+        CountDownLatch start = new CountDownLatch(1);
+        try (var callers = Executors.newFixedThreadPool(16)) {
+            List<Future<BlockHashCalculationResult>> results = new ArrayList<>();
+            for (int i = 0; i < 16; i++) {
+                results.add(callers.submit(() -> {
+                    assertTrue(start.await(5, TimeUnit.SECONDS));
+                    return concurrentExecutor.calculate(inputIds, 1, 0).block(Duration.ofSeconds(5));
+                }));
+            }
+            start.countDown();
+            for (Future<BlockHashCalculationResult> result : results) {
+                assertEquals(List.of(1L), result.get(10, TimeUnit.SECONDS).blockCacheKeys());
+            }
+            assertEquals(1, workers.size());
+            concurrentExecutor.shutdown();
+            assertThrows(RejectedExecutionException.class,
+                    () -> concurrentExecutor.calculate(inputIds, 1, 0).block(Duration.ofSeconds(5)));
+        } finally {
+            start.countDown();
+            concurrentExecutor.shutdown();
+        }
+    }
+
+    @Test
+    void initializedSchedulerDoesNotWaitForLifecycleMonitor() throws Exception {
+        TokenIds inputIds = TokenIds.wrap(new int[]{1, 2, 3, 4});
+        assertNotNull(executor.calculate(inputIds, 4, 0).block(Duration.ofSeconds(5)));
+
+        try (var caller = Executors.newSingleThreadExecutor()) {
+            synchronized (executor) {
+                Future<BlockHashCalculationResult> result = caller.submit(
+                        () -> executor.calculate(inputIds, 4, 0).block(Duration.ofSeconds(5)));
+                assertEquals(List.of(2164874634404590027L),
+                        result.get(5, TimeUnit.SECONDS).blockCacheKeys());
+            }
+        }
     }
 
     @Test
@@ -198,10 +297,7 @@ class BlockHashExecutorTest {
     }
     private Mono<BlockHashCalculationResult> submitHashTask(Callable<?> task) {
         TokenIds inputIds = TokenIds.wrap(new int[]{1});
-        doAnswer(invocation -> {
-            task.call();
-            return List.of(1L);
-        }).when(strategy).calculate(inputIds, 1, 0);
+        hashTasks.put(inputIds, task);
         return executor.calculate(inputIds, 1, 0);
     }
 }
