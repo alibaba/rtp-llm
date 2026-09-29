@@ -36,10 +36,14 @@ class Qwen3NextBase(BaseModel):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=self.device_resource_config,
+            apply_pp_partition=self._apply_pp_partition,
         )
         return self.py_model
 
     def support_cuda_graph(self) -> bool:
+        return True
+
+    def support_pp(self) -> bool:
         return True
 
     @classmethod
@@ -294,6 +298,7 @@ class Qwen35Moe(Qwen3NextBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=self.device_resource_config,
+            apply_pp_partition=self._apply_pp_partition,
         )
         return self.py_model
 

@@ -10,6 +10,7 @@ from flashinfer.cascade import merge_state
 from flashinfer.page import append_paged_kv_cache
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, recv, send
+from rtp_llm.models_py.distributed.rank_layout import Coord, RankLayout
 from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communicator
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_half_kv_indices,
@@ -66,6 +67,13 @@ class PCPAll2AllAttnOp:
         self.cp_info = attn_inputs.context_parallel_info
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
+        layout = RankLayout.from_parallelism_config(parallelism_config)
+        self.cp_peer_ranks = [
+            layout.world_rank_of(
+                Coord(pp=parallelism_config.pp_rank, dp=parallelism_config.dp_rank, tp=rank)
+            )
+            for rank in range(self.prefill_cp_size)
+        ]
 
         self.seq_size_per_block = attn_configs.tokens_per_block
 
@@ -233,12 +241,14 @@ class PCPAll2AllAttnOp:
                         self.ub_communicator.send(kv_buffer, dst=next_rank_id)
                         self.ub_communicator.recv(recv_buf, src=prev_rank_id)
                     else:
+                        prev_global_rank = self.cp_peer_ranks[prev_rank_id]
+                        next_global_rank = self.cp_peer_ranks[next_rank_id]
                         if self.prefill_cp_rank < next_rank_id:
-                            send(kv_buffer, dst=next_rank_id, group=Group.TP)
-                            recv(recv_buf, src=prev_rank_id, group=Group.TP)
+                            send(kv_buffer, dst=next_global_rank, group=Group.TP)
+                            recv(recv_buf, src=prev_global_rank, group=Group.TP)
                         else:
-                            recv(recv_buf, src=prev_rank_id, group=Group.TP)
-                            send(kv_buffer, dst=next_rank_id, group=Group.TP)
+                            recv(recv_buf, src=prev_global_rank, group=Group.TP)
+                            send(kv_buffer, dst=next_global_rank, group=Group.TP)
                     self.comm_events[round_id].record()
 
             if round_id == 0:  # local attention

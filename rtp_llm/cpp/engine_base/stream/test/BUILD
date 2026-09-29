@@ -56,6 +56,7 @@ cc_test(
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
+        "RTP_LLM_STREAM_ASYNC": "0",
     },
     exec_properties = {'gpu':'A10'},
 )

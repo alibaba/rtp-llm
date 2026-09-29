@@ -189,7 +189,7 @@ public:
         }
     }
 
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
+    absl::StatusOr<ScheduleOutput> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
@@ -210,7 +210,7 @@ public:
             }
         }
 
-        return running_streams_;
+        return ScheduleOutput{running_streams_};
     }
 
     absl::Status stop() override {

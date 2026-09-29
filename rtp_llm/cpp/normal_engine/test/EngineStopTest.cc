@@ -98,6 +98,8 @@ TEST_P(EngineStopTest, StopWaitsForInFlightDecodeDispatch) {
     // stop() cancels scheduled streams, so nextOutput() need not succeed.
     // The gated update must still have committed both generated tokens.
     EXPECT_EQ(stream->seqLength(), 4);
+    EXPECT_TRUE(engine->stop().ok());
+    engine.reset();
 }
 
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, EngineStopTest, ::testing::Values(0, 2));

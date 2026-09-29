@@ -343,7 +343,8 @@ bool KVCacheManager::init() {
 }
 
 std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferManager() const {
-    const size_t expected_worker_count = static_cast<size_t>(parallelism_config_.tp_size);
+    const size_t tp_size = static_cast<size_t>(parallelism_config_.tp_size);
+    const size_t expected_worker_count = static_cast<size_t>(parallelism_config_.pp_size) * tp_size;
     if (runtime_config_.worker_grpc_addrs.size() != expected_worker_count) {
         RTP_LLM_LOG_ERROR("KVCacheManager: worker grpc address count mismatch, expected=%zu, actual=%zu",
                           expected_worker_count,
@@ -351,7 +352,10 @@ std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferMa
         return nullptr;
     }
 
-    auto broadcast_manager = std::make_shared<BroadcastManager>(runtime_config_.worker_grpc_addrs);
+    /** Worker addresses already select this DP lane; cache block IDs are local to one PP stage. */
+    const auto stage_begin = runtime_config_.worker_grpc_addrs.begin() + parallelism_config_.pp_rank * tp_size;
+    const std::vector<std::string> stage_workers(stage_begin, stage_begin + tp_size);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(stage_workers);
     if (!broadcast_manager->init()) {
         RTP_LLM_LOG_ERROR("KVCacheManager: failed to initialize BlockTreeCache BroadcastManager");
         return nullptr;

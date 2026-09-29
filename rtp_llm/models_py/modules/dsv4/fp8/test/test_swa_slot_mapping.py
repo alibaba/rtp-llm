@@ -35,11 +35,15 @@ import torch
 
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+    dequantize_slots_to_bf16,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     compute_swa_cp_sliced_slot_mapping,
     compute_swa_slot_mapping,
     compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
 
 
 def _ref_compute_swa_slot_mapping(
@@ -555,6 +559,104 @@ class SwaSlotMappingTest(unittest.TestCase):
         self.assertTrue(torch.all(slots[256:266] == -1))
         self.assertTrue(torch.all(slots[266:] >= 0))
         self.assertEqual(int((slots >= 0).sum().item()), 268)
+
+    def test_dspark_dense_commit_matches_accepted_prefix_after_query_rewrite(self):
+        """Rejected feature KV must not change the next query's visible KV.
+
+        Compare dense COMMIT writes against accepted-prefix-only writes using
+        the real FP8 writer, position mapper and DSpARK attention indices.
+        Inputs are already projected KV rows; this isolates cache rollback
+        from model weights and sampling. No preceding PROPOSE is needed.
+        """
+        window, tokens_per_block, head_dim, entry_bytes = 128, 256, 512, 584
+        for gamma in (1, 3, 4):
+            ring_entries = (window + gamma + 1) & ~1
+            model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
+            model._gen_num_per_cycle = gamma
+            model._v4_args = SimpleNamespace(window_size=window)
+            # Include ring wrap and physical-block transitions.
+            for prefix in (10, ring_entries - 1, 255, 256):
+                block_count = (prefix + 2 * gamma + tokens_per_block) // tokens_per_block
+                block_table = torch.arange(
+                    1, block_count + 1, dtype=torch.int32, device=self.device
+                ).view(1, -1)
+
+                def commit(cache, kv, start):
+                    rows = kv.shape[0]
+                    positions = torch.arange(
+                        start, start + rows, dtype=torch.int32, device=self.device
+                    )
+                    slots = compute_swa_slot_mapping_from_positions(
+                        block_table=block_table,
+                        req_id_per_token=torch.zeros_like(positions),
+                        positions=positions,
+                        seq_lens=torch.tensor(
+                            [start + rows], dtype=torch.int32, device=self.device
+                        ),
+                        num_tokens=rows,
+                        pool_entries_per_block=ring_entries,
+                        tokens_per_block_for_block_table=tokens_per_block,
+                        ring_entries=ring_entries,
+                    )
+                    decode_write_swa_fp8(kv, slots, cache, rows, 1, head_dim)
+
+                history_kv = torch.randn(
+                    prefix, head_dim, dtype=torch.bfloat16, device=self.device
+                )
+                target_kv = torch.randn(
+                    gamma + 1, head_dim, dtype=torch.bfloat16, device=self.device
+                )
+                query_kv = torch.randn(
+                    gamma, head_dim, dtype=torch.bfloat16, device=self.device
+                )
+                seeded = torch.zeros(
+                    (block_count + 1, ring_entries, entry_bytes),
+                    dtype=torch.uint8,
+                    device=self.device,
+                )
+                commit(seeded, history_kv, 0)
+
+                for accept_len in sorted({1, gamma, gamma + 1}):
+                    with self.subTest(gamma=gamma, prefix=prefix, accept_len=accept_len):
+                        dense = seeded.clone()
+                        accepted_only = seeded.clone()
+                        commit(dense, target_kv, prefix)
+                        commit(accepted_only, target_kv[:accept_len], prefix)
+                        next_prefix = prefix + accept_len
+                        query_positions = torch.arange(
+                            next_prefix,
+                            next_prefix + gamma,
+                            dtype=torch.int32,
+                            device=self.device,
+                        )
+                        query_slots = model._global_pool_slots(
+                            block_table,
+                            torch.zeros_like(query_positions),
+                            query_positions,
+                            ring_entries,
+                            tokens_per_block,
+                        )
+                        # Each draft layer overwrites the entire query before attention.
+                        for cache in (dense, accepted_only):
+                            decode_write_swa_fp8(
+                                query_kv, query_slots, cache, 1, gamma, head_dim
+                            )
+                        indices, lengths = model._build_noncausal_indices(
+                            torch.tensor([next_prefix], dtype=torch.int32, device=self.device),
+                            torch.tensor([True], device=self.device),
+                            block_table,
+                            ring_entries,
+                            tokens_per_block,
+                        )
+                        visible_slots = indices[0, : lengths[0].item()].long()
+                        self.assertEqual(visible_slots.numel(), min(next_prefix, window) + gamma)
+                        self.assertTrue(torch.all(visible_slots >= 0))
+                        torch.testing.assert_close(
+                            dequantize_slots_to_bf16(dense, visible_slots),
+                            dequantize_slots_to_bf16(accepted_only, visible_slots),
+                            rtol=0,
+                            atol=0,
+                        )
 
     def test_dspark_position_mapping_masks_dense_decode_padding(self):
         """Graph capacity and rejected rows must not affect live decode writes."""

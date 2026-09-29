@@ -25,6 +25,13 @@ namespace rtp_llm {
 enum class ModelInputsModelRole;
 
 class ModelInputsLogger;
+class NormalGenerateStream;
+
+std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
+                                                  size_t                 reserved_blocks,
+                                                  const ModelConfig&     model_config,
+                                                  const RuntimeConfig&   runtime_config,
+                                                  const ResourceContext& resource_context);
 
 struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;
@@ -47,7 +54,7 @@ public:
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
@@ -112,17 +119,6 @@ protected:
     bool reduceDSparkCacheStoreStatus(bool local_ok);
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
-
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                              ModelBase&      source,
-                                              bool            request_actual_rows = false);
-    // Normalize the model's optional pre-output-projection MTP buffer into the
-    // forward result. Callers then use the regular all_hidden_states ->
-    // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
-    // row count"; target verify passes the explicit combo row count because a
-    // graph replay does not advance the Python-side row counter.
-    void
-    maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 

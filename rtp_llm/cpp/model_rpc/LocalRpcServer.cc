@@ -27,6 +27,8 @@ namespace rtp_llm {
 namespace {
 constexpr int64_t kRpcOutputWaitTimeoutMs        = 500;
 constexpr size_t  kAllocatorDumpReplayHistoryMax = 1024;
+/** Bound the wait for deferred engine startup before exposing the service. */
+constexpr int64_t kEngineStartupWaitTimeoutMs = 3600 * 1000;
 
 std::string endpointHost(std::string endpoint) {
     const auto scheme_separator = endpoint.find(':');
@@ -142,6 +144,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                                           !mm_process_engine.is_none(),
                                                           maga_init_params.pd_sep_config.role_type,
                                                           maga_init_params.parallelism_config.tp_rank,
+                                                          maga_init_params.parallelism_config.pp_rank,
                                                           maga_init_params.model_config_.model_type,
                                                           "LocalRpcServer");
     const auto mm_kind     = mm_decision.kind;
@@ -155,6 +158,12 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+        /** Deferred startup must settle before serving; engines ready on construction return immediately. */
+        auto startup_status = engine_->waitStartupResult(std::chrono::milliseconds(kEngineStartupWaitTimeoutMs));
+        if (!startup_status.ok()) {
+            RTP_LLM_LOG_ERROR("engine startup failed: %s", std::string(startup_status.message()).c_str());
+            return grpc::Status(grpc::StatusCode::INTERNAL, std::string(startup_status.message()));
+        }
     }
     if (mm_kind == MMProcessorKind::LOCAL) {
         mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,

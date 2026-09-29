@@ -897,5 +897,68 @@ class AutoConfigureDeepepTest(TestCase):
         self._assert_deepep_config(moe=True, low_latency=False, internode=False)
 
 
+class AutoConfigurePPDeepepTest(TestCase):
+    def _configs(self, pp_size, dp_size, tp_size, local_world_size):
+        parallel = ParallelismConfig()
+        parallel.pp_size = pp_size
+        parallel.dp_size = dp_size
+        parallel.tp_size = tp_size
+        parallel.ep_size = dp_size * tp_size
+        parallel.world_size = pp_size * dp_size * tp_size
+        parallel.local_world_size = local_world_size
+        moe = MoeConfig()
+        moe.use_all_gather = False
+        return moe, DeepEPConfig(), parallel
+
+    def test_auto_modes_use_stage_size(self):
+        # PP stages are either wholly inside a node or span whole nodes.
+        cases = (
+            (2, 2, 1, 4, False),
+            (2, 8, 1, 8, False),
+            (2, 16, 1, 8, True),
+            (2, 1, 1, 1, False),
+        )
+        for role in (RoleType.PDFUSION, RoleType.PREFILL, RoleType.DECODE):
+            for pp, dp, tp, local, internode in cases:
+                with self.subTest(role=role, pp=pp, dp=dp, tp=tp, local=local):
+                    moe, explicit, parallel = self._configs(pp, dp, tp, local)
+                    auto_configure_deepep(moe, explicit, parallel, role, 321)
+                    self.assertEqual(moe.use_deepep_moe, dp * tp > 1)
+                    self.assertEqual(
+                        moe.use_deepep_low_latency,
+                        role == RoleType.DECODE and dp * tp > 1,
+                    )
+                    self.assertEqual(moe.use_deepep_internode, internode)
+                    self.assertEqual(moe.ll_num_max_token, 321)
+
+    def test_pp_preserves_explicit_settings(self):
+        for field in (
+            "use_deepep_moe",
+            "use_deepep_low_latency",
+            "use_deepep_internode",
+            "use_mori_ep",
+        ):
+            for value in (False, True):
+                with self.subTest(field=field, value=value):
+                    moe, explicit, parallel = self._configs(2, 8, 1, 8)
+                    setattr(explicit, field, value)
+                    auto_configure_deepep(
+                        moe, explicit, parallel, RoleType.DECODE, 321
+                    )
+                    self.assertEqual(getattr(moe, field), value)
+                    self.assertEqual(moe.ll_num_max_token, 321)
+
+    def test_all_gather_stays_selected(self):
+        moe, explicit, parallel = self._configs(2, 2, 1, 2)
+        moe.use_all_gather = True
+        moe.moe_strategy = "fp8_per_block_pure_dp"
+        auto_configure_deepep(moe, explicit, parallel, RoleType.DECODE, 321)
+        self.assertTrue(moe.use_all_gather)
+        self.assertFalse(moe.use_deepep_moe)
+        self.assertFalse(moe.use_deepep_low_latency)
+        self.assertFalse(moe.use_deepep_internode)
+        self.assertEqual(moe.ll_num_max_token, 321)
+
+
 if __name__ == "__main__":
     main()

@@ -1,6 +1,7 @@
 import multiprocessing as mp
+import os
 import random
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -32,16 +33,15 @@ from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager
 
-from rtp_llm.ops.compute_ops import trt_fp8_quantize_128  # isort:skip
-
 
 def init_router(
     rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int
 ):
     model_config = ModelConfig()
-    model_config.expert_num = 16
+    # Keep the historical all-expert case; override explicitly for wheel limits.
+    model_config.expert_num = int(os.environ.get("TEST_NUM_EXPERTS", "16"))
     model_config.hidden_size = 1024
-    model_config.moe_k = 16
+    model_config.moe_k = model_config.expert_num
 
     parallelism_config.world_rank = rank
     parallelism_config.local_rank = rank
@@ -100,7 +100,7 @@ def init_router(
     init_deepep_wrapper(engine_config, model_config)
 
     quant_config = FusedMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=torch.float8_e4m3fn if use_fp8 else None,
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=[128, 128],
@@ -132,19 +132,24 @@ def worker_function(
     token_num_per_rank: List[int],
     parallelism_config: ParallelismConfig,
     nccl_port: int,
+    topk_ids_dtype: torch.dtype = torch.int64,
 ):
     random.seed(rank)
     config, router = init_router(rank, use_fp8, parallelism_config, nccl_port)
     try:
         dp_rank = config.dp_rank
         dp_size = config.dp_size
+        pp_rank = parallelism_config.pp_rank
+        stage_token_counts = token_num_per_rank[
+            pp_rank * dp_size : (pp_rank + 1) * dp_size
+        ]
         top_k = config.expert_num
         # test dispatch
         current_device = torch.device(f"cuda:{rank}")
         for i in range(5):
-            token_num = token_num_per_rank[dp_rank]
-            # 相同dp_rank的a1相同
-            torch.manual_seed(rank * dp_size + dp_rank)
+            token_num = stage_token_counts[dp_rank]
+            # 同一stage、同一dp_rank的TP ranks使用相同输入。
+            torch.manual_seed(pp_rank * dp_size + dp_rank)
             a1 = torch.randn(
                 (token_num, config.hidden_size),
                 device=current_device,
@@ -152,22 +157,20 @@ def worker_function(
             )
 
             a1[:, :128] = (
-                torch.arange(token_num, dtype=torch.bfloat16)
+                (torch.arange(token_num, dtype=torch.bfloat16) + 1)
                 .view(token_num, 1)
                 .repeat(1, 128)
                 .cuda()
             )
+            if parallelism_config.pp_size > 1:
+                # Distinguish stages so cross-stage dispatch cannot match the reference.
+                a1[:, :128] += pp_rank * 16
 
             topk_weights = torch.ones([token_num, top_k]).to(current_device)
-            topk_ids = torch.arange(config.expert_num, device=current_device).repeat(
-                token_num, 1
-            )
-            quant_config = FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
-                per_out_ch_quant=False,
-                block_shape=[128, 128],
-            )
+            topk_ids = torch.arange(
+                config.expert_num, device=current_device, dtype=topk_ids_dtype
+            ).repeat(token_num, 1)
+            quant_config = router.quant_config
             payload = router.prepare(
                 a1,
                 None,
@@ -176,8 +179,8 @@ def worker_function(
                 topk_ids,
             )
             assert payload.expert_tokens_meta.expert_num_tokens_cpu == [
-                sum(token_num_per_rank)
-            ] * (config.expert_num // config.world_size)
+                sum(stage_token_counts)
+            ] * (config.expert_num // config.ep_size)
             # Determine if fp8 is used based on quant_config
             use_fp8_actual = (
                 quant_config.is_quantized
@@ -196,36 +199,49 @@ def worker_function(
                 combine_payload, topk_weights, topk_ids, False, extra_finalize_args
             )
             if use_fp8_actual:
-                x, scale = trt_fp8_quantize_128(a1, False)
-                ref_a2 = per_token_cast_back(x, scale) * config.world_size
+                # Compare communication against the same quantized local input.
+                x, scale = router._do_quant(a1)
+                ref_a2 = per_token_cast_back(x, scale.contiguous()) * config.ep_size
             else:
-                ref_a2 = a1 * config.world_size
+                ref_a2 = a1 * config.ep_size
             torch.testing.assert_close(ref_a2[:, :128], a2[:, :128])
     finally:
         DeepEPWrapper.reset()
         destroy_distributed_environment()
 
 
-def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
+def test_single(
+    world_size: int,
+    test_tp_size: int,
+    use_fp8: bool,
+    pp_size: int = 1,
+    token_num: Optional[int] = None,
+    topk_ids_dtype: torch.dtype = torch.int64,
+):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
     nccl_port = ports[0]
 
-    dp_size = world_size // test_tp_size
-    ep_size = world_size  # EP size equals world_size for normal router
+    ep_size = world_size // pp_size
+    dp_size = ep_size // test_tp_size
 
     # 启动world_size个进程
     processes = []
-    token_num_per_rank = [random.randint(4, 12) // 4 * 4 for _ in range(dp_size)]
+    token_num_per_rank = [
+        token_num if token_num is not None else random.randint(4, 12) // 4 * 4
+        for _ in range(pp_size * dp_size)
+    ]
     for rank in range(world_size):
         # Calculate parallelism config for this rank
         parallelism_config = ParallelismConfig()
+        parallelism_config.pp_size = pp_size
+        parallelism_config.pp_rank = rank // ep_size
         parallelism_config.tp_size = test_tp_size
         parallelism_config.tp_rank = rank % test_tp_size
         parallelism_config.ep_size = ep_size
         parallelism_config.ep_rank = rank % ep_size
         parallelism_config.dp_size = dp_size
-        parallelism_config.dp_rank = rank // test_tp_size
+        parallelism_config.dp_rank = (rank // test_tp_size) % dp_size
         parallelism_config.world_size = world_size
         parallelism_config.world_rank = rank
         parallelism_config.local_world_size = world_size
@@ -234,7 +250,7 @@ def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
         p = mp.Process(
             target=worker_function,
             args=(rank, use_fp8, token_num_per_rank, parallelism_config, nccl_port),
-            kwargs={},
+            kwargs={"topk_ids_dtype": topk_ids_dtype},
         )
         processes.append(p)
         p.start()
@@ -262,10 +278,21 @@ if __name__ == "__main__":
     setup_logging()
     mp.set_start_method("spawn")
 
-    world_size = 2
+    world_size = int(os.environ.get("GPU_COUNT", "2"))
+    pp_size = int(os.environ.get("TEST_PP_SIZE", "1"))
     test_tp_sizes = [1, 2]
 
     # 为每个world_size运行test_single函数
     for use_fp8 in [True]:
-        for test_tp_size in [2]:
-            test_single(world_size, test_tp_size, use_fp8)
+        for test_tp_size in test_tp_sizes:
+            test_single(world_size, test_tp_size, use_fp8, pp_size)
+
+    # Empty TP shards are independent of PP; cover the int32-to-int64 cast once.
+    if pp_size == 1:
+        test_single(
+            world_size,
+            2,
+            False,
+            token_num=1,
+            topk_ids_dtype=torch.int32,
+        )

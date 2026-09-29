@@ -2036,30 +2036,47 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOut
 }
 
 TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
-    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    KVCacheConfig     kv_cache_config;
-    ParallelismConfig parallelism_config;
-    RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
-    parallelism_config.tp_size           = 2;
-    parallelism_config.tp_rank           = 0;
-    parallelism_config.world_size        = 2;
-    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
+    for (const auto& [pp_size, pp_rank] : std::vector<std::pair<int, int>>{{1, 0}, {2, 0}, {2, 1}}) {
+        SCOPED_TRACE(::testing::Message() << "pp_size=" << pp_size << ", pp_rank=" << pp_rank);
+        auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+        KVCacheConfig     kv_cache_config;
+        ParallelismConfig parallelism_config;
+        RuntimeConfig     runtime_config;
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 1;
+        parallelism_config.tp_size           = 2;
+        parallelism_config.tp_rank           = 0;
+        parallelism_config.pp_size           = pp_size;
+        parallelism_config.pp_rank           = pp_rank;
+        parallelism_config.dp_size           = 2;
+        parallelism_config.world_size        = pp_size * parallelism_config.dp_size * parallelism_config.tp_size;
+        parallelism_config.world_rank        = pp_rank * parallelism_config.dp_size * parallelism_config.tp_size;
+        runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
-    auto manager = std::make_shared<KVCacheManager>(
-        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
-    ASSERT_TRUE(manager->init());
-    ASSERT_NE(manager->blockTreeCache(), nullptr);
-    ASSERT_NE(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, nullptr);
-    EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
+        if (pp_size > 1) {
+            runtime_config.worker_grpc_addrs.push_back("127.0.0.1:12347");
+            runtime_config.worker_grpc_addrs.push_back("127.0.0.1:12348");
+        }
 
-    FunctionRequestPB request;
-    appendValidGroupedTransfer(manager, request);
-    FunctionResponsePB response;
-    EXPECT_TRUE(manager->executeFunction(request, response));
-    ASSERT_TRUE(response.has_mem_response());
-    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+        auto manager = std::make_shared<KVCacheManager>(
+            cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+        ASSERT_TRUE(manager->init());
+        ASSERT_NE(manager->blockTreeCache(), nullptr);
+        ASSERT_NE(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, nullptr);
+        EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
+
+        const auto& broadcast = manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_;
+        EXPECT_EQ(broadcast->worker_addrs_,
+                  (std::vector<std::string>{runtime_config.worker_grpc_addrs[pp_rank * 2],
+                                            runtime_config.worker_grpc_addrs[pp_rank * 2 + 1]}));
+
+        FunctionRequestPB request;
+        appendValidGroupedTransfer(manager, request);
+        FunctionResponsePB response;
+        EXPECT_TRUE(manager->executeFunction(request, response));
+        ASSERT_TRUE(response.has_mem_response());
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+    }
 }
 
 TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {

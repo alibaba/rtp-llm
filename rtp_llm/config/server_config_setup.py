@@ -9,6 +9,7 @@ import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
+from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
     ParallelismConfig,
@@ -130,8 +131,7 @@ def auto_configure_deepep(
         # All are None, use auto configuration
         _apply_auto_deepep_config(
             moe_config=moe_config,
-            world_size=parallelism_config.world_size,
-            local_world_size=parallelism_config.local_world_size,
+            parallelism_config=parallelism_config,
             role_type=role_type,
         )
     else:
@@ -169,8 +169,7 @@ def auto_configure_deepep(
 
 def _apply_auto_deepep_config(
     moe_config,
-    world_size: int,
-    local_world_size: int,
+    parallelism_config,
     role_type: RoleType,
 ):
     """
@@ -183,10 +182,22 @@ def _apply_auto_deepep_config(
     is_inference = role_type == RoleType.PDFUSION
     is_decode = role_type == RoleType.DECODE
 
-    # Determine GPU configuration
-    is_single_gpu = world_size == 1
-    is_multi_gpu = world_size > 1
-    is_multi_node = world_size > local_world_size
+    # Determine GPU configuration via RankLayout (stage-local view under PP).
+    local_world_size = parallelism_config.local_world_size
+    world_size = parallelism_config.world_size
+    if parallelism_config.pp_size > 1:
+        layout = RankLayout.from_parallelism_config(parallelism_config)
+        stage_size = layout.size_of(Group.STAGE)
+        is_single_gpu = stage_size == 1
+        is_multi_gpu = stage_size > 1
+        is_multi_node = any(
+            min(g) // local_world_size != max(g) // local_world_size
+            for g in layout.groups(Group.STAGE)
+        )
+    else:
+        is_single_gpu = world_size == 1
+        is_multi_gpu = world_size > 1
+        is_multi_node = world_size > local_world_size
 
     # Apply configuration rules
     use_deepep_moe = False
@@ -303,14 +314,15 @@ def set_parallelism_config(
     parallelism_config.local_rank = (
         parallelism_config.world_rank % parallelism_config.local_world_size
     )
-    parallelism_config.tp_rank = (
-        parallelism_config.world_rank % parallelism_config.tp_size
-    )
-    parallelism_config.dp_rank = (
-        parallelism_config.world_rank // parallelism_config.tp_size
-    )
-    parallelism_config.ep_rank = (
-        parallelism_config.world_rank % parallelism_config.ep_size
+    # Unchecked: the world may contain ranks outside the pp*dp*tp lattice
+    # (e.g. FFN-disaggregate replicas/service ranks); derivation is tolerant.
+    layout = RankLayout.from_parallelism_config(parallelism_config)
+    coord = layout.coord_of_unchecked(parallelism_config.world_rank)
+    parallelism_config.tp_rank = coord.tp
+    parallelism_config.dp_rank = coord.dp
+    parallelism_config.pp_rank = coord.pp
+    parallelism_config.ep_rank = layout.ep_rank_of(
+        parallelism_config.world_rank, parallelism_config.ep_size
     )
     parallelism_config.ffn_tp_rank = (
         parallelism_config.tp_rank % parallelism_config.ffn_tp_size

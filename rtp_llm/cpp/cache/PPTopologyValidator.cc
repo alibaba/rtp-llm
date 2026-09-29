@@ -1,0 +1,360 @@
+#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
+
+#include <algorithm>
+#include <limits>
+#include <sstream>
+#include <unordered_map>
+
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+
+namespace rtp_llm {
+
+namespace {
+
+std::string joinTags(const std::vector<std::string>& tags) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << tags[i];
+    }
+    return oss.str();
+}
+
+PPValidationResult fail(std::string error) {
+    PPValidationResult result;
+    result.ok    = false;
+    result.error = std::move(error);
+    return result;
+}
+
+/** Fills per-tag construction inputs from the completed canonical table. */
+void deriveConstructionInputs(PPValidationResult& result) {
+    uint32_t paged_min = std::numeric_limits<uint32_t>::max();
+    uint32_t any_max   = 0;
+    result.agreed.block_num_overrides.clear();
+    result.agreed.block_num_overrides.reserve(result.canonical_groups.size());
+    for (const auto& entry : result.canonical_groups) {
+        result.agreed.block_num_overrides.emplace(entry.tag, entry.logical_block_num);
+        any_max = std::max(any_max, entry.logical_block_num);
+        const bool follows_global_budget =
+            entry.explicit_block_num == 0
+            && (entry.type == CacheGroupType::FULL || entry.type == CacheGroupType::LINEAR);
+        if (follows_global_budget) {
+            paged_min = std::min(paged_min, entry.logical_block_num);
+        }
+    }
+    if (paged_min == std::numeric_limits<uint32_t>::max()) {
+        paged_min = any_max;
+    }
+    RTP_LLM_CHECK_WITH_INFO(paged_min > 0, "PP canonical table yielded a non-positive top-level block count");
+    result.agreed.paged_block_num = paged_min;
+}
+
+}  // namespace
+
+bool StageCacheSnapshot::internallyConsistent() const {
+    const size_t n = group_tags.size();
+    return group_types.size() == n && seq_size_per_block.size() == n && kernel_seq_size_per_block.size() == n
+           && cache_key_token_strides.size() == n && block_nums.size() == n && explicit_block_nums.size() == n
+           && policy_fingerprints.size() == n;
+}
+
+std::string cacheGroupPolicyFingerprint(const CacheGroupPolicy& policy) {
+    std::ostringstream oss;
+    oss << "t" << static_cast<int>(policy.group_type) << ":r" << (policy.enable_prefix_reuse ? 1 : 0) << ":sw"
+        << policy.sliding_window_size << ":v" << (policy.reservable ? 1 : 0) << ":x" << policy.explicit_block_num
+        << ":c" << (policy.charge_to_paged_budget ? 1 : 0) << ":p"
+        << static_cast<int>(policy.memory_placement) << ":a" << policy.active_tail_blocks << ":w"
+        << (policy.validate_tail_blocks ? 1 : 0) << ":m" << static_cast<int>(policy.cp_mapping) << ":s"
+        << static_cast<int>(policy.cp_slice);
+    return oss.str();
+}
+
+StageCacheSnapshot StageCacheSnapshot::fromConfig(const CacheConfig& config) {
+    StageCacheSnapshot snapshot;
+    for (const auto& group : config.topology().groups()) {
+        snapshot.group_tags.push_back(group.tag);
+        snapshot.group_types.push_back(group.policy.group_type);
+        snapshot.seq_size_per_block.push_back(group.seqSizePerBlock());
+        snapshot.kernel_seq_size_per_block.push_back(group.kernelSeqSizePerBlock());
+        snapshot.cache_key_token_strides.push_back(group.cacheKeyTokenStride());
+        snapshot.block_nums.push_back(group.block_num);
+        snapshot.explicit_block_nums.push_back(group.policy.explicit_block_num);
+        snapshot.policy_fingerprints.push_back(cacheGroupPolicyFingerprint(group.policy));
+    }
+    return snapshot;
+}
+
+namespace {
+
+/** Wire format: "v2|tags|types|seq|kseq|key_stride|blocks|explicit|fingerprints". */
+constexpr char kFieldSep = '|';
+constexpr char kTagSep   = '\x1f';
+constexpr char kNumSep   = ',';
+
+std::vector<std::string> splitFields(const std::string& s, char sep) {
+    std::vector<std::string> parts;
+    std::stringstream        ss(s);
+    std::string              item;
+    while (std::getline(ss, item, sep)) {
+        parts.push_back(item);
+    }
+    return parts;
+}
+
+template<typename T>
+std::string joinNums(const std::vector<T>& values) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            oss << kNumSep;
+        }
+        oss << static_cast<unsigned long long>(values[i]);
+    }
+    return oss.str();
+}
+
+template<typename T>
+std::vector<T> parseNums(const std::string& field, size_t expected_size) {
+    std::vector<T> values;
+    if (field.empty()) {
+        return values;
+    }
+    std::stringstream ss(field);
+    std::string       item;
+    while (std::getline(ss, item, kNumSep)) {
+        values.push_back(static_cast<T>(std::stoull(item)));
+    }
+    RTP_LLM_CHECK_WITH_INFO(values.size() == expected_size,
+                            "PP snapshot field has %zu entries, expected %zu",
+                            values.size(),
+                            expected_size);
+    return values;
+}
+
+}  // namespace
+
+std::string StageCacheSnapshot::serialize() const {
+    std::ostringstream oss;
+    oss << "v2" << kFieldSep;
+    for (size_t i = 0; i < group_tags.size(); ++i) {
+        if (i > 0) {
+            oss << kTagSep;
+        }
+        RTP_LLM_CHECK_WITH_INFO(group_tags[i].find_first_of("\x1f|,") == std::string::npos,
+                                "PP snapshot tag contains a wire-format delimiter: %s",
+                                group_tags[i].c_str());
+        oss << group_tags[i];
+    }
+    oss << kFieldSep << joinNums(group_types) << kFieldSep << joinNums(seq_size_per_block) << kFieldSep
+        << joinNums(kernel_seq_size_per_block) << kFieldSep << joinNums(cache_key_token_strides) << kFieldSep
+        << joinNums(block_nums) << kFieldSep << joinNums(explicit_block_nums) << kFieldSep;
+    for (size_t i = 0; i < policy_fingerprints.size(); ++i) {
+        if (i > 0) {
+            oss << kTagSep;
+        }
+        RTP_LLM_CHECK_WITH_INFO(policy_fingerprints[i].find_first_of("\x1f|,") == std::string::npos,
+                                "PP snapshot policy fingerprint contains a wire-format delimiter: %s",
+                                policy_fingerprints[i].c_str());
+        oss << policy_fingerprints[i];
+    }
+    return oss.str();
+}
+
+StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
+    const auto fields = splitFields(payload, kFieldSep);
+    RTP_LLM_CHECK_WITH_INFO(fields.size() == 9 && fields[0] == "v2",
+                            "PP snapshot payload is malformed (version/field count)");
+    StageCacheSnapshot snapshot;
+    snapshot.group_tags = splitFields(fields[1], kTagSep);
+    if (fields[1].empty()) {
+        snapshot.group_tags.clear();
+    }
+    snapshot.group_types               = parseNums<CacheGroupType>(fields[2], snapshot.group_tags.size());
+    snapshot.seq_size_per_block        = parseNums<size_t>(fields[3], snapshot.group_tags.size());
+    snapshot.kernel_seq_size_per_block = parseNums<size_t>(fields[4], snapshot.group_tags.size());
+    snapshot.cache_key_token_strides   = parseNums<size_t>(fields[5], snapshot.group_tags.size());
+    snapshot.block_nums                = parseNums<uint32_t>(fields[6], snapshot.group_tags.size());
+    snapshot.explicit_block_nums       = parseNums<uint32_t>(fields[7], snapshot.group_tags.size());
+    snapshot.policy_fingerprints       = splitFields(fields[8], kTagSep);
+    if (fields[8].empty()) {
+        snapshot.policy_fingerprints.clear();
+    }
+    RTP_LLM_CHECK_WITH_INFO(snapshot.internallyConsistent(), "PP snapshot payload failed consistency check");
+    return snapshot;
+}
+
+PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& stages) {
+    PPValidationResult result;
+
+    if (stages.size() <= 1) {
+        result.ok = true;
+        if (stages.size() == 1) {
+            if (!stages[0].internallyConsistent()) {
+                return fail("stage 0 cache snapshot is internally inconsistent");
+            }
+            for (size_t g = 0; g < stages[0].group_tags.size(); ++g) {
+                CanonicalGroupEntry entry;
+                entry.tag                       = stages[0].group_tags[g];
+                entry.type                      = stages[0].group_types[g];
+                entry.seq_size_per_block        = stages[0].seq_size_per_block[g];
+                entry.kernel_seq_size_per_block = stages[0].kernel_seq_size_per_block[g];
+                entry.cache_key_token_stride    = stages[0].cache_key_token_strides[g];
+                entry.logical_block_num         = stages[0].block_nums[g];
+                entry.explicit_block_num        = stages[0].explicit_block_nums[g];
+                entry.policy_fingerprint        = stages[0].policy_fingerprints[g];
+                result.canonical_groups.push_back(std::move(entry));
+            }
+            deriveConstructionInputs(result);
+        }
+        return result;
+    }
+
+    for (size_t s = 0; s < stages.size(); ++s) {
+        if (!stages[s].internallyConsistent()) {
+            return fail("stage " + std::to_string(s) + " cache snapshot is internally inconsistent");
+        }
+    }
+
+    for (size_t s = 0; s < stages.size(); ++s) {
+        for (size_t g = 0; g < stages[s].group_tags.size(); ++g) {
+            if (stages[s].block_nums[g] == 0) {
+                return fail("stage " + std::to_string(s) + " group [" + stages[s].group_tags[g]
+                            + "] has 0 KV blocks; the group could not allocate a single block");
+            }
+        }
+    }
+
+    std::unordered_map<std::string, size_t> canonical_index;
+    for (size_t s = 0; s < stages.size(); ++s) {
+        for (size_t g = 0; g < stages[s].group_tags.size(); ++g) {
+            const auto& tag = stages[s].group_tags[g];
+            const auto  it  = canonical_index.find(tag);
+            if (it == canonical_index.end()) {
+                /** Stage 0 issues every block id, so later stages can only own its tags. */
+                if (s != 0) {
+                    return fail("stage " + std::to_string(s) + " owns cache group [" + tag
+                                + "] that is absent from stage 0 [" + joinTags(stages[0].group_tags)
+                                + "]; the leading PP stage must own every cache group (bookkeeping-only "
+                                  "allocation is not supported)");
+                }
+                canonical_index.emplace(tag, result.canonical_groups.size());
+                CanonicalGroupEntry entry;
+                entry.tag                       = tag;
+                entry.type                      = stages[s].group_types[g];
+                entry.seq_size_per_block        = stages[s].seq_size_per_block[g];
+                entry.kernel_seq_size_per_block = stages[s].kernel_seq_size_per_block[g];
+                entry.cache_key_token_stride    = stages[s].cache_key_token_strides[g];
+                entry.logical_block_num         = stages[s].block_nums[g];
+                entry.explicit_block_num        = stages[s].explicit_block_nums[g];
+                entry.policy_fingerprint        = stages[s].policy_fingerprints[g];
+                result.canonical_groups.push_back(std::move(entry));
+                continue;
+            }
+            auto& entry = result.canonical_groups[it->second];
+            if (stages[s].group_types[g] != entry.type) {
+                return fail("stage " + std::to_string(s) + " group [" + tag
+                            + "] type differs from the canonical entry");
+            }
+            if (stages[s].seq_size_per_block[g] != entry.seq_size_per_block) {
+                return fail("stage " + std::to_string(s) + " group [" + tag + "] seq_size_per_block "
+                            + std::to_string(stages[s].seq_size_per_block[g]) + " != canonical "
+                            + std::to_string(entry.seq_size_per_block));
+            }
+            if (stages[s].kernel_seq_size_per_block[g] != entry.kernel_seq_size_per_block) {
+                return fail("stage " + std::to_string(s) + " group [" + tag + "] kernel_seq_size_per_block "
+                            + std::to_string(stages[s].kernel_seq_size_per_block[g]) + " != canonical "
+                            + std::to_string(entry.kernel_seq_size_per_block));
+            }
+            if (stages[s].cache_key_token_strides[g] != entry.cache_key_token_stride) {
+                return fail("stage " + std::to_string(s) + " group [" + tag + "] cache_key_token_stride "
+                            + std::to_string(stages[s].cache_key_token_strides[g]) + " != canonical "
+                            + std::to_string(entry.cache_key_token_stride));
+            }
+            if (stages[s].explicit_block_nums[g] != entry.explicit_block_num) {
+                return fail("stage " + std::to_string(s) + " group [" + tag + "] explicit_block_num "
+                            + std::to_string(stages[s].explicit_block_nums[g]) + " != canonical "
+                            + std::to_string(entry.explicit_block_num));
+            }
+            if (stages[s].policy_fingerprints[g] != entry.policy_fingerprint) {
+                return fail("stage " + std::to_string(s) + " group [" + tag + "] policy ["
+                            + stages[s].policy_fingerprints[g] + "] != canonical [" + entry.policy_fingerprint + "]");
+            }
+            entry.logical_block_num = std::min(entry.logical_block_num, stages[s].block_nums[g]);
+        }
+    }
+
+    result.ok = true;
+    deriveConstructionInputs(result);
+    return result;
+}
+
+PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector) {
+    return validatePPTopology(collector.collect());
+}
+
+std::vector<StageCacheSnapshot> PPSnapshotCollector::collect() {
+    const auto payloads = execPPSnapshotExchange(local_.serialize());
+    RTP_LLM_CHECK_WITH_INFO(!payloads.empty(), "PP snapshot exchange returned no stages");
+    std::vector<StageCacheSnapshot> stages;
+    stages.reserve(payloads.size());
+    for (size_t s = 0; s < payloads.size(); ++s) {
+        try {
+            stages.push_back(StageCacheSnapshot::deserialize(payloads[s]));
+        } catch (const std::exception& e) {
+            RTP_LLM_FAIL("PP snapshot exchange: stage %zu payload rejected: %s", s, e.what());
+        }
+    }
+    return stages;
+}
+
+void validatePPComposedBlockNums(const CacheConfig& composed, const NegotiatedCapacity& agreed) {
+    for (const auto& group : composed.topology().groups()) {
+        const auto it = agreed.block_num_overrides.find(group.tag);
+        RTP_LLM_CHECK_WITH_INFO(it != agreed.block_num_overrides.end(),
+                                "local group [%s] is missing from the PP canonical group table",
+                                group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group.block_num == it->second,
+                                "composed group [%s] block_num %u != cross-stage agreed %u",
+                                group.tag.c_str(),
+                                group.block_num,
+                                it->second);
+    }
+    for (const auto& sub_config : composed.mtp_sub_configs) {
+        if (sub_config != nullptr) {
+            validatePPComposedBlockNums(*sub_config, agreed);
+        }
+    }
+}
+
+PPValidationResult PPCacheCapacityNegotiator::negotiate(const CacheConfig&   topology,
+                                                        uint32_t             local_block_num,
+                                                        const RuntimeConfig& runtime_config) {
+    /**
+     * Size a throwaway copy, exchange stage-aligned snapshots, and reduce all
+     * owner stages to the same per-tag minima without mutating the input.
+     */
+    CacheConfig sized = topology;
+    sized.mtp_sub_configs.clear();
+    sized.finalizeBlockNums(local_block_num, runtime_config);
+    PPSnapshotCollector collector(StageCacheSnapshot::fromConfig(sized));
+    auto                validation = initPPCacheGeometry(collector);
+    if (!validation.ok) {
+        RTP_LLM_FAIL("PP cache topology validation failed: %s", validation.error.c_str());
+    }
+    RTP_LLM_LOG_INFO("PP cache negotiation: local block_num %u -> agreed paged %u over %zu canonical groups",
+                     local_block_num,
+                     validation.agreed.paged_block_num,
+                     validation.canonical_groups.size());
+    return validation;
+}
+
+void PPCacheCapacityNegotiator::validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed) {
+    validatePPComposedBlockNums(composed, agreed);
+}
+
+
+}  // namespace rtp_llm

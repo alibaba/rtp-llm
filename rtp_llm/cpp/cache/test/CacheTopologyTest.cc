@@ -229,5 +229,25 @@ TEST(CacheTopologyTest, DerivesReverseMembershipFromLayers) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full"), makeGroup("full")}, {{0, {"full"}}}));
 }
 
+TEST(CacheTopologyTest, PreservesSpecGeometryWhenCacheKeySpanDiffers) {
+    for (const auto type : {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR}) {
+        for (const uint32_t kernel_size : {2u, 4u, 8u}) {
+            SCOPED_TRACE(cacheGroupTypeName(type));
+            SCOPED_TRACE(kernel_size);
+            CacheConfig config;
+            config.seq_size_per_block = 64;
+            auto group                = makeGroup("cache", type);
+            group.spec                = std::make_shared<MHAKVCacheSpec>("cache", 8, kernel_size);
+
+            config.setTopology({group}, {{0, {"cache"}}});
+
+            const auto& configured = config.group("cache");
+            EXPECT_EQ(configured.seqSizePerBlock(), 8u);
+            EXPECT_EQ(configured.kernelSeqSizePerBlock(), kernel_size);
+            EXPECT_EQ(configured.kernelBlocksPerKvBlock(), 8 / kernel_size);
+        }
+    }
+}
+
 }  // namespace
 }  // namespace rtp_llm

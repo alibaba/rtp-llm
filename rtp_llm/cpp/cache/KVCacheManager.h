@@ -49,9 +49,9 @@ public:
         return coordinator_manager_ != nullptr;
     }
 
-    // TP0 owns request block allocation; other ranks only receive the block IDs.
+    /** The first stage's TP0 allocates request blocks; other ranks receive its block IDs. */
     bool isAllocatorOwner() const {
-        return parallelism_config_.tp_rank == 0;
+        return parallelism_config_.pp_rank == 0 && parallelism_config_.tp_rank == 0;
     }
 
     const CacheConfig& cacheConfig() const;

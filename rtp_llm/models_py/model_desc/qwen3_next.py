@@ -1489,6 +1489,7 @@ class Qwen3NextModel(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        apply_pp_partition: bool = True,
     ):
         super().__init__(
             model_config,
@@ -1498,9 +1499,15 @@ class Qwen3NextModel(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
+            apply_pp_partition=apply_pp_partition,
         )
-        self.embed_tokens = Embedding(
-            model_config, parallelism_config, weights.get_global_weight(W.embedding)
+        # First stage owns the embedding; pp_size=1 keeps today's behavior.
+        self.embed_tokens = (
+            Embedding(
+                model_config, parallelism_config, weights.get_global_weight(W.embedding)
+            )
+            if self.pp_has_embedding
+            else None
         )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
@@ -1508,6 +1515,7 @@ class Qwen3NextModel(GptModelBase):
             if py_hw_kernel_config is not None
             else False
         )
+        self.pp_layer_ids_list = self.pp_layer_ids()
         self.layers = nn.ModuleList(
             [
                 Qwen3NextDecoderLayer(
@@ -1520,11 +1528,16 @@ class Qwen3NextModel(GptModelBase):
                     enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
                 )
-                for idx in range(self.layer_num)
+                for idx in self.pp_layer_ids_list
             ]
         )
-        self.norm = RMSResNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+        self.norm = (
+            RMSResNorm(
+                weights.get_global_weight(W.final_ln_gamma),
+                eps=model_config.layernorm_eps,
+            )
+            if self.pp_has_lm_head
+            else None
         )
 
     def prepare_fmha_impl(
@@ -1569,6 +1582,29 @@ class Qwen3NextModel(GptModelBase):
             replay = _QwenGdnGraphDelegate(bounds_by_tag, anchor, impls.get(anchor))
             return _QwenGraphAttentionImpls({**impls, anchor: replay}, replay)
         return _QwenGdnGraphDelegate(bounds_by_tag, "", impls)
+
+    def make_empty_intermediate_tensors(
+        self, hidden_template: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Build the same stage inputs used by runtime, without communication.
+
+        Fused add-norm keeps hidden and residual separate across the boundary;
+        dropping residual changes downstream results. The auxiliary prefix
+        contains only configured layer boundaries preceding this stage.
+        """
+        tensors = {
+            "hidden_states": hidden_template,
+            "residual": torch.zeros_like(hidden_template),
+        }
+        previous_parts = sum(
+            layer_id < self.pp_layer_ids_list[0]
+            for layer_id in self._mtp_aux_capture_layer_ids
+        )
+        if previous_parts:
+            tensors["mtp_aux_hidden_states"] = hidden_template.new_zeros(
+                (hidden_template.shape[0], previous_parts * hidden_template.shape[1])
+            )
+        return tensors
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
@@ -1643,11 +1679,25 @@ class Qwen3NextModel(GptModelBase):
         return self.embed_tokens(input_ids)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        """Execute global decoder layers using this stage's local cache indices.
+
+        The model entry embeds tokens and starts residual from zero. Later
+        target stages require both hidden and residual from the upstream stage so fused
+        add-norm resumes the same layer boundary; stage-local warmup supplies
+        both tensors with zeros. Captured draft features follow global layer
+        order and travel as an additional prefix; only the tail applies final
+        norm and publishes the complete auxiliary features to the draft.
+        """
         if torch.version.hip is not None and isinstance(
             fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
         ):
             fmha_impl.bind_graph_inputs(inputs)
-        hidden_states = self.word_embedding(inputs)
+        if self.embed_tokens is not None:
+            hidden_states = self.word_embedding(inputs)
+            residual = torch.zeros_like(hidden_states)
+        else:
+            hidden_states = inputs.pp_intermediates["hidden_states"]
+            residual = inputs.pp_intermediates["residual"]
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
@@ -1754,38 +1804,59 @@ class Qwen3NextModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
-        residual = torch.zeros_like(hidden_states)
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
+        pp_capture = self._apply_pp_partition and self.pp_size > 1
         if capture_aux_hidden:
-            self.begin_aux_hidden_capture(hidden_states, is_target_verify)
+            if pp_capture:
+                self.begin_pp_aux_hidden_capture(
+                    hidden_states, inputs.pp_intermediates.get("mtp_aux_hidden_states")
+                )
+            else:
+                self.begin_aux_hidden_capture(hidden_states, is_target_verify)
 
-        for i, decoder_layer in enumerate(self.layers):
+        for local_idx, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, i
+                inputs, self.kv_cache, local_idx
             )
             layer_fmha_impl = (
                 None
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, local_idx)
             )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=(
+                    self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
+                ),
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
-            if i in self._mtp_aux_capture_layer_id_set:
-                self.capture_aux_hidden(i, hidden_states, residual)
+            global_layer_id = self.pp_layer_ids_list[local_idx]
+            if global_layer_id in self._mtp_aux_capture_layer_id_set:
+                self.capture_aux_hidden(global_layer_id, hidden_states, residual)
         if capture_aux_hidden:
-            self.finish_aux_hidden_capture()
+            if pp_capture:
+                self.finish_pp_aux_hidden_capture()
+            else:
+                self.finish_aux_hidden_capture()
 
-        hidden_states, residual = self.norm(hidden_states, residual)
-        if capture_aux_hidden:
-            assert self._mtp_target_hidden_states is not None
-            return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
-        return PyModelOutputs(hidden_states)
+        if self.norm is not None:
+            hidden_states, residual = self.norm(hidden_states, residual)
+            if capture_aux_hidden:
+                assert self._mtp_target_hidden_states is not None
+                return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
+            return PyModelOutputs(hidden_states)
+        outputs = PyModelOutputs(hidden_states)
+        intermediates = {
+            "hidden_states": hidden_states,
+            "residual": residual,
+        }
+        if capture_aux_hidden and self._mtp_aux_capture_buffer is not None:
+            intermediates["mtp_aux_hidden_states"] = self._mtp_aux_capture_buffer
+        outputs.pp_intermediates = intermediates
+        return outputs
 
 
 class Qwen35Model(Qwen3NextModel):
@@ -1799,6 +1870,7 @@ class Qwen35Model(Qwen3NextModel):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        apply_pp_partition: bool = True,
     ):
         super().__init__(
             model_config,
@@ -1809,6 +1881,7 @@ class Qwen35Model(Qwen3NextModel):
             fmha_config,
             py_hw_kernel_config,
             device_resource_config,
+            apply_pp_partition=apply_pp_partition,
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 

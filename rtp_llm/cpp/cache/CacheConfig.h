@@ -21,6 +21,8 @@
 
 namespace rtp_llm {
 
+using PPBlockNumOverrides = std::unordered_map<std::string, uint32_t>;
+
 // Residency (memory_placement) and budget (charge_to_paged_budget) are independent.
 inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std::string& tag) {
     RTP_LLM_CHECK_WITH_INFO(
@@ -39,11 +41,15 @@ public:
     bool use_typed_cache_regions                  = false;
     bool use_opaque_kv_cache_store                = false;
     bool disable_decode_first_malloc_device_reuse = false;
+    /** PP stages can own a single tag from a multi-tag model. Preserve the full-model
+     * transfer format so P and D use the same keys and block policy after partitioning. */
+    bool model_has_multiple_cache_groups = false;
 
-    rtp_llm::DataType dtype     = rtp_llm::DataType::TYPE_INVALID;
-    uint32_t          layer_num = 0;  // the number of main model layers
-    bool              use_mla   = false;
-    bool              is_sparse = false;
+    rtp_llm::DataType dtype              = rtp_llm::DataType::TYPE_INVALID;
+    uint32_t          layer_num          = 0;  // the number of main model layers
+    uint32_t          global_layer_begin = 0;
+    bool              use_mla            = false;
+    bool              is_sparse          = false;
 
     // Block configuration
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
@@ -80,6 +86,10 @@ public:
 
     int groupNums() const {
         return cache_topology == nullptr ? 0 : static_cast<int>(cache_topology->groups().size());
+    }
+
+    bool usesGroupCacheTransferPolicy() const {
+        return model_has_multiple_cache_groups || groupNums() > 1;
     }
 
     const CacheTopology& topology() const {
@@ -181,7 +191,9 @@ public:
                                  const std::vector<CacheGroupType>&   types,
                                  const std::vector<std::string>&      tags     = {},
                                  const std::vector<CacheGroupPolicy>& policies = {});
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    void        finalizeBlockNums(uint32_t                   global_block_num,
+                                  const RuntimeConfig&       runtime_config,
+                                  const PPBlockNumOverrides* pp_overrides = nullptr);
     std::string debugString(size_t indent = 0) const;
 };
 

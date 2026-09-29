@@ -8,6 +8,7 @@
 
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
@@ -88,6 +89,31 @@ private:
     int                           listen_port_{0};
 };
 
+class CapturingGenerateClientStream: public grpc::ClientReaderWriterInterface<GenerateRequestPB, GenerateOutputsPB> {
+public:
+    bool Read(GenerateOutputsPB*) override {
+        return false;
+    }
+    bool NextMessageSize(uint32_t*) override {
+        return false;
+    }
+    bool Write(const GenerateRequestPB& value, grpc::WriteOptions) override {
+        request = value;
+        ++write_count;
+        return true;
+    }
+    void WaitForInitialMetadata() override {}
+    bool WritesDone() override {
+        return true;
+    }
+    grpc::Status Finish() override {
+        return grpc::Status::OK;
+    }
+
+    GenerateRequestPB request;
+    int write_count = 0;
+};
+
 class TestMultimodalProcessor: public MultimodalProcessor {
 public:
     explicit TestMultimodalProcessor(ErrorCode result_code):
@@ -123,7 +149,8 @@ private:
 
 class TestEngineBase final: public EngineBase {
 public:
-    explicit TestEngineBase(bool is_mtp_eagle): EngineBase(EngineInitParams()), is_mtp_eagle_(is_mtp_eagle) {}
+    explicit TestEngineBase(bool is_mtp_eagle, bool is_dspark = false):
+        EngineBase(EngineInitParams()), is_mtp_eagle_(is_mtp_eagle), is_dspark_(is_dspark) {}
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
         return nullptr;
@@ -141,9 +168,13 @@ public:
     bool isMTPEagle() override {
         return is_mtp_eagle_;
     }
+    bool isDSpark() override {
+        return is_dspark_;
+    }
 
 private:
     bool is_mtp_eagle_;
+    bool is_dspark_;
 };
 
 class TestPrefillRpcServer: public PrefillRpcServer {
@@ -161,8 +192,8 @@ public:
         process_id_ = process_id;
     }
 
-    void setEngineForTest(bool is_mtp_eagle) {
-        engine_ = std::make_shared<TestEngineBase>(is_mtp_eagle);
+    void setEngineForTest(bool is_mtp_eagle, bool is_dspark = false) {
+        engine_ = std::make_shared<TestEngineBase>(is_mtp_eagle, is_dspark);
     }
 
     void prepareGenerateInputForTest(PrefillGenerateContext& context) {
@@ -338,6 +369,69 @@ TEST_F(PrefillRpcServerTest, waitStreamBeforeRunUsesEachServerTimeout) {
     auto second_error = second_server.waitStreamBeforeRunForTest(makeWaitingStream());
     EXPECT_EQ(second_error.code(), ErrorCode::WAIT_TO_RUN_TIMEOUT);
     EXPECT_NE(second_error.ToString().find("7000 us"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, MtpAndEagleSendDraftStateWithOrWithoutPrefillPp) {
+    for (int pp_size : {1, 2}) {
+        for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+            SCOPED_TRACE("PP=" + std::to_string(pp_size) + ", type=" + std::to_string(type));
+            auto input = std::make_shared<GenerateInput>();
+            input->request_id = 42;
+            input->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            input->generate_config->max_new_tokens = 16;
+            ModelConfig model;
+            model.max_seq_len = 64;
+            model.vocab_size = 128;
+            model.input_vocab_size = 128;
+            model.special_tokens.eos_token_id = -1;
+            auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+            stream->generate_status_->status = StreamState::RUNNING;
+            stream->update({torch::tensor({{7}}, torch::kInt32), 1});
+            ASSERT_FALSE(stream->hasError());
+            auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+            if (type == SP_TYPE_MTP || type == SP_TYPE_EAGLE) {
+                stream->setProposeToken({7, 8});
+                buffer->propose_step = 3;
+                buffer->tokens = torch::tensor({{7, 8, 0, 0}}, torch::kInt32);
+                buffer->all_probs = torch::full({1, 128}, 1.0f / 128);
+                buffer->hidden_states = torch::full({1, 8}, 0.5f);
+                stream->setSPOutputBuffer(buffer);
+            } else if (type == SP_TYPE_DSPARK) {
+                buffer->propose_step = 3;
+                buffer->tokens = torch::tensor({{7, 0, 0, 0}}, torch::kInt32);
+                stream->setSPOutputBuffer(buffer);
+            }
+            GenerateInputPB request;
+            request.set_request_id(42);
+            auto context = makeContext(&request);
+            context->generate_input = input;
+            context->stream_ = stream;
+            auto client_stream = std::make_shared<CapturingGenerateClientStream>();
+            context->client_stream = client_stream;
+            TestPrefillRpcServer server;
+            server.setEngineForTest(type != SP_TYPE_NONE, type == SP_TYPE_DSPARK);
+            server.maga_init_params_.parallelism_config.pp_size = pp_size;
+            server.maga_init_params_.sp_config.type = type;
+            server.remoteGenerate(*context);
+            context->stream_.reset();
+
+            ASSERT_TRUE(context->error_status.ok());
+            ASSERT_EQ(client_stream->write_count, 1);
+            const auto& sent = client_stream->request;
+            EXPECT_EQ(sent.stage(), RemoteStage::GENERATE);
+            EXPECT_EQ(sent.first_generate_token_id(), 7);
+            const auto expected_tokens = (type == SP_TYPE_NONE || type == SP_TYPE_DSPARK) ? std::vector<int>{} : std::vector<int>{7, 8};
+            EXPECT_EQ(std::vector<int>(sent.propose_token_ids().begin(), sent.propose_token_ids().end()), expected_tokens);
+            const bool has_draft_state = type == SP_TYPE_MTP || type == SP_TYPE_EAGLE;
+            EXPECT_EQ(sent.has_propose_probs(), has_draft_state);
+            EXPECT_EQ(sent.has_propose_hidden(), has_draft_state);
+            if (has_draft_state) {
+                EXPECT_TRUE(torch::equal(QueryConverter::transTensor(sent.propose_probs()), buffer->all_probs));
+                EXPECT_TRUE(torch::equal(QueryConverter::transTensor(sent.propose_hidden()), buffer->hidden_states));
+            }
+        }
+    }
 }
 
 TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatingMultimodalProcessing) {
@@ -1111,6 +1205,37 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     ASSERT_EQ(alloc_request.peer_addrs_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs(0), "a:1");
     EXPECT_EQ(alloc_request.peer_addrs(1), "b:2");
+    EXPECT_EQ(alloc_request.stage_peer_groups_size(), 0);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestCarriesStagePeerGroupsUnderPp) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(10);
+    auto context                              = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {
+        "w0:1:2", "w1:1:2", "w2:1:2", "w3:1:2", "w4:1:2", "w5:1:2", "w6:1:2", "w7:1:2"};
+
+    TestPrefillRpcServer server;
+    server.maga_init_params_.parallelism_config.pp_size               = 4;
+    server.maga_init_params_.parallelism_config.tp_size               = 2;
+    server.maga_init_params_.parallelism_config.pp_stage_layer_counts = {3, 3, 2, 2};
+
+    auto alloc_request = server.buildAllocateRequest(*context);
+
+    ASSERT_EQ(alloc_request.stage_peer_groups_size(), 4);
+    for (int stage = 0; stage < alloc_request.stage_peer_groups_size(); ++stage) {
+        EXPECT_EQ(alloc_request.stage_peer_groups(stage).is_last_stage(),
+                  stage == alloc_request.stage_peer_groups_size() - 1);
+    }
+    EXPECT_EQ(alloc_request.stage_peer_groups(0).layer_begin(), 0u);
+    EXPECT_EQ(alloc_request.stage_peer_groups(0).layer_count(), 3u);
+    EXPECT_EQ(alloc_request.stage_peer_groups(2).layer_begin(), 6u);
+    EXPECT_EQ(alloc_request.stage_peer_groups(2).layer_count(), 2u);
+    ASSERT_EQ(alloc_request.stage_peer_groups(1).peer_addrs_size(), 2);
+    EXPECT_EQ(alloc_request.stage_peer_groups(1).peer_addrs(0), "w2:1:2");
+    EXPECT_EQ(alloc_request.stage_peer_groups(1).peer_addrs(1), "w3:1:2");
+    EXPECT_EQ(alloc_request.stage_peer_groups(3).peer_addrs(1), "w7:1:2");
 }
 
 }  // namespace rtp_llm

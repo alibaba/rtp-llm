@@ -6,6 +6,11 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.pp_layout import (
+    stage_has_embedding,
+    stage_has_lm_head,
+    stage_layer_range,
+)
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
@@ -36,10 +41,12 @@ class GptModelBase(nn.Module):
         device_resource_config: Optional[
             DeviceResourceConfig
         ] = None,  # Optional DeviceResourceConfig
+        apply_pp_partition: bool = True,
     ) -> None:
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
+        self._apply_pp_partition = apply_pp_partition
         self.weight = weight
         self.fmha_config = fmha_config
         self.py_hw_kernel_config = py_hw_kernel_config
@@ -66,6 +73,49 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_buffer: Optional[torch.Tensor] = None
         self._mtp_aux_capture_rows = 0
         self._mtp_aux_capture_index = 0
+
+    # Pipeline-parallel stage view; layout delegates to config/pp_layout.py.
+    @property
+    def pp_size(self) -> int:
+        return self.parallelism_config.pp_size
+
+    @property
+    def pp_rank(self) -> int:
+        return self.parallelism_config.pp_rank
+
+    @property
+    def pp_has_embedding(self) -> bool:
+        """The first target stage or a complete draft owns its embedding."""
+        return not self._apply_pp_partition or stage_has_embedding(self.pp_rank)
+
+    @property
+    def pp_has_lm_head(self) -> bool:
+        """Only the last stage owns lm_head and final layernorm.
+
+        Draft placement is already restricted to the last stage, so model
+        construction scope does not change output-module ownership.
+        """
+        return stage_has_lm_head(self.pp_rank, self.pp_size)
+
+    def pp_layer_ids(self) -> list[int]:
+        """Global layer ids owned by this stage.
+
+        Lookup over the materialized partition on ParallelismConfig
+        (decided once at startup), so model construction stays in sync
+        with weight loading; pp_size=1 is trivially all layers.
+        A draft uses all of its own layers while retaining the physical
+        ParallelismConfig for TP/EP communication on its owning stage.
+        """
+        if not self._apply_pp_partition:
+            return list(range(self.layer_num))
+        counts = getattr(self.parallelism_config, "pp_stage_layer_counts", None)
+        return list(
+            stage_layer_range(self.layer_num, self.pp_size, self.pp_rank, counts)
+        )
+
+    def make_empty_intermediate_tensors(self, hidden_template: Any) -> dict[str, Any]:
+        """Build this model's stage-boundary inputs for stage-local PP warmup."""
+        return {"hidden_states": hidden_template}
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
@@ -171,6 +221,63 @@ class GptModelBase(nn.Module):
             else:
                 self._mtp_target_prompt_buffer = buffer
         self._mtp_aux_capture_buffer = buffer
+
+    def begin_pp_aux_hidden_capture(
+        self,
+        hidden_states: torch.Tensor,
+        upstream_hidden: Optional[torch.Tensor],
+    ) -> None:
+        """Resume the ordered capture prefix produced by earlier PP stages.
+
+        Only layer boundaries reached by this stage occupy the output buffer.
+        Each forward owns fresh contiguous storage: PP sends can outlive this
+        forward, so reusing the single-stage capture buffer would overwrite
+        features belonging to an in-flight batch. Rows retain the target's
+        current token layout, including CP-local padding.
+        """
+        layer_ids = self.pp_layer_ids()
+        previous_parts = sum(
+            layer_id < layer_ids[0] for layer_id in self._mtp_aux_capture_layer_ids
+        )
+        self._mtp_aux_capture_expected_parts = sum(
+            layer_id <= layer_ids[-1] for layer_id in self._mtp_aux_capture_layer_ids
+        )
+        self._mtp_target_hidden_states = None
+        self._mtp_aux_capture_rows = int(hidden_states.shape[0])
+        self._mtp_aux_capture_index = previous_parts
+        self._mtp_aux_capture_buffer = None
+        hidden_width = int(hidden_states.shape[-1])
+        prefix_shape = (self._mtp_aux_capture_rows, previous_parts * hidden_width)
+        if previous_parts and (
+            upstream_hidden is None or tuple(upstream_hidden.shape) != prefix_shape
+        ):
+            actual_shape = (
+                None if upstream_hidden is None else tuple(upstream_hidden.shape)
+            )
+            raise RuntimeError(
+                f"PP auxiliary hidden prefix has shape {actual_shape}, expected {prefix_shape}"
+            )
+        if self._mtp_aux_capture_expected_parts == 0:
+            return
+        self._mtp_aux_capture_buffer = hidden_states.new_empty(
+            (
+                self._mtp_aux_capture_rows,
+                self._mtp_aux_capture_expected_parts * hidden_width,
+            )
+        )
+        if previous_parts:
+            self._mtp_aux_capture_buffer[:, : prefix_shape[1]].copy_(upstream_hidden)
+
+    def finish_pp_aux_hidden_capture(self) -> None:
+        """Forward the completed prefix; only the tail publishes draft inputs."""
+        if self._mtp_aux_capture_index != self._mtp_aux_capture_expected_parts:
+            raise RuntimeError(
+                "PP auxiliary hidden capture missed configured layers: "
+                f"captured={self._mtp_aux_capture_index}, "
+                f"expected={self._mtp_aux_capture_expected_parts}"
+            )
+        if self.pp_has_lm_head:
+            self.finish_aux_hidden_capture()
 
     def capture_aux_hidden(
         self,

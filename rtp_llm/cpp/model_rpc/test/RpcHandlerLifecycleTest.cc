@@ -4,6 +4,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -75,22 +76,34 @@ private:
 
 class SteppedEngine: public EngineBase {
 public:
-    static EngineInitParams parameters() {
+    static EngineInitParams parameters(bool pipeline = false) {
         EngineInitParams params;
         params.model_config_.max_seq_len                                  = 32;
         params.model_config_.vocab_size                                   = 128;
         params.runtime_config.max_generate_batch_size                     = 8;
         params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32;
+        if (pipeline) {
+            params.model_config_.num_layers = 3;
+            params.parallelism_config.pp_size = 3;
+            params.parallelism_config.tp_size = 1;
+            params.parallelism_config.pp_stage_layer_counts = {1, 1, 1};
+        }
         return params;
     }
 
-    explicit SteppedEngine(OutputAction action): EngineBase(parameters()), action_(action) {
-        resource_context_.cache_manager =
-            std::make_shared<KVCacheManager>(DeviceTestBase::makeMhaCacheConfig(1, 8, 1, 4, 8, DataType::TYPE_FP16));
+    static CacheConfig defaultCacheConfig() {
+        return makeSimpleMhaCacheConfig(1, 8, 8, DataType::TYPE_FP16, 1, 4);
+    }
+
+    explicit SteppedEngine(OutputAction action,
+                           bool pipeline = false,
+                           const CacheConfig& cache_config = defaultCacheConfig()):
+        EngineBase(parameters(pipeline)), action_(action), pipeline_(pipeline) {
+        resource_context_.cache_manager = std::make_shared<KVCacheManager>(cache_config);
         if (!resource_context_.cache_manager->init()) {
             throw std::runtime_error("test cache initialization failed");
         }
-        const auto params = parameters();
+        const auto params = parameters(pipeline_);
         scheduler_        = std::make_unique<FIFOScheduler>(params.runtime_config,
                                                      params.model_config_,
                                                      params.pd_sep_config,
@@ -104,7 +117,8 @@ public:
     }
 
     GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
-        stream = std::make_shared<HandlerTestStream>(input, parameters(), resource_context_, action_, polling);
+        stream = std::make_shared<HandlerTestStream>(input, parameters(pipeline_), resource_context_, action_, polling);
+        stream->setPipelineParallel(pipeline_);
         return stream;
     }
     GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
@@ -118,7 +132,7 @@ public:
             throw std::runtime_error(status.ToString());
         }
         auto scheduled = scheduler_->schedule();
-        if (!scheduled.ok() || scheduled.value().size() != 1 || value->getStatus() != StreamState::RUNNING) {
+        if (!scheduled.ok() || scheduled.value().streams.size() != 1 || value->getStatus() != StreamState::RUNNING) {
             throw std::runtime_error("test stream was not admitted to RUNNING: " + value->statusInfo().ToString());
         }
         // No background engine loop: the test explicitly advances the next tick.
@@ -141,6 +155,7 @@ public:
 
 private:
     OutputAction action_;
+    bool pipeline_;
 };
 
 // Isolate remote computation/cache transport, not the handler under test.
@@ -161,15 +176,26 @@ public:
         return grpc::Status::OK;
     }
     grpc::Status
-    RemoteLoad(grpc::ServerContext*, const BroadcastLoadRequestPB*, BroadcastLoadResponsePB* response) override {
+    RemoteLoad(grpc::ServerContext*, const BroadcastLoadRequestPB* request, BroadcastLoadResponsePB* response) override {
+        {
+            std::lock_guard<std::mutex> lock(load_requests_mutex_);
+            load_requests_.push_back(*request);
+        }
         response->set_done_time_us(currentTimeUs());
         return grpc::Status::OK;
+    }
+
+    std::vector<BroadcastLoadRequestPB> loadRequests() {
+        std::lock_guard<std::mutex> lock(load_requests_mutex_);
+        return load_requests_;
     }
 
 private:
     // An early local failure never consumes LOAD's response. Keep this peer
     // quiescent so Finish tests handler teardown, not unread-message draining.
     bool send_load_response_;
+    std::mutex load_requests_mutex_;
+    std::vector<BroadcastLoadRequestPB> load_requests_;
 };
 
 class ScopedRpcServer {
@@ -242,7 +268,7 @@ protected:
     void reap(const std::shared_ptr<SteppedEngine>& engine, size_t free_before) {
         auto next = engine->scheduler().schedule();
         ASSERT_TRUE(next.ok());
-        EXPECT_TRUE(next.value().empty());
+        EXPECT_TRUE(next.value().streams.empty());
         EXPECT_EQ(engine->stream->getStatus(), StreamState::FINISHED);
         EXPECT_TRUE(engine->scheduler().empty());
         EXPECT_EQ(engine->scheduler().onflightStreams(), 0);
@@ -318,9 +344,11 @@ protected:
         reap(engine, free_before);
     }
 
-    void runDecodeHandler(OutputAction action) {
+    void runDecodeHandler(OutputAction action,
+                          bool pipeline = false,
+                          const CacheConfig& cache_config = SteppedEngine::defaultCacheConfig()) {
         TestLogCapture         capture("decode_handler_lifecycle");
-        auto                   engine      = std::make_shared<SteppedEngine>(action);
+        auto                   engine      = std::make_shared<SteppedEngine>(action, pipeline, cache_config);
         auto                   meta        = std::make_shared<RpcServerRuntimeMeta>();
         const auto             free_before = engine->getCacheManager()->freeBlocksNum();
         LifecyclePeer          peer;
@@ -332,6 +360,12 @@ protected:
         // Exercise real async RemoteLoad fan-out, with only remote KV transport faked.
         service.handler.resource().workers      = {"rank0", "rank1"};
         service.handler.resource().grpc_workers = {peer_server.address(), peer_server.address()};
+        if (pipeline) {
+            service.handler.maga_init_params_ = SteppedEngine::parameters(true);
+            service.handler.resource().workers = {"rank0", "rank1", "rank2"};
+            service.handler.resource().grpc_workers = {
+                peer_server.address(), peer_server.address(), peer_server.address()};
+        }
         ScopedRpcServer server(&service);
         auto stub = RpcService::NewStub(grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials()));
         grpc::ClientContext client;
@@ -345,6 +379,19 @@ protected:
         request.set_client_id("lifecycle");
         *request.mutable_input() = lifecycleRequest();
         request.add_peer_addrs("prefill:1:2");
+        if (pipeline) {
+            /** Unequal PP stage counts must not trigger the legacy total-worker ratio check. */
+            request.add_peer_addrs("prefill-last:1:2");
+            auto* first = request.add_stage_peer_groups();
+            first->set_layer_begin(0);
+            first->set_layer_count(1);
+            first->add_peer_addrs("prefill:1:2");
+            auto* last = request.add_stage_peer_groups();
+            last->set_layer_begin(1);
+            last->set_layer_count(2);
+            last->add_peer_addrs("prefill-last:1:2");
+            last->set_is_last_stage(true);
+        }
         ASSERT_TRUE(rpc->Write(request));
         GenerateOutputsPB response;
         ASSERT_TRUE(rpc->Read(&response));
@@ -353,6 +400,32 @@ protected:
         ASSERT_TRUE(rpc->Write(request));
         ASSERT_TRUE(rpc->Read(&response));
         ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+        if (pipeline) {
+            const auto received = peer.loadRequests();
+            ASSERT_EQ(received.size(), 3);
+            const auto& blocks = engine->stream->kvCachePtr()->cacheResource(0).groupBlockIds();
+            const auto tags = blocks.orderedTags();
+            ASSERT_FALSE(tags.empty());
+            ASSERT_EQ(tags.size(), cache_config.groupNums());
+            if (tags.size() == 2) {
+                /** Distinct allocated rows detect truncation and accidental reuse of another tag's blocks. */
+                ASSERT_NE(blocks.blocks(tags[0]), blocks.blocks(tags[1]));
+            }
+            for (const auto& load : received) {
+                EXPECT_EQ(load.peer_addrs_size(), 0);
+                ASSERT_EQ(load.stage_peer_groups_size(), request.stage_peer_groups_size());
+                for (int i = 0; i < request.stage_peer_groups_size(); ++i) {
+                    EXPECT_EQ(load.stage_peer_groups(i).SerializeAsString(),
+                              request.stage_peer_groups(i).SerializeAsString());
+                }
+                ASSERT_EQ(load.tagged_group_block_ids_size(), tags.size());
+                for (size_t i = 0; i < tags.size(); ++i) {
+                    const auto& row = load.tagged_group_block_ids(static_cast<int>(i));
+                    EXPECT_EQ(row.tag(), tags[i]);
+                    EXPECT_EQ(BlockIndicesType(row.block_ids().begin(), row.block_ids().end()), blocks.blocks(tags[i]));
+                }
+            }
+        }
         request.set_stage(RemoteStage::GENERATE);
         request.set_first_generate_token_id(3);
         ASSERT_TRUE(rpc->Write(request));
@@ -423,6 +496,19 @@ TEST_F(RpcHandlerLifecycleTest, PrefillCaughtExceptionCompletesHandlingWithoutUn
 }
 TEST_F(RpcHandlerLifecycleTest, DecodeSuccessReturnsBeforeSchedulerWithoutCanceling) {
     runDecodeHandler(OutputAction::COMPLETE);
+}
+TEST_F(RpcHandlerLifecycleTest, PipelineDecodeFansOutStageMetadataAndCompleteTagRows) {
+    runDecodeHandler(OutputAction::COMPLETE, /*pipeline=*/true);
+
+    auto config = SteppedEngine::defaultCacheConfig();
+    config.seq_size_per_block = 1;
+    config.model_has_multiple_cache_groups = true;
+    /** Full and tail-only linear allocation produce distinct rows for the two-token prompt. */
+    config.fromGroupedSpecs(
+        {makeMhaSpec("full", 1, DataType::TYPE_FP16, 1, 4), makeLinearSpec("linear", 1, DataType::TYPE_FP16, 1, 4)},
+        {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::LINEAR}, {"full", "linear"});
+    config.finalizeBlockNums(16, RuntimeConfig{});
+    runDecodeHandler(OutputAction::COMPLETE, /*pipeline=*/true, config);
 }
 TEST_F(RpcHandlerLifecycleTest, DecodePriorityPreemptionReclaimsKvOnNextSchedulerTick) {
     runDecodeHandler(OutputAction::FAIL);

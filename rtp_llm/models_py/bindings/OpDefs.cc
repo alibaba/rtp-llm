@@ -54,7 +54,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
-             "Return a per-layer LayerKVCache for the given global layer id")
+             "Return a per-layer LayerKVCache for the given model-local layer id")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int, const std::string&) const>(&KVCache::getLayerCache),
              "Return a LayerKVCache for the given layer and tag")
@@ -261,7 +261,10 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("pp_intermediates",
+                       &PyModelInputs::pp_intermediates,
+                       "PP stage-boundary tensors from the upstream stage (empty under pp_size=1)");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -273,7 +276,10 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
-                       "Optional target features consumed by speculative decoding");
+                       "Optional target features consumed by speculative decoding")
+        .def_readwrite("pp_intermediates",
+                       &PyModelOutputs::pp_intermediates,
+                       "PP stage-boundary tensors to send to the downstream stage (empty on last stage)");
 }
 
 }  // namespace torch_ext

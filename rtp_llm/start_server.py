@@ -20,6 +20,7 @@ from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
     setup_and_configure_server,
 )
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -211,8 +212,9 @@ def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
         )
 
     # Keep DashSc serving ranks aligned with frontend serving ranks.
+    layout = RankLayout.from_parallelism_config(pc)
     for rank in range(local_world_size):
-        if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
+        if rank == 0 or layout.coord_of_unchecked(pc.world_rank + rank).tp == 0:
             yield rank
         else:
             logging.info(
@@ -499,9 +501,10 @@ def start_frontend_server_impl(
 
     # To reduce the number of frontend servers, we only start those with tp_rank=0;
     # however, since k8s needs to check machine heartbeat, rank 0 on each machine also needs to be started.
+    layout = RankLayout.from_parallelism_config(pc)
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
-            if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
+            if rank == 0 or layout.coord_of_unchecked(pc.world_rank + rank).tp == 0:
                 logging.info(
                     f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
                 )
@@ -552,7 +555,8 @@ def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
         raise ValueError(
             f"parallelism_config.tp_size should be positive, got {tp_size}"
         )
-    return world_rank % tp_size == 0
+    layout = RankLayout.from_parallelism_config(parallelism_config)
+    return layout.coord_of(world_rank).tp == 0
 
 
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:

@@ -146,8 +146,8 @@ def _run_deepep_low_latency_router_test(
 ):
     config, router = _init_router(rank, use_fp8, parallelism_config, nccl_port)
     # construct data
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    torch.manual_seed(42 + parallelism_config.pp_rank)
+    torch.cuda.manual_seed(42 + parallelism_config.pp_rank)
     ep_size = config.ep_size
     ep_rank = config.ep_rank
     dp_size = config.dp_size
@@ -172,6 +172,8 @@ def _run_deepep_low_latency_router_test(
         .repeat(1, 1, 128)
         .cuda()
     )
+    if parallelism_config.pp_size > 1:
+        hidden_states[:, :, :128] += parallelism_config.pp_rank * 128
     topk_ids = torch.rand(dp_size, num_token_per_rank, num_experts).topk(
         num_topk, dim=-1, largest=True
     )[1]
@@ -211,7 +213,7 @@ def _run_deepep_low_latency_router_test(
         for local_expert_id in range(num_local_experts):
             recv_x[local_expert_id] = per_token_cast_back(
                 payload.expert_x[local_expert_id],
-                payload.expert_x_scale[local_expert_id],
+                payload.expert_x_scale[local_expert_id].contiguous(),
             )
     else:
         recv_x = payload.expert_x
@@ -278,20 +280,27 @@ def _run_deepep_low_latency_router_test(
 
 
 def _spawn_wrapper(
-    rank: int, use_fp8: bool, world_size: int, test_tp_size: int, nccl_port: int
+    rank: int,
+    use_fp8: bool,
+    world_size: int,
+    test_tp_size: int,
+    nccl_port: int,
+    pp_size: int = 1,
 ):
     """Wrapper function for mp.spawn that calculates parallelism config."""
-    dp_size = world_size // test_tp_size
-    ep_size = world_size  # EP size equals world_size for low latency router
+    ep_size = world_size // pp_size
+    dp_size = ep_size // test_tp_size
 
     # Calculate parallelism config for this rank
     parallelism_config = ParallelismConfig()
+    parallelism_config.pp_size = pp_size
+    parallelism_config.pp_rank = rank // ep_size
     parallelism_config.tp_size = test_tp_size
     parallelism_config.tp_rank = rank % test_tp_size
     parallelism_config.ep_size = ep_size
     parallelism_config.ep_rank = rank % ep_size
     parallelism_config.dp_size = dp_size
-    parallelism_config.dp_rank = rank // test_tp_size
+    parallelism_config.dp_rank = (rank // test_tp_size) % dp_size
     parallelism_config.local_rank = rank
     parallelism_config.world_size = world_size
     parallelism_config.world_rank = rank
@@ -304,7 +313,8 @@ def test_deepep_low_latency_router():
     ports, locks = port_manager.get_consecutive_ports(1)
     nccl_port = ports[0]
 
-    world_size = 2
+    world_size = int(os.environ.get("GPU_COUNT", "2"))
+    pp_size = int(os.environ.get("TEST_PP_SIZE", "1"))
     test_tp_sizes = [1, 2]
 
     for use_fp8 in [True, False]:
@@ -314,7 +324,7 @@ def test_deepep_low_latency_router():
             )
             mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
                 _spawn_wrapper,
-                args=(use_fp8, world_size, test_tp_size, nccl_port),
+                args=(use_fp8, world_size, test_tp_size, nccl_port, pp_size),
                 nprocs=world_size,
                 join=True,
             )

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.alltoall_cp_impl import (
     PCPAll2AllAttnOp,
 )
@@ -102,14 +103,19 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
     def _run_with_mocks(
         self, attn_cfg, par_cfg, attn_inputs, qkv, kv_cache, all_shuffle, all_kv_buffers
     ):
+        peer_base = (par_cfg.pp_rank * par_cfg.dp_size + par_cfg.dp_rank) * par_cfg.tp_size
         mock_ag, mock_send, mock_recv = self._make_mocks(
             all_shuffle,
-            all_kv_buffers,
+            {peer_base + rank: buffer for rank, buffer in all_kv_buffers.items()},
         )
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch(f"{_A2A_MODULE}.all_gather", side_effect=mock_ag))
-            stack.enter_context(patch(f"{_A2A_MODULE}.send", side_effect=mock_send))
-            stack.enter_context(patch(f"{_A2A_MODULE}.recv", side_effect=mock_recv))
+            send_mock = stack.enter_context(
+                patch(f"{_A2A_MODULE}.send", side_effect=mock_send)
+            )
+            recv_mock = stack.enter_context(
+                patch(f"{_A2A_MODULE}.recv", side_effect=mock_recv)
+            )
             stack.enter_context(
                 patch(
                     f"{_A2A_MODULE}.get_user_buffers_communicator",
@@ -118,7 +124,28 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             )
             op = PCPAll2AllAttnOp(attn_cfg, attn_inputs, par_cfg)
             params = op.prepare(attn_inputs)
-            return op.forward(qkv, kv_cache, params)
+            output = op.forward(qkv, kv_cache, params)
+            self.assertEqual(
+                [
+                    (call.kwargs["dst"], call.kwargs["group"])
+                    for call in send_mock.call_args_list
+                ],
+                [
+                    (peer_base + (par_cfg.tp_rank + step) % par_cfg.tp_size, Group.TP)
+                    for step in range(1, par_cfg.tp_size)
+                ],
+            )
+            self.assertEqual(
+                [
+                    (call.kwargs["src"], call.kwargs["group"])
+                    for call in recv_mock.call_args_list
+                ],
+                [
+                    (peer_base + (par_cfg.tp_rank - step) % par_cfg.tp_size, Group.TP)
+                    for step in range(1, par_cfg.tp_size)
+                ],
+            )
+            return output
 
     # ---- no-prefix driver ----
 
@@ -132,6 +159,10 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         kv_head_num: int = 2,
         head_dim: int = 64,
         tokens_per_block: int = 16,
+        pp_size: int = 1,
+        pp_rank: int = 0,
+        dp_size: int = 1,
+        dp_rank: int = 0,
     ):
         assert all(sl % cp_size == 0 for sl in sequence_lengths)
         cp_chunk_lengths = [sl // cp_size for sl in sequence_lengths]
@@ -145,6 +176,12 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             cp_size=cp_size,
             cp_rank=cp_rank,
         )
+        par_cfg.pp_size = pp_size
+        par_cfg.pp_rank = pp_rank
+        par_cfg.dp_size = dp_size
+        par_cfg.dp_rank = dp_rank
+        par_cfg.world_size = pp_size * dp_size * cp_size
+        par_cfg.world_rank = (pp_rank * dp_size + dp_rank) * cp_size + cp_rank
 
         total_tokens = sum(sequence_lengths)
         q_full = torch.randn(
@@ -419,6 +456,21 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
     # ==================================================================
     # Case 1: No-prefix cp_size=4 (all ranks)
     # ==================================================================
+
+    def test_no_prefix_nonzero_pp_stage_peers(self):
+        for dp_size, dp_rank in ((1, 0), (2, 1)):
+            for cp_rank in range(2):
+                with self.subTest(dp_size=dp_size, dp_rank=dp_rank, cp_rank=cp_rank):
+                    self.run_no_prefix(
+                        batch_size=1,
+                        sequence_lengths=[32],
+                        cp_size=2,
+                        cp_rank=cp_rank,
+                        pp_size=2,
+                        pp_rank=1,
+                        dp_size=dp_size,
+                        dp_rank=dp_rank,
+                    )
 
     def test_no_prefix_cp4_rank0(self):
         self.run_no_prefix(batch_size=1, sequence_lengths=[64], cp_rank=0)

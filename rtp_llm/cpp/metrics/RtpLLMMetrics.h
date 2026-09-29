@@ -1316,6 +1316,7 @@ public:
     int64_t update_weights_latency_ms;
     bool    update_weights_qps;
 
+    int64_t              layer_begin = 0;  // Global ID of the first reported layer.
     std::vector<int64_t> gpu_loads;
 };
 

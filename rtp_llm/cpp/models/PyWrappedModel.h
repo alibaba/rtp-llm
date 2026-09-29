@@ -1,6 +1,7 @@
 
 #pragma once
 #include <algorithm>
+#include <cstdint>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
@@ -18,6 +19,7 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/embed.h>
+#include <pybind11/stl.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 // cuda_graph_base.h is platform-agnostic (only defines GraphParams/CudaGraphState structs),
 // safe to include unconditionally. cuda_graph_runner.h requires CUDA/ROCm runtime.
@@ -50,7 +52,7 @@ inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_confi
     py::gil_scoped_acquire gil;
     try {
         auto collective = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
-        auto group      = collective.attr("Group").attr("DP_AND_TP");
+        auto group      = collective.attr("Group").attr("WORLD");
         collective.attr("barrier")(group);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("CUDA graph capture rank sync failed at %s:\n%s", phase, e.what());
@@ -60,9 +62,9 @@ inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_confi
 
 class KVCacheManager;  // Forward declaration
 
-// Fixed construction-time role of a DSpARK Python-model wrapper. This is not
-// per-call phase metadata: propose and commit own different model wrappers and
-// different CUDA-graph input widths for the lifetime of the executor.
+/** Fixed construction-time role of a DSpARK Python-model wrapper. This is not
+ * per-call phase metadata: propose and commit own different model wrappers and
+ * different CUDA-graph input widths for the lifetime of the executor. */
 enum class DSparkModelRole : uint8_t {
     NONE,
     PROPOSE,
@@ -81,16 +83,17 @@ public:
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
-    GptModelOutputs forward(const GptModelInputs& inputs) override;
-    GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
-    void            releaseBuffers() override;
-    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool            hasMtpTargetHiddenBuffer() const override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    std::string     waitCacheStorePublication() override;
+    GptModelOutputs       forward(const GptModelInputs& inputs) override;
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    GptModelOutputs       forwardMicroBatched(const GptModelInputs& inputs);
+    void                  releaseBuffers() override;
+    torch::Tensor         getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor         getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                  hasMtpTargetHiddenBuffer() const override;
+    void                  prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                  prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                  updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string           waitCacheStorePublication() override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -147,6 +150,8 @@ private:
     const bool                                      track_cache_store_completion_;
     const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
+    const int64_t                                   pp_size_;
+    const int64_t                                   hidden_size_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
@@ -210,6 +215,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     track_cache_store_completion_(track_cache_store_completion),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
+    pp_size_(std::max<int64_t>(1, params.parallelism_config.pp_size)),
+    hidden_size_(params.hidden_size),
     description_(params.description),
     cache_manager_(params.cache_manager),
     owns_generation_prefill_cuda_graph_(shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
@@ -217,7 +224,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                is_prefill_cuda_graph_mode,
                                                                                params.parallelism_config.role_type,
                                                                                params.sp_config.type)),
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph),
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph && pp_size_ == 1),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :

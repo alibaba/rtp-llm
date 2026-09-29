@@ -111,6 +111,7 @@ class Qwen3DSpark(QwenV3):
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,
+            apply_pp_partition=self._apply_pp_partition,
         )
         return self.py_model
 

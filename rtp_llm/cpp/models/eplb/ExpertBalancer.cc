@@ -2,6 +2,7 @@
 #include <thread>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -78,10 +79,10 @@ void LoadFlags::setReady(bool ready) {
     flag_gpu.fill_(value);
 }
 
-bool LoadFlags::isReady(size_t world_size) {
-    if (world_size > 1) {
+bool LoadFlags::isReady(size_t eplb_group_size, ParallelMode parallel_mode) {
+    if (eplb_group_size > 1) {
         // sync all ranks load_flag_tensor_
-        flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP, flag_sync}).buffer;
+        flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, false, parallel_mode, flag_sync}).buffer;
     } else {
         flag_sync.copy_(flag_gpu);
     }
@@ -121,7 +122,7 @@ bool EplbController::stepAndCheckSyncStep() {
     return false;
 }
 
-EPLBConfig EplbController::getAndSyncData(size_t world_size) {
+EPLBConfig EplbController::getAndSyncData(size_t eplb_group_size, ParallelMode parallel_mode) {
     // copy control data to host buffer
     EPLBConfig cur_data;
     {
@@ -137,8 +138,8 @@ EPLBConfig EplbController::getAndSyncData(size_t world_size) {
     // copy to device
     eplb_control_data_buf_device.copy_(eplb_control_data_buf_host, /*non_blocking=*/true);
 
-    if (world_size > 1) {
-        execBroadcast({{eplb_control_data_buf_device}, 0, ParallelMode::DP_AND_TP});
+    if (eplb_group_size > 1) {
+        execBroadcast({{eplb_control_data_buf_device}, 0, parallel_mode});
     }
 
     // copy to host
@@ -155,9 +156,8 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                size_t                       num_layers,
                                size_t                       moe_size,
                                size_t                       hidden_size,
-                               size_t                       ep_rank,
-                               size_t                       ep_size,
-                               size_t                       world_size,
+                               const ParallelismConfig&     parallelism_config,
+                               std::pair<int64_t, int64_t>   layer_range,
                                py::object                   py_eplb,
                                DataType                     dtype,
                                QuantAlgo                    quant_algo,
@@ -165,18 +165,24 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                const EPLBConfig&            eplb_config):
     num_logic_experts_(log_exp_num),
     num_physic_experts_(phy_exp_num),
-    ep_rank_(ep_rank),
-    ep_size_(ep_size),
-    world_size_(world_size),
+    ep_rank_(parallelism_config.ep_rank),
+    ep_size_(parallelism_config.ep_size),
+    layer_begin_(layer_range.first),
+    layer_end_(layer_range.second),
     metrics_reporter_(metrics_reporter),
     eplb_python_wrapper_(py_eplb) {
     cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
     printf("DEBUG: ExpertBalancer constructor called for linker debug\n");
-    eplb_control_data_ = eplb_config;
+    const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
+    parallel_mode_     = layout.pp_size > 1 ? ParallelMode::STAGE : ParallelMode::WORLD;
+    eplb_group_size_    = layout.pp_size > 1 ? layout.laneStride() : parallelism_config.world_size;
+    is_eplb_group_root_ = layout.pp_size > 1 ? layout.stageRank() == 0 : ep_rank_ == 0;
+    executor_collector_.layer_begin = layer_begin_;
+    eplb_control_data_              = eplb_config;
 
     // init memory
     stats_.init(num_layers, log_exp_num, ep_size_);
-    eplb_plan_buffers_.init(log_exp_num, phy_exp_num, hidden_size, moe_size, ep_size, dtype, quant_algo);
+    eplb_plan_buffers_.init(log_exp_num, phy_exp_num, hidden_size, moe_size, ep_size_, dtype, quant_algo);
     eplb_plan_tensors_.init(log_exp_num, phy_exp_num);
     load_flags_.init();
     load_flags_.setReady(false);
@@ -191,7 +197,9 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
 
 ExpertBalancer::~ExpertBalancer() {}
 
-void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector) {
+void ExpertBalancer::stepForward(ModelBase&                     model,
+                                 RtpLLMExecutorMetricsCollector& executor_collector,
+                                 bool                           record_stats) {
     syncController();
 
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
@@ -201,10 +209,12 @@ void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollecto
     OverallExpertStats& stats = model.overall_expert_stats_;
 
     // report stats
-    reportStats(stats);
+    if (record_stats) {
+        reportStats(stats);
+    }
 
     // eplb plan
-    excuteEplbPlan(stats, model);
+    excuteEplbPlan(stats, model, record_stats);
 }
 
 bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
@@ -215,7 +225,7 @@ bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
 void ExpertBalancer::syncController() {
     // sync control data
     if (eplb_controller_.stepAndCheckSyncStep()) {
-        auto eplb_control_data = eplb_controller_.getAndSyncData(world_size_);
+        auto eplb_control_data = eplb_controller_.getAndSyncData(eplb_group_size_, parallel_mode_);
         if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode
             || eplb_control_data.eplb_update_time != eplb_control_data_.eplb_update_time) {
             eplb_control_data_ = eplb_control_data;
@@ -227,7 +237,7 @@ void ExpertBalancer::syncController() {
 void ExpertBalancer::reportStats(OverallExpertStats& stats) {
     if (metrics_reporter_
         && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
-        int layer_num = stats.layer_num;
+        int layer_num = layer_end_ - layer_begin_;
         executor_collector_.gpu_loads.resize(layer_num);
         executor_collector_.ep_rank = ep_rank_;
 
@@ -235,7 +245,7 @@ void ExpertBalancer::reportStats(OverallExpertStats& stats) {
         int* gpu_loads        = gpu_loads_tensor.data_ptr<int>();
 
         for (int i = 0; i < layer_num; ++i) {
-            executor_collector_.gpu_loads[i] = gpu_loads[i * ep_size_ + ep_rank_];
+            executor_collector_.gpu_loads[i] = gpu_loads[(layer_begin_ + i) * ep_size_ + ep_rank_];
         }
 
         metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &executor_collector_);
@@ -253,13 +263,16 @@ EplbPlanStatus ExpertBalancer::getPlanStatus() const {
     return status;
 }
 
-void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, ModelBase& model) {
+void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, ModelBase& model, bool record_stats) {
     if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::EPLB, EplbMode::ALL)) {
         EplbPlanStatus status = getPlanStatus();
         switch (status) {
             case EplbPlanStatus::INIT:
                 update_cnt_++;
-                updateStats(stats);
+                // Fake DP forwards still advance the collective state machine.
+                if (record_stats) {
+                    updateStats(stats);
+                }
                 if (update_cnt_ >= eplb_control_data_.eplb_update_time) {
                     setPlanStatus(EplbPlanStatus::PREPARING);
                 }
@@ -319,16 +332,16 @@ void ExpertBalancer::copyToTensor(const torch::Tensor& src, torch::Tensor& dst) 
 
 void ExpertBalancer::createPlan() {
     // pre run
-    if (world_size_ > 1) {
-        execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
-        execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    if (eplb_group_size_ > 1) {
+        execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, parallel_mode_});
+        execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, parallel_mode_});
     }
 
     // copy stats gpu tensor to host tensor [implicit sync]
     stats_.log_stats.copy_(stats_.log_stats_gpu);
     stats_.gpu_loads.copy_(stats_.gpu_loads_gpu);
 
-    if (ep_rank_ == 0) {
+    if (is_eplb_group_root_) {
         eplb_python_wrapper_.createBalancePlan(stats_.log_stats, stats_.gpu_loads, eplb_plan_tensors_);
 
         // copy tensor(host) to gpu tensor
@@ -339,13 +352,13 @@ void ExpertBalancer::createPlan() {
         copyFromTensor(eplb_plan_tensors_.phy2log, eplb_plan_buffers_.phy2log);
     }
 
-    if (world_size_ > 1) {
+    if (eplb_group_size_ > 1) {
         execBroadcast({{eplb_plan_buffers_.layer_id_buf,
                         eplb_plan_buffers_.logic_expert_cnt,
                         eplb_plan_buffers_.log2phy,
                         eplb_plan_buffers_.phy2log},
                        0,
-                       ParallelMode::DP_AND_TP});
+                       parallel_mode_});
     }
 
     // copy plan gpu tensor to host tensor [implicit sync]
@@ -418,7 +431,7 @@ void ExpertBalancer::applyPlanWeights(ModelBase& model) {
 }
 
 bool ExpertBalancer::syncPlanWeightsLoadStatus() {
-    return load_flags_.isReady(world_size_);
+    return load_flags_.isReady(eplb_group_size_, parallel_mode_);
 }
 
 void ExpertBalancer::updateStats(OverallExpertStats& stats) {

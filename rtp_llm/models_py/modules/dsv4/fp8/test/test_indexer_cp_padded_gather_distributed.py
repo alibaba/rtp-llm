@@ -123,10 +123,11 @@ def _rank_cache_payload(
 
 def _install_world_as_tp_group() -> None:
     collective_torch._group_map.clear()
-    collective_torch._group_map[Group.DP_AND_TP] = dist.group.WORLD
+    collective_torch._group_map[Group.WORLD] = dist.group.WORLD
     collective_torch._parallelism_config = SimpleNamespace(
         tp_size=_WORLD_SIZE,
         dp_size=1,
+        pp_size=1,
         world_size=_WORLD_SIZE,
     )
     collective_torch._initialized = True

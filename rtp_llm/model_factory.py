@@ -14,6 +14,7 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.pp_layout import resolve_pp_partition, stage_has_lm_head
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -166,6 +167,12 @@ class ModelFactory:
                 engine_config.sp_config.type = SpeculativeType.EAGLE3
                 sp_type = SpeculativeType.EAGLE3
 
+            parallelism_config = engine_config.parallelism_config
+            if not stage_has_lm_head(
+                parallelism_config.pp_rank, parallelism_config.pp_size
+            ):
+                return None
+
             # Need to create GPT model for propose model
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
@@ -216,6 +223,7 @@ class ModelFactory:
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
+                apply_pp_partition=False,
             )
             aliased_local_bytes = 0
             for name in alias_names:
@@ -430,6 +438,25 @@ class ModelFactory:
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
+
+        # Materialize the PP layer partition once; downstream consumers (loading, construction, cache) read the counts.
+        parallelism_config = engine_config.parallelism_config
+        if (
+            parallelism_config.pp_size > 1
+            and not parallelism_config.pp_stage_layer_counts
+        ):
+            counts = resolve_pp_partition(
+                model_config.num_layers,
+                parallelism_config.pp_size,
+                model_config,
+            )
+            parallelism_config.pp_stage_layer_counts = counts
+            logging.info(
+                "PP layer partition materialized: num_layers=%d pp_size=%d counts=%s",
+                model_config.num_layers,
+                parallelism_config.pp_size,
+                counts,
+            )
 
     @staticmethod
     def create_propose_model_config(

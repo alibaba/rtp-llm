@@ -12,6 +12,8 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
@@ -27,6 +29,79 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+namespace {
+
+/** Exercise real speculative initialization without loading a checkpoint or submitting model work. */
+std::unique_ptr<ProposeModelEngineInitParams> makeLocalProposalParams(const EngineInitParams& params) {
+    auto modules    = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    auto draft      = std::make_unique<EngineInitParams>(params);
+    draft->model_id = params.model_id + 1;
+    if (params.sp_config.type == SP_TYPE_DSPARK) {
+        const auto options                = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        draft->gpt_weights.dspark_markov_w1 = torch::zeros({params.model_config_.vocab_size, 1}, options);
+        draft->gpt_weights.dspark_markov_w2 = torch::zeros({params.model_config_.vocab_size, 1}, options);
+    }
+    modules->push_back(std::move(draft));
+    return std::make_unique<ProposeModelEngineInitParams>(
+        params.sp_config.type, params.sp_config.gen_num_per_cycle, std::move(modules));
+}
+
+}
+
+#if USING_CUDA
+namespace {
+
+struct PPWarmupObserved {};
+struct UnexpectedWarmupExecutor {};
+
+/** Stop inside the real constructor's warmup before cache negotiation or the engine loop starts. */
+class PPWarmupProbeModel: public ModelBase {
+public:
+    using Observer = std::function<void(const GptModelInputs&)>;
+
+    PPWarmupProbeModel(int stage, Observer observer): stage_(stage), observer_(std::move(observer)) {}
+
+    GptModelOutputs forward(const GptModelInputs& input) override {
+        EXPECT_EQ(input.pp_intermediates.empty(), stage_ == 0);
+        if (stage_ != 0) {
+            EXPECT_TRUE(torch::equal(input.pp_intermediates.at("hidden_states"),
+                                    torch::zeros({input.combo_tokens.numel(), 4})));
+        }
+        observer_(input);
+        throw PPWarmupObserved{};
+    }
+
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& input, bool) override {
+        return {{{"hidden_states", torch::zeros({input.combo_tokens.numel(), 4})}}};
+    }
+
+private:
+    int      stage_;
+    Observer observer_;
+};
+
+struct PPWarmupFactoryGuard {
+    NormalExecutor::ModelFactory normal_factory = std::move(NormalExecutor::test_model_factory);
+    PPExecutor::ModelFactory     pp_factory     = std::move(PPExecutor::test_model_factory);
+
+    PPWarmupFactoryGuard() {
+        NormalExecutor::test_model_factory = [](const GptModelInitParams&) -> std::unique_ptr<ModelBase> {
+            ADD_FAILURE() << "NormalEngine selected NormalExecutor for PP warmup";
+            throw UnexpectedWarmupExecutor{};
+        };
+    }
+
+    ~PPWarmupFactoryGuard() {
+        NormalExecutor::test_model_factory = std::move(normal_factory);
+        PPExecutor::test_model_factory = std::move(pp_factory);
+        /** These fixtures initialize runtime tracing as false; the sentinel interrupts warmup's normal reset. */
+        setTraceMemory(false);
+    }
+};
+
+}
+#endif
 
 TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     class CopyPayloadProcessor: public NormalBatchStreamProcessor {
@@ -123,10 +198,10 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         resource.mutableBlockIds(0, "second").assign({1, 2});
         stream->setKVCache(resource);
         if (invalid_row) {
-            EXPECT_ANY_THROW((void)executor.process({stream}));
+            EXPECT_ANY_THROW((void)executor.process(ScheduleOutput{{stream}}));
             EXPECT_FALSE(reached_model);
         } else {
-            EXPECT_THROW((void)executor.process({stream}), StopBeforeSampling);
+            EXPECT_THROW((void)executor.process(ScheduleOutput{{stream}}), StopBeforeSampling);
             EXPECT_TRUE(reached_model);
         }
         runtimeSyncAndCheck();
@@ -282,10 +357,10 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
     params.hw_kernel_config.enable_cuda_graph                        = true;
     params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
     params.runtime_config.warm_up                                    = false;
+    params.sp_config.gen_num_per_cycle                              = 3;
+    params.sp_config.sp_dspark_mask_token_id                         = model_config.vocab_size - 1;
 
-    // Keep the real NormalEngine constructor and its configuration checks.
-    // Only model execution is mocked; no draft model is needed to exercise the
-    // retained speculative configuration that previously failed at startup.
+    /** Keep the real constructor and complete local proposal parameters; no requests are submitted. */
     NormalExecutor::test_model_factory = [vocab = model_config.vocab_size](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };
@@ -302,7 +377,27 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
             params.parallelism_config.role_type = role_type;
             params.pd_sep_config.role_type      = role_type;
             params.sp_config.type               = speculative_type;
-            EXPECT_NO_THROW({ NormalEngine engine(params, nullptr); });
+            auto proposal = speculative_type == SP_TYPE_NONE ? nullptr : makeLocalProposalParams(params);
+            NormalEngine engine(params, std::move(proposal));
+            if (speculative_type == SP_TYPE_NONE) {
+                ASSERT_NE(dynamic_cast<NormalExecutor*>(engine.executor_.get()), nullptr);
+            } else {
+                ASSERT_NE(dynamic_cast<MtpExecutor*>(engine.executor_.get()), nullptr);
+            }
+            const int expected_reserve =
+                speculative_type == SP_TYPE_NONE ? 0 : speculative_type == SP_TYPE_DSPARK ? 9 : 4;
+            EXPECT_EQ(engine.reserve_step_, expected_reserve);
+
+            std::list<GenerateStreamPtr> streams;
+            engine.mayAddFakeStream(streams);
+            ASSERT_EQ(streams.size(), 1u);
+            EXPECT_TRUE(streams.front()->isFakeStream());
+            EXPECT_EQ(streams.front()->isContextStream(), role_type == RoleType::PREFILL);
+            if (role_type == RoleType::DECODE && speculative_type != SP_TYPE_NONE) {
+                const auto& buffer = streams.front()->getSPOutputBuffer();
+                ASSERT_NE(buffer, nullptr);
+                EXPECT_EQ(buffer->propose_step, 3);
+            }
         }
     }
 }
@@ -350,6 +445,122 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
 
     EXPECT_TRUE(saw_cacheless_warmup);
 }
+
+#if USING_CUDA
+TEST_F(NormalEngineTest, testPpPrefillWarmupStaysCachelessWithGenerationGraphBuckets) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard device_input("RTP_LLM_DEVICE_INPUT", "0");
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up                                    = true;
+    params.runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+    params.parallelism_config.pp_size                               = 2;
+    params.parallelism_config.world_size                            = 2;
+    params.parallelism_config.pp_stage_layer_counts                 = {1, 1};
+    params.parallelism_config.role_type                             = RoleType::PDFUSION;
+    params.pd_sep_config.role_type                                  = RoleType::PDFUSION;
+    params.hw_kernel_config.enable_cuda_graph                       = true;
+    params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
+
+    for (int stage : {0, 1}) {
+        SCOPED_TRACE(stage);
+        params.parallelism_config.pp_rank    = stage;
+        params.parallelism_config.world_rank = stage;
+        PPWarmupFactoryGuard factories;
+        bool                 saw_warmup = false;
+        PPExecutor::test_model_factory = [&](const GptModelInitParams& init) {
+            EXPECT_EQ(init.cache_manager, nullptr);
+            EXPECT_FALSE(init.kv_cache_layer_layout.has_value());
+            return std::make_unique<PPWarmupProbeModel>(stage, [&](const GptModelInputs& input) {
+                saw_warmup = true;
+                EXPECT_TRUE(input.warmup);
+                EXPECT_TRUE(input.kv_cache_group_tags.empty());
+                EXPECT_FALSE(input.kv_cache_block_id.defined());
+                EXPECT_FALSE(input.kv_cache_kernel_block_id.defined());
+                EXPECT_EQ(input.sequence_lengths.numel(), 0);
+                EXPECT_TRUE(input.input_lengths.eq(19).all().item<bool>());
+            });
+        };
+        EXPECT_THROW((void)std::make_unique<NormalEngine>(params, nullptr), PPWarmupObserved);
+        EXPECT_TRUE(saw_warmup);
+        runtimeSyncAndCheck();
+    }
+}
+
+TEST_F(NormalEngineTest, testPpDecodeWarmupUsesStageCacheAndSpeculativeHeadroom) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard device_input("RTP_LLM_DEVICE_INPUT", "0");
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up                 = true;
+    params.runtime_config.max_generate_batch_size = 2;
+    params.model_config_.max_seq_len              = 64;
+    params.model_config_.kv_cache_spec_descs = {
+        {{"first", KVCacheSpecType::MultiHeadAttention}},
+        {{"last", KVCacheSpecType::MultiHeadAttention}},
+    };
+    params.parallelism_config.pp_size              = 2;
+    params.parallelism_config.world_size           = 2;
+    params.parallelism_config.pp_stage_layer_counts = {1, 1};
+    params.parallelism_config.role_type             = RoleType::DECODE;
+    params.pd_sep_config.role_type                  = RoleType::DECODE;
+    params.sp_config.gen_num_per_cycle              = 3;
+    params.sp_config.sp_dspark_mask_token_id         = 99;
+
+    for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+        for (int stage : {0, 1}) {
+            SCOPED_TRACE(::testing::Message() << "type=" << type << ", stage=" << stage);
+            params.sp_config.type                 = type;
+            params.parallelism_config.pp_rank    = stage;
+            params.parallelism_config.world_rank = stage;
+            const std::string tag                  = stage == 0 ? "first" : "last";
+            const int         warmup_length        = type == SP_TYPE_NONE ? 63 : type == SP_TYPE_DSPARK ? 55 : 57;
+            std::unique_ptr<ProposeModelEngineInitParams> proposal;
+            if (stage == 1 && type != SP_TYPE_NONE) {
+                auto modules = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+                modules->push_back(std::make_unique<EngineInitParams>(params));
+                proposal = std::make_unique<ProposeModelEngineInitParams>(type, 3, std::move(modules));
+            }
+
+            PPWarmupFactoryGuard factories;
+            bool                 saw_warmup = false;
+            PPExecutor::test_model_factory = [&](const GptModelInitParams& init) {
+                EXPECT_NE(init.cache_manager, nullptr);
+                EXPECT_TRUE(init.kv_cache_layer_layout.has_value());
+                if (init.cache_manager) {
+                    const auto& cache = init.cache_manager->cacheConfig();
+                    EXPECT_EQ(cache.layer_num, 1u);
+                    EXPECT_EQ(cache.global_layer_begin, static_cast<uint32_t>(stage));
+                    EXPECT_EQ(cache.groupTags(), (std::vector<std::string>{tag}));
+                    EXPECT_EQ(cache.group(tag).block_num, 2u);
+                }
+                return std::make_unique<PPWarmupProbeModel>(stage, [&](const GptModelInputs& input) {
+                    saw_warmup = true;
+                    EXPECT_TRUE(input.warmup);
+                    EXPECT_EQ(input.kv_cache_group_tags, (std::vector<std::string>{tag}));
+                    ASSERT_GT(input.sequence_lengths.numel(), 0);
+                    EXPECT_TRUE(input.input_lengths.eq(warmup_length).all().item<bool>());
+                    EXPECT_TRUE(input.sequence_lengths.eq(warmup_length - 1).all().item<bool>());
+                    ASSERT_TRUE(input.kv_cache_block_id.defined());
+                    ASSERT_TRUE(input.kv_cache_kernel_block_id.defined());
+                    EXPECT_EQ(input.kv_cache_block_id.sizes().vec(),
+                              (std::vector<int64_t>{1, input.input_lengths.numel(), 32}));
+                    EXPECT_EQ(input.kv_cache_kernel_block_id.sizes().vec(), input.kv_cache_block_id.sizes().vec());
+                    EXPECT_TRUE(input.kv_cache_block_id.eq(0).all().item<bool>());
+                    EXPECT_TRUE(input.kv_cache_kernel_block_id.eq(0).all().item<bool>());
+                });
+            };
+            EXPECT_THROW((void)std::make_unique<NormalEngine>(params, std::move(proposal)), PPWarmupObserved);
+            EXPECT_TRUE(saw_warmup);
+            runtimeSyncAndCheck();
+        }
+    }
+}
+#endif
 
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
@@ -777,10 +988,17 @@ TEST_F(NormalEngineTest, testRejectInvalidOutputVocabIds) {
 
 TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     CustomConfig config;
-    config.prefill_cp_enabled  = true;
     config.speculative_enabled = true;
-    config.warm_up_with_loss   = true;
-    EXPECT_NO_THROW(createMockEngine(config));
+    config.prefill_cp_enabled = true;
+    config.warm_up_with_loss  = true;
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params           = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.sp_config.type = SP_TYPE_MTP;
+    auto proposal         = makeLocalProposalParams(params);
+    NormalEngine engine(params, std::move(proposal));
+    EXPECT_NE(dynamic_cast<MtpExecutor*>(engine.executor_.get()), nullptr);
 }
 
 }  // namespace rtp_llm

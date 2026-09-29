@@ -52,9 +52,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                      torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
     std::vector<torch::Tensor> token_columns;
     token_columns.reserve(propose_step_);
-    // lm_head shards are padded to a TP alignment before gather. Sampling
-    // must ignore those synthetic tail columns just like the regular target
-    // sampler ignores padded vocabulary rows.
+    /** lm_head shards are padded to TP alignment; ignore synthetic tail columns as target sampling does. */
     auto proposal_logits =
         base_logits.narrow(1, 0, draft_vocab_size)
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
@@ -65,9 +63,8 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1)).to(torch::kFloat32);
         auto logits           = proposal_logits.select(1, step) + markov_bias;
 
-        // Draft q applies request temperature only. Materialize that exact
-        // dense distribution once, sample from it with FlashInfer, and pass
-        // the same q to rejection sampling. Request top-k/top-p stay target-side.
+        /** Draft q applies request temperature only. Materialize and sample the same dense distribution;
+         * request top-k/top-p remain target-side. */
         logits.div_(temperature_column);
         auto sampling_probabilities = torch::softmax(logits, -1);
         auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
@@ -87,26 +84,26 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     return output;
 }
 
-SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
-                                                     SamplerOutput&                      draft_sampler_output,
-                                                     SamplerOutput&                      target_sampler_output) {
+SpeculativeSamplerOutput SpeculativeSampler::forward(const SpeculativeSamplingParams& params,
+                                                     SamplerOutput&                   draft_sampler_output,
+                                                     SamplerOutput&                   target_sampler_output) {
     // TensorHolder release point (SpeculativeSampler): advances host tensors
     // staged for rejection sampling H2D in the previous forward.
     buffer_holder_.release();
     SpeculativeSamplerOutput sample_output;
-    batchSample(sample_output, streams, draft_sampler_output, target_sampler_output);
+    batchSample(sample_output, params, draft_sampler_output, target_sampler_output);
 
     return sample_output;
 }
 
-void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_output,
-                                     const std::list<GenerateStreamPtr>& streams,
-                                     SamplerOutput&                      draft_sampler_output,
-                                     SamplerOutput&                      target_sampler_output) const {
+void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&         sample_output,
+                                     const SpeculativeSamplingParams& params,
+                                     SamplerOutput&                   draft_sampler_output,
+                                     SamplerOutput&                   target_sampler_output) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample");
     torch::Device target_device = getTorchCudaDevice();
 
-    int batch_size = streams.size();
+    const int batch_size = params.do_sample.size(0);
 
     auto draft_token_ids  = draft_sampler_output.token_ids;
     auto target_token_ids = target_sampler_output.token_ids;
@@ -124,13 +121,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         target_token_ids_d_t = target_token_ids_d_t.to(target_device, true);
     }
 
-    torch::Tensor do_sample =
-        torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
-    int stream_idx = 0;
-    for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = stream->generateConfig()->stochastic();
-        stream_idx++;
-    }
+    const auto& do_sample = params.do_sample;
     buffer_holder_.hold_host(do_sample);
     auto do_sample_d = do_sample.to(target_device, true);
 
@@ -141,8 +132,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     // ensuring deterministic acceptance for reproducible iter_count.
     {
         int idx = 0;
-        for (const auto& stream : streams) {
-            auto gen = stream->getGenerator();
+        for (const auto& gen : params.generators) {
             if (gen.defined()) {
                 uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
             }
@@ -190,6 +180,20 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         draft_token_probs_d_t = draft_probs_padding;
     }
 
+    if (params.draft_point_mass_rows.defined()) {
+        /** Fixed handoff candidates define q(token|prefix)=1 at the proposed token. Materialize
+         * that distribution only after d2t mapping: the target token may be absent from draft vocab.
+         * Fill only these scratch rows in the per-call q (or existing vocab-padding buffer), keeping
+         * sampled rows intact and avoiding another dense batch allocation. Both acceptance and
+         * residual sampling then use the same one-hot q through the ordinary dense kernel path. */
+        buffer_holder_.hold_host(params.draft_point_mass_rows);
+        auto rows   = params.draft_point_mass_rows.to(target_device, /*non_blocking=*/true);
+        auto tokens = draft_token_ids_d_t.index_select(0, rows).to(torch::kLong);
+        auto steps  = torch::arange(static_cast<int64_t>(propose_step_), rows.options()).unsqueeze(0);
+        draft_token_probs_d_t.index_fill_(0, rows, 0);
+        draft_token_probs_d_t.index_put_({rows.unsqueeze(1), steps, tokens}, 1.0f);
+    }
+
     {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.execRejectionSampling");
         execRejectionSampling({
@@ -213,13 +217,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         bool has_force = false;
         auto force_mask =
             torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
-        int idx = 0;
-        for (const auto& stream : streams) {
-            if (stream->forceSpAccept()) {
+        for (int idx = 0; idx < batch_size; ++idx) {
+            if (params.force_accept[idx].item<bool>()) {
                 force_mask[idx] = true;
                 has_force       = true;
             }
-            idx++;
         }
         if (has_force) {
             RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
@@ -245,16 +247,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
-
-    sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
-    sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
-    sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
-
-void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,
-                                      const std::list<GenerateStreamPtr>& streams,
-                                      SamplerOutput&                      draft_sampler_output,
-                                      SamplerOutput&                      target_sampler_output) const {}
 
 }  // namespace speculative
 }  // namespace rtp_llm

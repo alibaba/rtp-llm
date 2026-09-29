@@ -1,0 +1,131 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include <torch/torch.h>
+
+#include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+
+namespace rtp_llm {
+
+struct SamplingState;
+using SamplingStates = std::unordered_map<int64_t, SamplingState>;
+
+struct RequestLogitsProcessorConfig {
+    std::string grammar_type;   // scalar per stream
+    std::string grammar_value;  // scalar per stream
+
+    int                           combo_token_size = 0;                   // scalar per stream
+    std::vector<std::vector<int>> banned_combo_token_ids;                 // [banned_combo_count, combo_token_size]
+    std::vector<int>              end_think_token_ids;                    // [end_think_token_count]
+    bool                          enable_cross_sequence_ban     = false;  // scalar per stream
+    int                           cross_seq_diverge_start_combo = 0;      // scalar per stream
+};
+
+struct PPSamplingPlan {
+    std::vector<std::optional<int>>           random_seeds;              // [stream_count]
+    std::vector<RequestLogitsProcessorConfig> logits_processor_configs;  // [stream_count]
+    std::vector<int32_t>                      num_return_sequences;      // [stream_count]
+
+    torch::Tensor request_ids;  // [stream_count]
+
+    torch::Tensor token_ids;         // [total_batch_size, max_sequence_length + 1]
+    torch::Tensor input_lengths;     // [total_batch_size]
+    torch::Tensor sequence_lengths;  // [total_batch_size]
+    torch::Tensor max_tokens;        // [total_batch_size], total sequence limit from stream->maxTokenNum()
+
+    torch::Tensor top_k;                 // [total_batch_size]
+    torch::Tensor top_p;                 // [total_batch_size]
+    torch::Tensor temperature;           // [total_batch_size]
+    torch::Tensor repetition_penalty;    // [total_batch_size]
+    torch::Tensor presence_penalty;      // [total_batch_size]
+    torch::Tensor frequency_penalty;     // [total_batch_size]
+    torch::Tensor no_repeat_ngram_size;  // [total_batch_size]
+    torch::Tensor do_sample;             // [total_batch_size]
+    torch::Tensor finished_mask;         // [total_batch_size]
+
+    /** CPU bool [stream_count]: stochastic() controls both rejection sampling and DSpARK temperature. */
+    torch::Tensor spec_do_sample;
+    torch::Tensor force_sp_accept;  // [stream_count]
+    /** Optional DSpARK q: CPU FP32 [stream_count, K, draft_vocab_size]. In mixed batches,
+     * point-mass rows are zero placeholders until the last stage materializes target-vocab one-hot q. */
+    torch::Tensor draft_all_probs;
+    /** CPU int64 row indices within request_ids, defined only for mixed dense/point-mass batches. */
+    torch::Tensor draft_point_mass_rows;
+};
+
+struct PPPromptLogitsRequest {
+    bool enabled               = false;
+    int  top_k                 = 64;
+    int  start                 = -1;
+    int  end                   = -1;
+    bool return_target_logprob = true;
+};
+
+/** Output configuration for the lm-head stage. */
+struct PPOutputConfig {
+    bool               return_logits            = false;
+    bool               return_softmax_probs     = false;
+    bool               return_cum_log_probs     = false;
+    bool               calculate_loss           = false;
+    bool               return_hidden_states     = false;
+    bool               return_all_hidden_states = false;
+    ReturnAllProbsMode return_all_probs         = ReturnAllProbsMode::NONE;
+
+    /** Per-stream configuration, aligned with PPSamplingPlan::request_ids. */
+    std::vector<PPPromptLogitsRequest> prompt_logits_requests;
+};
+
+struct PPExecutionPlan {
+    GptModelInputs       model_input;
+    PPSamplingPlan       sampling_plan;
+    PPOutputConfig       output_config;
+    std::vector<int64_t> finished_request_ids;
+
+    bool          is_decode = false;        // Request phase; verify may use a prefill input shape
+    torch::Tensor draft_next_position_ids;  // [stream_count * position_id_len_factor], MTP prefill
+};
+
+/** Final outputs produced by the lm-head stage TP root. */
+struct PPExecutionResult {
+    torch::Tensor request_ids;  // [stream_count]
+    /** New tokens to append: CPU int32 [B, 1], or [B, K+1] for verify. */
+    torch::Tensor new_token_ids;
+    /** Committed prefix length per row in new_token_ids, before applying the request length limit: CPU int32 [B].*/
+    torch::Tensor new_token_lengths;
+
+    torch::Tensor logits;         // optional [total_batch_size, vocab_size]
+    torch::Tensor softmax_probs;  // optional [total_batch_size, 1], or [B, K+1] aligned with verify new_token_ids
+    torch::Tensor cum_log_probs;  // optional [total_batch_size]
+    torch::Tensor all_probs;      // optional [total_batch_size, vocab_size]
+
+    torch::Tensor loss;  // optional [loss_token_count]
+
+    torch::Tensor hidden_states;      // optional [total_batch_size, hidden_size]
+    torch::Tensor all_hidden_states;  // optional [executed_token_count, hidden_size]
+
+    std::vector<std::optional<PromptLogitsOutput>> prompt_logits;  // [stream_count]
+
+    /** First error per request; failed-row placeholders are not committed. */
+    std::vector<ErrorInfo> request_errors;
+
+    /** Next-round drafts excluding the anchor: CPU int32 [B, K].
+     * PD prefill: one draft for MTP/EAGLE; undefined for DSpARK. */
+    torch::Tensor propose_token_ids;
+    /** Proposal q paired with propose_token_ids: CPU FP32 [B, K, draft_vocab_size].
+     * Ordinary MTP/EAGLE carries one proposal on PD prefill for a non-PP D consumer;
+     * DSpARK carries its next-round distributions on decode. */
+    torch::Tensor propose_all_probs;
+    /** PD MTP/EAGLE handoff keeps one final draft hidden row per request, CPU [B,H].
+     * This is separate from target hidden requested by the user. */
+    torch::Tensor propose_hidden_states;
+};
+
+}  // namespace rtp_llm

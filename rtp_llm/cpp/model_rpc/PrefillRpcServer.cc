@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include <exception>
 #include "autil/Scope.h"
+#include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -392,7 +393,25 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(address);
     }
+    fillStagePeerGroups(alloc_request, prefill_context.prefill_worker_cache_store_addrs);
     return alloc_request;
+}
+
+void PrefillRpcServer::fillStagePeerGroups(GenerateRequestPB& alloc_request, const std::vector<std::string>& workers) {
+    /** Single-stage prefill keeps flat peer addresses; PP additionally publishes stage routing. */
+    const auto groups = buildStagePeerGroups(maga_init_params_.parallelism_config, workers);
+    if (groups.empty()) {
+        return;
+    }
+    for (const auto& group : groups) {
+        auto* group_pb = alloc_request.add_stage_peer_groups();
+        group_pb->set_layer_begin(group.range.begin);
+        group_pb->set_layer_count(group.range.size);
+        group_pb->set_is_last_stage(group.is_last_stage);
+        for (const auto& peer : group.peer_addrs) {
+            group_pb->add_peer_addrs(peer);
+        }
+    }
 }
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
@@ -608,6 +627,8 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
+    /** P and D choose PP independently. Carry the ordinary speculative handoff for
+     * main's non-PP D; a PP D consumes the tokens and rebuilds draft inputs itself. */
     if (sp_output_buffer && !engine_->isDSpark()) {
         auto all_probs_cpu =
             sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;

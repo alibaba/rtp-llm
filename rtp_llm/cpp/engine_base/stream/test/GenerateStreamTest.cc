@@ -1,5 +1,6 @@
 
 #include "gtest/gtest.h"
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -42,10 +43,9 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
+    GenerateStreamPtr createContextStream(std::vector<int> input_ids, const ResourceContext& resource_context = {}) {
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
         generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         generate_input->input_ids =
@@ -204,7 +204,7 @@ TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissin
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = -1,
+        .draft_tokens        = torch::Tensor(),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = std::nullopt,
@@ -229,7 +229,7 @@ TEST_F(GenerateStreamTest, mtpUpdateRefreshesGpuProposalWithMultipleDrafts) {
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = -1,
+        .draft_tokens        = torch::Tensor(),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = new_gpu_proposal,
@@ -256,7 +256,7 @@ TEST_F(GenerateStreamTest, mtpCpuProposalClearsStaleGpuMirror) {
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{4}}, torch::kInt32),
         .num_new_tokens      = 1,
-        .draft_token         = 11,
+        .draft_tokens        = torch::tensor({11}, torch::kInt32),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = torch::Tensor(),
@@ -725,6 +725,71 @@ TEST_F(GenerateStreamTest, testSpeculativeMaxLengthUsesGreaterConfiguredAndAsync
     // seven-token window for gamma=3.
     stream->setReserveStep(4);
     EXPECT_EQ(stream->maxTokenNum(), 2041);
+}
+
+TEST_F(GenerateStreamTest, ppCommitCanCrossNextRoundLimitButStopsBeforeAnotherRound) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    auto builder = GenerateStreamBuilder();
+    ResourceContext resources;
+    resources.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+    ASSERT_TRUE(resources.cache_manager->init());
+    auto stream = builder.createContextStream(std::vector<int>(2038, 1), resources);
+    stream->setPipelineParallel(true);
+    stream->setReserveStep(9);
+    stream->generate_input_->generate_config->max_new_tokens = 32;
+    auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+    buffer->propose_step = 3;
+    buffer->tokens = torch::zeros({1, 4}, torch::kInt32);
+    stream->setSPOutputBuffer(buffer);
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 2039u);
+    EXPECT_EQ(stream->maxTokenNum(), 2048u);
+    EXPECT_FALSE(stream->needFinish());
+    stream->specUpdate({torch::tensor({{2, 3, 4, 5}}, torch::kInt32),
+                        4, torch::tensor({6, 7, 8}, torch::kInt32), torch::Tensor(), torch::Tensor()}, false);
+    EXPECT_EQ(stream->seqLength(), 2042);
+    EXPECT_EQ(stream->getProposeToken(), (std::vector<int>{5, 6, 7, 8}));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_TRUE(stream->needFinish());
+}
+
+TEST_F(GenerateStreamTest, ppCommitClipsToRequestAndModelCaps) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const int max_new_tokens : {1, 32}) {
+        auto stream = GenerateStreamBuilder().createContextStream(std::vector<int>(2046, 1));
+        stream->setPipelineParallel(true);
+        stream->setReserveStep(0);
+        stream->generate_input_->generate_config->max_new_tokens = max_new_tokens;
+        stream->updateFromPP({torch::tensor({{2, 3, 4}}, torch::kInt32), 3});
+        EXPECT_EQ(stream->seqLength(), max_new_tokens == 1 ? 2047 : 2048);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    }
+}
+
+TEST_F(GenerateStreamTest, ppModeAppliesBeforeInflightAndReserveSaturates) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    stream->setPipelineParallel(true);
+    stream->setReserveStep(2049);
+    stream->generate_input_->generate_config->max_new_tokens = 10;
+    EXPECT_FALSE(stream->isPPInflight());
+    EXPECT_EQ(stream->nextStepSeqLengthLimit(), 0u);
+    EXPECT_EQ(stream->maxTokenNum(), 13u);
+    /** Decode RPC commits its handoff token through ordinary update before enqueue. */
+    stream->update({torch::tensor({{4}}, torch::kInt32), 1});
+    EXPECT_EQ(stream->seqLength(), 4);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(GenerateStreamTest, cpuMultiDraftUpdateClearsGpuMirrorAndPreservesAllCandidates) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+    buffer->tokens = torch::zeros({1, 4}, torch::kInt32);
+    buffer->propose_tokens_gpu = torch::tensor({9}, torch::kInt32).to(torch::kCUDA);
+    stream->setSPOutputBuffer(buffer);
+    stream->specUpdate({torch::tensor({{4}}, torch::kInt32), 1,
+                        torch::tensor({5, 6, 7}, torch::kInt32), torch::Tensor(), torch::Tensor(), torch::Tensor()});
+    EXPECT_EQ(stream->getProposeToken(), (std::vector<int>{4, 5, 6, 7}));
+    EXPECT_TRUE(torch::equal(buffer->tokens, torch::tensor({{4, 5, 6, 7}}, torch::kInt32)));
+    EXPECT_FALSE(buffer->propose_tokens_gpu.defined());
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that

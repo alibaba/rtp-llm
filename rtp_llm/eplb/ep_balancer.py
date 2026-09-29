@@ -57,6 +57,7 @@ class ExpertBalancer:
         compute_dtype: torch.dtype,
         phy2log: Any,
         database: BaseDatabase,
+        layer_ids: Sequence[int],
         model_config: Optional[ModelConfig] = None,
     ):
         """
@@ -67,6 +68,7 @@ class ExpertBalancer:
             compute_dtype: Compute data type
             phy2log: Physical to logical expert mapping
             database: Database for loading weights
+            layer_ids: Global layer IDs selected by the model loader
             model_config: Optional ModelConfig (used to get eplb_config)
         """
         self.database: BaseDatabase = database
@@ -87,7 +89,11 @@ class ExpertBalancer:
         self.num_groups = self._load_config.moe_n_group
         self.num_nodes = self._load_config.num_nodes
         self.num_gpu = self._load_config.ep_size
-        self.moe_layer_index = self._load_config.moe_layer_index
+        self.moe_layer_index = [
+            layer_id
+            for layer_id in self._load_config.moe_layer_index
+            if layer_id in layer_ids
+        ]
         self.num_experts = self._load_config.expert_num
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

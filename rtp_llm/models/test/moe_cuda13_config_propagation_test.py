@@ -233,7 +233,8 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                 engine_config = SimpleNamespace(
                     runtime_config=SimpleNamespace(
                         fifo_scheduler_config=scheduler, model_name=""
-                    )
+                    ),
+                    parallelism_config=ParallelismConfig(),
                 )
                 ModelFactory.update_engine_config_from_model_config(
                     engine_config, model_config
@@ -323,7 +324,8 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                     SimpleNamespace(
                         runtime_config=SimpleNamespace(
                             fifo_scheduler_config=scheduler, model_name=""
-                        )
+                        ),
+                        parallelism_config=ParallelismConfig(),
                     ),
                     config,
                 )

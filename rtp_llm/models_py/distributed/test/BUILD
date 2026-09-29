@@ -1,3 +1,15 @@
+py_test(
+    name = "deepep_group_test",
+    srcs = ["deepep_group_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:deepep_wrapper",
+    ],
+    timeout = "short",
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],
@@ -46,6 +58,27 @@ py_test(
     env = {"GPU_COUNT": "4"},
     tags = ["open_skip"],
     exec_properties = {'gpu':'A10', 'gpu_count':'4'},
+)
+
+# Pure stdlib unit test; no testlib dep so it builds without torch/triton repos.
+py_test(
+    name = "rank_layout_test",
+    srcs = ["rank_layout_test.py"],
+    deps = [
+        "//rtp_llm/models_py/distributed:rank_layout",
+    ],
+    timeout = "short",
+)
+
+# PP-aware process group topology: CPU-only gloo, no GPU.
+py_test(
+    name = "pp_group_topology_test",
+    srcs = ["pp_group_topology_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = 'moderate',
 )
 
 py_test(

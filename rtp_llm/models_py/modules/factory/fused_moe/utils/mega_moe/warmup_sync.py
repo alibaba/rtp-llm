@@ -35,4 +35,4 @@ def sync_cuda_graph_warmup_ranks(
 
     from rtp_llm.models_py.distributed import collective_torch
 
-    collective_torch.barrier(collective_torch.Group.DP_AND_TP)
+    collective_torch.barrier(collective_torch.Group.WORLD)

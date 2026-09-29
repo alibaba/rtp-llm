@@ -10,9 +10,10 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <map>
+#include <memory>
 #include <string>
 #include <utility>
-#include <memory>
 #include <vector>
 
 namespace kmonitor {
@@ -22,6 +23,11 @@ class MetricsReporter;
 namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
+
+/** Model-level container for stage-boundary tensors, independent of PP transport. */
+struct PPIntermediateTensors {
+    std::map<std::string, torch::Tensor> tensors;
+};
 
 struct GptModelDescription {
     rtp_llm::AttentionConfigs attention_conf;
@@ -162,6 +168,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlPdSeparation        = 1u << 7,
     kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
+    kControlShutdown            = 1u << 10,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -188,10 +195,13 @@ struct TokenSliceInfo {
 
 class ModelBase {
 public:
-    virtual ~ModelBase()                                          = default;
+    virtual ~ModelBase() = default;
+    /** Runs this model instance; a partitioned target executes only its local stage. */
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
-    virtual void            releaseBuffers() {}
-    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    /** Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
+    virtual PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
+    virtual void                  releaseBuffers() {}
+    virtual void                  prepareAttentionInputs(const GptModelInputs& inputs) {}
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
