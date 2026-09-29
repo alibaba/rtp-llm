@@ -70,12 +70,12 @@ class FlexlbScheduleLocalStandbyTest {
         LocalStandbyHashService hashes = mock(LocalStandbyHashService.class);
         CompletableFuture<LocalStandbyHashResult> pendingHash = new CompletableFuture<>();
         when(hashes.getHashResult("warmup", null, 4096)).thenReturn(pendingHash);
-        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(configuration, manager, hashes);
+        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
+                configuration, manager, hashes, mock(org.flexlb.metric.FlexMonitor.class));
         RequestBlockHashService requestHashes = mock(RequestBlockHashService.class);
         when(requestHashes.prepareBlockCacheKeys(any())).thenAnswer(invocation -> {
             BalanceContext context = invocation.getArgument(0);
             context.getRequest().setLocalStandbyBlockSize(4096);
-            context.getRequest().setLocalStandbyCacheableBlockCacheKeys(List.of(11L, 22L));
             return Mono.empty();
         });
         CacheAwareService cache = new CacheAwareService(metrics, null, null,
@@ -97,14 +97,14 @@ class FlexlbScheduleLocalStandbyTest {
 
             pendingHash.complete(new LocalStandbyHashResult(List.of(11L, 22L, 33L), 4096));
             indexed.get(5, TimeUnit.SECONDS);
-            assertEquals(2, manager.mappingCount());
+            assertEquals(3, manager.mappingCount());
             when(hashes.getHashResult("followup", List.of(11L, 22L, 33L), 4096))
                     .thenReturn(CompletableFuture.completedFuture(
                             new LocalStandbyHashResult(List.of(11L, 22L, 33L), 4096)));
             var prediction = provider.asyncLocalStandbyMatch(new CacheMatchQuery(
                     "followup", List.of(11L, 22L, 33L), 4096,
                     List.of(11L, 22L, 33L), 4096, role, "default")).get(5, TimeUnit.SECONDS);
-            assertEquals(2, prediction.exactHostMatch(worker.getLogicalIpPort()).localMatchBlocks());
+            assertEquals(3, prediction.exactHostMatch(worker.getLogicalIpPort()).localMatchBlocks());
             assertEquals(4096, prediction.blockSize());
         } finally {
             provider.shutdown();
