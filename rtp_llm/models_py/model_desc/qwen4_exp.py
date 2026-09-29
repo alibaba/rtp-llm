@@ -734,13 +734,11 @@ class Qwen4ExpModel(Qwen35Model):
         if is_target_verify and not allow_target_verify:
             raise RuntimeError("qwen4_exp PLE does not support target-verify/MTP yet")
         is_cuda_graph = bool(getattr(attention_inputs, "is_cuda_graph", False))
-        if is_cuda_graph and not is_target_verify:
-            raise RuntimeError("qwen4_exp PLE only supports target-verify CUDA Graph")
-        # C++ chooses an exact batch graph whenever a speculative target has
-        # side-state hooks. is_s_padded also labels that exact-batch graph.
-        if getattr(attention_inputs, "is_s_padded", False) and not (
-            is_cuda_graph and is_target_verify
-        ):
+        if is_cuda_graph and bool(attention_inputs.is_prefill) and not is_target_verify:
+            raise RuntimeError("qwen4_exp PLE prefill does not support CUDA Graph")
+        # C++ chooses an exact batch graph for any Qwen side cache;
+        # is_s_padded also labels that exact-batch graph.
+        if getattr(attention_inputs, "is_s_padded", False) and not is_cuda_graph:
             raise RuntimeError("qwen4_exp PLE does not support padded execution yet")
         if getattr(attention_inputs, "context_parallel_info", None) is not None:
             raise RuntimeError("qwen4_exp PLE does not support context parallelism yet")
@@ -1239,11 +1237,12 @@ class Qwen4ExpModel(Qwen35Model):
         if page_size <= 0:
             raise RuntimeError("qwen4_exp PLE cache page size must be positive")
 
+        graph_capture = bool(state_inputs.is_cuda_graph)
+        if graph_capture:
+            # Warmup initializes the pointer table and Triton specialization
+            # before graphCaptureBegin; eager masked indexing is dynamic.
+            ple.ple_embedding._graph_gather_required = True
         if is_target_verify:
-            if bool(state_inputs.is_cuda_graph):
-                # Warmup initializes the pointer table and Triton specialization
-                # before graphCaptureBegin; eager masked indexing is dynamic.
-                ple.ple_embedding._graph_gather_required = True
             return self._stage_ple_target_verify(
                 layer_idx=layer_idx,
                 ple=ple,
@@ -1410,8 +1409,23 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError(
                 "qwen4_exp PLE decode sequence_lengths must be a 1-D integer tensor"
             )
-        sequence_lengths = sequence_lengths.to(dtype=torch.long)
-        if bool((sequence_lengths <= 0).any().item()):
+        if graph_capture:
+            sequence_plus_one_device = getattr(
+                state_inputs, "sequence_lengths_plus_1_device", None
+            )
+            if (
+                sequence_plus_one_device is None
+                or sequence_plus_one_device.device != state_pool.device
+                or sequence_plus_one_device.dtype != torch.int32
+                or int(sequence_plus_one_device.numel()) != batch
+            ):
+                raise RuntimeError(
+                    "qwen4_exp PLE decode Graph requires device sequence lengths"
+                )
+            sequence_lengths = sequence_plus_one_device.to(torch.long) - 1
+        else:
+            sequence_lengths = sequence_lengths.to(dtype=torch.long)
+        if not graph_capture and bool((sequence_lengths <= 0).any().item()):
             raise RuntimeError(
                 "qwen4_exp PLE decode requires a non-empty prefill history"
             )
@@ -1423,6 +1437,7 @@ class Qwen4ExpModel(Qwen35Model):
             read_pages,
             int(state_pool.shape[0]),
             state_pool.device,
+            graph_capture=graph_capture,
         )
         ctx_read_blocks = self._physical_blocks(
             ctx_inputs,
@@ -1430,6 +1445,7 @@ class Qwen4ExpModel(Qwen35Model):
             read_pages,
             int(ctx_pool.shape[0]),
             ctx_pool.device,
+            graph_capture=graph_capture,
         )
         state_write_blocks = self._physical_blocks(
             state_inputs,
@@ -1437,6 +1453,7 @@ class Qwen4ExpModel(Qwen35Model):
             write_pages,
             int(state_pool.shape[0]),
             state_pool.device,
+            graph_capture=graph_capture,
         )
         ctx_write_blocks = self._physical_blocks(
             ctx_inputs,
@@ -1444,6 +1461,7 @@ class Qwen4ExpModel(Qwen35Model):
             write_pages,
             int(ctx_pool.shape[0]),
             ctx_pool.device,
+            graph_capture=graph_capture,
         )
         conv_buffer = state_pool.index_select(0, state_read_blocks)
         context = ctx_pool.index_select(0, ctx_read_blocks)
