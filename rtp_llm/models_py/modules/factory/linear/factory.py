@@ -149,22 +149,14 @@ class LinearFactory:
                 )
             rejection_reasons = []
             for strategy_class in cls._strategies:
-                try:
-                    reason = strategy_class.rejection_reason(
-                        quant_config,
-                        weight,
-                        weight_scales,
-                        hw_kernel_config,
-                        weight_scale_2,
-                        input_scale,
-                    )
-                except Exception:
-                    logger.debug(
-                        "Linear strategy %s rejection diagnostic failed",
-                        strategy_class.__name__,
-                        exc_info=True,
-                    )
-                    continue
+                reason = strategy_class.rejection_reason(
+                    quant_config,
+                    weight,
+                    weight_scales,
+                    hw_kernel_config,
+                    weight_scale_2,
+                    input_scale,
+                )
                 if reason is not None and reason not in rejection_reasons:
                     rejection_reasons.append(reason)
             details = (

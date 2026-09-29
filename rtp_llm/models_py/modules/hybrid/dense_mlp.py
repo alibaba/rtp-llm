@@ -1,6 +1,5 @@
 """Unified dense MLP implementation supporting multiple activation types."""
 
-import os
 from typing import Dict, Optional, Type
 
 import torch
@@ -44,9 +43,6 @@ class DenseMLP(nn.Module):
             raise ValueError(f"Unsupported activation type: {activation_type}")
         self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
         self.is_gated = activation_type in _GATED_ACTIVATION_TYPE_LIST
-        self.enable_fused_activation_quant = (
-            os.environ.get("DISABLE_FUSED_ACTIVATION_QUANT", "0") != "1"
-        )
 
         if self.is_gated:
             if W.ffn_w13 not in weights:
@@ -120,7 +116,6 @@ class DenseMLP(nn.Module):
             not self.is_gated
             and self.activation_type == ActivationType.Gelu
             and ffn_tp_size == 1
-            and self.enable_fused_activation_quant
             and self.up_proj.supports_fused_bias_gelu_quant
             and self.down_proj.supports_fused_bias_gelu_quant
             and self.up_proj.fused_activation_quant_format is not None

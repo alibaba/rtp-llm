@@ -90,63 +90,60 @@ class FusedBiasGeluTest(unittest.TestCase):
         torch.testing.assert_close(actual_q.float(), expected_q.float(), rtol=0, atol=0)
         torch.testing.assert_close(actual_s, expected_s, rtol=0, atol=0)
 
-    def test_fused_quant_float_scale_matches_separate_path(self):
-        torch.manual_seed(20260831)
-        value = torch.randn((17, 3072), device="cuda", dtype=torch.bfloat16)
-        bias = torch.randn(3072, device="cuda", dtype=torch.bfloat16)
-        activated = value.clone()
-        rtp_llm_ops.fused_bias_gelu(activated, bias)
-        expected_q, expected_s = sgl_per_token_group_quant_fp8(
-            activated,
-            group_size=128,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=False,
-            scale_ue8m0=False,
-        )
-        actual_q = torch.empty_like(value, dtype=torch.float8_e4m3fn)
-        actual_s = torch.empty_strided(
-            expected_s.shape,
-            expected_s.stride(),
-            dtype=torch.float32,
-            device=value.device,
-        )
-        rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, actual_q, actual_s)
-        torch.testing.assert_close(actual_q.float(), expected_q.float(), rtol=0, atol=0)
-        torch.testing.assert_close(actual_s, expected_s, rtol=0, atol=0)
-
-    def test_fused_quant_float_scale_can_skip_bias(self):
-        torch.manual_seed(20260831)
-        value = torch.randn((17, 3072), device="cuda", dtype=torch.bfloat16)
-        bias = torch.randn(3072, device="cuda", dtype=torch.bfloat16)
-        expected_q, expected_s = sgl_per_token_group_quant_fp8(
-            F.gelu(value),
-            group_size=128,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=False,
-            scale_ue8m0=False,
-        )
-        actual_q = torch.empty_like(value, dtype=torch.float8_e4m3fn)
-        actual_s = torch.empty_strided(
-            expected_s.shape,
-            expected_s.stride(),
-            dtype=torch.float32,
-            device=value.device,
-        )
-        rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, actual_q, actual_s, False)
-        torch.testing.assert_close(actual_q.float(), expected_q.float(), rtol=0, atol=0)
-        torch.testing.assert_close(actual_s, expected_s, rtol=0, atol=0)
-
-    def test_fused_quant_float_scale_rejects_overlapping_layout(self):
-        value = torch.randn((17, 256), device="cuda", dtype=torch.bfloat16)
-        bias = torch.randn(256, device="cuda", dtype=torch.bfloat16)
+    def test_fused_quant_rejects_float_scales(self):
+        value = torch.randn(17, 256, device="cuda", dtype=torch.bfloat16)
+        bias = torch.zeros(256, device="cuda", dtype=value.dtype)
         output = torch.empty_like(value, dtype=torch.float8_e4m3fn)
         scales = torch.empty_strided(
-            (17, 2), (1, 1), dtype=torch.float32, device=value.device
+            (17, 2), (1, 17), device="cuda", dtype=torch.float32
         )
-        with self.assertRaisesRegex(RuntimeError, "stride"):
-            rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, output, scales, False)
+        with self.assertRaisesRegex(RuntimeError, "int32 UE8M0"):
+            rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, output, scales)
+
+    def test_packed_scales_reject_overlapping_columns(self):
+        value = torch.randn(17, 1024, device="cuda", dtype=torch.bfloat16)
+        bias = torch.zeros(1024, device="cuda", dtype=value.dtype)
+        output = torch.empty_like(value, dtype=torch.float8_e4m3fn)
+        scales = torch.empty_strided((17, 2), (1, 1), device="cuda", dtype=torch.int32)
+        with self.assertRaisesRegex(RuntimeError, "overlap"):
+            rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, output, scales)
+        with self.assertRaisesRegex(RuntimeError, "overlap"):
+            rtp_llm_ops.fused_add_layernorm_quant_fp8(
+                value,
+                value.clone(),
+                bias,
+                torch.ones_like(bias),
+                bias,
+                output,
+                scales,
+                1e-6,
+            )
+
+    def test_nondefault_stream_and_device_guard(self):
+        # Single-GPU runs still cover non-default streams. Multi-GPU runs
+        # additionally keep current_device different from the input device.
+        current = torch.cuda.current_device()
+        target = (current + 1) % torch.cuda.device_count()
+        stream = torch.cuda.Stream(device=target)
+        with torch.cuda.device(target):
+            previous = torch.cuda.current_stream()
+            torch.cuda.set_stream(stream)
+            value = torch.randn(17, 768, device=target, dtype=torch.bfloat16)
+            bias = torch.randn(768, device=target, dtype=value.dtype)
+            expected = F.gelu(value + bias)
+            added = value.clone()
+            expected_added = value + bias
+        try:
+            self.assertEqual(torch.cuda.current_device(), current)
+            rtp_llm_ops.fused_bias_add(added, bias)
+            rtp_llm_ops.fused_bias_gelu(value, bias)
+            self.assertEqual(torch.cuda.current_device(), current)
+            stream.synchronize()
+            torch.testing.assert_close(added, expected_added, rtol=0, atol=0)
+            torch.testing.assert_close(value, expected, rtol=2e-2, atol=2e-2)
+        finally:
+            with torch.cuda.device(target):
+                torch.cuda.set_stream(previous)
 
 
 if __name__ == "__main__":

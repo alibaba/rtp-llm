@@ -26,10 +26,21 @@ py_test(
 
 py_test(
     name = "bert_multimodal_embedding_test",
-    srcs = ["bert_multimodal_embedding_test.py"],
+    srcs = ["bert_multimodal_embedding_test.py", "bert_embedding_test_utils.py"],
+    main = "bert_multimodal_embedding_test.py",
     deps = py_test_deps,
     env = {"GPU_COUNT": "1"},
     timeout = "long",
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "bert_embedding_op_test",
+    srcs = ["bert_embedding_op_test.py", "bert_embedding_test_utils.py"],
+    main = "bert_embedding_op_test.py",
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
     tags = ["H20"],
     exec_properties = {"gpu": "H20", "gpu_count": "1"},
 )
