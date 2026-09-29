@@ -1223,6 +1223,38 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self.assertIsNone(captured.prepared_writes)
         self.assertFalse(captured.tentative_committed)
 
+    def test_graph_physical_blocks_replay_uses_updated_table_and_pages(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for Graph replay")
+        device = torch.device("cuda")
+        table = torch.tensor([[1, 3], [5, 7]], dtype=torch.int32, device=device)
+        pages = torch.tensor([1, 0], dtype=torch.long, device=device)
+        attention_inputs = SimpleNamespace(kv_cache_block_id_device=table)
+        resolve = qwen4_exp.Qwen4ExpModel._physical_blocks
+
+        resolve(attention_inputs, PLE_STATE_TAG, pages, 12, device, graph_capture=True)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            blocks = resolve(
+                attention_inputs,
+                PLE_STATE_TAG,
+                pages,
+                12,
+                device,
+                graph_capture=True,
+            )
+        graph.replay()
+        torch.testing.assert_close(blocks.cpu(), torch.tensor([3, 5]))
+
+        table.copy_(torch.tensor([[0, 9], [6, 8]], dtype=torch.int32, device=device))
+        pages.copy_(torch.tensor([0, 1], dtype=torch.long, device=device))
+        graph.replay()
+        torch.testing.assert_close(blocks.cpu(), torch.tensor([0, 8]))
+
+        pages.copy_(torch.tensor([99, -1], dtype=torch.long, device=device))
+        graph.replay()
+        torch.testing.assert_close(blocks.cpu(), torch.tensor([0, 0]))
+
     def test_target_verify_commit_finalize_and_next_decode_match_baseline(self):
         prefixes = (self._PAGE - 1, self._PAGE)
         query_len = 5

@@ -642,6 +642,8 @@ class Qwen4ExpModel(Qwen35Model):
         logical_pages: torch.Tensor,
         pool_rows: int,
         device: torch.device,
+        *,
+        graph_capture: bool = False,
     ) -> torch.Tensor:
         """Resolve one request-local logical page per batch row."""
         table = cls._resolve_block_table(attention_inputs, tag)
@@ -650,6 +652,20 @@ class Qwen4ExpModel(Qwen35Model):
         ):
             raise RuntimeError(f"PLE cache {tag!r} block-table batch is inconsistent")
         pages = logical_pages.to(device=table.device, dtype=torch.long)
+        if graph_capture:
+            # The graph runner owns the fixed-size device table and refreshes
+            # it each step. Clamp invalid indices to
+            # the reserved dummy row so malformed input cannot index outside
+            # the pool while capture/replay is in progress.
+            if not pages.numel() or not int(table.shape[1]) or pool_rows <= 0:
+                raise RuntimeError(f"PLE cache {tag!r} graph table is empty")
+            valid_page = (pages >= 0) & (pages < int(table.shape[1]))
+            safe_pages = pages.clamp(0, int(table.shape[1]) - 1)
+            blocks = table.gather(1, safe_pages.unsqueeze(1)).squeeze(1)
+            valid_block = (blocks > 0) & (blocks < pool_rows)
+            return torch.where(valid_page & valid_block, blocks, 0).to(
+                device=device, dtype=torch.long
+            )
         if not pages.numel() or bool((pages < 0).any().item()):
             raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
         if bool((pages >= int(table.shape[1])).any().item()):
@@ -796,7 +812,8 @@ class Qwen4ExpModel(Qwen35Model):
         prefixes_device = prefixes.to(
             device=hyper_states.device, dtype=torch.long, non_blocking=True
         ).contiguous()
-        if bool(torch.any(prefixes_device <= 0).item()):
+        graph_capture = bool(getattr(state_inputs, "is_cuda_graph", False))
+        if not graph_capture and bool(torch.any(prefixes_device <= 0).item()):
             raise RuntimeError(
                 "qwen4_exp PLE target verify requires a non-empty committed history"
             )
@@ -820,6 +837,7 @@ class Qwen4ExpModel(Qwen35Model):
             read_pages,
             int(state_pool.shape[0]),
             state_pool.device,
+            graph_capture=graph_capture,
         )
         ctx_read_blocks = self._physical_blocks(
             ctx_inputs,
@@ -827,6 +845,7 @@ class Qwen4ExpModel(Qwen35Model):
             read_pages,
             int(ctx_pool.shape[0]),
             ctx_pool.device,
+            graph_capture=graph_capture,
         )
         initial_state = state_pool.index_select(0, state_read_blocks)
         initial_context = ctx_pool.index_select(0, ctx_read_blocks)
@@ -873,7 +892,10 @@ class Qwen4ExpModel(Qwen35Model):
                 transaction.batch_size != batch_size
                 or transaction.query_len != query_len
                 or transaction.prefixes.device != prefixes_device.device
-                or not bool(torch.equal(transaction.prefixes, prefixes_device))
+                or (
+                    not graph_capture
+                    and not bool(torch.equal(transaction.prefixes, prefixes_device))
+                )
             ):
                 raise RuntimeError(
                     "qwen4_exp PLE layers disagree about target-verify geometry"
