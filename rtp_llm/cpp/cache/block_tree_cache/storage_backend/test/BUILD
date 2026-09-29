@@ -3,10 +3,11 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test_wrapper(
     name = "storage_backend_test",
-    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["StorageBackendTest.cc"],
     copts = copts(),
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",

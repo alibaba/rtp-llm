@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -60,6 +61,103 @@ def get_cuda_info():
     name = list(cuda_info.keys())[0]
     count = cuda_info[name]
     return name, count
+
+
+def validate_expected_cuda_environment(required_gpu_count: int) -> None:
+    expected_major = os.environ.get("EXPECTED_CUDA_MAJOR")
+    expected_toolkit = os.environ.get("EXPECTED_CUDA_TOOLKIT")
+    expected_capability = os.environ.get("EXPECTED_CUDA_COMPUTE_CAPABILITY")
+    expected_tag = os.environ.get("EXPECTED_GPU_TAG")
+    if (
+        not expected_major
+        and not expected_toolkit
+        and not expected_capability
+        and not expected_tag
+    ):
+        return
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, torch; "
+            "print(json.dumps({'cuda': torch.version.cuda, "
+            "'devices': [{'name': torch.cuda.get_device_name(i), "
+            "'capability': torch.cuda.get_device_capability(i)} "
+            "for i in range(torch.cuda.device_count())]}))",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        smi = subprocess.run(
+            ["nvidia-smi", "-L"], capture_output=True, text=True, check=False
+        )
+        detail = (smi.stdout or smi.stderr).strip()[:2000]
+        raise RuntimeError(
+            f"CUDA preflight failed: {probe.stderr.strip()[:2000]}; "
+            f"nvidia-smi rc={smi.returncode}: {detail}"
+        )
+    facts = json.loads(probe.stdout)
+    devices = facts.get("devices", [])
+    if len(devices) < required_gpu_count:
+        raise RuntimeError(
+            f"CUDA preflight requires {required_gpu_count} devices, found {len(devices)}"
+        )
+    if expected_major:
+        actual_cuda = facts.get("cuda")
+        actual_major = actual_cuda.split(".")[0] if actual_cuda else None
+        if actual_major != expected_major:
+            raise RuntimeError(
+                f"CUDA preflight requires major {expected_major}, got {actual_cuda}"
+            )
+    if expected_capability:
+        expected = tuple(int(part) for part in expected_capability.split("."))
+        mismatches = [
+            f"{device['name']}={'.'.join(str(part) for part in device['capability'])}"
+            for device in devices
+            if tuple(device["capability"]) != expected
+        ]
+        if mismatches:
+            raise RuntimeError(
+                f"CUDA preflight requires capability {expected_capability}, got "
+                + ", ".join(mismatches)
+            )
+    if expected_toolkit:
+        nvcc = subprocess.run(
+            ["/usr/local/cuda/bin/nvcc", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        release = re.search(r"release ([0-9]+\.[0-9]+)", nvcc.stdout)
+        actual_toolkit = release.group(1) if nvcc.returncode == 0 and release else None
+        if actual_toolkit != expected_toolkit:
+            raise RuntimeError(
+                f"CUDA preflight requires toolkit {expected_toolkit}, got {actual_toolkit}"
+            )
+    expected_names = {
+        "A10_CU13": ("A10",),
+        "L20_CU13": ("L20",),
+        "H20_CU13": ("H20",),
+        "SM100_ARM_CU13": ("B200", "GB200"),
+        "L20D_TEST": ("B300", "GB300"),
+        "RTX_5000_PRO_CU13": ("RTX PRO 5000", "RTX 5000"),
+    }
+    if expected_tag in expected_names:
+        names = [device["name"].upper() for device in devices]
+        allowed = expected_names[expected_tag]
+        if any(not any(token in name for token in allowed) for name in names):
+            raise RuntimeError(
+                f"CUDA preflight tag {expected_tag} does not match devices {names}"
+            )
+    logging.info(
+        "CUDA preflight passed: tag=%s cuda=%s devices=%s",
+        expected_tag or "<unset>",
+        facts.get("cuda"),
+        ", ".join(device["name"] for device in devices),
+    )
 
 
 def get_ip():
@@ -156,9 +254,7 @@ class DeviceResource:
                 )
                 return None
             return [
-                int(p.strip())
-                for p in result.stdout.strip().splitlines()
-                if p.strip()
+                int(p.strip()) for p in result.stdout.strip().splitlines() if p.strip()
             ]
         except subprocess.TimeoutExpired:
             logging.warning("nvidia-smi timed out querying gpu %s", gpu_id)
@@ -286,7 +382,9 @@ class DeviceResource:
                             logging.info(f"lock device {id} failed")
                             break
                         if self._has_zombie_gpu_contexts(str(id)):
-                            logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
+                            logging.info(
+                                f"skip GPU {id}: zombie CUDA contexts detected"
+                            )
                             break
                         gpu_ids.append(str(id))
                         logging.info(f"{get_ip()} lock device {id} done")
@@ -414,8 +512,10 @@ class DeviceResource:
 
 
 if __name__ == "__main__":
+    require_count = int(os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1")))
     cuda_info = get_cuda_info()
     if not cuda_info:
+        validate_expected_cuda_environment(require_count)
         logging.info("no gpu, continue")
         result = subprocess.run(sys.argv[1:])
         logging.info("exitcode: %d", result.returncode)
@@ -427,15 +527,13 @@ if __name__ == "__main__":
         setup_jit_cache()
 
         device_name, _ = cuda_info
-        require_count = int(
-            os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1"))
-        )
         with DeviceResource(require_count) as gpu_resource:
             if "308" in device_name:
                 env_name = "HIP_VISIBLE_DEVICES"
             else:
                 env_name = "CUDA_VISIBLE_DEVICES"
             os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
+            validate_expected_cuda_environment(require_count)
             result = subprocess.run(sys.argv[1:])
             logging.info("exitcode: %d", result.returncode)
             sys.exit(result.returncode)

@@ -1,7 +1,10 @@
-load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps", "torch_deps")
-load("//bazel:device_defs.bzl",
-    "device_impl_target", "device_test_envs")
+load("//:def.bzl", "cc_test_wrapper", "copts")
+load(
+    "//bazel:device_defs.bzl",
+    "device_impl_target",
+    "device_test_envs",
+)
 
 cc_test = cc_test_wrapper
 
@@ -21,19 +24,20 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-py_test (
+py_test(
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
+    data = [
+        "//:th_transformer",
+    ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
+        "//rtp_llm:testlib",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
-        "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util",
+        "//rtp_llm/test/model_test/test_util",
     ] + telemetry_test_deps(),
-    data = [
-        "//:th_transformer"
-    ],
-    exec_properties = {'gpu':'A10'},
 )
 
 test_deps = [
@@ -70,9 +74,10 @@ cc_test(
     name = "local_rpc_server_test",
     srcs = ["LocalRpcServerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -96,13 +101,14 @@ cc_test(
         "QueryConverterTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps + [
-        "//rtp_llm/cpp/models:logits_processor",
-    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/models:logits_processor",
+    ],
 )
 
 cc_test(
@@ -110,32 +116,35 @@ cc_test(
     srcs = [
         "BroadcastManagerTest.cc",
     ],
-    data = [],
     copts = test_copts,
+    data = [],
+    env = {},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = test_deps + [
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "@havenask//aios/autil:net",
     ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
     name = "prefill_rpc_server_test",
     srcs = ["PrefillRpcServerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
     name = "decode_rpc_server_test",
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -157,11 +166,12 @@ cc_test(
         "ResponseBufferTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(
@@ -170,13 +180,14 @@ cc_test(
         "PrefillBatchRpcServerTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps + [
-        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
-    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
 )
 
 cc_test(
@@ -185,13 +196,14 @@ cc_test(
         "RpcWriterCancellationTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps + [
-        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
-    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
 )
 
 cc_test(
@@ -200,11 +212,12 @@ cc_test(
         "RpcServerRuntimeMetaTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps,
 )
 
 cc_test(

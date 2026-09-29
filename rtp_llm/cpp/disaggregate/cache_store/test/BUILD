@@ -1,7 +1,7 @@
-package(default_visibility = ["//rtp_llm/cpp/disaggregate/cache_store:__subpackages__"])
-
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
+
+package(default_visibility = ["//rtp_llm/cpp/disaggregate/cache_store:__subpackages__"])
 
 cc_test = cc_test_wrapper
 
@@ -33,29 +33,33 @@ cc_library(
     name = "cache_store_test_base",
     srcs = test_base_sources,
     hdrs = test_base_includes,
+    visibility = ["//visibility:public"],
     deps = [
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
-        "@com_google_googletest//:gtest",
+        "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
-    visibility=['//visibility:public'],
 )
 
 cc_test(
     name = "cache_store_gtest",
-    srcs = glob(["*.cpp"], exclude = test_base_sources),
+    srcs = glob(
+        ["*.cpp"],
+        exclude = test_base_sources,
+    ),
+    copts = ["-fno-access-control"] + copts(),
+    env = {
+        "CACHE_STORE_RDMA_MODE": "0",
+    },
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         ":cache_store_test_base",
+        "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + device_impl_target() + cuda13_torch_link_deps,
-    env = {
-        "CACHE_STORE_RDMA_MODE": "0",
-    },
-    copts = ["-fno-access-control"] + copts(),
-    exec_properties = {'gpu':'A10'},
 )

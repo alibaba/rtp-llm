@@ -1,5 +1,5 @@
-load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test = cc_test_wrapper
 
@@ -17,16 +17,16 @@ cuda13_torch_link_deps = select({
 
 cc_library(
     name = "cuda_test_util",
+    srcs = [],
     hdrs = [
         "CudaTestUtils.h",
     ],
-    srcs = [],
+    copts = copts(),
+    visibility = ["//visibility:public"],
     deps = [
         "@com_google_googletest//:gtest",
         "@local_config_cuda//cuda:cuda_headers",
     ],
-    visibility = ["//visibility:public"],
-    copts = copts(),
 )
 
 test_deps = [
@@ -41,10 +41,11 @@ cc_test(
     srcs = [
         "CudaBatchCopyTest.cc",
     ],
-    data = [],
     copts = copts(),
+    data = [],
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
     deps = test_deps,
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -52,12 +53,13 @@ cc_test(
     srcs = [
         "CudaMaskLogitsOpTest.cc",
     ],
-    data = [],
     copts = copts(),
+    data = [],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = test_deps + [
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -65,13 +67,14 @@ cc_test(
     srcs = [
         "CudaSamplerTest.cc",
     ],
-    data = [],
     copts = copts(),
+    data = [],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = test_deps + [
-        "//3rdparty/flashinfer:flashinfer",
-        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+        "//3rdparty/flashinfer",
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -79,12 +82,13 @@ cc_test(
     srcs = [
         "CudaRejectionSamplingOpTest.cc",
     ],
-    data = [],
     copts = copts(),
+    data = [],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm/cpp/testing:rejection_sampling_test_utils",
     ] + torch_deps(),
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -92,13 +96,14 @@ cc_test(
     srcs = [
         "CudaBeamSearchOpTest.cc",
     ],
-    data = [],
     copts = copts(),
+    data = [],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = test_deps + [
-        "//3rdparty/flashinfer:flashinfer",
-        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+        "//3rdparty/flashinfer",
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling",
     ] + cuda13_torch_link_deps,
-    exec_properties = {'gpu':'A10'},
 )
 
 # Aliases: CudaGraph tests at //rtp_llm/cpp/cuda_graph/tests/

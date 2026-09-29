@@ -6,6 +6,19 @@ import sys
 import tempfile
 
 
+def _expected_compute_capability():
+    value = os.environ.get("EXPECTED_CUDA_COMPUTE_CAPABILITY")
+    if not value:
+        return None
+    parts = value.split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise RuntimeError(
+            "EXPECTED_CUDA_COMPUTE_CAPABILITY must be '<major>.<minor>', "
+            f"got {value!r}"
+        )
+    return int(parts[0]), int(parts[1])
+
+
 class ExecutionCount:
     def __init__(self):
         self.passed = 0
@@ -40,15 +53,29 @@ def main():
     if options.cuda_devices:
         import torch
 
-        if not torch.version.cuda or int(torch.version.cuda.split(".")[0]) != 13:
-            raise RuntimeError(f"CUDA 13 runtime required, got {torch.version.cuda}")
+        expected_cuda_major = int(os.environ.get("EXPECTED_CUDA_MAJOR") or "13")
+        expected_capability = _expected_compute_capability()
+        actual_cuda = torch.version.cuda
+        actual_cuda_major = int(actual_cuda.split(".")[0]) if actual_cuda else None
+        if actual_cuda_major != expected_cuda_major:
+            raise RuntimeError(
+                f"CUDA {expected_cuda_major} runtime required, got {actual_cuda}"
+            )
         if torch.cuda.device_count() < options.cuda_devices:
             raise RuntimeError(
                 f"requires {options.cuda_devices} CUDA devices, "
                 f"found {torch.cuda.device_count()}"
             )
         for index in range(options.cuda_devices):
-            if torch.cuda.get_device_capability(index)[0] != 10:
+            actual_capability = torch.cuda.get_device_capability(index)
+            if expected_capability is not None:
+                if actual_capability != expected_capability:
+                    raise RuntimeError(
+                        f"CUDA device {index} requires compute capability "
+                        f"{expected_capability[0]}.{expected_capability[1]}, got "
+                        f"{actual_capability[0]}.{actual_capability[1]}"
+                    )
+            elif actual_capability[0] != 10:
                 raise RuntimeError("DSV4 CUDA13 tests require Blackwell devices")
 
     # Machine-installed plugins must not change test collection or dependencies.

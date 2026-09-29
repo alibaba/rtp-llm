@@ -1,6 +1,6 @@
 def copy_so(target):
-    name = 'lib' + target.split(':')[1] + '_so'
-    so_name = 'lib' + target.split(':')[1] + '.so'
+    name = "lib" + target.split(":")[1] + "_so"
+    so_name = "lib" + target.split(":")[1] + ".so"
     native.genrule(
         name = name,
         srcs = [target],
@@ -11,19 +11,19 @@ def copy_so(target):
 
 def copy_so_inst(target, inst_num):
     for i in range(inst_num):
-        name = 'lib' + target.split(':')[1] + '_' + str(i) + '_inst_so'
-        so_name = 'lib' + target.split(':')[1] + '_' + str(i) + '_inst.so'
+        name = "lib" + target.split(":")[1] + "_" + str(i) + "_inst_so"
+        so_name = "lib" + target.split(":")[1] + "_" + str(i) + "_inst.so"
         native.genrule(
             name = name,
-            srcs = [target + '_' + str(i) + '_inst'],
+            srcs = [target + "_" + str(i) + "_inst"],
             outs = [so_name],
             cmd = "cp $(SRCS) $@",
             tags = ["no-remote"],
         )
 
     native.filegroup(
-        name = 'lib' + target.split(':')[1] + '_inst_so',
-        srcs = [':lib' + target.split(':')[1] + '_' + str(i) + '_inst_so' for i in range(inst_num)],
+        name = "lib" + target.split(":")[1] + "_inst_so",
+        srcs = [":lib" + target.split(":")[1] + "_" + str(i) + "_inst_so" for i in range(inst_num)],
     )
 
 def copy_target_to(name, to_copy, copy_name, dests = [], **kwargs):
@@ -47,17 +47,19 @@ def _upload_pkg_impl(ctx):
     ctx.actions.expand_template(
         template = ctx.file._deploy_script,
         substitutions = {
-            "{oss_prefix}" : ctx.attr.oss_prefix,
-            "{pkg_prefix}" : ctx.attr.pkg_prefix,
+            "{oss_prefix}": ctx.attr.oss_prefix,
+            "{pkg_prefix}": ctx.attr.pkg_prefix,
         },
         output = ctx.outputs.executable,
-        is_executable = True
+        is_executable = True,
     )
     return DefaultInfo(
         executable = ctx.outputs.executable,
         runfiles = ctx.runfiles(
             files = [ctx.file.target],
-            symlinks = {"pkg.tar": ctx.file.target}))
+            symlinks = {"pkg.tar": ctx.file.target},
+        ),
+    )
 
 _upload_pkg = rule(
     attrs = {
@@ -87,7 +89,7 @@ def upload_pkg(name, **kwargs):
     tags.extend(["manual"])
     kwargs.setdefault(key, tags)
 
-    _upload_pkg( name = name, **kwargs)
+    _upload_pkg(name = name, **kwargs)
 
 def upload_wheel(name, src, dir, wheel_prefix):
     oss_path = "oss://search-ad/%s/%s" % (dir, wheel_prefix) + "_$$(date '+%Y-%m-%d_%H_%M_%S')"
@@ -96,12 +98,12 @@ def upload_wheel(name, src, dir, wheel_prefix):
         srcs = [src],
         outs = ["tmp_wheel.whl"],
         cmd = "bash -c 'set -xe;" +
-            "mkdir tmp;" +
-            "cp $(locations %s) tmp; " % (src) +
-            "osscmd put $(locations %s) %s/$$(basename $(locations %s));" % (src, oss_path, src) +
-            "mv tmp/$$(basename $(locations %s)) $(OUTS);" % (src) +
-            "rm tmp -rf;" +
-            "'",
+              "mkdir tmp;" +
+              "cp $(locations %s) tmp; " % (src) +
+              "osscmd put $(locations %s) %s/$$(basename $(locations %s));" % (src, oss_path, src) +
+              "mv tmp/$$(basename $(locations %s)) $(OUTS);" % (src) +
+              "rm tmp -rf;" +
+              "'",
         tags = [
             "local",
             "manual",
@@ -116,10 +118,10 @@ def pyc_wheel(name, package_name, src):
         outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
         exec_tools = ["//bazel:pyc_wheel.py"],
         cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "/opt/conda310/bin/python $(location //bazel:pyc_wheel.py) $(OUTS);" +
-            "'",
+              "cp $(locations %s) $(OUTS);" % (src) +
+              "chmod a+w $(OUTS);" +
+              "/opt/conda310/bin/python $(location //bazel:pyc_wheel.py) $(OUTS);" +
+              "'",
         tags = [
             "local",
             "manual",
@@ -133,9 +135,9 @@ def rename_wheel(name, package_name, src):
         srcs = [src],
         outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
         cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "'",
+              "cp $(locations %s) $(OUTS);" % (src) +
+              "chmod a+w $(OUTS);" +
+              "'",
         tags = [
             "local",
             "manual",
@@ -149,9 +151,9 @@ def rename_wheel_aarch64(name, package_name, src):
         srcs = [src],
         outs = [package_name + "-cp310-cp310-linux_aarch64.whl"],
         cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "'",
+              "cp $(locations %s) $(OUTS);" % (src) +
+              "chmod a+w $(OUTS);" +
+              "'",
         tags = [
             "local",
             "manual",
@@ -162,25 +164,26 @@ def rename_wheel_aarch64(name, package_name, src):
 def rpm_library(
         name,
         hdrs,
-        include_path=None,
-        lib_path=None,
-        rpms=None,
-        static_lib=None,
-        static_libs=[], # multi static libs, do not add to cc_library, provide .a filegroup
-        shared_lib=None,
-        shared_libs=[],
-        bins=[],
-        include_prefix=None,
-        static_link=False,
-        deps=[],
-        header_only=False,
-        tags={},
+        include_path = None,
+        lib_path = None,
+        rpms = None,
+        static_lib = None,
+        static_libs = [],  # multi static libs, do not add to cc_library, provide .a filegroup
+        shared_lib = None,
+        shared_libs = [],
+        bins = [],
+        include_prefix = None,
+        static_link = False,
+        deps = [],
+        header_only = False,
+        origin_rpath = False,
+        tags = {},
         **kwargs):
-    hdrs = [ "include/" + hdr for hdr in hdrs ]
+    hdrs = ["include/" + hdr for hdr in hdrs]
     outs = [] + hdrs
     if static_lib:
         outs.append(static_lib)
-    if shared_lib :
+    if shared_lib:
         outs.append(shared_lib)
     if not rpms:
         rpms = ["@" + name + "//file:file"]
@@ -198,9 +201,13 @@ def rpm_library(
         bash_cmd += "&& cp -L " + lib_path + "/*.a" + " ../$(@D)/"
     if shared_lib:
         bash_cmd += "&& echo $$PATH && which patchelf && patchelf --version && cp -L " + lib_path + "/" + shared_lib + " ../$(@D) && patchelf --set-soname " + shared_lib + " ../$(@D)/" + shared_lib
+        if origin_rpath:
+            bash_cmd += " && patchelf --set-rpath '$$ORIGIN' ../$(@D)/" + shared_lib
     for share_lib in shared_libs:
         outs.append(share_lib)
         bash_cmd += "&& cp -L " + lib_path + "/" + share_lib + " ../$(@D) && patchelf --set-soname " + share_lib + " ../$(@D)/" + share_lib
+        if origin_rpath:
+            bash_cmd += " && patchelf --set-rpath '$$ORIGIN' ../$(@D)/" + share_lib
     for path in bins:
         outs.append(path)
         bash_cmd += "&& cp -rL " + path + " ../$(@D)"
@@ -212,7 +219,7 @@ def rpm_library(
         outs = outs,
         cmd = bash_cmd,
         visibility = ["//visibility:public"],
-        tags=tags,
+        tags = tags,
     )
     hdrs_fg_target = name + "_hdrs_fg"
     native.filegroup(
@@ -243,7 +250,7 @@ def rpm_library(
             name = bins_filegroup,
             srcs = bins,
             visibility = ["//visibility:public"],
-            tags=tags,
+            tags = tags,
         )
 
     if static_lib == None:
@@ -259,12 +266,12 @@ def rpm_library(
         )
     else:
         import_target = name + "_import"
-        alwayslink = static_lib!=None
+        alwayslink = static_lib != None
         native.cc_import(
             name = import_target,
             static_library = static_lib,
             shared_library = shared_lib,
-            alwayslink=alwayslink,
+            alwayslink = alwayslink,
             visibility = ["//visibility:public"],
         )
         native.cc_library(

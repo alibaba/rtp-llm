@@ -1,10 +1,12 @@
+load("@pip_arm_torch//:requirements.bzl", requirement_arm = "requirement")
+
 # to wrapper target relate with different system config
-load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
-load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
-load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
-load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
-load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13="requirement")
-load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
+load("@pip_cpu_torch//:requirements.bzl", requirement_cpu = "requirement")
+load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm = "requirement")
+load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9 = "requirement")
+load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requirement")
+load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13 = "requirement")
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
@@ -26,12 +28,14 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 def requirement(names):
     for name in names:
         cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
+        cuda13_arm_deps = [] if name in _CUDA13_DEFERRED else [requirement_cuda13_arm(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
                 deps = select({
                     "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                     "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                    "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                     "//conditions:default": [],
                 }),
                 visibility = ["//visibility:public"],
@@ -43,6 +47,7 @@ def requirement(names):
                 "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
@@ -53,7 +58,7 @@ def requirement(names):
 def cache_store_deps():
     native.alias(
         name = "cache_store_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl"
+        actual = "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl",
     )
 
 def rdma_transport_deps():
@@ -63,16 +68,17 @@ def rdma_transport_deps():
         actual = "@rtp_llm//rtp_llm/cpp/rdma_transport:rdma_transport_no_impl",
         visibility = ["//visibility:public"],
     )
+
 def embedding_arpc_deps():
     native.alias(
         name = "embedding_arpc_deps",
-        actual = "@rtp_llm//rtp_llm/cpp/embedding_engine:embedding_engine_arpc_server_impl"
+        actual = "@rtp_llm//rtp_llm/cpp/embedding_engine:embedding_engine_arpc_server_impl",
     )
 
 def subscribe_deps():
     native.alias(
         name = "subscribe_deps",
-        actual = "@rtp_llm//rtp_llm/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl"
+        actual = "@rtp_llm//rtp_llm/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl",
     )
 
 def whl_deps():
@@ -87,6 +93,17 @@ def whl_deps():
             "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
             "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
             "tilelang==0.1.9",
+        ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "torch@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "torchvision@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "deep_gemm@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_gb300/deep_gemm-2.5.0%2B6053f00-cp310-cp310-linux_aarch64.whl",
+            "flash-mla@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl",
+            "rtp-kernel@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0608/arm_pkg/rtp_kernel-0.1.0%2Bcu13.fb4b4ab-cp310-cp310-linux_aarch64.whl",
+            "fast-safetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
+            "fastsafetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
+            "tilelang@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl",
+            "apache-tvm-ffi==0.1.10",
         ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
@@ -106,7 +123,7 @@ def platform_deps():
     return select({
         "@rtp_llm//:using_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],
-        "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0", "av==16.1.0"],
+        "@rtp_llm//:using_rocm": ["pyyaml==6.0.2", "decord==0.6.0", "av==16.1.0"],
         "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
     })
 
@@ -121,6 +138,11 @@ def torch_deps():
             "@torch_2.3_py310_cpu_aarch64//:torch_api",
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",
+        ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "@torch_2.11_py310_cuda-aarch64//:torch_api",
+            "@torch_2.11_py310_cuda-aarch64//:torch",
+            "@torch_2.11_py310_cuda-aarch64//:torch_libs",
         ],
         "@rtp_llm//:cuda_pre_12_9": [
             "@torch_2.6_py310_cuda//:torch_api",
@@ -141,7 +163,7 @@ def torch_deps():
             "@torch_2.1_py310_cpu//:torch_api",
             "@torch_2.1_py310_cpu//:torch",
             "@torch_2.1_py310_cpu//:torch_libs",
-        ]
+        ],
     })
     return deps
 
@@ -150,14 +172,15 @@ def flashinfer_deps():
         name = "flashinfer",
         actual = select({
             "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
+            "@rtp_llm//:using_cuda13_arm": "@flashinfer_cpp_cu13//:flashinfer",
             "//conditions:default": "@flashinfer_cpp//:flashinfer",
-        })
+        }),
     )
 
 def flashmla_deps():
     native.alias(
         name = "flashmla",
-        actual = "@flashmla//:flashmla"
+        actual = "@flashmla//:flashmla",
     )
 
 def deep_ep_py_deps():
@@ -196,10 +219,10 @@ def jit_deps():
 def select_py_bindings():
     return select({
         "@rtp_llm//:using_cuda12": [
-            "@rtp_llm//rtp_llm/models_py/bindings/cuda:cuda_bindings_register"
+            "@rtp_llm//rtp_llm/models_py/bindings/cuda:cuda_bindings_register",
         ],
         "@rtp_llm//:using_rocm": [
-            "@rtp_llm//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
+            "@rtp_llm//rtp_llm/models_py/bindings/rocm:rocm_bindings_register",
         ],
         "//conditions:default": [
             "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
@@ -207,12 +230,11 @@ def select_py_bindings():
     })
 
 def cuda13_test_exec_properties(gpu_count = 1):
-    """GPU test pools; internal builds override CUDA13 pool names."""
+    """CUDA13 tests use existing pools matching their target architecture."""
     return select({
-        "@rtp_llm//:using_cuda13_arm": {"gpu": "SM100_ARM", "gpu_count": str(gpu_count)},
-        "@rtp_llm//:using_cuda13_x86": {"gpu": "SM100_X86", "gpu_count": str(gpu_count)},
-        "@rtp_llm//:using_cuda12_arm": {"gpu": "SM100_ARM", "gpu_count": str(gpu_count)},
-        "//conditions:default": {"gpu": "A10", "gpu_count": str(gpu_count)},
+        "@rtp_llm//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": str(gpu_count)},
+        "@rtp_llm//:using_cuda13_x86": {"gpu": "L20D_TEST", "gpu_count": str(gpu_count)},
+        "//conditions:default": {"gpu": "A10_CU13", "gpu_count": str(gpu_count)},
     })
 
 def no_block_copy_link_deps():

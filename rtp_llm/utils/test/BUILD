@@ -6,7 +6,6 @@ requirement([
     "protobuf",
 ])
 
-
 filegroup(
     name = "testdata",
     srcs = glob([
@@ -55,11 +54,7 @@ _JIT_SMOKE_EXTRA_DEPS = [
 # the shared-cache lifecycle instead of passing on a private cold start.
 custom_smoke_test(
     name = "jit_cache_deepseek_v2_lite",
-    main = "jit_cache_smoke_test.py",
-    smoke_args = "--warm_up 0 --hack_layer_num 2 --load_method scratch --test_block_num 100 --act_type BF16 --quantization FP8_PER_BLOCK --seq_size_per_block 64 --tp_size 2 --reuse_cache 1",
     args = ["JitCacheSmokeTest.test_deepseek_v2_lite"],
-    gpu_type = ["H20"],
-    tags = ["multi_device"],
     data = [
         "//:rtp_compute_ops",
         "//:th_transformer",
@@ -67,17 +62,17 @@ custom_smoke_test(
         "//rtp_llm:sdk",
         "//rtp_llm/test/smoke:deepseek_v2_lite_task_info",
     ],
+    gpu_type = ["H20_CU13"],
+    main = "jit_cache_smoke_test.py",
+    smoke_args = "--warm_up 0 --hack_layer_num 2 --load_method scratch --test_block_num 100 --act_type BF16 --quantization FP8_PER_BLOCK --seq_size_per_block 64 --tp_size 2 --reuse_cache 1",
+    tags = ["multi_device"],
     deps = _JIT_SMOKE_EXTRA_DEPS + [":grpcio"],
 )
 
 # ROCm lifecycle coverage intentionally omits the CUDA IPC weight-update path.
 custom_smoke_test(
     name = "jit_cache_qwen3_rocm",
-    main = "jit_cache_smoke_test.py",
-    smoke_args = "--warm_up 0 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
     args = ["JitCacheSmokeTest.test_qwen3_rocm"],
-    gpu_type = ["MI308X-ROCM7"],
-    tags = ["rocm"],
     data = [
         "//:rtp_compute_ops",
         "//:th_transformer",
@@ -85,6 +80,10 @@ custom_smoke_test(
         "//rtp_llm:sdk",
         "//rtp_llm/test/smoke:qwen3_8b_task_info",
     ],
+    gpu_type = ["MI308X-ROCM7"],
+    main = "jit_cache_smoke_test.py",
+    smoke_args = "--warm_up 0 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
+    tags = ["rocm"],
     deps = _JIT_SMOKE_EXTRA_DEPS,
 )
 
@@ -93,28 +92,33 @@ py_test(
     srcs = [
         "ckpt_database_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        "//rtp_llm:config",
-        "//rtp_llm:_ft_pickler",
-        "//rtp_llm:lora"
-    ],
     data = [
         "//rtp_llm/utils/test:testdata",
-    ]
+    ],
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:lora",
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(
     # Verifies load_tensor_slice / copy-out on a real ROCm build (hip asserted).
     name = "ckpt_database_test_rocm",
     srcs = ["ckpt_database_test.py"],
-    main = "ckpt_database_test.py",
     args = ["HandleRecyclingTest"],
-    deps = ["//rtp_llm:utils", "//rtp_llm:config", "//rtp_llm:_ft_pickler", "//rtp_llm:lora"],
     data = ["//rtp_llm/utils/test:testdata"],
     env = {"RTP_LLM_REQUIRE_ACCELERATOR": "1"},
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    main = "ckpt_database_test.py",
     tags = ["rocm"],
-    exec_properties = {'gpu': 'MI308X-ROCM7'},
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:lora",
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(
@@ -127,18 +131,17 @@ py_test(
     ],
 )
 
-
 py_test(
     name = "util_test",
     srcs = [
         "util_test.py",
     ],
     deps = [
-        "//rtp_llm:utils",
         "//rtp_llm:_ft_pickler",
-        "//rtp_llm:pynvml",
-        "//rtp_llm:psutil",
         "//rtp_llm:fastapi",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pynvml",
+        "//rtp_llm:utils",
     ],
 )
 
@@ -164,15 +167,16 @@ py_test(
     srcs = [
         "process_manager_test.py",
     ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm:utils",
     ],
-    data = [
-        "//:th_transformer",
-        "//:th_transformer_config",
-        "//:rtp_compute_ops",
-    ],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -180,16 +184,17 @@ py_test(
     srcs = [
         "grpc_host_channel_pool_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        ":grpcio",
-    ],
     data = [
+        "//:rtp_compute_ops",
         "//:th_transformer",
         "//:th_transformer_config",
-        "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = [
+        ":grpcio",
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(
@@ -209,15 +214,16 @@ py_test(
     srcs = [
         "oom_diag_test.py",
     ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm:utils",
     ],
-    data = [
-        "//:th_transformer",
-        "//:th_transformer_config",
-        "//:rtp_compute_ops",
-    ],
-    exec_properties = {'gpu':'A10'}
 )
 
 py_test(
@@ -225,17 +231,18 @@ py_test(
     srcs = [
         "duplicated_kv_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        "//rtp_llm:fastapi",
-        "//rtp_llm:_ft_pickler",
-    ],
     data = [
+        "//:rtp_compute_ops",
         "//:th_transformer",
         "//:th_transformer_config",
-        "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(

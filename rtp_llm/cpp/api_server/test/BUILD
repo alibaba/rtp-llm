@@ -1,5 +1,5 @@
-load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "copts")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 cc_import(
@@ -36,51 +36,53 @@ test_deps = [
 # 通过 python 执行 cpp 单测
 py_test(
     name = "api_server_unittest",  # 需要有一个同名 py 文件
-    python_version = 'PY3',
-    srcs_version = 'PY3',
     srcs = [
         "api_server_unittest.py",
-    ],
-    deps = [
-        ":api_server_unittest_pylib",
     ],
     data = [
         "testdata/annocation",
         "testdata/parallel.json",
     ],
-    imports = [
-        ".",
-    ],
     env = select({
         "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
     }),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    imports = [
+        ".",
+    ],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    tags = ["A10_CU13"],
+    deps = [
+        ":api_server_unittest_pylib",
+    ],
 )
 
 py_library(
     name = "api_server_unittest_pylib",
     srcs = [],
-    deps = [],
     data = [
         ":api_server_unittest_lib.so",
     ],
+    deps = [],
 )
 
 cc_binary(
     name = "api_server_unittest_lib.so",
     srcs = [],
+    data = ["//:rtp_compute_ops"],
+    linkshared = 1,
     deps = [
         ":api_server_unittest_lib",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ],
-    data = ["//:rtp_compute_ops"],
-    linkshared = 1,
 )
 
 cc_library(
     name = "api_server_unittest_lib",
-    srcs = [ # TODO: use glob
+    srcs = [
+        # TODO: use glob
         "mock/MockEngineBase.h",
         "mock/MockHttpResponseWriter.h",
         "mock/MockTokenProcessor.h",
@@ -109,10 +111,10 @@ cc_library(
         "ChatServiceTest.cc",
         "TestMain.cc",
     ],
+    copts = test_copts,
     deps = test_deps + [
         "//rtp_llm/cpp/api_server:http_api_server",
     ],
-    copts = test_copts,
     alwayslink = 1,
 )
 

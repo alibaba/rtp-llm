@@ -30,21 +30,25 @@ test_deps = [
 
 cc_test(
     name = "block_tree_storer_test",
-    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["BlockTreeStorerTest.cc"],
     copts = test_copts,
-    tags = ["exclusive-if-local"],
-    deps = test_deps,
     env = {},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = [
+        "A10_CU13",
+        "exclusive-if-local",
+    ],
+    deps = test_deps,
 )
 
 cc_test(
     name = "store_task_runner_test",
-    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["StoreTaskRunnerTest.cc"],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
     env = {},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
 )

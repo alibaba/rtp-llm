@@ -11,11 +11,11 @@ cc_binary(
         "//3rdparty/trt_beam_search:trt_beam_search_impl",
     ] + select({
         "@//:using_rocm": [
-            "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:hip",
+            "@local_config_rocm//rocm:rocm_headers",
         ],
         "//conditions:default": [
-            "@local_config_cuda//cuda:cuda",
+            "@local_config_cuda//cuda",
             "@local_config_cuda//cuda:cudart",
         ],
     }),
@@ -31,26 +31,27 @@ cc_test(
     srcs = ["topk_bench.cu"],
     args = ["--check"],
     copts = any_cuda_copts(),
-    deps = [
-        "//3rdparty/trt_beam_search:trt_beam_search_impl",
-    ] + select({
-        "@//:using_rocm": [
-            "@local_config_rocm//rocm:rocm_headers",
-            "@local_config_rocm//rocm:hip",
-        ],
-        "//conditions:default": [
-            "@local_config_cuda//cuda:cuda",
-            "@local_config_cuda//cuda:cudart",
-        ],
+    exec_properties = select({
+        "@//:using_cuda": {"gpu": "A10_CU13"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {},
     }),
     # A select needs its own CUDA branch: with only the rocm branch present, CUDA
     # falls through to "//conditions:default": {} -- empty exec_properties, which is
     # not a GPU request at all. Both tests then landed on a CPU-only worker and died
     # with "libcuda.so.1: cannot open shared object file" (exit 127) in run 69714248.
-    exec_properties = select({
-        "@//:using_cuda": {"gpu": "A10"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
-        "//conditions:default": {},
+    tags = ["A10_CU13"],
+    deps = [
+        "//3rdparty/trt_beam_search:trt_beam_search_impl",
+    ] + select({
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:hip",
+            "@local_config_rocm//rocm:rocm_headers",
+        ],
+        "//conditions:default": [
+            "@local_config_cuda//cuda",
+            "@local_config_cuda//cuda:cudart",
+        ],
     }),
 )
 
@@ -61,25 +62,26 @@ cc_test(
     name = "beam_mapping_test",
     srcs = ["beam_mapping_test.cu"],
     copts = any_cuda_copts(),
-    deps = [
-        "//3rdparty/trt_beam_search:trt_beam_search_impl",
-    ] + select({
-        "@//:using_rocm": [
-            "@local_config_rocm//rocm:rocm_headers",
-            "@local_config_rocm//rocm:hip",
-        ],
-        "//conditions:default": [
-            "@local_config_cuda//cuda:cuda",
-            "@local_config_cuda//cuda:cudart",
-        ],
+    exec_properties = select({
+        "@//:using_cuda": {"gpu": "A10_CU13"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {},
     }),
     # A select needs its own CUDA branch: with only the rocm branch present, CUDA
     # falls through to "//conditions:default": {} -- empty exec_properties, which is
     # not a GPU request at all. Both tests then landed on a CPU-only worker and died
     # with "libcuda.so.1: cannot open shared object file" (exit 127) in run 69714248.
-    exec_properties = select({
-        "@//:using_cuda": {"gpu": "A10"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
-        "//conditions:default": {},
+    tags = ["A10_CU13"],
+    deps = [
+        "//3rdparty/trt_beam_search:trt_beam_search_impl",
+    ] + select({
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:hip",
+            "@local_config_rocm//rocm:rocm_headers",
+        ],
+        "//conditions:default": [
+            "@local_config_cuda//cuda",
+            "@local_config_cuda//cuda:cudart",
+        ],
     }),
 )

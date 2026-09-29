@@ -6,21 +6,12 @@ combining the functionality of the previous DeepEPInitializer and DeepEPWrapper 
 
 import gc
 import logging
-import os
-import platform
 import threading
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import Optional, Tuple
 
 import torch
-
-try:
-    from deep_ep import Buffer as DeepEPBuffer
-    from deep_ep import Config as DeepEPConfig
-except ImportError:
-    DeepEPBuffer = None  # type: ignore[misc,assignment]
-    DeepEPConfig = None  # type: ignore[misc,assignment]
 
 from torch.distributed import ProcessGroup
 
@@ -48,16 +39,10 @@ except ImportError as _deep_ep_import_err:
             )
 
         def __init_subclass__(cls, **kwargs):
-            raise NotImplementedError(
-                "deep_ep is not available in this build."
-            )
-
-        @classmethod
-        def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
             raise NotImplementedError("deep_ep is not available in this build.")
 
         @classmethod
-        def get_low_latency_rdma_size_hint_m2n(cls, *args, **kwargs):
+        def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
             raise NotImplementedError("deep_ep is not available in this build.")
 
     DeepEPBuffer = _DeepEPUnavailable  # type: ignore[assignment,misc]
@@ -66,11 +51,9 @@ except ImportError as _deep_ep_import_err:
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.ops import SpeculativeType
 
 __all__ = [
@@ -79,21 +62,8 @@ __all__ = [
     "DeepEPBuffer",
     "DeepEPConfig",
     "DeepEPMode",
-    "use_accl_ep",
-    "allow_mnnvl",
     "init_deepep_wrapper",
 ]
-
-
-def use_accl_ep() -> bool:
-    """Check if ACCL EP should be used based on device type."""
-    device_type = get_device_type()
-    return not device_type == DeviceType.ROCm
-
-
-def allow_mnnvl() -> bool:
-    """Check if MNNVL is allowed based on architecture and GPU capability."""
-    return "aarch64" in platform.machine() and is_sm10x()
 
 
 class DeepEPMode(IntEnum):
@@ -101,7 +71,6 @@ class DeepEPMode(IntEnum):
 
     NORMAL = auto()
     LOW_LATENCY = auto()
-    LOW_LATENCY_M2N = auto()
 
 
 @dataclass
@@ -238,7 +207,7 @@ class DeepepWrapperConfig:
             quant_config is not None and quant_config.get_method() == "modelopt_fp4"
         )
         if not is_quantized or is_block_quantized or is_per_group_fp4:
-            matched_tokens = [128] if allow_mnnvl() else [64, 128]
+            matched_tokens = [64, 128]
         elif is_per_act_token:
             matched_tokens = [
                 16,
@@ -294,8 +263,6 @@ class DeepEPWrapper:
             config: DeepepWrapperConfig containing all necessary configuration
         """
         self._config = config
-        self._use_accl_ep = use_accl_ep()
-
         self._mode, self._buffer = self._init_deepep_buffer(group)
 
     @classmethod
@@ -471,11 +438,6 @@ class DeepEPWrapper:
         """Get number of SMs."""
         return self._config.deep_ep_num_sm
 
-    @property
-    def use_accl_ep(self) -> bool:
-        """Check if ACCL EP is used."""
-        return self._use_accl_ep
-
     def _init_deepep_buffer(
         self, group: ProcessGroup
     ) -> Tuple[DeepEPMode, DeepEPBuffer]:
@@ -490,16 +452,10 @@ class DeepEPWrapper:
         config = self._config
 
         if config.use_deepep_low_latency and config.enable_ffn_disaggregate:
-            if self._use_accl_ep:
-                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(
-                    group
-                )
-            else:
-                raise RuntimeError(
-                    f"[rank: {config.ep_rank}] init deep_ep buffer failed, "
-                    f"current deep_ep provider does not support "
-                    f"use_deepep_low_latency and enable_ffn_disaggregate"
-                )
+            raise RuntimeError(
+                f"[rank: {config.ep_rank}] init deep_ep buffer failed, "
+                "upstream DeepEP does not support low-latency FFN disaggregation"
+            )
         elif config.use_deepep_low_latency and not config.enable_ffn_disaggregate:
             return DeepEPMode.LOW_LATENCY, self._init_low_latency_buffer(group)
         elif not config.use_deepep_low_latency and not config.enable_ffn_disaggregate:
@@ -523,16 +479,7 @@ class DeepEPWrapper:
         if config.use_deepep_internode:
             num_nvl_bytes = int(2e9)
             num_rdma_bytes = int(1e9)
-            # Normal IBGDA
-            if os.environ.get("ACCL_NORMAL_MODE", "IBRC") == "IBGDA":
-                os.environ["ACCL_NORMAL_MODE"] = "IBGDA"
-                num_qps_per_rank = max(
-                    config.deep_ep_num_sm // 2, int(config.expert_num / config.ep_size)
-                )
-            # Normal IBRC
-            else:
-                os.environ["ACCL_NORMAL_MODE"] = "IBRC"
-                num_qps_per_rank = config.deep_ep_num_sm // 2
+            num_qps_per_rank = config.deep_ep_num_sm // 2
         # Normal-kernel intranode
         else:
             num_nvl_bytes = int(2e9)
@@ -545,14 +492,6 @@ class DeepEPWrapper:
             "low_latency_mode": False,
             "num_qps_per_rank": num_qps_per_rank,
         }
-
-        if self._use_accl_ep:
-            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            if allow_mnnvl():
-                init_kwargs["allow_mnnvl"] = True
-                init_kwargs["use_fabric"] = True
-            else:
-                init_kwargs["allow_mnnvl"] = False
 
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
@@ -584,63 +523,7 @@ class DeepEPWrapper:
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
-            "allow_mnnvl": True,
         }
-
-        if self._use_accl_ep:
-            os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
-            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            if allow_mnnvl():
-                init_kwargs["allow_mnnvl"] = True
-            else:
-                init_kwargs["allow_mnnvl"] = False
-
-        return DeepEPBuffer(**init_kwargs)  # type: ignore
-
-    def _init_low_latency_m2n_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
-        """Initialize buffer for low-latency M2N mode."""
-        config = self._config
-        num_m = config.attention_dp_size * config.attention_tp_size
-        num_n = config.ffn_dp_size * config.ffn_tp_size
-
-        if not hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"):
-            raise RuntimeError(
-                "current deep_ep provider does not support low-latency m2n"
-            )
-
-        num_rdma_bytes = DeepEPBuffer.get_low_latency_rdma_size_hint_m2n(
-            config.ll_num_max_token_per_rank,
-            config.hidden_size,
-            num_m + num_n,
-            config.expert_num,
-            num_m,
-        )
-
-        if config.local_rank == 0:
-            print(
-                f"Allocating buffer size: {num_rdma_bytes / 1e6} MB, "
-                f"ll_num_max_token_per_rank: {config.ll_num_max_token_per_rank}, "
-                f"hidden_size: {config.hidden_size}, "
-                f"expert_num: {config.expert_num}, "
-                f"num_m: {num_m}, "
-                f"num_n: {num_n}",
-                flush=True,
-            )
-
-        num_qps_per_rank = config.expert_num / num_n
-
-        init_kwargs = {
-            "group": group,
-            "num_nvl_bytes": 0,
-            "num_rdma_bytes": num_rdma_bytes,
-            "low_latency_mode": True,
-            "num_qps_per_rank": num_qps_per_rank,
-        }
-
-        if self._use_accl_ep:
-            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
-
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _destroy_buffer(self) -> None:

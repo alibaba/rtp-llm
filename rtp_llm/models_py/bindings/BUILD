@@ -1,25 +1,25 @@
-load("//:def.bzl", "copts", "rocm_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "copts", "rocm_copts")
 
 cc_library(
     name = "op_defs",
+    srcs = [
+        "OpDefs.cc",
+    ],
     hdrs = [
         "CacheStoreWriter.h",
         "OpDefs.h",
         "OpDefsUtils.h",
         "ParamsBase.h",
     ],
-    srcs = [
-        "OpDefs.cc",
-    ],
+    visibility = ["//visibility:public"],
     deps = torch_deps() + [
-        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:kv_cache_specs",
-        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/model_utils",
         "//rtp_llm/cpp/utils:core_utils",
     ],
-    visibility = ["//visibility:public"],
     alwayslink = 1,
 )
 
@@ -29,10 +29,11 @@ py_test(
     data = [
         "//rtp_llm:ops/librtp_compute_ops/__init__.pyi",
     ],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_library(
@@ -40,41 +41,40 @@ cc_library(
     hdrs = [
         "RegisterOps.h",
     ],
+    visibility = ["//visibility:public"],
     deps = torch_deps() + [
         ":op_defs",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "no_block_copy_hdr",
     hdrs = ["NoBlockCopy.h"],
-    deps = torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
+    deps = torch_deps(),
 )
 
 cc_library(
     name = "no_block_copy_default",
     srcs = ["NoBlockCopyDefault.cc"],
     copts = copts(),
+    visibility = ["//visibility:public"],
     deps = [
         ":no_block_copy_hdr",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
-    visibility = ["//visibility:public"],
     alwayslink = 1,
 )
-
 
 cc_library(
     name = "dummy_register",
     srcs = [
         "DummyRegister.cc",
     ],
+    visibility = ["//visibility:public"],
     deps = [
         ":register_ops_hdr",
     ],
-    visibility = ["//visibility:public"],
     alwayslink = 1,
 )

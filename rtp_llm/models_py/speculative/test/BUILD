@@ -10,19 +10,20 @@ _DSV4_CUDA13_ONLY = select({
 py_test(
     name = "test_dspark_proposer",
     srcs = ["test_dspark_proposer.py"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 
 py_test(
     name = "test_qwen3_dspark",
     srcs = ["test_qwen3_dspark.py"],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = [
         "//rtp_llm:async_model",
         "//rtp_llm:models",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    exec_properties = {"gpu": "A10"},
 )
