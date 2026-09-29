@@ -851,9 +851,13 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         raw = torch.randn(token_count, self.D, dtype=torch.bfloat16, device=device)
         observed = []
 
-        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+        def _score(
+            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            validate_block_table,
+        ):
             observed.append((q.shape, lengths.clone(), table.clone(), max_ctx_len))
-            rows = q.shape[1]
+            self.assertFalse(validate_block_table)
+            rows = q.shape[0] * q.shape[1]
             return torch.arange(
                 rows * max_ctx_len, dtype=torch.float32, device=device
             ).view(rows, max_ctx_len)
@@ -871,15 +875,11 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             )
 
         self.assertEqual(selected.shape, (token_count, 8 + self.RATIO - 1))
-        self.assertEqual(len(observed), 2)
-        self.assertEqual(observed[0][0], (1, 1, 2, self.D))
-        self.assertEqual(observed[1][0], (1, self.RATIO, 2, self.D))
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][0], (2, self.RATIO, 2, self.D))
         torch.testing.assert_close(
-            observed[0][1], torch.tensor([[2]], dtype=torch.int32, device=device)
-        )
-        torch.testing.assert_close(
-            observed[1][1],
-            torch.full((1, self.RATIO), 2, dtype=torch.int32, device=device),
+            observed[0][1],
+            torch.tensor([[2, 0, 0, 0], [2, 2, 2, 2]], dtype=torch.int32, device=device),
         )
         visible_lengths = [8, 8, 9, 10, 11]
         for row, visible in enumerate(visible_lengths):
@@ -1002,9 +1002,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         state_pool = state_base.view(8, 2 * self.RATIO, self.D)
         state_pool[4, :3].copy_(raw[:3].float())
 
-        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+        def _score(
+            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
             return torch.zeros(
-                q.shape[1], max_ctx_len, dtype=torch.float32, device=device
+                q.shape[0] * q.shape[1], max_ctx_len,
+                dtype=torch.float32, device=device
             )
 
         with patch(
@@ -1082,9 +1087,14 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         q = torch.randn(12, 2, self.D, dtype=torch.bfloat16, device=device)
         raw = torch.randn(12, self.D, dtype=torch.bfloat16, device=device)
 
-        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+        def _score(
+            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
             return torch.zeros(
-                q.shape[1], max_ctx_len, dtype=torch.float32, device=device
+                q.shape[0] * q.shape[1], max_ctx_len,
+                dtype=torch.float32, device=device
             )
 
         with patch(

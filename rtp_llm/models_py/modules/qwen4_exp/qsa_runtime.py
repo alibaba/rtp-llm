@@ -13,8 +13,9 @@ accepted-length callback only when its width is at most one compression group.
 With ``G <= ratio`` it can complete at most one new compressed entry, while the
 ``2 * ratio`` raw-key ring cannot alias the committed partial group. Rejected
 tail entries therefore remain outside the logical length and are overwritten
-before they can become visible. CP, PD, padding and CUDA Graph remain
-unsupported; prefix-cache reuse is restricted to page-aligned prefixes.
+before they can become visible. CP, PD and padding remain unsupported; CUDA
+Graph handles exact-batch decode and target verification while dynamic draft
+incremental prefill remains eager. Prefix-cache reuse is page-aligned.
 """
 
 from __future__ import annotations
@@ -563,10 +564,11 @@ class Qwen4ExpQSARuntimeContext:
                     "cu_kv_seqlens metadata"
                 )
 
+        prefix_values = prefixes.tolist()
         logical_positions = torch.cat(
             [
                 torch.arange(prefix, prefix + length, device=device)
-                for prefix, length in zip(prefixes.tolist(), lengths)
+                for prefix, length in zip(prefix_values, lengths)
             ]
         ).to(torch.int64)
         position_ids = self.main_inputs.combo_position_ids
@@ -677,7 +679,7 @@ class Qwen4ExpQSARuntimeContext:
         # A completed group may read committed raw keys preceding the new rows.
         # Validate that source tail and every destination absolute state page.
         state_table_width = int(state_table.shape[1])
-        for request_idx, (prefix, length) in enumerate(zip(prefixes.tolist(), lengths)):
+        for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
             first_needed = prefix - (prefix % ratio)
             logical_blocks = {
                 position // state_tokens_per_block
@@ -724,6 +726,10 @@ class Qwen4ExpQSARuntimeContext:
             "current_sin": current_sin,
             "visible_lengths": visible_lengths,
             "compressed_lengths": compressed_lengths,
+            "max_ctx_len": max(
+                (prefix + length) // ratio
+                for prefix, length in zip(prefix_values, lengths)
+            ),
             "kv_tokens_per_block": kv_tokens_per_block,
             "kv_entries_per_block": kv_entries_per_block,
             "state_tokens_per_block": state_tokens_per_block,
@@ -1326,39 +1332,46 @@ class Qwen4ExpQSARuntimeContext:
             qsa_paged_indexer_score,
         )
 
-        selections = []
-        row_offset = 0
-        for request_idx, length in enumerate(plan["lengths"]):
-            row_end = row_offset + length
-            compressed_lengths = plan["compressed_lengths"][
-                request_idx : request_idx + 1, :length
-            ].contiguous()
-            block_logits = qsa_paged_indexer_score(
-                rotated_q[row_offset:row_end].unsqueeze(0).contiguous(),
-                score_weights[row_offset:row_end],
-                plan["kv_pool"].flatten(0, 1),
-                plan["kv_table"][request_idx : request_idx + 1],
-                compressed_lengths,
-                block_size=int(plan["kv_entries_per_block"]),
-                max_ctx_len=(
-                    int(compressed_lengths.max().item())
-                    if int(compressed_lengths.numel())
-                    else 0
-                ),
-            )
-            visible_lengths = plan["visible_lengths"][request_idx, :length].to(
-                torch.int32
-            )
-            selections.append(
-                select_qsa_paged_tokens(
-                    block_logits,
-                    visible_lengths,
-                    compress_ratio=int(plan["ratio"]),
-                    token_budget=int(plan["token_budget"]),
-                )
-            )
-            row_offset = row_end
-        return torch.cat(selections, dim=0)
+        # The draft has at most one compression group's worth of rows per
+        # request. Pad only that short dimension so all requests share one
+        # paged-score launch and one top-k selection. Invalid rows have zero
+        # visible context and are removed before returning packed token IDs.
+        lengths = plan["lengths"]
+        batch_size = len(lengths)
+        max_rows = max(lengths)
+        offsets = []
+        valid_rows = []
+        offset = 0
+        for request_idx, length in enumerate(lengths):
+            offsets.extend(offset + min(row, length - 1) for row in range(max_rows))
+            valid_rows.extend(request_idx * max_rows + row for row in range(length))
+            offset += length
+        row_map = torch.tensor(offsets, dtype=torch.int64, device=q.device)
+        padded_q = rotated_q.index_select(0, row_map).reshape(
+            batch_size, max_rows, head_num, head_dim
+        )
+        padded_weights = score_weights.index_select(0, row_map)
+        compressed_lengths = plan["compressed_lengths"]
+        block_logits = qsa_paged_indexer_score(
+            padded_q,
+            padded_weights,
+            plan["kv_pool"].flatten(0, 1),
+            plan["kv_table"],
+            compressed_lengths,
+            block_size=int(plan["kv_entries_per_block"]),
+            max_ctx_len=int(plan["max_ctx_len"]),
+            validate_block_table=False,
+        )
+        selected = select_qsa_paged_tokens(
+            block_logits,
+            plan["visible_lengths"].reshape(-1).to(torch.int32),
+            compress_ratio=int(plan["ratio"]),
+            token_budget=int(plan["token_budget"]),
+            validate_lengths=False,
+        )
+        return selected.index_select(
+            0, torch.tensor(valid_rows, dtype=torch.int64, device=q.device)
+        )
 
     def select_decode_tokens(
         self,
