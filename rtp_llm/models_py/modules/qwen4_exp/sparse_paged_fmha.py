@@ -222,6 +222,7 @@ def sparse_paged_gqa_attn(
     page_size: int,
     kv_head_num: int | None = None,
     block_k: int = _BLOCK_K,
+    graph_capture: bool = False,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
 
@@ -237,6 +238,8 @@ def sparse_paged_gqa_attn(
         kv_head_num: local KV head count. Required for a packed HybridPool view,
             whose row stride may be padded by a larger cache group and therefore
             cannot be inferred from ``kv_cache.shape[1]``.
+        graph_capture: capture only. The caller must validate the initial
+            metadata before capture; replayed values are masked by the kernel.
     """
     if q.dim() != 4 or q.dtype != torch.bfloat16 or not q.is_cuda:
         raise ValueError("q must be a rank-4 BF16 CUDA tensor")
@@ -319,9 +322,15 @@ def sparse_paged_gqa_attn(
         )
     if int(block_table.shape[1]) == 0:
         raise ValueError("block_table must contain at least one logical block")
-    _validate_sparse_paged_indices(
-        block_table, kv_lens, selected, page_size=page_size, cache_blocks=cache_blocks
-    )
+    if graph_capture:
+        if not torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "qwen4 sparse paged GQA graph_capture requires an active capture"
+            )
+    else:
+        _validate_sparse_paged_indices(
+            block_table, kv_lens, selected, page_size=page_size, cache_blocks=cache_blocks
+        )
 
     q = q.contiguous()
     block_table = block_table.contiguous()
