@@ -13,8 +13,12 @@ import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +28,8 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
+
 /**
  * Cache matching backed by approximate request-derived local standby metadata.
  */
@@ -31,16 +37,18 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
 
+    private final FlexMonitor monitor;
     private final boolean enabled;
     private final LocalStandbyCacheManager cacheManager;
     private final LocalStandbyHashService localStandbyHashService;
     private final ThreadPoolExecutor asyncMatchExecutor;
     private final ThreadPoolExecutor updateExecutor;
 
-    public LocalStandbyCacheMatchProvider(
-            CacheMatchConfiguration configuration,
-            LocalStandbyCacheManager cacheManager,
-            LocalStandbyHashService localStandbyHashService) {
+    public LocalStandbyCacheMatchProvider(CacheMatchConfiguration configuration,
+                                        LocalStandbyCacheManager cacheManager,
+                                        LocalStandbyHashService localStandbyHashService,
+                                        FlexMonitor monitor) {
+        this.monitor = monitor;
         LocalStandbyConfig config = configuration.getLocalStandbyConfig();
         this.enabled = configuration.isLocalStandbyEnabled();
         this.cacheManager = cacheManager;
@@ -52,6 +60,11 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
         this.updateExecutor = createExecutor(queueCapacity, "local-standby-cache-updater");
     }
 
+    @PostConstruct
+    public void registerMetrics() {
+        monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
+    }
+
     @Override
     public CacheMatchSource source() {
         return CacheMatchSource.LOCAL_STANDBY;
@@ -59,7 +72,8 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
 
     @Override
     public Map<String, HostCacheMatch> findMatchingEngines(String requestId, List<Long> blockCacheKeys,
-                                                           long blockSize, RoleType roleType, String group) {
+                                                         long blockSize, RoleType roleType, String group) {
+        monitor.report(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricTags.of("role", roleType.name()), blockSize);
         return HostCacheMatch.fromLocalMatches(cacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
