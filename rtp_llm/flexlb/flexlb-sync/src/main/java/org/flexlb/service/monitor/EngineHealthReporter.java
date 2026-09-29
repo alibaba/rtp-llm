@@ -69,7 +69,6 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_IN
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_ENCODER_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
-import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
@@ -170,7 +169,6 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_ENCODER_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENCODER_PENDING_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENCODER_SELECTION_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL_TOTAL,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
@@ -301,11 +299,6 @@ public class EngineHealthReporter {
         reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "gRpcExecutor", (ThreadPoolExecutor) engineGrpcClient.getExecutor());
 
         eventLoopGroupMap.forEach(this::reportEventLoopGroup);
-    }
-
-    public void reportServiceDiscoveryResult(int result, String role) {
-        FlexMetricTags metricTags = FlexMetricTags.of("role", role);
-        monitor.report(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, metricTags, result);
     }
 
     public void reportStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
