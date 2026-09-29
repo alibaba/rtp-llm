@@ -5,6 +5,7 @@ reshape back); it is validated against the torch reference on the same
 split/reshape geometry.  The routing key is pure logic.
 """
 
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -103,6 +104,7 @@ def _configs(is_sparse=True, use_mla=False, is_prefill=True, opt_in=True):
         kv_cache_kernel_block_id_device=None,
         is_target_verify=False,
         is_cuda_graph=False,
+        is_exact_cuda_graph_batch=False,
         is_s_padded=False,
         context_parallel_info=None,
         cache_store_inputs=None,
@@ -185,11 +187,16 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         ):
             return SparseGqaFmhaImpl(attn_configs, attn_inputs)
 
-    def _decode_impl(self, batch=2):
+    def _decode_impl(self, batch=2, graph=False):
         attn_configs, attn_inputs = _configs(is_prefill=False)
         attn_inputs.sequence_lengths = torch.tensor(
             [4 + 2 * index for index in range(batch)], dtype=torch.int32
         )
+        if graph:
+            attn_inputs.sequence_lengths = attn_inputs.sequence_lengths.pin_memory()
+            attn_inputs.is_cuda_graph = True
+            attn_inputs.is_exact_cuda_graph_batch = True
+            attn_inputs.is_s_padded = True
         attn_inputs.kv_cache_kernel_block_id_device = torch.arange(
             1, batch * 3 + 1, dtype=torch.int32, device=_DEV
         ).reshape(batch, 3)
@@ -199,6 +206,48 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             self._IdentityDecodeWriter,
         ):
             return SparseGqaFmhaImpl(attn_configs, attn_inputs)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_decode_graph_replays_updated_lengths_pages_and_selection(self):
+        impl = self._decode_impl(batch=1, graph=True)
+        self.assertTrue(impl.support_cuda_graph())
+        cache = SimpleNamespace(
+            kv_cache_base=torch.randn(
+                4, 2, _H_KV, 4, _D, dtype=torch.bfloat16, device=_DEV
+            )
+        )
+        qkv = torch.randn(
+            1, (_H_Q + 2 * _H_KV) * _D, dtype=torch.bfloat16, device=_DEV
+        )
+        selected = torch.tensor([[[0, 2, 4, -1]]], dtype=torch.int32, device=_DEV)
+        with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+            impl.forward(qkv, cache, selected_indices=selected)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            got = impl.forward(qkv, cache, selected_indices=selected)
+
+        qkv.copy_(torch.randn_like(qkv.float()).bfloat16())
+        selected.copy_(torch.tensor([[[0, 3, 5, -1]]], device=_DEV))
+        impl.attn_inputs.sequence_lengths[0] = 5
+        impl.attn_inputs.kv_cache_kernel_block_id_device[0].copy_(
+            torch.tensor([3, 2, 1], dtype=torch.int32, device=_DEV)
+        )
+        graph.replay()
+
+        eager = self._decode_impl(batch=1)
+        eager.attn_inputs.sequence_lengths = impl.attn_inputs.sequence_lengths
+        eager.attn_inputs.kv_cache_kernel_block_id_device = (
+            impl.attn_inputs.kv_cache_kernel_block_id_device
+        )
+        expected = eager.forward(qkv, cache, selected_indices=selected)
+        torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
+
+    def test_decode_graph_rejects_padded_batch_without_exact_provenance(self):
+        attn_configs, attn_inputs = _configs(is_prefill=False)
+        attn_inputs.is_cuda_graph = True
+        attn_inputs.is_s_padded = True
+        with self.assertRaisesRegex(RuntimeError, "exact batch graph"):
+            SparseGqaFmhaImpl(attn_configs, attn_inputs)
 
     def test_main_cache_phase_is_marked_before_fused_writer(self):
         impl = self._impl(batch=1, seq_len=1)

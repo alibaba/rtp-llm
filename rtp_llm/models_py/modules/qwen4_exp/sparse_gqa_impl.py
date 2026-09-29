@@ -23,7 +23,8 @@ Scope of this restricted production bridge:
 Target verification is restricted to a contiguous text-only window no wider
 than one QSA compression group. Under that bound, writing the uncommitted
 physical tail cannot alias committed indexer state. Page-aligned prefix-cache
-reuse is supported; PD, CP and CUDA Graph remain fail-fast.
+reuse is supported; PD and CP remain fail-fast. CUDA Graph decode requires
+an exact batch graph; target verification and draft prefill remain gated.
 
 The top-level Qwen4 serving gate remains closed until those missing modes and
 the indexer's two side pools are integrated.
@@ -87,9 +88,16 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError(
                 "qwen4_exp sparse GQA target verification must use context-style prefill"
             )
-        if inputs.is_cuda_graph:
-            raise RuntimeError("qwen4_exp sparse GQA does not support CUDA Graph")
-        if inputs.is_s_padded:
+        graph_decode = bool(inputs.is_cuda_graph and not self.is_prefill)
+        if inputs.is_cuda_graph and not graph_decode:
+            raise RuntimeError("qwen4_exp sparse GQA prefill CUDA Graph is not supported")
+        if graph_decode and not bool(
+            getattr(inputs, "is_exact_cuda_graph_batch", False)
+        ):
+            raise RuntimeError(
+                "qwen4_exp sparse GQA Graph decode requires an exact batch graph"
+            )
+        if inputs.is_s_padded and not graph_decode:
             raise RuntimeError("qwen4_exp sparse GQA does not support padded execution")
         if inputs.context_parallel_info is not None:
             raise RuntimeError(
@@ -162,6 +170,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         sequence_bases: torch.Tensor,
         query_lengths: torch.Tensor,
         device: torch.device,
+        graph_capture: bool = False,
     ) -> int:
         """Validate all pages that a paged prefill/decode may observe."""
         batch_size = int(sequence_bases.numel())
@@ -174,15 +183,25 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError(
                 "qwen4_exp QSA paged sequence metadata has invalid geometry"
             )
-        sequence_bases = sequence_bases.to(
-            device=device, dtype=torch.int32, non_blocking=True
-        )
-        query_lengths = query_lengths.to(
-            device=device, dtype=torch.int32, non_blocking=True
-        )
-        if bool(torch.any(sequence_bases < 0).item()) or bool(
-            torch.any(query_lengths <= 0).item()
+        if graph_capture and (
+            sequence_bases.device.type != "cpu"
+            or query_lengths.device.type != "cpu"
         ):
+            raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
+        invalid_lengths = bool(torch.any(sequence_bases < 0).item()) or bool(
+            torch.any(query_lengths <= 0).item()
+        ) if graph_capture else False
+        if not graph_capture:
+            sequence_bases = sequence_bases.to(
+                device=device, dtype=torch.int32, non_blocking=True
+            )
+            query_lengths = query_lengths.to(
+                device=device, dtype=torch.int32, non_blocking=True
+            )
+            invalid_lengths = bool(torch.any(sequence_bases < 0).item()) or bool(
+                torch.any(query_lengths <= 0).item()
+            )
+        if invalid_lengths:
             raise RuntimeError(
                 "qwen4_exp QSA paged sequence bases must be non-negative and "
                 "query lengths positive"
@@ -247,7 +266,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "qwen4_exp QSA paged main cache must be packed 2-D or HND 5-D"
             )
 
-        if block_table.numel() and int(block_table.max().item()) >= cache_blocks:
+        if not graph_capture and block_table.numel() and int(block_table.max().item()) >= cache_blocks:
             raise RuntimeError(
                 "qwen4_exp QSA paged main block table contains an "
                 "out-of-range physical block"
@@ -258,6 +277,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError(
                 "qwen4_exp QSA paged main block table does not cover the visible KV"
             )
+        if graph_capture:
+            return page_size
         columns = torch.arange(
             int(block_table.shape[1]), device=block_table.device
         ).unsqueeze(0)
@@ -340,6 +361,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             sequence_bases,
             query_lengths,
             hidden_states.device,
+            graph_capture=bool(self.attn_inputs.is_cuda_graph and not self.is_prefill),
         )
 
     def set_selected_indices(self, selected_indices: torch.Tensor) -> None:
@@ -415,10 +437,15 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 raise ValueError(
                     "qwen4_exp target-verify input lengths must match query_len"
                 )
+        graph_decode = bool(self.attn_inputs.is_cuda_graph and not self.is_prefill)
+        if graph_decode and lengths_source.device.type != "cpu":
+            raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
+        if graph_decode and bool(torch.any(lengths_source < 0).item()):
+            raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
         sequence_lengths = lengths_source.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
-        if bool(torch.any(sequence_lengths < 0).item()):
+        if not graph_decode and bool(torch.any(sequence_lengths < 0).item()):
             raise ValueError(
                 "qwen4_exp sparse GQA sequence lengths must be non-negative"
             )
@@ -491,10 +518,26 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
 
         required_columns = (kv_lens[:, -1] + page_size - 1) // page_size
-        if bool(torch.any(required_columns > int(block_table.shape[1])).item()):
+        exceeds_capacity = (
+            bool(torch.any((lengths_source + query_len + page_size - 1) // page_size
+                           > int(block_table.shape[1])).item())
+            if graph_decode
+            else bool(torch.any(required_columns > int(block_table.shape[1])).item())
+        )
+        if exceeds_capacity:
             raise RuntimeError(
                 "qwen4_exp sparse GQA main block table does not cover the visible KV"
             )
+        if graph_decode:
+            return {
+                "batch": batch,
+                "query_len": query_len,
+                "tokens": tokens,
+                "selected_indices": selected_indices,
+                "kv_lens": kv_lens,
+                "block_table": block_table,
+                "page_size": page_size,
+            }
         columns = torch.arange(
             int(block_table.shape[1]), device=block_table.device
         ).unsqueeze(0)
@@ -673,8 +716,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def support_cuda_graph(self) -> bool:
-        # The paged reader still uses dynamic metadata and is not graph-safe.
-        return False
+        return bool(self.attn_inputs.is_cuda_graph and not self.is_prefill)
 
     def forward(
         self,
@@ -853,6 +895,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             selected_indices.contiguous(),
             page_size=page_size,
             kv_head_num=self.kv_head_num,
+            **({"graph_capture": True} if self.attn_inputs.is_cuda_graph else {}),
         )
         return output.transpose(1, 2).reshape(tokens, self.q_width)
 
