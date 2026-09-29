@@ -16,9 +16,7 @@ import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
-import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
@@ -188,9 +186,8 @@ public class BatchSchedulerReporter {
     // ==================== Inflight metrics ====================
 
     /**
-     * Report batch-aggregated cache hit metrics via reuse of the existing
-     * {@code cache.hit.count} / {@code cache.hit.ratio} / {@code cache.request.total}
-     * keys registered by {@link CacheMetricsReporter}.
+     * Report the dispatched batch's cache-hit ratio.
+     * Cache-hit tokens and request counts are reported when each request selects its worker.
      *
      * @param role        prefill / decode
      * @param engineIp    the selected prefill endpoint IP
@@ -204,9 +201,7 @@ public class BatchSchedulerReporter {
         double hitRatio = hitTokens / (double) totalTokens;
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
-        monitor.report(CACHE_HIT_COUNT, tags, hitTokens);
         monitor.report(CACHE_HIT_RATIO, tags, hitRatio);
-        monitor.report(CACHE_REQUEST_TOTAL, tags, 1.0);
     }
 
     /**

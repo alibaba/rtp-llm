@@ -12,6 +12,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
@@ -83,6 +86,16 @@ class BatchSchedulerReporterTest {
                 "engineIp", "10.0.0.1",
                 "reason", "batch_full");
         verify(monitor).report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
+    }
+
+    @Test
+    void batch_dispatch_does_not_count_selected_requests_or_cache_hits_twice() {
+        reporter.reportBatchCacheHitMetrics("PREFILL", "10.0.0.1:8080", 120L, 300L);
+
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080");
+        verify(monitor, never()).report(eq(CACHE_HIT_COUNT), any(), anyDouble());
+        verify(monitor).report(CACHE_HIT_RATIO, tags, 0.4);
+        verify(monitor, never()).report(eq(CACHE_REQUEST_TOTAL), any(), anyDouble());
     }
 
     @Test

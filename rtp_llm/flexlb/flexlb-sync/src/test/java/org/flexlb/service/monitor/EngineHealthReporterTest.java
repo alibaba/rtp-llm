@@ -92,15 +92,17 @@ class EngineHealthReporterTest {
     void shouldRegisterCacheHitComparisonMetrics() {
         reporter.init();
 
-        verify(monitor).register("app.cache.hit.comparison.predicted.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register("app.cache.hit.comparison.actual.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.input.tokens", FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.local.standby.input.tokens", FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.predicted.tokens", FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.actual.tokens", FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.delta.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.kvcm.local.delta.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.kvcm.global.match.delta.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.tokens",
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.delta.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.predicted.ratio",
@@ -510,6 +512,8 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.cache.hit.comparison.predicted.ratio", expectedTags, 0.5);
         verify(monitor).report("app.cache.hit.comparison.actual.ratio", expectedTags, 0.6);
         verify(monitor).report("app.cache.hit.comparison.local.standby.predicted.ratio", expectedTags, 0.4);
+        verify(monitor).report("app.cache.hit.comparison.input.tokens", expectedTags, 200.0);
+        verify(monitor).report("app.cache.hit.comparison.local.standby.input.tokens", expectedTags, 200.0);
         assertEquals(Map.of(
                 "model", "test-model",
                 "engineIp", "10.0.0.1:8080@0",
@@ -521,19 +525,20 @@ class EngineHealthReporterTest {
 
     @Test
     void shouldReportSelectedKvcmGlobalMatchDetails() {
-        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080@0", 40, 100, true);
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080@0", 40, 100, 200, true);
 
         verify(cacheMetricsReporter).reportKvcmSelectedMatch(
-                RoleType.PREFILL, "10.0.0.1:8080@0", 40, 100);
+                RoleType.PREFILL, "10.0.0.1:8080@0", 40, 100, 200);
     }
 
     @Test
     void shouldSkipSelectedKvcmMetricsWhenDetailsAreUnavailable() {
-        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 0, false);
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 0, 200, false);
 
         verify(cacheMetricsReporter, never()).reportKvcmSelectedMatch(
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyLong());
     }
@@ -571,6 +576,10 @@ class EngineHealthReporterTest {
                 org.mockito.ArgumentMatchers.anyDouble());
         verify(monitor, never()).report(
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.predicted.ratio"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.input.tokens"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
                 org.mockito.ArgumentMatchers.anyDouble());
         verify(monitor, never()).report(
@@ -632,6 +641,14 @@ class EngineHealthReporterTest {
                 org.mockito.ArgumentMatchers.anyDouble());
         verify(monitor, never()).report(
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.predicted.ratio"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.input.tokens"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.actual.tokens"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
                 org.mockito.ArgumentMatchers.anyDouble());
     }

@@ -164,6 +164,7 @@ public class CostBasedPrefillStrategy {
                             selectedMatch.localMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
                     selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
                             selectedMatch.globalMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
+                    seqLen,
                     true);
         }
         balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
@@ -646,7 +647,7 @@ public class CostBasedPrefillStrategy {
     private void reportCacheHitMetrics(
             RoleType roleType, String ipIndex, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, ipIndex, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(roleType, ipIndex, hitCacheTokens, seqLen, hitRate);
     }
 
     private void reportSelectedEstimates(
