@@ -262,6 +262,7 @@ class MagaServerManager(object):
             self._stop_requested = True
             server_process = self._server_process
 
+        success = True
         if server_process is not None and server_process.pid is not None:
             try:
                 # 如果只kill start_server，会残留 backend/frontend 占用显存。
@@ -273,11 +274,30 @@ class MagaServerManager(object):
                     parent.children(recursive=True)
                 )  # 获取所有子进程（递归）
                 for child in children:
-                    child.terminate()  # 先尝试优雅终止
+                    try:
+                        child.terminate()
+                    except psutil.NoSuchProcess:
+                        # A sibling may exit between enumeration and signaling.
+                        # Do not abandon the remaining owned children.
+                        continue
                 _, alive = psutil.wait_procs(children, timeout=5)
                 for child in alive:
-                    child.kill()  # 强制终止未退出的进程
-                parent.terminate()
+                    try:
+                        child.kill()
+                    except psutil.NoSuchProcess:
+                        continue
+                # A successful kill request is not proof of process exit.
+                _, remaining = psutil.wait_procs(alive, timeout=5)
+                if remaining:
+                    success = False
+                    logging.error(
+                        "Owned server children did not exit: %s",
+                        [child.pid for child in remaining],
+                    )
+                try:
+                    parent.terminate()
+                except psutil.NoSuchProcess:
+                    pass
                 # 添加超时机制，避免永久阻塞
                 try:
                     parent.wait(timeout=10)
@@ -290,15 +310,21 @@ class MagaServerManager(object):
                 with self._state_lock:
                     if self._server_process is server_process:
                         self._server_process = None
+            except psutil.NoSuchProcess:
+                # The parent may have exited after its children were drained.
+                with self._state_lock:
+                    if self._server_process is server_process:
+                        self._server_process = None
             except Exception as e:
-                logging.warning("failed to get process with: " + str(e))
+                success = False
+                logging.warning("failed to stop owned server processes: " + str(e))
                 with self._state_lock:
                     if self._server_process is server_process:
                         self._server_process = None
         if self._file_stream is not None:
             self._file_stream.close()
             self._file_stream = None
-        return True
+        return success
 
     def visit(
         self,

@@ -75,3 +75,11 @@ py_test(
     deps = [":device_resource"],
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
+
+py_test(
+    name = "maga_server_manager_test",
+    srcs = ["maga_server_manager_test.py"],
+    data = ["maga_server_manager.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
