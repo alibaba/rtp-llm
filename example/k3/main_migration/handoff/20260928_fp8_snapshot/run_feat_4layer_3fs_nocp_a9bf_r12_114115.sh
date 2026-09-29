@@ -4,8 +4,8 @@ umask 077
 
 task=/data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-export PREFILL_SSH_TARGET=L20-dev-114
-export DECODE_SSH_TARGET=L20-dev-115
+export PREFILL_SSH_TARGET=11.163.39.114
+export DECODE_SSH_TARGET=11.163.39.115
 export PREFILL_REPO_ROOT=/data0/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-perf-20260929
 export DECODE_REPO_ROOT=/data0/luohaocheng.lhc/worktrees/rtp-llm-k3-feat-a9bf-perf-20260929
 export PREFILL_CHECKPOINT_PATH=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
