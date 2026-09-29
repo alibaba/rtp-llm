@@ -1,3 +1,9 @@
+import pickle
+import torch
+from unittest.mock import AsyncMock
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.ops import PDSepConfig
+from rtp_llm.server.backend_rpc_server_visitor import disable_token_only_reuse_for_input_embeddings
 import asyncio
 import unittest
 from dataclasses import dataclass, field
@@ -15,8 +21,33 @@ from rtp_llm.server.backend_rpc_server_visitor import (
     get_role_names,
 )
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
+from rtp_llm.server.host_service import HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse
 from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.server.misc import format_exception
+from rtp_llm.utils.base_model_datatypes import GenerateInput, InputEmbeddings
+
+
+def make_visitor():
+    """Exercise constructor defaults without opening clients or discovering hosts."""
+    module = "rtp_llm.server.backend_rpc_server_visitor"
+    with (
+        patch(f"{module}.ModelRpcClient"),
+        patch(f"{module}.MasterClient"),
+        patch(f"{module}.HostService") as host_service,
+        patch(
+            f"{module}.HostServiceArgs.create_from_env", return_value=HostServiceArgs()
+        ),
+    ):
+        host_service.return_value.service_available = False
+        host_service.return_value.get_master_addr.return_value = "master:1234"
+        host_service.return_value.get_backend_role_addrs.return_value = []
+        return BackendRPCServerVisitor(
+            max_seq_len=16,
+            seq_size_per_block=2,
+            pd_sep_config=PDSepConfig(),
+            addresses=["worker:9000"],
+        )
 
 
 class _FakeTokenIds:
@@ -217,26 +248,74 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
-        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
-        visitor.master_config = None
-        visitor.host_service = _FakeHostService()
-        visitor.backend_role_list = ["PREFILL"]
+        for error_code in (int(ExceptionType.MASTER_NO_AVAILABLE_WORKER), 8499):
+            with self.subTest(error_code=error_code):
+                visitor = make_visitor()
+                visitor.get_master_route_addrs = AsyncMock(
+                    return_value=FlexlbResponse.error_response(error_code, "no worker")
+                )
+                with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+                    with self.assertRaises(FtRuntimeException) as ctx:
+                        await visitor.route_ips(make_generate_input())
 
-        async def get_master_route_addrs(_input):
-            return FlexlbResponse.error_response(
-                int(ExceptionType.MASTER_NO_AVAILABLE_WORKER), "no worker"
-            )
+                error = ctx.exception
+                self.assertEqual(error.exception_type, ExceptionType.ROUTE_ERROR)
+                self.assertEqual(error.rtp_error_code, error_code)
+                self.assertIn("request_id=123", error.message)
+                self.assertIn("no worker", error.message)
+                visitor.host_service.get_backend_role_addrs.assert_not_called()
+                restored = pickle.loads(pickle.dumps(error))
+                self.assertEqual(restored.exception_type, ExceptionType.ROUTE_ERROR)
+                self.assertEqual(restored.message, error.message)
+                self.assertEqual(restored.rtp_error_code, error_code)
+                formatted = format_exception(restored)
+                self.assertEqual(formatted["error_code"], error_code)
+                self.assertEqual(
+                    formatted["error_code_str"],
+                    "8400_MASTER_NO_AVAILABLE_WORKER" if error_code == 8400 else "8499",
+                )
 
-        visitor.get_master_route_addrs = get_master_route_addrs
+    async def test_connection_failure_falls_back_to_domain(self):
+        visitor = make_visitor()
+        visitor.backend_role_list = [RoleType.PREFILL]
+        visitor.get_master_route_addrs = AsyncMock(
+            return_value=FlexlbResponse.connection_failed_response()
+        )
+        role_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="127.0.0.1", http_port=1, grpc_port=2
+        )
+        visitor.host_service.get_backend_role_addrs.return_value = [role_addr]
+        input = make_generate_input()
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            await visitor.route_ips(input)
+        self.assertEqual(input.generate_config.role_addrs, [role_addr])
+        visitor.host_service.get_backend_role_addrs.assert_called_once_with(
+            [RoleType.PREFILL]
+        )
 
+    async def test_empty_domain_route_keeps_generic_error(self):
+        visitor = make_visitor()
+        visitor.host_service.get_master_addr.return_value = ""
         with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
             with self.assertRaises(FtRuntimeException) as ctx:
-                await visitor.route_ips(_FakeInput())
+                await visitor.route_ips(make_generate_input())
+        self.assertIsNone(ctx.exception.rtp_error_code)
+        self.assertEqual(format_exception(ctx.exception)["error_code"], 8500)
 
-        self.assertEqual(ctx.exception.exception_type, ExceptionType.ROUTE_ERROR)
+    def test_default_exception_format_and_pickle_remain_compatible(self):
+        error = FtRuntimeException(ExceptionType.INVALID_PARAMS, "bad input")
+        restored = pickle.loads(pickle.dumps(error))
+        self.assertEqual(restored.exception_type, error.exception_type)
+        self.assertIsNone(restored.rtp_error_code)
+        restored.aux_info = {"input_len": 4}
         self.assertEqual(
-            ctx.exception.rtp_error_code,
-            int(ExceptionType.MASTER_NO_AVAILABLE_WORKER),
+            format_exception(restored),
+            {
+                "error_code": 605,
+                "error_code_str": "605_INVALID_PARAMS",
+                "message": "bad input",
+                "aux_info": {"input_len": 4},
+            },
         )
 
     async def test_route_ips_falls_back_on_master_connection_failure(self):
@@ -767,20 +846,6 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.attempts, 2)
 
 
-from unittest.mock import AsyncMock, Mock
-
-import torch
-
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
-from rtp_llm.ops import RoleType
-from rtp_llm.server.backend_rpc_server_visitor import (
-    BackendRPCServerVisitor,
-    disable_token_only_reuse_for_input_embeddings,
-)
-from rtp_llm.server.master_client import FlexlbResponse
-from rtp_llm.utils.base_model_datatypes import GenerateInput, InputEmbeddings
-
-
 def make_generate_input(input_embeddings=None):
     return GenerateInput(
         request_id=123,
@@ -872,7 +937,8 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(input.generate_config.reuse_cache)
-        output = await visitor.enqueue(input)
+        stream = await visitor.enqueue(input)
+        outputs = [output async for output in stream]
 
         self.assertEqual([item async for item in output], ["stream"])
         self.assertFalse(input.generate_config.reuse_cache)
@@ -909,8 +975,12 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        await visitor.batch_enqueue([text_input, embedding_input])
+        outputs = await visitor.batch_enqueue([text_input, embedding_input])
 
+        self.assertEqual(outputs, [])
+        visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with(
+            [text_input, embedding_input]
+        )
         self.assertTrue(text_input.generate_config.reuse_cache)
         self.assertFalse(embedding_input.generate_config.reuse_cache)
         self.assertFalse(embedding_input.generate_config.enable_device_cache)

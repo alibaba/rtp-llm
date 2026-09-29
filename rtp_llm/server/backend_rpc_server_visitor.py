@@ -501,6 +501,8 @@ class BackendRPCServerVisitor:
                     and master_route_result.error_code is not None
                 ):
                     route_error.rtp_error_code = master_route_result.error_code
+                if master_route_result is not None and master_route_result.error_message:
+                    route_error.message += ": " + master_route_result.error_message
                 raise route_error
         except BaseException as e:
             if route_span is not None:
@@ -510,7 +512,7 @@ class BackendRPCServerVisitor:
                 elif isinstance(e, FtRuntimeException):
                     route_span.set_attribute(
                         trace_attrs.RTP_LLM_ERROR_CODE,
-                        int(getattr(e, "rtp_error_code", e.exception_type)),
+                        int(e.rtp_error_code if e.rtp_error_code is not None else e.exception_type),
                     )
                     if not route_error_type:
                         route_error_type = "RouteError"

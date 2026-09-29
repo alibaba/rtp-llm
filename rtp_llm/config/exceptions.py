@@ -1,4 +1,5 @@
 from enum import Enum, IntEnum
+from typing import Optional
 
 
 class ExceptionCategory(Enum):
@@ -182,8 +183,10 @@ class FtRuntimeException(Exception):
         admission_reject_reason: AdmissionRejectReason = (
             AdmissionRejectReason.UNSPECIFIED
         ),
+        rtp_error_code: Optional[int] = None,
     ):
         self.exception_type = exception_type
+        self.rtp_error_code = rtp_error_code
         self.message = message
         self.admission_reject_reason = AdmissionRejectReason(admission_reject_reason)
         super().__init__(self.message)
@@ -193,4 +196,5 @@ class FtRuntimeException(Exception):
             self.exception_type,
             self.message,
             self.admission_reject_reason,
+            self.rtp_error_code,
         )
