@@ -40,8 +40,15 @@ public class BlockHashExecutor {
 
     private final FlexMonitor monitor;
     private final BlockHashStrategy blockHashStrategy;
-    private final ThreadPoolExecutor executor;
-    private final Scheduler scheduler;
+    private final int coreThreadCount;
+    private final int maxThreadCount;
+    private final long keepAliveSeconds;
+    private final int queueCapacity;
+
+    // The executor is accessed under this instance's monitor.
+    private ThreadPoolExecutor executor;
+    private volatile Scheduler scheduler;
+    private volatile boolean shutdown;
 
     public BlockHashExecutor(
             FlexMonitor monitor,
@@ -65,15 +72,40 @@ public class BlockHashExecutor {
 
         this.monitor = monitor;
         this.blockHashStrategy = blockHashStrategy;
-        this.executor = new ThreadPoolExecutor(
-                coreThreadCount,
-                maxThreadCount,
-                keepAliveSeconds,
-                TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(queueCapacity),
-                new NamedThreadFactory("block-hash"),
-                new ThreadPoolExecutor.AbortPolicy());
-        this.scheduler = Schedulers.fromExecutor(executor);
+        this.coreThreadCount = coreThreadCount;
+        this.maxThreadCount = maxThreadCount;
+        this.keepAliveSeconds = keepAliveSeconds;
+        this.queueCapacity = queueCapacity;
+    }
+
+    private Scheduler getOrCreateScheduler() {
+        if (shutdown) {
+            throw new RejectedExecutionException("Block hash executor is shut down");
+        }
+        Scheduler current = scheduler;
+        if (current != null) {
+            return current;
+        }
+        synchronized (this) {
+            // Shutdown may have completed while this caller waited for initialization.
+            if (shutdown) {
+                throw new RejectedExecutionException("Block hash executor is shut down");
+            }
+            current = scheduler;
+            if (current == null) {
+                executor = new ThreadPoolExecutor(
+                        coreThreadCount,
+                        maxThreadCount,
+                        keepAliveSeconds,
+                        TimeUnit.SECONDS,
+                        new ArrayBlockingQueue<>(queueCapacity),
+                        new NamedThreadFactory("block-hash"),
+                        new ThreadPoolExecutor.AbortPolicy());
+                current = Schedulers.fromExecutor(executor);
+                scheduler = current;
+            }
+            return current;
+        }
     }
 
     @PostConstruct
@@ -94,6 +126,7 @@ public class BlockHashExecutor {
 
     private <T> Mono<TimedTaskResult<T>> submitTimed(Callable<T> task) {
         return Mono.defer(() -> {
+            Scheduler taskScheduler = getOrCreateScheduler();
             long submittedAt = System.nanoTime();
             return Mono.fromCallable(() -> {
                         long startedAt = System.nanoTime();
@@ -107,22 +140,25 @@ public class BlockHashExecutor {
                             monitor.report(BLOCK_HASH_EXECUTION_TIME_US, (System.nanoTime() - startedAt) / 1_000.0);
                         }
                     })
-                    .subscribeOn(scheduler)
-                    .doOnSuccess(ignored -> monitor.report(BLOCK_HASH_RESULT, SUCCESS_TAGS, 1.0))
-                    .doOnError(error -> monitor.report(
-                            BLOCK_HASH_RESULT,
-                            error instanceof RejectedExecutionException ? REJECTED_TAGS : FAILURE_TAGS,
-                            1.0))
-                    // Keep downstream routing callbacks from occupying a block hash worker.
-                    .publishOn(Schedulers.parallel());
-        });
+                    .subscribeOn(taskScheduler);
+        })
+                .doOnSuccess(ignored -> monitor.report(BLOCK_HASH_RESULT, SUCCESS_TAGS, 1.0))
+                .doOnError(error -> monitor.report(
+                        BLOCK_HASH_RESULT,
+                        error instanceof RejectedExecutionException ? REJECTED_TAGS : FAILURE_TAGS,
+                        1.0))
+                // Keep downstream routing callbacks from occupying a block hash worker.
+                .publishOn(Schedulers.parallel());
     }
 
     private record TimedTaskResult<T>(T value, long queueWaitTimeUs, long executionTimeUs) {
     }
 
     @Scheduled(fixedRate = 2000)
-    void reportThreadPoolMetrics() {
+    synchronized void reportThreadPoolMetrics() {
+        if (executor == null || shutdown) {
+            return;
+        }
         reportThreadPoolMetric("executingTaskThreadSize", executor.getActiveCount());
         reportThreadPoolMetric("queueSize", executor.getQueue().size());
         reportThreadPoolMetric("remainingQueueCapacity", executor.getQueue().remainingCapacity());
@@ -137,8 +173,11 @@ public class BlockHashExecutor {
     }
 
     @PreDestroy
-    public void shutdown() {
-        scheduler.dispose();
-        executor.shutdown();
+    public synchronized void shutdown() {
+        shutdown = true;
+        if (scheduler != null) {
+            scheduler.dispose();
+            executor.shutdown();
+        }
     }
 }
