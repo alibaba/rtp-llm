@@ -303,8 +303,8 @@ public class EngineHealthReporter {
         eventLoopGroupMap.forEach(this::reportEventLoopGroup);
     }
 
-    public void reportServiceDiscoveryResult(String modelName, int result, String role) {
-        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
+    public void reportServiceDiscoveryResult(int result, String role) {
+        FlexMetricTags metricTags = FlexMetricTags.of("role", role);
         monitor.report(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, metricTags, result);
     }
 
