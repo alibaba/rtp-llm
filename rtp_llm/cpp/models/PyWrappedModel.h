@@ -369,8 +369,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "finish_speculative_target_commit as a pair, together with "
                                 "finalize_speculative_target_commit");
         has_speculative_target_commit_hooks_ = has_prepare_speculative_target_commit;
-        RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_commit_hooks_ || !enable_cuda_graph_,
-                                "speculative target side-state transactions do not support CUDA Graph yet");
+        if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
+            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "clear_speculative_target_graph_capture")
+                                        && py::hasattr(py_model_, "save_speculative_target_graph_capture")
+                                        && py::hasattr(py_model_, "activate_speculative_target_graph_replay"),
+                                    "speculative target CUDA Graph requires capture, save and replay transaction "
+                                    "hooks to preserve side-state across graph instances");
+        }
     }
 
     auto py_initialize_method = py_model_.attr("initialize");
