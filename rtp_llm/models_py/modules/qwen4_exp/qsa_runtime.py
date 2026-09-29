@@ -1649,23 +1649,53 @@ class Qwen4ExpQSARuntimeContext:
             device=raw_keys.device,
             logical_positions=flat_query_positions,
         )
-        self._write_indexer_cache_transactional(
-            raw_keys,
-            plan["cu_seqlens"],
-            plan["prefixes"].to(torch.int64),
-            rope_cos,
-            rope_sin,
-            indexer.k_norm_gamma,
-            plan["kv_pool"],
-            plan["kv_table"],
-            plan["state_pool"],
-            plan["state_table"],
-            ratio=ratio,
-            kv_tokens_per_block=int(plan["kv_tokens_per_block"]),
-            state_tokens_per_block=int(plan["state_tokens_per_block"]),
-            norm_eps=float(indexer.norm_eps),
-            rope_is_token_aligned=True,
+        target_writer = os.environ.get(
+            "RTP_LLM_QWEN4_TRITON_TARGET_WRITER", "0"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        target_writer = target_writer and (
+            query_len == ratio == 4
+            and head_dim == 128
+            and int(plan["kv_tokens_per_block"]) == 128
+            and int(plan["state_tokens_per_block"]) == 128
         )
+        if target_writer:
+            from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
+                write_target_window_with_undo_,
+            )
+
+            if self._side_cache_undo is not None:
+                raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+            undo = write_target_window_with_undo_(
+                raw_keys,
+                plan["prefixes"],
+                rope_cos,
+                rope_sin,
+                indexer.k_norm_gamma,
+                plan["kv_pool"],
+                plan["kv_table"],
+                plan["state_pool"],
+                plan["state_table"],
+                norm_eps=float(indexer.norm_eps),
+            )
+            object.__setattr__(self, "_side_cache_undo", undo)
+        else:
+            self._write_indexer_cache_transactional(
+                raw_keys,
+                plan["cu_seqlens"],
+                plan["prefixes"].to(torch.int64),
+                rope_cos,
+                rope_sin,
+                indexer.k_norm_gamma,
+                plan["kv_pool"],
+                plan["kv_table"],
+                plan["state_pool"],
+                plan["state_table"],
+                ratio=ratio,
+                kv_tokens_per_block=int(plan["kv_tokens_per_block"]),
+                state_tokens_per_block=int(plan["state_tokens_per_block"]),
+                norm_eps=float(indexer.norm_eps),
+                rope_is_token_aligned=True,
+            )
 
         q = q.view(batch_size, query_len, head_num, head_dim)
         rotated_q = apply_partial_rope(
