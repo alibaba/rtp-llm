@@ -1,6 +1,8 @@
 import os
+import sys
 import unittest
-from unittest.mock import patch
+from types import ModuleType
+from unittest.mock import MagicMock, patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import (
@@ -12,6 +14,44 @@ from rtp_llm.utils.scr_restore_context import RestoreContext
 
 
 class ScrVipIntegrationTest(unittest.TestCase):
+    def test_serving_children_keep_their_node_world_rank(self):
+        from rtp_llm import start_dash_sc_server, start_frontend_server
+
+        for launcher, module_name, class_name in (
+            (start_frontend_server, "rtp_llm.frontend.frontend_app", "FrontendApp"),
+            (start_dash_sc_server, "rtp_llm.dash_sc", "DashScApp"),
+        ):
+            for node_rank in (0, 2):
+                for local_rank in (0, 1):
+                    with self.subTest(
+                        launcher=launcher.__name__,
+                        node_rank=node_rank,
+                        local_rank=local_rank,
+                    ):
+                        configs = PyEnvConfigs()
+                        pc = configs.parallelism_config
+                        pc.world_size, pc.local_world_size = 4, 2
+                        pc.tp_size, pc.dp_size, pc.ep_size = 2, 2, 4
+                        pc.world_rank = node_rank
+                        app_type = MagicMock()
+                        module = ModuleType(module_name)
+                        setattr(module, class_name, app_type)
+                        with patch.dict(
+                            sys.modules, {module_name: module}
+                        ), patch.object(
+                            launcher, "_install_hot_hook_runtime"
+                        ), patch.object(
+                            launcher, "set_global_controller"
+                        ), patch.object(
+                            launcher, "setproctitle"
+                        ):
+                            entry = getattr(launcher, launcher.__name__.split(".")[-1])
+                            entry(local_rank, 0, None, configs)
+                        self.assertEqual(pc.world_rank, node_rank + local_rank)
+                        self.assertEqual(pc.local_rank, local_rank)
+                        self.assertEqual(pc.dp_rank, node_rank // 2)
+                        app_type.return_value.start.assert_called_once()
+
     def test_vip_is_used_for_store_registration_frontend_and_restore(self):
         for rank in range(4):
             with self.subTest(rank=rank):

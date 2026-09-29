@@ -342,6 +342,7 @@ py_test(
     srcs = ["scr_vip_integration_test.py"],
     data = ["//:th_transformer_config"],
     deps = [
+        "//rtp_llm:sdk",
         "//rtp_llm:config_ops",
         "//rtp_llm:utils",
         "//rtp_llm/distribute:distribute",
