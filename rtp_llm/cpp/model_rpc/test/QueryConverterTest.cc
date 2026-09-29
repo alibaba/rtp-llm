@@ -30,8 +30,35 @@ public:
     }
 };
 
+// Only request preparation is exercised; no model or scheduler is needed.
+class RequestParsingEngine: public EngineBase {
+public:
+    RequestParsingEngine(): EngineBase(EngineInitParams()) {}
+
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        ADD_FAILURE() << "request parsing must not enqueue inference";
+        return nullptr;
+    }
+    void enqueue(std::shared_ptr<GenerateStream>&) override {
+        ADD_FAILURE() << "request parsing must not enqueue inference";
+    }
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("request parsing only");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+};
+
 class TestPrefillRpcServer: public PrefillRpcServer {
 public:
+    void initRequestParsingEngine() {
+        engine_ = std::make_shared<RequestParsingEngine>();
+    }
+
     void setParallelismConfig(const ParallelismConfig& parallelism_config) {
         maga_init_params_.parallelism_config = parallelism_config;
     }
@@ -119,7 +146,7 @@ TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) 
         for (const bool streaming : {false, true}) {
             for (const bool return_all_probs : {false, true}) {
                 SCOPED_TRACE(::testing::Message() << "aux_mode=" << aux_mode << " streaming=" << streaming
-                                                 << " all_probs=" << return_all_probs);
+                                                  << " all_probs=" << return_all_probs);
                 GenerateInputPB request;
                 request.add_token_ids(1);
                 request.add_token_ids(2);
@@ -141,18 +168,18 @@ TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) 
 
                 ModelConfig model;
                 model.max_seq_len = 32;
-                model.vocab_size = 128;
-                auto stream = std::make_shared<NormalGenerateStream>(
-                    input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+                model.vocab_size  = 128;
+                auto stream =
+                    std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
                 stream->generate_status_->status.store(StreamState::RUNNING);
                 stream->step();
                 const auto tokens = torch::tensor({11, 12, 21, 22}, torch::kInt32).reshape({2, 2});
                 const auto scores = torch::tensor({-1.0f, -2.0f});
-                const auto probs = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({2, 2});
-                stream->update(StreamUpdateInfo{.new_tokens = tokens,
+                const auto probs  = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({2, 2});
+                stream->update(StreamUpdateInfo{.new_tokens     = tokens,
                                                 .num_new_tokens = 2,
-                                                .cum_log_probs = scores,
-                                                .all_probs = return_all_probs ? probs : torch::Tensor()});
+                                                .cum_log_probs  = scores,
+                                                .all_probs      = return_all_probs ? probs : torch::Tensor()});
                 EXPECT_TRUE(torch::equal(stream->cumLogProbs(), scores));
                 auto result = stream->nextOutputForRpc();
                 ASSERT_TRUE(result.ok());
@@ -879,7 +906,8 @@ TEST_F(QueryConverterTest, PrefillRpcServerConvertsMalformedInputEmbeddingsToInv
     embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
     input_embeddings_pb->add_embedding_locs(0);
 
-    PrefillRpcServer             server;
+    TestPrefillRpcServer server;
+    server.initRequestParsingEngine();
     RPCContext                   rpc_context{&input, nullptr};
     grpc::ServerContext          server_context;
     kmonitor::MetricsReporterPtr metrics_reporter;
@@ -891,6 +919,9 @@ TEST_F(QueryConverterTest, PrefillRpcServerConvertsMalformedInputEmbeddingsToInv
 
     EXPECT_EQ(prefill_context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_NE(prefill_context.error_status.error_message().find("Request parsing error"), std::string::npos);
+    EXPECT_NE(
+        prefill_context.error_status.error_message().find("TensorPB payload byte size does not match shape and dtype"),
+        std::string::npos);
 
     ErrorDetailsPB error_details;
     ASSERT_TRUE(error_details.ParseFromString(prefill_context.error_status.error_details()));
@@ -912,6 +943,9 @@ TEST_F(QueryConverterTest, PrefillRpcServerRejectsInputEmbeddingsWithTpGreaterTh
     auto                         meta            = std::make_shared<RpcServerRuntimeMeta>();
     auto                         prefill_context = PrefillGenerateContext(
         &server.resource(), rpc_context, input.generate_config().timeout_ms(), &server_context, metrics_reporter, meta);
+
+    // Test runtime support independently of engine-dependent request preparation.
+    prefill_context.generate_input = QueryConverter::transQuery(&input);
 
     server.getRpcConnection(prefill_context);
 
