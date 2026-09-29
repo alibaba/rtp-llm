@@ -1,0 +1,24 @@
+diff --git a/rtp_llm/models_py/modules/kimi_k3/mla_verify.py b/rtp_llm/models_py/modules/kimi_k3/mla_verify.py
+index f26c9da28..9677ff8c9 100644
+--- a/rtp_llm/models_py/modules/kimi_k3/mla_verify.py
++++ b/rtp_llm/models_py/modules/kimi_k3/mla_verify.py
+@@ -63,9 +63,10 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
+-        # The shared planner otherwise reserves reuse-page metadata only for
+-        # the capture prefix. A later page crossing must not reallocate it.
+-        self.block_tables_h.zero_()
+-        reserve_lengths = inputs.input_lengths if inputs.prefix_lengths is not None and inputs.prefix_lengths.numel() else torch.ones_like(inputs.input_lengths)
+-        reserve_prefix = torch.full_like(reserve_lengths, self.max_seq_len) - reserve_lengths
+-        self.fmha_params.fill_params(
+-            reserve_prefix, torch.empty(0, dtype=torch.int32), reserve_lengths,
+-            self.block_tables_h, self.native.page_size, False,
+-        )
++        if is_cuda_graph:
++            # Reserve replay capacity for later page crossings. Eager calls
++            # only need the actual request metadata prepared below.
++            self.block_tables_h.zero_()
++            reserve_lengths = inputs.input_lengths if inputs.prefix_lengths is not None and inputs.prefix_lengths.numel() else torch.ones_like(inputs.input_lengths)
++            reserve_prefix = torch.full_like(reserve_lengths, self.max_seq_len) - reserve_lengths
++            self.fmha_params.fill_params(
++                reserve_prefix, torch.empty(0, dtype=torch.int32), reserve_lengths,
++                self.block_tables_h, self.native.page_size, False,
++            )
