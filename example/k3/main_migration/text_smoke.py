@@ -623,7 +623,9 @@ class Runner:
         request_max_tokens: int,
     ) -> dict[str, Any]:
         try:
-            message = response["choices"][0]["message"]
+            choice = response["choices"][0]
+            message = choice["message"]
+            finish_reason = choice.get("finish_reason")
             content = message.get("content", "") or ""
             reasoning_content = message.get("reasoning_content", "") or ""
             aux = response["aux_info"]
@@ -635,6 +637,12 @@ class Runner:
         output_ids = debug_info.get("output_ids")
         if not isinstance(content, str) or not isinstance(reasoning_content, str):
             raise SmokeFailure(f"{case.name}: malformed model response")
+        if "\ufffd" in content or "\ufffd" in reasoning_content:
+            raise SmokeFailure(f"{case.name}: Unicode replacement in model response")
+        if self.args.suite != "flow" and finish_reason in ("length", "content_filter"):
+            raise SmokeFailure(
+                f"{case.name}: incomplete model response finish_reason={finish_reason}"
+            )
         # A four-layer checkpoint is only a transport preflight. With the
         # model's default reasoning mode enabled, all short output may remain
         # in reasoning_content. Keep full-model semantic checks pinned to the
@@ -792,6 +800,7 @@ class Runner:
             "elapsed_s": round(elapsed_s, 3),
             "content": content,
             "reasoning_content": reasoning_content,
+            "finish_reason": finish_reason,
             "output_ids": output_ids,
             "decode_owner_rank": case.decode_owner_rank,
             "selected_decode_role_addr": selected_decode_role_addr,
