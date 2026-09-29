@@ -22,3 +22,11 @@ MTP checkpoint 视图在各主机的 `/data0/luohaocheng.lhc/models/kimi-k3-mtp-
 09:47 复查：PID 25038 最终响应终止信号并退出 143；重跑一次 MTP guard，仍在 rank00 的 fd 3、偏移 0、1 MiB `read` 上进入同一内核等待，容器内 PID 25310；已终止，退出 143。此前两个独立客户端 114/115 同时出现相同症状，115 上相邻 MTP shard 与四层 target shard 的小块读取均正常，因此暂不另起任务私有 FUSE 或继续增加读取线程，避免把特定文件的等待扩大为更多并发请求。此判断仍需存储侧确认服务端根因。
 
 完整 target 96 个 shard 的元数据统计为 1453.74 GiB、最大单 shard 15.82 GiB，没有文件超过任务级并发读取原型的 32 GiB 文件上限。115 当时可用主机内存约 3.8 TiB；八 rank 各缓存一个最大 shard 的粗略上界约 126.6 GiB。这只排除了明显的文件大小上限和当前主机容量缺口，不能代替完整模型加载时的内存与吞吐测量。当前阻断服务启动的是 MTP rank00 的 `open/read` 等待。
+
+## 10:00 的四层 target 复查
+
+为准备固定 vLLM 版本的四层 PD 对照，114、115 已拉到相同镜像 digest `sha256:dfaab3570be5b1f66c21e60c60f1616ad3a0143f9899b8738257004f289979fd`，两端镜像 ID 都是 `sha256:ac8e1e42fbe7d8e3f50c103d6f811354d4aaadd1ef776ca1f81b381d04a31755`。10:00 左右的 GPU 独占复查选中 114/115，各 rank 空闲显存约 268.6 GiB，GPU 利用率为 0%；主机间 ping 成功，两端 InfiniBand 端口为 Active/LinkUp。尚未启动 vLLM 服务或任何 GPU 请求。
+
+启动前在两端各执行一次 `sha256sum`，参数依次为四层 target 的 `config.json` 和 `model.safetensors.index.json`。两端读取进程约 40 秒后仍未产生第一行哈希，均处于 `D` 状态、等待点 `folio_wait_bit_common`。已只向这两个本任务进程发送 `SIGTERM`；两端命令均结束，没有修改权重或其他人的进程。这表明阻塞已不局限于此前的 MTP rank00：连四层 target 的小型配置文件读取也出现等待。但当前证据只能定位到客户端读等待，不能断定服务端根因或判断所有 3FS 文件都受影响。
+
+两端 3FS 仍以 `fuse.hf3fs` 挂载；共享的 `hf3fs-fuse` 容器处于 running。FUSE 连接的 `max_background` 等参数为 root-only，本次个人账号无法读取，也没有修改由其他用户管理的 FUSE 容器、挂载或集群配置。先前 64、128、256 线程的真实 FastSafetensors 读取耗时接近；当前连小文件首读都等待，继续增加本任务的并发读请求没有可验证的收益，反而会累积挂起请求。待存储侧排查 10:00 左右 114/115 对四层 target 配置文件的 FUSE/RPC 等待，以及此前 MTP rank00 的 inode 3146980 后，再复查同路径读取和完整模型加载。
