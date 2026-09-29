@@ -128,7 +128,13 @@ void validate_unique_destinations_async(const at::Tensor& physical_page_ids,
     if (physical_page_ids.numel() <= 1) {
         return;
     }
-    const auto destinations        = physical_page_ids.to(at::kLong) * physical_page_size + token_offsets.to(at::kLong);
+    const auto padding = physical_page_ids.eq(-1);
+    at::_assert_async(padding.eq(token_offsets.eq(-1)).all(),
+                      "FP8 KV cache write padding must use paired (-1, -1) mappings");
+    const auto destinations =
+        at::where(padding,
+                  -(at::arange(physical_page_ids.numel(), physical_page_ids.options().dtype(at::kLong)) + 1),
+                  physical_page_ids.to(at::kLong) * physical_page_size + token_offsets.to(at::kLong));
     const auto sorted_destinations = std::get<0>(destinations.sort());
     const auto unique_destinations = sorted_destinations.slice(0, 1, sorted_destinations.numel())
                                          .ne(sorted_destinations.slice(0, 0, sorted_destinations.numel() - 1))
@@ -396,7 +402,11 @@ __global__ void quantize_and_write_fp8_kv_cache_kernel(const T* __restrict__ k,
 
     const int64_t physical_page = static_cast<int64_t>(physical_page_ids[n]);
     const int64_t token_offset  = static_cast<int64_t>(token_offsets[n]);
-    const bool    valid_mapping =
+    // Graph padding has no persistent KV slot. Other invalid mappings still fail.
+    if (physical_page == -1 && token_offset == -1) {
+        return;
+    }
+    const bool valid_mapping =
         physical_page >= 0 && physical_page < physical_pages && token_offset >= 0 && token_offset < physical_page_size;
     CUDA_KERNEL_ASSERT_MSG(valid_mapping, "FP8 KV cache write mapping is out of bounds");
     if (!valid_mapping) {

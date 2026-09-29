@@ -23,6 +23,7 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
 // Quantize post-RoPE K/V one [H, D] row at a time and write it into a
 // persistent paged FP8 cache. target_physical_page_ids and token_offsets are
 // one-dimensional CUDA int32/int64 tensors with one unique entry per input token.
+// The paired mapping (-1, -1) skips graph padding without writing payload/scales.
 // NaN maps to zero; infinities saturate under the finite-value row scale.
 void quantize_and_write_fp8_kv_cache(const at::Tensor& k,
                                      const at::Tensor& v,

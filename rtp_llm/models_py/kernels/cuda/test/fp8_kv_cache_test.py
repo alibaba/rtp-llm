@@ -17,6 +17,83 @@ class Fp8KvCacheTest(unittest.TestCase):
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
 
+    def test_graph_padding_skips_both_payload_and_scales(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            for index_dtype in (torch.int32, torch.int64):
+                for layout in ("physical", "kernel"):
+                    with self.subTest(
+                        dtype=dtype, index_dtype=index_dtype, layout=layout
+                    ):
+                        shape = (
+                            (3, 2, 2, 8, 17)
+                            if layout == "physical"
+                            else (6, 2, 2, 4, 17)
+                        )
+                        cache = torch.full(
+                            shape, 3.0, device="cuda", dtype=torch.float8_e4m3fn
+                        )
+                        scales = torch.full(
+                            (shape[0], 2 * 2 * shape[3]), 13.0, device="cuda"
+                        )
+                        keys = torch.full(
+                            (3, 2, 17), float("nan"), dtype=dtype, device="cuda"
+                        )
+                        values = keys.clone()
+                        keys[1].fill_(7)
+                        values[1].fill_(-31)
+                        pages = torch.tensor(
+                            [-1, 1, -1], dtype=index_dtype, device="cuda"
+                        )
+                        offsets = torch.tensor(
+                            [-1, 3, -1], dtype=index_dtype, device="cuda"
+                        )
+
+                        def write():
+                            quantize_and_write_fp8_kv_cache(
+                                keys, values, cache, scales, pages, offsets, 8, 4, 2
+                            )
+
+                        stream = torch.cuda.Stream()
+                        stream.wait_stream(torch.cuda.current_stream())
+                        with torch.cuda.stream(stream):
+                            write()
+                        torch.cuda.current_stream().wait_stream(stream)
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            write()
+                        for page_id, offset in ((2, 7), (-1, -1), (0, 0)):
+                            cache.fill_(3)
+                            scales.fill_(13)
+                            pages[1] = page_id
+                            offsets[1] = offset
+                            expected_cache, expected_scales = (
+                                cache.clone(),
+                                scales.clone(),
+                            )
+                            if page_id >= 0:
+                                quantize_and_write_fp8_kv_cache(
+                                    keys[1:2],
+                                    values[1:2],
+                                    expected_cache,
+                                    expected_scales,
+                                    pages[1:2],
+                                    offsets[1:2],
+                                    8,
+                                    4,
+                                    2,
+                                )
+                            graph.replay()
+                            torch.cuda.synchronize()
+                            torch.testing.assert_close(
+                                cache.view(torch.uint8),
+                                expected_cache.view(torch.uint8),
+                                rtol=0,
+                                atol=0,
+                            )
+                            torch.testing.assert_close(
+                                scales, expected_scales, rtol=0, atol=0
+                            )
+
     @staticmethod
     def _quantize_row(row: torch.Tensor) -> tuple[torch.Tensor, float]:
         row = row.float()

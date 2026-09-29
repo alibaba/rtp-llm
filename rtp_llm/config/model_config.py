@@ -79,6 +79,7 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "fp8_kv_cache_eagle3",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -537,6 +538,8 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        # Authorized by ModelFactory after validating the complete SP configuration.
+        self.fp8_kv_cache_eagle3: bool = False
         # DSpARK draft checkpoint metadata. Runtime proposal width comes only
         # from sp_config.gen_num_per_cycle.
         self.dspark_noise_token_id: Optional[int] = None

@@ -72,6 +72,35 @@ And supplement in the request's `extra_config`:
 | --gen_num_per_cycle | 5 | How many tokens the small model proposes per cycle |
 | --sp_quantization | FP8_PER_BLOCK/FP8 | Small model quantization method: FP8, FP8_PER_BLOCK, etc. |
 
+##### Dynamic FP8 KV Cache (Mode 2)
+
+On CUDA, `--fp8_kv_cache 2` supports linear Eagle3 with a `qwen_3` target and an
+`angelslim_qwen3_eagle3` draft in eager mode or with `--enable_cuda_graph 1`.
+Use a positive `--gen_num_per_cycle`, leave `--tree_decode_config` empty, and
+keep `--enable_native_cuda_graph 0`.
+
+The target verify and draft prefill phases use native FlashInfer paged prefill
+over the quantized KV cache (including the new tokens); the draft's single-token
+decode uses the existing mode2 decode path. Verify/commit and decode share the
+direct-scale FP8 kernel, avoiding an intermediate BF16 KV cache in verify/commit.
+Keep native FlashInfer enabled. Graph capture covers target verify, draft
+single-token decode and draft commit, not arbitrary prompt prefill. Verify and
+commit require fixed-width `gen_num_per_cycle + 1` query rows and producer-owned
+host int32 metadata mirrors. Replay replans with current page/length metadata;
+captured buffer addresses and plan layout must stay fixed. Padded query rows
+skip writes to both KV payload and scales.
+
+Other speculative model types, tree decoding, native CUDA Graph, and general
+prefill Graph execution remain rejected. The existing mode2 MHA/RoPE
+restrictions still apply. Deploy the matching compute extension: the FP8 writer
+must understand the paired `(-1, -1)` mapping for skipped graph padding.
+
+This support does not imply bit-exact agreement with non-speculative
+decoding or a performance improvement. Single-token and multi-token execution
+can use different GEMM and attention reduction shapes. Initial cached prefill
+still uses the existing gather/dequantize path. Validate numerical quality and
+latency on the intended checkpoint and workload before deployment.
+
 
 ---
 

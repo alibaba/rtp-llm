@@ -705,10 +705,9 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
         config.attn_configs.fp8_kv_cache_mode = 2
         config.attn_configs.is_causal = True
         inputs = harness._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths),
-            prefix_lengths,
-            input_lengths,
-            kernel_page_size,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=kernel_page_size,
         )
         block_table = torch.zeros_like(inputs.kv_cache_kernel_block_id)
         physical_page_offset = 0
@@ -915,10 +914,9 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
                     config.attn_configs.fp8_kv_cache_mode = 2
                     config.attn_configs.is_causal = True
                     inputs = harness._create_chunked_prefill_attention_inputs(
-                        len(prefix_lengths),
-                        prefix_lengths,
-                        input_lengths,
-                        kernel_page_size,
+                        input_lengths=input_lengths,
+                        prefix_lengths=prefix_lengths,
+                        seq_size_per_block=kernel_page_size,
                         dtype=dtype,
                     )
 
@@ -1096,6 +1094,48 @@ class TestDynamicFp8FactoryGating(unittest.TestCase):
                 self._config(), None, inputs, parallelism_config=None
             )
         self.assertIsInstance(result, allowed)
+
+    def test_eagle3_verify_and_commit_only_read_quantized_paged_kv(self):
+        config = self._config()
+        config.gen_num_per_cycle = 5
+        allowed = self._impl("PyFlashinferPagedPrefillImpl")
+        disallowed = [
+            self._impl(
+                name,
+                constructor=lambda: self.fail(
+                    "verify/commit selected unquantized new KV"
+                ),
+            )
+            for name in ("PyFlashinferPrefillImpl", "PyFlashinferHybridPrefillImpl")
+        ]
+        for role in ("is_target_verify", "is_spec_draft_prefill"):
+            inputs = SimpleNamespace(is_prefill=True, **{role: True})
+            with self.subTest(role=role), mock.patch.object(
+                attn_factory, "PREFILL_MHA_IMPS", [*disallowed, allowed]
+            ):
+                result = attn_factory.get_fmha_impl(
+                    config, None, inputs, fp8_eagle3=True
+                )
+                self.assertIsInstance(result, allowed)
+            with mock.patch.object(attn_factory, "PREFILL_MHA_IMPS", disallowed):
+                with self.assertRaisesRegex(ValueError, "PyFlashinferPagedPrefillImpl"):
+                    attn_factory.get_fmha_impl(config, None, inputs, fp8_eagle3=True)
+
+    def test_eagle3_initial_prefill_preserves_existing_backends(self):
+        config = self._config()
+        config.gen_num_per_cycle = 5
+        for name in ("PyFlashinferPrefillImpl", "PyFlashinferHybridPrefillImpl"):
+            allowed = self._impl(name)
+            with self.subTest(name=name), mock.patch.object(
+                attn_factory, "PREFILL_MHA_IMPS", [allowed]
+            ):
+                result = attn_factory.get_fmha_impl(
+                    config,
+                    None,
+                    SimpleNamespace(is_prefill=True),
+                    fp8_eagle3=True,
+                )
+                self.assertIsInstance(result, allowed)
 
     def test_decode_only_instantiates_native_flashinfer_backend(self):
         disallowed = self._impl(

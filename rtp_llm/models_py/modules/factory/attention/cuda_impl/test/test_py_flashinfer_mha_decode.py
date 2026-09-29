@@ -1703,6 +1703,84 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
                 config.fp8_kv_cache_mode = mode
                 _validate_dynamic_fp8_config(config, is_cuda_graph=False)
 
+    def test_mode2_authorized_eagle3_graph_requires_decode_or_verify_commit(self):
+        config = self._config()
+        config.use_mla = False
+        config.use_logn_attn = False
+        config.gen_num_per_cycle = 5
+        for is_prefill in (False, True):
+            with self.subTest(is_prefill=is_prefill):
+                inputs = SimpleNamespace(is_prefill=is_prefill)
+                _validate_dynamic_fp8_config(config, False, inputs, fp8_eagle3=True)
+                if is_prefill:
+                    with self.assertRaises(ValueError):
+                        _validate_dynamic_fp8_config(
+                            config, True, inputs, fp8_eagle3=True
+                        )
+                    for role in ("is_target_verify", "is_spec_draft_prefill"):
+                        _validate_dynamic_fp8_config(
+                            config,
+                            True,
+                            SimpleNamespace(is_prefill=True, **{role: True}),
+                            fp8_eagle3=True,
+                        )
+                else:
+                    _validate_dynamic_fp8_config(config, True, inputs, fp8_eagle3=True)
+
+    def test_mode2_eagle3_does_not_bypass_other_attention_contracts(self):
+        config = self._config()
+        config.use_mla = False
+        config.use_logn_attn = False
+        config.gen_num_per_cycle = 5
+        for attribute in ("use_mla", "use_logn_attn"):
+            with self.subTest(attribute=attribute):
+                setattr(config, attribute, True)
+                with self.assertRaises(ValueError):
+                    _validate_dynamic_fp8_config(config, False, fp8_eagle3=True)
+                setattr(config, attribute, False)
+        config.rope_config.style = RopeStyle.Mrope
+        with self.assertRaisesRegex(ValueError, "MRoPE"):
+            _validate_dynamic_fp8_config(config, False, fp8_eagle3=True)
+
+    def test_mode2_eagle3_rejects_verify_routed_as_single_token_decode(self):
+        config = self._config()
+        config.use_mla = False
+        config.use_logn_attn = False
+        config.gen_num_per_cycle = 5
+        for role in ("is_target_verify", "is_spec_draft_prefill"):
+            inputs = SimpleNamespace(is_prefill=False, **{role: True})
+            with self.subTest(role=role), self.assertRaisesRegex(
+                ValueError, "requires prefill"
+            ):
+                _validate_dynamic_fp8_config(config, False, inputs, fp8_eagle3=True)
+
+    def test_model_factory_attention_entry_preserves_eagle3_authorization(self):
+        from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+            AttnImplFactory,
+        )
+
+        config = self._config()
+        config.use_mla = False
+        config.use_logn_attn = False
+        config.gen_num_per_cycle = 5
+        model = SimpleNamespace(
+            getAttentionConfigs=mock.Mock(return_value=config),
+            fp8_kv_cache_eagle3=True,
+            quant_config=None,
+            max_seq_len=128,
+        )
+        parallelism = SimpleNamespace(get_attn_tp_size=lambda: 1)
+        inputs = SimpleNamespace(is_prefill=True, is_target_verify=True)
+        factory = mock.Mock()
+        with mock.patch.dict(AttnImplFactory.FMHA_IMPL_REGISTRY, {"mha": factory}):
+            AttnImplFactory.get_fmha_impl(model, parallelism, None, inputs)
+            self.assertTrue(factory.call_args.kwargs["fp8_eagle3"])
+            model.fp8_kv_cache_eagle3 = False
+            factory.reset_mock()
+            with self.assertRaisesRegex(ValueError, "validated Eagle3"):
+                AttnImplFactory.get_fmha_impl(model, parallelism, None, inputs)
+            factory.assert_not_called()
+
     def test_mode2_constructs_and_caches_versioned_fa2_direct_scale_jit(self):
         wrappers = [SimpleNamespace(_fixed_batch_size=0) for _ in range(2)]
         loaded_module = object()
@@ -2145,6 +2223,39 @@ class TestDynamicFp8DecodeUnit(unittest.TestCase):
                     rtol=0.13,
                     atol=0.02,
                 )
+
+    def test_eagle3_decode_rope_reserves_proposals_and_rejects_short_cache(self):
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha"
+        )
+        for proposal_tokens, expected_rows in ((0, 128), (5, 134)):
+            for cached_rows in (128, 134):
+                with self.subTest(
+                    proposal_tokens=proposal_tokens, cached_rows=cached_rows
+                ):
+                    config = self._config()
+                    config.gen_num_per_cycle = proposal_tokens
+                    cached = torch.empty(cached_rows, config.rope_config.dim)
+                    decode = SimpleNamespace(
+                        set_params=mock.Mock(), prepare=mock.Mock()
+                    )
+                    with mock.patch(
+                        f"{module}.PyFlashinferDecodeAttnOp", return_value=decode
+                    ), mock.patch(
+                        f"{module}.get_rope_cache_once",
+                        return_value=SimpleNamespace(data=cached),
+                    ) as get_cache, mock.patch(
+                        f"{module}.check_rope_cache", return_value=True
+                    ), mock.patch(
+                        f"{module}.common.create_write_cache_store_impl",
+                        return_value=None,
+                    ):
+                        impl = PyFlashinferDecodeImpl(config, SimpleNamespace())
+                    self.assertEqual(get_cache.call_args.args[1], expected_rows)
+                    if cached_rows >= expected_rows:
+                        self.assertIs(impl.dynamic_rope_cache, cached)
+                    else:
+                        self.assertIsNone(impl.dynamic_rope_cache)
 
     def test_impl_uses_one_fused_prepare_before_direct_decode(self):
         config = self._config()
