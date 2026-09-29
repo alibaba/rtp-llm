@@ -49,9 +49,11 @@ cc_library(
     hdrs = ["CompleteTokenIds.h"],
     srcs = ["CompleteTokenIds.cc"],
     deps = [
+        ":input_embeddings_utils",
         ":generate_types",
         ":generate_config",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:hash_util",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],

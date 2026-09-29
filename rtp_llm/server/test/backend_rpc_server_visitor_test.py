@@ -14,7 +14,6 @@ from rtp_llm.config.exceptions import (
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
-    disable_token_only_reuse_for_input_embeddings,
     get_role_names,
 )
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
@@ -1045,7 +1044,7 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
             await visitor.route_ips(self.custom_input())
         visitor.master_client.get_backend_role_addrs.assert_not_called()
 
-    async def test_enqueue_disables_token_only_reuse_with_input_embeddings(self):
+    async def test_enqueue_preserves_reuse_with_input_embeddings(self):
         visitor = self.make_visitor()
         visitor.max_seq_len = 16
         visitor.sp_config = None
@@ -1067,10 +1066,10 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
         output = await visitor.enqueue(input)
 
         self.assertEqual([item async for item in output], ["result"])
-        self.assertFalse(input.generate_config.reuse_cache)
-        self.assertFalse(input.generate_config.enable_device_cache)
-        self.assertFalse(input.generate_config.enable_memory_cache)
-        self.assertFalse(input.generate_config.enable_remote_cache)
+        self.assertTrue(input.generate_config.reuse_cache)
+        self.assertTrue(input.generate_config.enable_device_cache)
+        self.assertTrue(input.generate_config.enable_memory_cache)
+        self.assertTrue(input.generate_config.enable_remote_cache)
 
     def test_check_sp_supported_rejects_input_embeddings(self):
         visitor = self.make_visitor()
@@ -1093,7 +1092,7 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
                     error.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
                 )
 
-    async def test_batch_enqueue_disables_token_only_reuse_with_input_embeddings(self):
+    async def test_batch_enqueue_preserves_cache_policy_with_input_embeddings(self):
         visitor = self.make_visitor()
         visitor.max_seq_len = 16
         visitor.sp_config = None
@@ -1111,25 +1110,13 @@ class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
         await visitor.batch_enqueue([text_input, embedding_input])
 
         self.assertTrue(text_input.generate_config.reuse_cache)
+        self.assertTrue(embedding_input.generate_config.reuse_cache)
+        self.assertTrue(embedding_input.generate_config.enable_device_cache)
+        self.assertTrue(embedding_input.generate_config.enable_memory_cache)
+        self.assertTrue(embedding_input.generate_config.enable_remote_cache)
+        embedding_input.generate_config.reuse_cache = False
+        await visitor.batch_enqueue([text_input, embedding_input])
         self.assertFalse(embedding_input.generate_config.reuse_cache)
-        self.assertFalse(embedding_input.generate_config.enable_device_cache)
-        self.assertFalse(embedding_input.generate_config.enable_memory_cache)
-        self.assertFalse(embedding_input.generate_config.enable_remote_cache)
-
-    def test_empty_input_embeddings_keeps_reuse_flags(self):
-        input = make_generate_input(
-            InputEmbeddings(
-                embeddings=[],
-                embedding_locs=[],
-            )
-        )
-
-        disable_token_only_reuse_for_input_embeddings(input)
-
-        self.assertTrue(input.generate_config.reuse_cache)
-        self.assertTrue(input.generate_config.enable_device_cache)
-        self.assertTrue(input.generate_config.enable_memory_cache)
-        self.assertTrue(input.generate_config.enable_remote_cache)
 
 
 if __name__ == "__main__":

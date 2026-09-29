@@ -2681,7 +2681,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsWithReuseLength) {
     EXPECT_EQ(locs_vec[1], 2);
 }
 
-TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsReuseLengthCapped) {
+TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsReuseSkipsAndSlicesSpans) {
     ResourceContext resource_context;
     ModelConfig     model_config;
     model_config.max_seq_len                = 2048;
@@ -2695,7 +2695,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsReuseLengthCapped) {
     NormalBatchStreamProcessor  processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
-    // reuseLength=5 但 embedding loc 最小为 2，应被 cap 到 2
+    // Reuse covers the first span and the first row of the second span.
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1, 2, 3, 4, 5, 6, 7, 8});
     query1->generate_config               = make_shared<GenerateConfig>();
@@ -2704,10 +2704,9 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsReuseLengthCapped) {
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     stream1->setIsContextStream(true);
-    stream1->setReuseLength(5);
+    stream1->setReuseLength(7);
 
-    // reuseLength 应被 cap 到 min(loc) = 2
-    EXPECT_EQ(stream1->reuseLength(), 2);
+    EXPECT_EQ(stream1->reuseLength(), 7);
 
     std::list<GenerateStreamPtr> streams;
     streams.emplace_back(stream1);
@@ -2719,12 +2718,13 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsReuseLengthCapped) {
     auto& model_input = merge_input_status.value();
     EXPECT_TRUE(model_input.input_embeddings.has_value());
     const auto& locs = model_input.input_embeddings_locs;
-    // 调整后位置：[2 - 2 + 0, 6 - 2 + 0] = [0, 4]
+    ASSERT_EQ(model_input.input_embeddings->size(), 1);
+    EXPECT_TRUE(
+        torch::equal(model_input.input_embeddings->at(0).cpu(), query1->input_embeddings->at(1).slice(0, 1, 2)));
     auto*                locs_ptr = locs.data_ptr<int32_t>();
     std::vector<int32_t> locs_vec(locs_ptr, locs_ptr + locs.numel());
-    EXPECT_EQ(locs_vec.size(), 2);
+    ASSERT_EQ(locs_vec.size(), 1);
     EXPECT_EQ(locs_vec[0], 0);
-    EXPECT_EQ(locs_vec[1], 4);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsMixedWithDecodeStreams) {
@@ -3006,7 +3006,7 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsRejectDirectOutOfRange
     EXPECT_NE(merge_input_status.status().ToString().find("out of range"), std::string::npos);
 }
 
-TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsRejectDirectLocBeforeReuse) {
+TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsFullyReused) {
     ResourceContext resource_context;
     ModelConfig     model_config;
     model_config.max_seq_len                = 2048;
@@ -3035,8 +3035,8 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsRejectDirectLocBeforeR
     TensorHolder holder;
     auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
 
-    EXPECT_FALSE(merge_input_status.ok());
-    EXPECT_NE(merge_input_status.status().ToString().find("falls outside current context batch"), std::string::npos);
+    ASSERT_TRUE(merge_input_status.ok());
+    EXPECT_FALSE(merge_input_status.value().input_embeddings.has_value());
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsEmpty) {

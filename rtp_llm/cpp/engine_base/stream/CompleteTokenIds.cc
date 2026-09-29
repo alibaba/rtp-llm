@@ -2,6 +2,9 @@
 
 #include <sstream>
 #include <algorithm>
+#include <string_view>
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
+#include "rtp_llm/cpp/utils/HashUtil.h"
 
 namespace rtp_llm {
 
@@ -21,6 +24,12 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
     start_check_seq_length_(other.start_check_seq_length_),
     first_token_time_us_(other.first_token_time_us_),
     first_token_latency_us_(other.first_token_latency_us_) {
+    for (const auto& [position, hash] : other.input_embedding_hashes_) {
+        const int shifted_position = position - (share ? shift_token_num : 0);
+        if (shifted_position >= 0) {
+            input_embedding_hashes_.emplace_back(shifted_position, hash);
+        }
+    }
     if (share) {
         if (shift_token_num == 0) {
             complete_token_ids_ = other.complete_token_ids_;
@@ -68,6 +77,54 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     }
 
     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
+    input_embedding_hashes_.clear();
+}
+
+absl::Status CompleteTokenIds::initInputEmbeddingHashes(const GenerateInput& input) {
+    input_embedding_hashes_.clear();
+    const std::vector<torch::Tensor> empty_embeddings;
+    const std::vector<int32_t>       empty_locs;
+    const auto&                      embeddings = input.input_embeddings ? *input.input_embeddings : empty_embeddings;
+    const auto&                      locs   = input.input_embeddings_locs ? *input.input_embeddings_locs : empty_locs;
+    auto                             status = validateInputEmbeddings(embeddings, locs, seq_length_);
+    if (!status.ok()) {
+        return status;
+    }
+    // Like multimodal features, hash the actual bytes once on the prefill path.
+    // Keep dtype/width and both halves of the content hash; no truncation to a token ID.
+    for (size_t i = 0; i < embeddings.size(); ++i) {
+        auto emb = embeddings[i].to(torch::kCPU).contiguous();
+        if (emb.dim() == 1) {
+            emb = emb.unsqueeze(0);
+        }
+        const int64_t row_bytes = emb.size(1) * emb.element_size();
+        const char*   base      = static_cast<const char*>(emb.data_ptr());
+        for (int64_t row = 0; row < emb.size(0); ++row) {
+            uint64_t hash =
+                std::hash<std::string_view>{}(std::string_view(base + row * row_bytes, static_cast<size_t>(row_bytes)));
+            hash ^= static_cast<uint64_t>(emb.scalar_type()) + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+            hash ^= static_cast<uint64_t>(emb.size(1)) + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+            input_embedding_hashes_.emplace_back(locs[i] + row, hash);
+        }
+    }
+    return absl::OkStatus();
+}
+
+int64_t CompleteTokenIds::cacheHash(int batch_id, int64_t seed, int offset, int length) const {
+    auto* tokens = complete_token_ids_.data_ptr<int32_t>() + batch_id * tokenDim();
+    auto  it     = std::lower_bound(input_embedding_hashes_.begin(),
+                               input_embedding_hashes_.end(),
+                               offset,
+                               [](const auto& entry, int position) { return entry.first < position; });
+    int   cursor = offset;
+    for (; it != input_embedding_hashes_.end() && it->first < offset + length; ++it) {
+        seed = hashInt64Array(seed, tokens + cursor, tokens + it->first + 1);
+        // Domain marker separates custom embeddings from ordinary token-only requests.
+        int32_t identity[] = {0x49454d42, static_cast<int32_t>(it->second), static_cast<int32_t>(it->second >> 32)};
+        seed               = hashInt64Array(seed, identity, identity + 3);
+        cursor             = it->first + 1;
+    }
+    return hashInt64Array(seed, tokens + cursor, tokens + offset + length);
 }
 
 int CompleteTokenIds::maxBatchSize() {
