@@ -24,7 +24,9 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_MAPPING_COUNT;
@@ -94,12 +96,14 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_GLOBAL_BYTES, FlexMetricType.GAUGE);
 
         // Cache hit rate metrics
-        monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_HIT_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.GAUGE);
-        monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.GAUGE);
-        monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.COUNTER);
+        monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
@@ -169,28 +173,45 @@ public class CacheMetricsReporter {
     /**
      * Report cache hit rate metrics
      *
-     * @param roleType  Role type
-     * @param ipIndex   logical engine address in {@code ip:port@engineIndex} format
-     * @param hitTokens Number of hit tokens
-     * @param hitRatio  Hit percentage
+     * @param roleType    Role type
+     * @param ipIndex     logical engine address in {@code ip:port@engineIndex} format
+     * @param hitTokens   Number of hit tokens
+     * @param inputTokens Number of input tokens
+     * @param hitRatio    Hit fraction for this request
      */
-    public void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitTokens, double hitRatio) {
+    public void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitTokens, long inputTokens, double hitRatio) {
 
         FlexMetricTags baseTags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
 
         // Report hit token count and hit percentage
-        monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
         monitor.report(CACHE_HIT_RATIO, baseTags, hitRatio);
+        if (inputTokens > 0L) {
+            monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
+            monitor.report(CACHE_INPUT_TOKENS, baseTags, inputTokens);
+        }
         monitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
     }
 
+    /**
+     * Count the selected worker's KVCM local and global matches against its input tokens.
+     *
+     * @param roleType          selected role
+     * @param ipIndex           logical engine address
+     * @param localMatchTokens  tokens matched in the selected worker's local cache
+     * @param globalMatchTokens tokens matched across local and remote caches
+     * @param inputTokens       request input tokens
+     */
     public void reportKvcmSelectedMatch(RoleType roleType,
                                         String ipIndex,
                                         long localMatchTokens,
-                                        long globalMatchTokens) {
+                                        long globalMatchTokens,
+                                        long inputTokens) {
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
-        monitor.report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, tags, localMatchTokens);
-        monitor.report(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, tags, globalMatchTokens);
+        if (inputTokens > 0L) {
+            monitor.report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, tags, localMatchTokens);
+            monitor.report(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, tags, globalMatchTokens);
+            monitor.report(CACHE_KVCM_SELECTED_INPUT_TOKENS, tags, inputTokens);
+        }
     }
 
     public void reportLocalStandbyCapacityRejected() {

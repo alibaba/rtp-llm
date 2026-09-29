@@ -127,6 +127,20 @@ class CostBasedPrefillSelectionMetricTest {
         }
     }
 
+    @Test
+    void selectedPrefillReportsInputTokensAlongsideHitTokens() {
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                Map.of("10.0.0.1:8080", HostCacheMatch.local(2)),
+                CacheMatchSource.KVCM, 0L, 100L));
+
+        try (SelectedRole ignored = select()) {
+            verify(reporter).reportCacheHitMetrics(
+                    RoleType.PREFILL, "10.0.0.1:8080", 200L, 1_000L, 0.2);
+            verify(reporter).reportKvcmSelectedMatch(
+                    RoleType.PREFILL, "10.0.0.1:8080", 200L, 200L, 1_000L, true);
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"5,1,false,BLOCKED", "50,1,false,BLOCKED", "5,2,false,SUCCESS",
             "50,1,true,SUCCESS", "10,1,true,BLOCKED", "5,1,true,BLOCKED"})

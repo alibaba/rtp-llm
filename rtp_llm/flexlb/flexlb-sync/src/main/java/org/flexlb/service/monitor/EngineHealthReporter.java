@@ -41,9 +41,11 @@ import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_RATIO;
@@ -102,9 +104,9 @@ import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_BODY_BYTES;
-import static org.flexlb.constant.MetricConstant.REQUEST_SEQ_LEN;
 import static org.flexlb.constant.MetricConstant.REQUEST_MESSAGE_BYTES;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
+import static org.flexlb.constant.MetricConstant.REQUEST_SEQ_LEN;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
@@ -230,9 +232,13 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_INPUT_TOKENS,
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS,
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
@@ -240,7 +246,7 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_RATIO,
@@ -709,9 +715,18 @@ public class EngineHealthReporter {
         monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalPendingTask);
     }
 
+    /**
+     * Report selected-worker cache hits and the matching request's input tokens.
+     *
+     * @param roleType    selected role
+     * @param ipIndex     selected worker address
+     * @param hitTokens   cache-hit tokens
+     * @param inputTokens request input tokens
+     * @param hitRatio    hit fraction for this request
+     */
     public void reportCacheHitMetrics(
-            RoleType roleType, String ipIndex, long hitTokens, double hitRatio) {
-        cacheMetricsReporter.reportCacheHitMetrics(roleType, ipIndex, hitTokens, hitRatio);
+            RoleType roleType, String ipIndex, long hitTokens, long inputTokens, double hitRatio) {
+        cacheMetricsReporter.reportCacheHitMetrics(roleType, ipIndex, hitTokens, inputTokens, hitRatio);
     }
 
     /** Report request-level estimates captured when a Prefill worker is selected. */
@@ -734,14 +749,25 @@ public class EngineHealthReporter {
         cacheMetricsReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
     }
 
+    /**
+     * Report KVCM matches only when KVCM supplied a result for the selected worker.
+     *
+     * @param roleType          selected role
+     * @param engineIp          selected worker address
+     * @param localMatchTokens  tokens matched in the worker's local cache
+     * @param globalMatchTokens tokens matched across local and remote caches
+     * @param inputTokens       request input tokens
+     * @param available         whether KVCM supplied a match result
+     */
     public void reportKvcmSelectedMatch(RoleType roleType,
-                                        String engineIp,
-                                        long localMatchTokens,
-                                        long globalMatchTokens,
-                                        boolean available) {
+                                         String engineIp,
+                                         long localMatchTokens,
+                                         long globalMatchTokens,
+                                         long inputTokens,
+                                         boolean available) {
         if (available) {
             cacheMetricsReporter.reportKvcmSelectedMatch(
-                    roleType, engineIp, localMatchTokens, globalMatchTokens);
+                    roleType, engineIp, localMatchTokens, globalMatchTokens, inputTokens);
         }
     }
 
@@ -760,8 +786,6 @@ public class EngineHealthReporter {
                 "group", comparison.group(),
                 "taskState", comparison.state(),
                 "cacheMatchSource", comparison.source() == null ? "" : comparison.source());
-        monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, tags, routing.hit());
-        monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, actual.hit());
         monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, tags, routing.delta());
         if (kvcmDetails != null) {
             monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
@@ -771,6 +795,9 @@ public class EngineHealthReporter {
         }
         long inputTokens = comparison.inputTokens();
         if (inputTokens > 0) {
+            monitor.report(CACHE_HIT_COMPARISON_INPUT_TOKENS, tags, inputTokens);
+            monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, tags, routing.hit());
+            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, actual.hit());
             monitor.report(CACHE_HIT_COMPARISON_PREDICTED_RATIO,
                     tags, routing.hit() / (double) inputTokens);
             monitor.report(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
@@ -778,11 +805,13 @@ public class EngineHealthReporter {
         }
         CacheHitComparisonResult.HitComparison localStandby = comparison.localStandby();
         if (localStandby != null) {
-            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS,
-                    tags, localStandby.hit());
             monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
                     tags, localStandby.delta());
             if (inputTokens > 0) {
+                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS,
+                        tags, inputTokens);
+                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS,
+                        tags, localStandby.hit());
                 monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO,
                         tags, localStandby.hit() / (double) inputTokens);
             }
