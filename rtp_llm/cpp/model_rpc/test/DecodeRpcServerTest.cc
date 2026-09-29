@@ -223,7 +223,8 @@ TEST(DecodeRpcServerTest, CompletedHandoffKeepsEmbeddingPrefixWithoutChangingPha
     input->input_embeddings_locs = std::vector<int32_t>{4};
     ASSERT_TRUE(stream->isContextStream());
     stream->setReuseLength(256);
-    ASSERT_EQ(stream->reuseLength(), 4);
+    // Embedding-aware keys allow local reuse beyond the embedding span.
+    ASSERT_EQ(stream->reuseLength(), 256);
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
                   stream, {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2}, 256, /*group_num=*/2),
               512);

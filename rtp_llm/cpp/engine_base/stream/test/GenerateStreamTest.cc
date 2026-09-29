@@ -1282,17 +1282,85 @@ TEST_F(GenerateStreamTest, testAllHiddenStatesCopiedToCpuOnceForMultipleOutputs)
     ASSERT_TRUE(torch::equal(first.value(), all_hidden_states.cpu()));
 }
 
-TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {
+TEST_F(GenerateStreamTest, testInputEmbeddingsRespectRequestCacheSwitches) {
     auto builder                                   = GenerateStreamBuilder();
     auto stream                                    = builder.createContextStream({1, 2, 3, 4, 5, 6});
     stream->generate_input_->input_embeddings      = std::vector<torch::Tensor>{torch::rand({1, 8}, torch::kFloat32)};
     stream->generate_input_->input_embeddings_locs = std::vector<int32_t>{2};
 
     ASSERT_TRUE(stream->hasInputEmbeddings());
-    ASSERT_FALSE(stream->reuseCache());
-    ASSERT_FALSE(stream->enableDeviceCache());
-    ASSERT_FALSE(stream->enableMemoryCache());
-    ASSERT_FALSE(stream->enableRemoteCache());
+    for (bool enabled : {false, true}) {
+        auto& config       = *stream->generate_input_->generate_config;
+        config.reuse_cache = config.enable_device_cache = config.enable_memory_cache = config.enable_remote_cache =
+            enabled;
+        EXPECT_EQ(stream->reuseCache(), enabled);
+        EXPECT_EQ(stream->enableDeviceCache(), enabled);
+        EXPECT_EQ(stream->enableMemoryCache(), enabled);
+        EXPECT_EQ(stream->enableRemoteCache(), enabled);
+    }
+}
+
+TEST(CompleteTokenIdsTest, InputEmbeddingCacheIdentityPreservesTokensAndPrefixes) {
+    auto input                   = std::make_shared<GenerateInput>();
+    input->input_ids             = torch::tensor({1, 2, 3, 4, 5, 6, 7, 8}, torch::kInt32);
+    input->generate_config       = std::make_shared<GenerateConfig>();
+    input->input_embeddings      = {torch::arange(12, torch::kFloat32).reshape({3, 4}), torch::ones({4})};
+    input->input_embeddings_locs = {2, 6};
+    CompleteTokenIds original(2, 2, 16, 2);
+    original.init(input);
+    ASSERT_TRUE(original.initInputEmbeddingHashes(*input).ok());
+    const auto hash = original.cacheHash(0, 0, 0, 8);
+    EXPECT_EQ(hash, original.cacheHash(1, 0, 0, 8));
+    EXPECT_EQ(original.completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 4, 5, 6, 7, 8}));
+    EXPECT_TRUE(torch::equal(input->input_ids, original.completeTokenIds()[0].slice(0, 0, 8)));
+
+    // Identical values in a non-contiguous tensor and a normalized 1-D row have identical keys.
+    auto& embeddings = *input->input_embeddings;
+    embeddings[0]    = embeddings[0].t().contiguous().t();
+    embeddings[1]    = embeddings[1].unsqueeze(0);
+    CompleteTokenIds same(1, 1, 16, 2);
+    same.init(input);
+    ASSERT_TRUE(same.initInputEmbeddingHashes(*input).ok());
+    EXPECT_EQ(hash, same.cacheHash(0, 0, 0, 8));
+    // A block boundary inside an embedding must hash identically when recomputed incrementally.
+    const auto prefix = original.cacheHash(0, 0, 0, 4);
+    EXPECT_EQ(hash, original.cacheHash(0, prefix, 4, 4));
+
+    embeddings[0] = embeddings[0].clone();
+    embeddings[0][1][0] += 1;
+    CompleteTokenIds changed(1, 1, 16, 2);
+    changed.init(input);
+    ASSERT_TRUE(changed.initInputEmbeddingHashes(*input).ok());
+    EXPECT_EQ(original.cacheHash(0, 0, 0, 3), changed.cacheHash(0, 0, 0, 3));
+    EXPECT_NE(prefix, changed.cacheHash(0, 0, 0, 4));
+    EXPECT_NE(hash, changed.cacheHash(0, 0, 0, 8));
+
+    CompleteTokenIds copied(original);
+    CompleteTokenIds shared(original, true);
+    EXPECT_EQ(hash, copied.cacheHash(1, 0, 0, 8));
+    EXPECT_EQ(hash, shared.cacheHash(0, 0, 0, 8));
+    CompleteTokenIds shifted(same, true, 2);
+    EXPECT_EQ(same.cacheHash(0, 0, 2, 6), shifted.cacheHash(0, 0, 0, 6));
+
+    input->input_embeddings.reset();
+    input->input_embeddings_locs.reset();
+    CompleteTokenIds text_only(1, 1, 16, 2);
+    text_only.init(input);
+    ASSERT_TRUE(text_only.initInputEmbeddingHashes(*input).ok());
+    EXPECT_EQ(original.cacheHash(0, 0, 0, 2), text_only.cacheHash(0, 0, 0, 2));
+    EXPECT_NE(hash, text_only.cacheHash(0, 0, 0, 8));
+
+    // Equal-width FP16/BF16 zeros have identical bytes but distinct cache identities.
+    input->input_embeddings      = {torch::zeros({1, 4}, torch::kFloat16)};
+    input->input_embeddings_locs = {2};
+    CompleteTokenIds half(1, 1, 16, 2);
+    half.init(input);
+    ASSERT_TRUE(half.initInputEmbeddingHashes(*input).ok());
+    input->input_embeddings = {torch::zeros({1, 4}, torch::kBFloat16)};
+    CompleteTokenIds bfloat(1, 1, 16, 2);
+    bfloat.init(input);
+    ASSERT_TRUE(bfloat.initInputEmbeddingHashes(*input).ok());
+    EXPECT_NE(half.cacheHash(0, 0, 0, 8), bfloat.cacheHash(0, 0, 0, 8));
 }
 
 TEST_F(GenerateStreamTest, timeInfoSeparatesLegacyWaitFromRunningMilestone) {

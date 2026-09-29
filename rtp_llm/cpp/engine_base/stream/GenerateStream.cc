@@ -145,6 +145,12 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     stream_cache_resource_->init(init_batch_size);
 
+    const auto token_init_status = complete_token_ids_->initInputEmbeddingHashes(*input);
+    if (!token_init_status.ok()) {
+        reportError(ErrorCode::INVALID_PARAMS, token_init_status.ToString());
+        return;
+    }
+
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     int64_t processor_eos_token_id = special_tokens_.eos_token_id;
@@ -519,16 +525,6 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
-    // Cap reuseLength so it doesn't exceed any input_embeddings location.
-    // Only needed during prefill; on decode/speculative paths the KV cache
-    // already incorporates the custom embeddings.
-    if (*is_context_stream_ && generate_input_->input_embeddings_locs) {
-        for (int32_t loc : generate_input_->input_embeddings_locs.value()) {
-            if (reuse_length_ > loc) {
-                reuse_length_ = loc;
-            }
-        }
-    }
 }
 
 void GenerateStream::setHandoffReuseLength(int reuse_length) {
