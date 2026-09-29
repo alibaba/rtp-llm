@@ -251,6 +251,20 @@ class SparsePagedGqaAttentionTest(unittest.TestCase):
         )
         self.assertFalse(torch.equal(output, eager))
 
+        # A stale selection must never dereference a freed or reserved page
+        # after the scheduler refreshes a graph-owned device block table.
+        selected.copy_(
+            torch.tensor([[[4, -1, -1, -1]]], dtype=torch.int32, device=_DEVICE)
+        )
+        for physical in (0, cache.shape[0] + 7):
+            table[0, 1] = physical
+            graph.replay()
+            torch.testing.assert_close(output, torch.zeros_like(output))
+        table[0, 1] = 1
+        selected[0, 0, 0] = 1000000
+        graph.replay()
+        torch.testing.assert_close(output, torch.zeros_like(output))
+
 
 if __name__ == "__main__":
     unittest.main()
