@@ -24,6 +24,7 @@ def audit(directory: Path, decode_ip: str, decode_port: int) -> dict:
     errors = []
     meta = json.loads((directory / "requests/input.json").read_text(),
                       object_pairs_hook=unique_keys)
+    legacy_feat_aux = meta.get("legacy_feat_aux") is True
     lines = [json.loads(line, object_pairs_hook=unique_keys)
              for line in (directory / "stdout.log").read_text().splitlines() if line.strip()]
     labels = [row.get("label") for row in lines]
@@ -38,14 +39,16 @@ def audit(directory: Path, decode_ip: str, decode_port: int) -> dict:
         errors.append("cache reuse or warmup convergence differs")
     if (directory / "exit").read_text().strip() != "0":
         errors.append("runner did not exit successfully")
+    stability_field = ("first_token_cost_ms" if meta.get("warmup_stability_field") == "first-token"
+                       else "elapsed_s")
     if len(warmups) >= 3:
-        recent = [row.get("elapsed_s") for row in warmups[-3:]]
+        recent = [row.get(stability_field) for row in warmups[-3:]]
         if not all(isinstance(value, (float, int)) and value > 0 for value in recent):
             errors.append("invalid final warmup latencies")
         else:
             median = statistics.median(recent)
             if any(abs(value / median - 1) > 0.05 for value in recent):
-                errors.append("final three HTTP warmups did not converge")
+                errors.append(f"final three {stability_field} warmups did not converge")
     files = {path.stem for path in (directory / "requests").glob("*.json")}
     if files != set(expected) | {"input"}:
         errors.append("raw response set differs from request labels")
@@ -69,18 +72,22 @@ def audit(directory: Path, decode_ip: str, decode_port: int) -> dict:
             if label.startswith("profiled-") and digest != FIXED_INPUT_SHA:
                 raise ValueError("profiled request did not use fixed 64K input")
             usage, aux = body["usage"], body["aux_info"]
-            if usage.get("prompt_tokens") != 65536 or usage.get("completion_tokens") != 8:
+            expected_prompt_tokens = (65533, 65536) if legacy_feat_aux else (65536,)
+            if usage.get("prompt_tokens") not in expected_prompt_tokens or usage.get("completion_tokens") != 8:
                 raise ValueError("input or output token count differs")
             if aux.get("pd_sep") is not True or aux.get("prefill_total_reuse_len") != 0:
                 raise ValueError("PD flag or Prefill cache reuse differs")
-            if aux.get("decode_total_reuse_len") != 61440:
+            if legacy_feat_aux:
+                if aux.get("decode_total_reuse_len") != 0:
+                    raise ValueError("legacy Decode reuse field differs")
+            elif aux.get("decode_total_reuse_len") != 61440:
                 raise ValueError("Decode KV handoff differs from 15 complete pages")
             if not any(isinstance(addr, dict) and addr.get("ip") == decode_ip
                        and addr.get("http_port") == decode_port
                        for addr in aux.get("role_addrs", [])):
                 raise ValueError("Decode route differs")
             draft = aux.get("speculative_draft_rounds")
-            if not isinstance(draft, int) or draft <= 0:
+            if not legacy_feat_aux and (not isinstance(draft, int) or draft <= 0):
                 raise ValueError("native MTP draft did not execute")
             content = body["choices"][0]["message"].get("content")
             if not isinstance(content, str) or not content.strip() or "\x00" in content:
@@ -98,6 +105,8 @@ def audit(directory: Path, decode_ip: str, decode_port: int) -> dict:
         "profiled_count": sum(row["label"].startswith("profiled-") for row in rows),
         "replacement_characters_observed": sum(row.get("replacement_characters", 0) for row in rows),
         "semantic_answer_claim": False,
+        "mtp_execution_claim": not legacy_feat_aux and not errors,
+        "decode_handoff_length_claim": not legacy_feat_aux and not errors,
         "errors": errors,
         "requests": rows,
     }
