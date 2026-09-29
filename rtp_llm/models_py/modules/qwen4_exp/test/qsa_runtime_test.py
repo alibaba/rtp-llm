@@ -669,7 +669,11 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         )
         observed = {}
 
-        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+        def _score(
+            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
             observed.update(q=q, lengths=lengths, max_ctx_len=max_ctx_len)
             return torch.tensor(
                 [[0.25, 3.0]] * q_len,
@@ -724,7 +728,11 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         device = self.indexer.k_norm_gamma.device
         q_len = self.RATIO
 
-        def _score(q, weight, pool, table, lengths, *, block_size, max_ctx_len):
+        def _score(
+            q, weight, pool, table, lengths, *, block_size, max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
             return torch.zeros(
                 q.shape[0] * q.shape[1],
                 max_ctx_len,
@@ -1542,6 +1550,33 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                 validate_lengths=False,
             )
         torch.testing.assert_close(prevalidated, expected)
+
+    @skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_paged_topk_prevalidated_path_replays_new_lengths(self):
+        device = torch.device("cuda")
+        logits = torch.tensor([[0.5, 2.0, 1.0]], device=device)
+        lengths = torch.tensor([9], dtype=torch.int32, device=device)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            select_qsa_paged_tokens(
+                logits, lengths, compress_ratio=4, token_budget=8,
+                validate_lengths=False,
+            )
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = select_qsa_paged_tokens(
+                logits, lengths, compress_ratio=4, token_budget=8,
+                validate_lengths=False,
+            )
+        logits.copy_(torch.tensor([[3.0, 0.5, 2.0]], device=device))
+        lengths.copy_(torch.tensor([12], dtype=torch.int32, device=device))
+        graph.replay()
+        expected = select_qsa_paged_tokens(
+            logits, lengths, compress_ratio=4, token_budget=8,
+        )
+        torch.testing.assert_close(replayed, expected)
 
 
 if __name__ == "__main__":
