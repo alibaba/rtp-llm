@@ -264,7 +264,7 @@ def sparse_prefill_attn(
     stride_idx_b, stride_idx_s = selected.stride(0), selected.stride(1)
 
     grid = (B, H_q, S)
-    online = os.environ.get("RTP_LLM_QWEN4_SPARSE_PREFILL_ONLINE", "0").strip().lower()
+    online = os.environ.get("RTP_LLM_QWEN4_SPARSE_PREFILL_ONLINE", "1").strip().lower()
     kernel = (
         _sparse_prefill_online_kernel
         if online in ("1", "true", "on")
