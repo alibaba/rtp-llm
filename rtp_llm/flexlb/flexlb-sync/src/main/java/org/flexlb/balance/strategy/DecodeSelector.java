@@ -44,19 +44,18 @@ public class DecodeSelector {
      * Selects the least-cost available Decode endpoint and records the choice
      * reason when the caller supplies the request context.
      */
-    public PlacementResult<SelectedRole, RoleType> select(
-            BalanceContext context, DecodeBinding request, String group) {
+    public PlacementResult<SelectedRole, RoleType> select(BalanceContext context, DecodeBinding request, String group) {
         for (int attempt = 0; attempt < MAX_SELECTION_ATTEMPTS; attempt++) {
-            List<DecodeRoutingView> snapshots = workerDirectory.decodeRoutingSnapshot(group);
-            if (snapshots.isEmpty()) {
+            List<DecodeRoutingView> decodeWorkerViews = workerDirectory.decodeRoutingSnapshot(group);
+            if (decodeWorkerViews.isEmpty()) {
                 return PlacementResult.blocked(RoleType.DECODE);
             }
-            Availability[] availabilityByWorker = new Availability[snapshots.size()];
+            Availability[] availabilityByWorker = new Availability[decodeWorkerViews.size()];
             Availability preferredAvailability = Availability.IMPOSSIBLE;
             boolean allWorkersTooSmall = true;
             long largestKvBudget = 0L;
-            for (int index = 0; index < snapshots.size(); index++) {
-                DecodeRoutingView view = snapshots.get(index);
+            for (int index = 0; index < decodeWorkerViews.size(); index++) {
+                DecodeRoutingView view = decodeWorkerViews.get(index);
                 Availability availability = availability(request, view);
                 availabilityByWorker[index] = availability;
                 allWorkersTooSmall &= availability == Availability.IMPOSSIBLE;
@@ -73,19 +72,25 @@ public class DecodeSelector {
                         request.expectedKvTokens(), largestKvBudget));
             }
             if (preferredAvailability == Availability.IMPOSSIBLE) {
-                return classifyCapacityFailure(request, snapshots);
+                return classifyCapacityFailure(request, decodeWorkerViews);
             }
             Availability selectedAvailability = preferredAvailability;
-            double[] costByWorker = new double[snapshots.size()];
+            double[] costByWorker = new double[decodeWorkerViews.size()];
             double minimumCost = Double.POSITIVE_INFINITY;
-            for (int index = 0; index < snapshots.size(); index++) {
+            int minimumCostCandidateCount = 0;
+            for (int index = 0; index < decodeWorkerViews.size(); index++) {
                 if (availabilityByWorker[index] == selectedAvailability) {
-                    DecodeRoutingView view = snapshots.get(index);
+                    DecodeRoutingView view = decodeWorkerViews.get(index);
                     double cost = request.costFormula().evaluate(view.totalLoad(),
                             request.capacity().maxEngineRequests(), view.realKvUsed(), view.totalKv());
                     costByWorker[index] = cost;
                     if (Double.isFinite(cost)) {
-                        minimumCost = Math.min(minimumCost, cost);
+                        if (cost < minimumCost) {
+                            minimumCost = cost;
+                            minimumCostCandidateCount = 1;
+                        } else if (cost == minimumCost) {
+                            minimumCostCandidateCount++;
+                        }
                     }
                 }
             }
@@ -94,18 +99,11 @@ public class DecodeSelector {
                         + request.costFormula().expression());
             }
             double selectedCost = minimumCost;
-            int minimumCostCandidateCount = 0;
-            for (int index = 0; index < snapshots.size(); index++) {
-                if (availabilityByWorker[index] == selectedAvailability
-                        && costByWorker[index] == selectedCost) {
-                    minimumCostCandidateCount++;
-                }
-            }
-            int selectedIndex = rotation.next(RoleType.DECODE, group, snapshots.size(),
+            int selectedIndex = rotation.next(RoleType.DECODE, group, decodeWorkerViews.size(),
                     i -> availabilityByWorker[i] == selectedAvailability && costByWorker[i] == selectedCost,
-                    i -> snapshots.get(i).address());
+                    i -> decodeWorkerViews.get(i).address());
             if (selectedIndex < 0) { throw new IllegalStateException("Decode snapshot candidate disappeared"); }
-            DecodeRoutingView selected = snapshots.get(selectedIndex);
+            DecodeRoutingView selected = decodeWorkerViews.get(selectedIndex);
             WorkerEndpoint.GenerationPin pin = workerDirectory.captureDecodeGeneration(selected);
             if (pin != null) {
                 if (context != null) {
