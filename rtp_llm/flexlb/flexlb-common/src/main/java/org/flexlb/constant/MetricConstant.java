@@ -320,9 +320,14 @@ public class MetricConstant {
     public static final String CACHE_GLOBAL_BYTES = "app.cache.global.bytes";
 
     /**
-     * Cache hit count
+     * Accumulated cache-hit tokens for selected prefill requests.
      */
     public static final String CACHE_HIT_COUNT = "app.cache.hit.count";
+
+    /**
+     * Accumulated input tokens for the same selected prefill requests.
+     */
+    public static final String CACHE_INPUT_TOKENS = "app.cache.input.tokens";
 
     /**
      * Cache hit percentage
@@ -333,6 +338,16 @@ public class MetricConstant {
             "app.cache.hit.comparison.predicted.tokens";
     public static final String CACHE_HIT_COMPARISON_ACTUAL_TOKENS =
             "app.cache.hit.comparison.actual.tokens";
+    /**
+     * Accumulated input tokens from requests with valid cache-hit feedback.
+     */
+    public static final String CACHE_HIT_COMPARISON_INPUT_TOKENS =
+            "app.cache.hit.comparison.input.tokens";
+    /**
+     * Input tokens only from requests with an available local-standby prediction.
+     */
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS =
+            "app.cache.hit.comparison.local.standby.input.tokens";
     public static final String CACHE_HIT_COMPARISON_DELTA_TOKENS =
             "app.cache.hit.comparison.delta.tokens";
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS =
@@ -345,10 +360,22 @@ public class MetricConstant {
             "app.cache.hit.comparison.actual.ratio";
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO =
             "app.cache.hit.comparison.local.standby.predicted.ratio";
+    /**
+     * Accumulated KVCM local match tokens for selected prefill requests.
+     */
     public static final String CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS =
             "app.cache.kvcm.selected.local.match.tokens";
+    /**
+     * Accumulated KVCM global match tokens (including local matches) for selected prefill requests.
+     */
     public static final String CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS =
             "app.cache.kvcm.selected.global.match.tokens";
+
+    /**
+     * Accumulated input tokens for the same KVCM-selected requests.
+     */
+    public static final String CACHE_KVCM_SELECTED_INPUT_TOKENS =
+            "app.cache.kvcm.selected.input.tokens";
     public static final String CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS =
             "app.cache.hit.comparison.kvcm.local.delta.tokens";
     public static final String CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS =
@@ -367,22 +394,22 @@ public class MetricConstant {
             "app.cache.match.standby.fallback.qps";
 
     /**
-     * Recent cache-key hit token count for requests in the current metric bucket.
+     * Accumulated recent cache-key hit tokens for requests in this key window.
      */
     public static final String CACHE_RECENT_KEY_HIT_COUNT = "app.cache.recent.key.hit.count";
 
     /**
-     * Recent cache-key input token count for requests in the current metric bucket.
+     * Accumulated input tokens for the same recent cache-key requests.
      */
     public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
 
     /**
-     * Aggregated theory cache-hit token count. Tagged by window=all.
+     * Cumulative theoretical cache-hit tokens reported as a gauge. Tagged by window=all.
      */
     public static final String CACHE_THEORY_HIT_COUNT = "app.cache.theory.hit.count";
 
     /**
-     * Aggregated theory cache input-token count. Tagged by window=all.
+     * Cumulative theoretical input tokens reported as a gauge. Tagged by window=all.
      */
     public static final String CACHE_THEORY_TOTAL_COUNT = "app.cache.theory.total.count";
 

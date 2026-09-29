@@ -51,7 +51,10 @@ import java.util.concurrent.CompletableFuture;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -160,6 +163,10 @@ class CacheHitFeedbackFlowTest {
         assertEquals(200, comparison.path("localStandby").path("delta").asLong());
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS), any(), eq(200.0));
+        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_ACTUAL_TOKENS), any(), eq(500.0));
+        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_INPUT_TOKENS), any(), eq(1000.0));
+        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS), any(), eq(300.0));
+        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS), any(), eq(1000.0));
         JsonNode status = events("prefill_worker_status").getFirst();
         assertEquals(1, events("prefill_worker_status").size());
         assertEquals(200, status.path("hbmLocalMatchTokens").asLong());
@@ -200,6 +207,7 @@ class CacheHitFeedbackFlowTest {
         assertEquals(0, event.path("actual").path("hit").asLong());
         assertEquals(-300, event.path("localStandby").path("delta").asLong());
         verify(monitor).report(eq(CACHE_HIT_COMPARISON_ACTUAL_TOKENS), any(), eq(0.0));
+        verify(monitor).report(eq(CACHE_HIT_COMPARISON_INPUT_TOKENS), any(), eq(1000.0));
     }
 
     @Test
@@ -212,6 +220,7 @@ class CacheHitFeedbackFlowTest {
         assertTrue(event.hasNonNull("kvcm"));
         assertFalse(event.hasNonNull("localStandby"));
         verify(monitor).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
+        verify(monitor, never()).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS), any(), anyDouble());
     }
 
     @Test
