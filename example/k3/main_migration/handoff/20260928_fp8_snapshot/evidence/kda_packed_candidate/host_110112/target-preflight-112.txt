@@ -1,0 +1,11 @@
+[INFO] checkpoint requested=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
+[INFO] checkpoint realpath=/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers
+[INFO] mount target=/mnt/hf3fs/3fs source=hf3fs.three_node_dev_20260922 fstype=fuse.hf3fs stat_fstype=fuseblk options=rw,nosuid,nodev,relatime,user_id=0,group_id=0,default_permissions,allow_other,max_read=1048576
+[INFO] stat device=188 inode=2894675 kind=directory; df size=90703260549120 used=44194127151104 available=46509133398016 (42.30 TiB)
+[PASS] checkpoint resolves under allowed 3FS root /mnt/hf3fs/3fs/models/kimi
+[PASS] index metadata.total_size matches shard payloads: 58480464384 bytes
+[PASS] checkpoint structure: index=model.safetensors.index.json, shards=7, tensors=16402, bytes=58482942648 (54.47 GiB)
+[PASS] all Safetensors headers and index-to-tensor mappings are structurally valid
+[PASS] explicit load method from environment LOAD_METHOD: fastsafetensors
+[INFO] checkpoint tree bytes=58487884774 (54.47 GiB); weight shard bytes=58482942648 (54.47 GiB)
+[RESULT] PASS warnings=0

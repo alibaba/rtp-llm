@@ -1,0 +1,3 @@
+{"path": "/mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/model-00002-of-000007.safetensors", "use_shm": true, "file_bytes": 16990911504, "seconds": 18.910126328468323, "count": 5404, "first_tensor": "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight_packed", "first_shape": [3072, 1792], "first_dtype": "torch.uint8", "first_1024_sum": 117316.0, "first_device": "cuda:0", "all_tensor_sha256": null}
+set shm[1091593729] failed for fd[70], err[22]
+shm[] readHeader[16] malloc[783] read[17063] copyToDevice[795] total[18658]

@@ -1,0 +1,166 @@
+{
+  "passed": true,
+  "warmup_count": 10,
+  "profiled_count": 16,
+  "replacement_characters_observed": 0,
+  "semantic_answer_claim": false,
+  "errors": [],
+  "requests": [
+    {
+      "label": "warmup-01",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-02",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-03",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-04",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-05",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-06",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-07",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-08",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-09",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "warmup-10",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-01",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-02",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-03",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-04",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-05",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-06",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-07",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-08",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-09",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-10",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-11",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-12",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-13",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-14",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-15",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    },
+    {
+      "label": "profiled-16",
+      "passed": true,
+      "draft_rounds": 7,
+      "replacement_characters": 0
+    }
+  ]
+}

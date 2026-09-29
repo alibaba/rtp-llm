@@ -1,0 +1,32 @@
+rank=0
+[PASS] FastSafetensors startup evidence at /data1/luohaocheng.lhc/k3decode-3fs-112-kda47b-r2/logs/main_0.log:783: [root][2026-09-29 00:36:51.693][495868][MainThread][/data1/luohaocheng.lhc/.cache/bazel/k3-kda-direct-47b-20260928-112/6ee05011022f43dabbc91f4553a3c79d/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS
+rank=1
+[PASS] FastSafetensors startup evidence at /data1/luohaocheng.lhc/k3decode-3fs-112-kda47b-r2/logs/main_1.log:224: [root][2026-09-29 00:36:52.615][495869][MainThread][/data1/luohaocheng.lhc/.cache/bazel/k3-kda-direct-47b-20260928-112/6ee05011022f43dabbc91f4553a3c79d/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS
+rank=2
+[PASS] FastSafetensors startup evidence at /data1/luohaocheng.lhc/k3decode-3fs-112-kda47b-r2/logs/main_2.log:224: [root][2026-09-29 00:36:54.270][495870][MainThread][/data1/luohaocheng.lhc/.cache/bazel/k3-kda-direct-47b-20260928-112/6ee05011022f43dabbc91f4553a3c79d/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS
+rank=3
+[PASS] FastSafetensors startup evidence at /data1/luohaocheng.lhc/k3decode-3fs-112-kda47b-r2/logs/main_3.log:224: [root][2026-09-29 00:36:50.851][495871][MainThread][/data1/luohaocheng.lhc/.cache/bazel/k3-kda-direct-47b-20260928-112/6ee05011022f43dabbc91f4553a3c79d/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS
+rank=4
+[PASS] FastSafetensors startup evidence at /data1/luohaocheng.lhc/k3decode-3fs-112-kda47b-r2/logs/main_4.log:224: [root][2026-09-29 00:36:50.053][495872][MainThread][/data1/luohaocheng.lhc/.cache/bazel/k3-kda-direct-47b-20260928-112/6ee05011022f43dabbc91f4553a3c79d/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS
+rank=5
+[PASS] FastSafetensors startup evidence at /data1/luohaocheng.lhc/k3decode-3fs-112-kda47b-r2/logs/main_5.log:224: [root][2026-09-29 00:36:48.506][495936][MainThread][/data1/luohaocheng.lhc/.cache/bazel/k3-kda-direct-47b-20260928-112/6ee05011022f43dabbc91f4553a3c79d/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS
+rank=6
+[PASS] FastSafetensors startup evidence at /data1/luohaocheng.lhc/k3decode-3fs-112-kda47b-r2/logs/main_6.log:224: [root][2026-09-29 00:36:53.419][496000][MainThread][/data1/luohaocheng.lhc/.cache/bazel/k3-kda-direct-47b-20260928-112/6ee05011022f43dabbc91f4553a3c79d/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS
+rank=7
+[PASS] FastSafetensors startup evidence at /data1/luohaocheng.lhc/k3decode-3fs-112-kda47b-r2/logs/main_7.log:224: [root][2026-09-29 00:36:49.261][496064][MainThread][/data1/luohaocheng.lhc/.cache/bazel/k3-kda-direct-47b-20260928-112/6ee05011022f43dabbc91f4553a3c79d/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/rtp_llm_server.runfiles/rtp_llm/rtp_llm/model_loader/loader.py:_load_weight():273][INFO] load method: fastsafetensors, finally choose load method: fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS

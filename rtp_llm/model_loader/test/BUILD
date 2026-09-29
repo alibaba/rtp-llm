@@ -3,6 +3,20 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_kimi_k3_dense_sp",
+    srcs = ["test_kimi_k3_dense_sp.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_kimi_k3_mla_streaming",
+    srcs = ["test_kimi_k3_mla_streaming.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,
@@ -67,4 +81,11 @@ py_test(
     exec_properties = {
         'gpu': 'MI308X-ROCM7',
     },
+)
+
+py_test(
+    name = "test_kimi_k3_kda_precision",
+    srcs = ["test_kimi_k3_kda_precision.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
 )

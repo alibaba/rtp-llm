@@ -1,0 +1,11 @@
+{
+  "source_commit": "0a36d6d24829f79e06e229ed53feeefee8913172",
+  "prefill_service": "111/r43",
+  "decode_service": "112/r42",
+  "input_tokens": 65536,
+  "output_tokens": 8,
+  "cold_http_elapsed_s": 65.199820805341,
+  "cold_start_only": true,
+  "pd_and_mtp_verified": true,
+  "response_sha256": "8badf908dca5752ed468d6faf9591def1c8f22878b8f2cbadd1e4b86857e49b0"
+}

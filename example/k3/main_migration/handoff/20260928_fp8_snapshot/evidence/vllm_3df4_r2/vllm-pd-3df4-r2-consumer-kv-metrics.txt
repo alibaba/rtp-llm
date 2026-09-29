@@ -1,0 +1,103 @@
+# HELP vllm:nixl_xfer_time_seconds Histogram of transfer duration for NIXL KV Cache transfers.
+# TYPE vllm:nixl_xfer_time_seconds histogram
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.005",model_name="kimi-k3"} 0.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.01",model_name="kimi-k3"} 0.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.025",model_name="kimi-k3"} 0.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.05",model_name="kimi-k3"} 0.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.075",model_name="kimi-k3"} 0.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.1",model_name="kimi-k3"} 3.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.2",model_name="kimi-k3"} 83.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.3",model_name="kimi-k3"} 94.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.5",model_name="kimi-k3"} 119.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="0.75",model_name="kimi-k3"} 131.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="1.0",model_name="kimi-k3"} 136.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="5.0",model_name="kimi-k3"} 136.0
+vllm:nixl_xfer_time_seconds_bucket{engine="0",le="+Inf",model_name="kimi-k3"} 136.0
+vllm:nixl_xfer_time_seconds_count{engine="0",model_name="kimi-k3"} 136.0
+vllm:nixl_xfer_time_seconds_sum{engine="0",model_name="kimi-k3"} 35.693498
+# HELP vllm:nixl_xfer_time_seconds_created Histogram of transfer duration for NIXL KV Cache transfers.
+# TYPE vllm:nixl_xfer_time_seconds_created gauge
+vllm:nixl_xfer_time_seconds_created{engine="0",model_name="kimi-k3"} 1.7906153077986546e+09
+# HELP vllm:nixl_post_time_seconds Histogram of transfer post time for NIXL KV Cache transfers.
+# TYPE vllm:nixl_post_time_seconds histogram
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.001",model_name="kimi-k3"} 129.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.005",model_name="kimi-k3"} 134.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.01",model_name="kimi-k3"} 134.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.025",model_name="kimi-k3"} 134.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.05",model_name="kimi-k3"} 134.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.075",model_name="kimi-k3"} 134.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.1",model_name="kimi-k3"} 134.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.2",model_name="kimi-k3"} 136.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.3",model_name="kimi-k3"} 136.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.5",model_name="kimi-k3"} 136.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="0.75",model_name="kimi-k3"} 136.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="1.0",model_name="kimi-k3"} 136.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="5.0",model_name="kimi-k3"} 136.0
+vllm:nixl_post_time_seconds_bucket{engine="0",le="+Inf",model_name="kimi-k3"} 136.0
+vllm:nixl_post_time_seconds_count{engine="0",model_name="kimi-k3"} 136.0
+vllm:nixl_post_time_seconds_sum{engine="0",model_name="kimi-k3"} 0.42060000000000014
+# HELP vllm:nixl_post_time_seconds_created Histogram of transfer post time for NIXL KV Cache transfers.
+# TYPE vllm:nixl_post_time_seconds_created gauge
+vllm:nixl_post_time_seconds_created{engine="0",model_name="kimi-k3"} 1.7906153077987146e+09
+# HELP vllm:nixl_bytes_transferred Histogram of bytes transferred per NIXL KV Cache transfers.
+# TYPE vllm:nixl_bytes_transferred histogram
+vllm:nixl_bytes_transferred_bucket{engine="0",le="2048.0",model_name="kimi-k3"} 0.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="8192.0",model_name="kimi-k3"} 0.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="32768.0",model_name="kimi-k3"} 0.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="131072.0",model_name="kimi-k3"} 0.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="524288.0",model_name="kimi-k3"} 0.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="2.097152e+06",model_name="kimi-k3"} 0.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="8.388608e+06",model_name="kimi-k3"} 0.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="3.3554432e+07",model_name="kimi-k3"} 0.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="1.34217728e+08",model_name="kimi-k3"} 136.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="5.36870912e+08",model_name="kimi-k3"} 136.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="2.147483648e+09",model_name="kimi-k3"} 136.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="8.589934592e+09",model_name="kimi-k3"} 136.0
+vllm:nixl_bytes_transferred_bucket{engine="0",le="+Inf",model_name="kimi-k3"} 136.0
+vllm:nixl_bytes_transferred_count{engine="0",model_name="kimi-k3"} 136.0
+vllm:nixl_bytes_transferred_sum{engine="0",model_name="kimi-k3"} 5.506080768e+09
+# HELP vllm:nixl_bytes_transferred_created Histogram of bytes transferred per NIXL KV Cache transfers.
+# TYPE vllm:nixl_bytes_transferred_created gauge
+vllm:nixl_bytes_transferred_created{engine="0",model_name="kimi-k3"} 1.7906153077987552e+09
+# HELP vllm:nixl_num_descriptors Histogram of number of descriptors per NIXL  KV Cache transfers.
+# TYPE vllm:nixl_num_descriptors histogram
+vllm:nixl_num_descriptors_bucket{engine="0",le="10.0",model_name="kimi-k3"} 0.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="20.0",model_name="kimi-k3"} 72.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="30.0",model_name="kimi-k3"} 72.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="50.0",model_name="kimi-k3"} 72.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="75.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="100.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="200.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="400.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="1000.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="2000.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="4000.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="10000.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="20000.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="50000.0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_bucket{engine="0",le="+Inf",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_count{engine="0",model_name="kimi-k3"} 136.0
+vllm:nixl_num_descriptors_sum{engine="0",model_name="kimi-k3"} 4456.0
+# HELP vllm:nixl_num_descriptors_created Histogram of number of descriptors per NIXL  KV Cache transfers.
+# TYPE vllm:nixl_num_descriptors_created gauge
+vllm:nixl_num_descriptors_created{engine="0",model_name="kimi-k3"} 1.7906153077987924e+09
+# HELP vllm:nixl_num_failed_transfers_total Number of failed NIXL KV Cache transfers, including handshake and notification failures. NOTE: KV expiry is tracked separately in vllm:nixl_num_kv_expired_reqs.
+# TYPE vllm:nixl_num_failed_transfers_total counter
+vllm:nixl_num_failed_transfers_total{engine="0",model_name="kimi-k3"} 0.0
+# HELP vllm:nixl_num_failed_transfers_created Number of failed NIXL KV Cache transfers, including handshake and notification failures. NOTE: KV expiry is tracked separately in vllm:nixl_num_kv_expired_reqs.
+# TYPE vllm:nixl_num_failed_transfers_created gauge
+vllm:nixl_num_failed_transfers_created{engine="0",model_name="kimi-k3"} 1.7906153077988298e+09
+# HELP vllm:nixl_num_failed_notifications_total Number of failed NIXL KV Cache notifications. Retained for compatibility; these failures are also included in vllm:nixl_num_failed_transfers.
+# TYPE vllm:nixl_num_failed_notifications_total counter
+vllm:nixl_num_failed_notifications_total{engine="0",model_name="kimi-k3"} 0.0
+# HELP vllm:nixl_num_failed_notifications_created Number of failed NIXL KV Cache notifications. Retained for compatibility; these failures are also included in vllm:nixl_num_failed_transfers.
+# TYPE vllm:nixl_num_failed_notifications_created gauge
+vllm:nixl_num_failed_notifications_created{engine="0",model_name="kimi-k3"} 1.7906153077988458e+09
+# HELP vllm:nixl_num_kv_expired_reqs_total Number of requests that had their KV expire. NOTE: This metric is tracked on the P instance.
+# TYPE vllm:nixl_num_kv_expired_reqs_total counter
+vllm:nixl_num_kv_expired_reqs_total{engine="0",model_name="kimi-k3"} 0.0
+# HELP vllm:nixl_num_kv_expired_reqs_created Number of requests that had their KV expire. NOTE: This metric is tracked on the P instance.
+# TYPE vllm:nixl_num_kv_expired_reqs_created gauge
+vllm:nixl_num_kv_expired_reqs_created{engine="0",model_name="kimi-k3"} 1.790615307798857e+09
+vllm:prompt_tokens_by_source_total{engine="0",model_name="kimi-k3",source="external_kv_transfer"} 1.114112e+06
+vllm:prompt_tokens_by_source_created{engine="0",model_name="kimi-k3",source="external_kv_transfer"} 1.7906153077993643e+09

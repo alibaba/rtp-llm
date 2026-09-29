@@ -1,0 +1,12 @@
+[23,705 / 23,714] Compiling rtp_llm/cpp/model_rpc/PrefillGenerateContext.cc; 40s local ... (7 actions, 6 running)
+[23,707 / 23,714] Compiling rtp_llm/cpp/model_rpc/PrefillGenerateContext.cc; 41s local ... (5 actions running)
+[23,708 / 23,714] Compiling rtp_llm/cpp/model_rpc/PrefillGenerateContext.cc; 44s local ... (4 actions running)
+[23,710 / 23,714] Compiling rtp_llm/cpp/model_rpc/LocalRpcServer.cc; 44s local ... (2 actions running)
+[23,711 / 23,714] Compiling rtp_llm/cpp/model_rpc/DecodeRpcServer.cc; 43s local
+[23,713 / 23,714] Linking libth_transformer.so; 0s local
+[23,713 / 23,714] Linking libth_transformer.so; 10s local
+Target //rtp_llm:rtp_llm_server up-to-date:
+  bazel-bin/rtp_llm/rtp_llm_server
+INFO: Elapsed time: 851.748s, Critical Path: 182.42s
+INFO: 23714 processes: 17567 internal, 6147 local.
+INFO: Build completed successfully, 23714 total actions

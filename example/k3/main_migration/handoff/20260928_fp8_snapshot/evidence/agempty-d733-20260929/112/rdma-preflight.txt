@@ -1,0 +1,227 @@
+hca_id:	mlx5_2
+	transport:			InfiniBand (0)
+	fw_ver:				28.47.2526
+	node_guid:			3c6d:6603:00f6:c9a6
+	sys_image_guid:			3c6d:6603:00f6:c9a6
+	vendor_id:			0x02c9
+	vendor_part_id:			4129
+	hw_ver:				0x0
+	board_id:			NVD0000000079
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		512 (2)
+			sm_lid:			1
+			port_lid:		1
+			port_lmc:		0x00
+			link_layer:		InfiniBand
+
+hca_id:	mlx5_3
+	transport:			InfiniBand (0)
+	fw_ver:				28.47.2526
+	node_guid:			3c6d:6603:00f6:c9a7
+	sys_image_guid:			3c6d:6603:00f6:c9a6
+	vendor_id:			0x02c9
+	vendor_part_id:			4129
+	hw_ver:				0x0
+	board_id:			NVD0000000079
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		512 (2)
+			sm_lid:			1
+			port_lid:		4
+			port_lmc:		0x00
+			link_layer:		InfiniBand
+
+hca_id:	mlx5_4
+	transport:			InfiniBand (0)
+	fw_ver:				28.47.2526
+	node_guid:			3c6d:6603:00f6:c9a8
+	sys_image_guid:			3c6d:6603:00f6:c9a6
+	vendor_id:			0x02c9
+	vendor_part_id:			4129
+	hw_ver:				0x0
+	board_id:			NVD0000000079
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		512 (2)
+			sm_lid:			1
+			port_lid:		5
+			port_lmc:		0x00
+			link_layer:		InfiniBand
+
+hca_id:	mlx5_5
+	transport:			InfiniBand (0)
+	fw_ver:				28.47.2526
+	node_guid:			3c6d:6603:00f6:c9a9
+	sys_image_guid:			3c6d:6603:00f6:c9a6
+	vendor_id:			0x02c9
+	vendor_part_id:			4129
+	hw_ver:				0x0
+	board_id:			NVD0000000079
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		512 (2)
+			sm_lid:			1
+			port_lid:		6
+			port_lmc:		0x00
+			link_layer:		InfiniBand
+
+hca_id:	mlx5_bond_0
+	transport:			InfiniBand (0)
+	fw_ver:				40.47.1632
+	node_guid:			3c6d:6603:00f6:c9ea
+	sys_image_guid:			3c6d:6603:00f6:c9ea
+	vendor_id:			0x02c9
+	vendor_part_id:			4131
+	hw_ver:				0x0
+	board_id:			NVD0000000072
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
+hca_id:	mlx5_bond_1
+	transport:			InfiniBand (0)
+	fw_ver:				40.47.1632
+	node_guid:			3c6d:6603:00f6:c9fa
+	sys_image_guid:			3c6d:6603:00f6:c9fa
+	vendor_id:			0x02c9
+	vendor_part_id:			4131
+	hw_ver:				0x0
+	board_id:			NVD0000000072
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
+hca_id:	mlx5_bond_2
+	transport:			InfiniBand (0)
+	fw_ver:				40.47.1632
+	node_guid:			3c6d:6603:00f6:ca0a
+	sys_image_guid:			3c6d:6603:00f6:ca0a
+	vendor_id:			0x02c9
+	vendor_part_id:			4131
+	hw_ver:				0x0
+	board_id:			NVD0000000072
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
+hca_id:	mlx5_bond_3
+	transport:			InfiniBand (0)
+	fw_ver:				40.47.1632
+	node_guid:			3c6d:6603:00f6:ca1a
+	sys_image_guid:			3c6d:6603:00f6:ca1a
+	vendor_id:			0x02c9
+	vendor_part_id:			4131
+	hw_ver:				0x0
+	board_id:			NVD0000000072
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
+hca_id:	mlx5_bond_4
+	transport:			InfiniBand (0)
+	fw_ver:				40.47.1632
+	node_guid:			3c6d:6603:00f6:c9aa
+	sys_image_guid:			3c6d:6603:00f6:c9aa
+	vendor_id:			0x02c9
+	vendor_part_id:			4131
+	hw_ver:				0x0
+	board_id:			NVD0000000072
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
+hca_id:	mlx5_bond_5
+	transport:			InfiniBand (0)
+	fw_ver:				40.47.1632
+	node_guid:			3c6d:6603:00f6:c9ba
+	sys_image_guid:			3c6d:6603:00f6:c9ba
+	vendor_id:			0x02c9
+	vendor_part_id:			4131
+	hw_ver:				0x0
+	board_id:			NVD0000000072
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
+hca_id:	mlx5_bond_6
+	transport:			InfiniBand (0)
+	fw_ver:				40.47.1632
+	node_guid:			3c6d:6603:00f6:c9ca
+	sys_image_guid:			3c6d:6603:00f6:c9ca
+	vendor_id:			0x02c9
+	vendor_part_id:			4131
+	hw_ver:				0x0
+	board_id:			NVD0000000072
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
+hca_id:	mlx5_bond_7
+	transport:			InfiniBand (0)
+	fw_ver:				40.47.1632
+	node_guid:			3c6d:6603:00f6:c9da
+	sys_image_guid:			3c6d:6603:00f6:c9da
+	vendor_id:			0x02c9
+	vendor_part_id:			4131
+	hw_ver:				0x0
+	board_id:			NVD0000000072
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet

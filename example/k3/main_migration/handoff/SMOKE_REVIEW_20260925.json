@@ -1,0 +1,27 @@
+{
+  "time": 1790349585.983775,
+  "verdict": "PASS for 118 completed cases, three repeat cases deferred by explicit user instruction",
+  "checked": 118,
+  "errors": [],
+  "deferred": [
+    "decode-page-cross-4096-repeat",
+    "decode-page-cross-65536-repeat",
+    "decode-page-cross-8192-repeat"
+  ],
+  "original_full_suite_passed": false,
+  "scope": "full93 BF16 dual-host PD main-text-64k completed cases; no FP8, performance, controlled-state or whole migration completion claim",
+  "raw_audit": "pd427-reviewed-118-audit.json",
+  "raw_archive": "pd427-reviewed-results.tar.gz",
+  "archive_sha256": "4bea02c7c1c820a5bd7563c6ace5ac69871e915b0cc35e0275e8388941d8fa9a",
+  "runtime": {
+    "graph_replay_pairs": 508,
+    "rdma_write_callbacks": 2187,
+    "cases_with_real_mtp_acceptance": 118
+  },
+  "limitations": [
+    "Old PD non-streaming path does not promptly cancel backend generation when client disconnects; observed natural completion and full resource recovery.",
+    "Three deferred repeat responses were not collected and are not counted as passed.",
+    "Earlier PD420 timeout failures remain preserved."
+  ],
+  "artifact_note": "Original responses and full prompts retained in the private evidence archive; see handoff operational index."
+}

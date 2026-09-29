@@ -1,0 +1,203 @@
+{
+  "integrated_git_commit": "0a36d6d24829f79e06e229ed53feeefee8913172",
+  "feat_git_commit": "55641e09bc09cdafcf8f31b28aa55b18bc66d24b",
+  "hosts": {
+    "prefill": "L20-dev-111",
+    "decode": "L20-dev-112"
+  },
+  "model_layers": 4,
+  "input_token_ids_sha256": "97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee",
+  "max_output_tokens": 8,
+  "actual_input_ids_verified_by_runner": true,
+  "warmup": {
+    "integrated_completed": 10,
+    "integrated_stable": true,
+    "integrated_last3_http_s": {
+      "last3": [
+        2.038832599297166,
+        2.070597712881863,
+        2.030448858626187
+      ],
+      "max_relative_deviation_pct": 1.5580049875427457
+    },
+    "integrated_last3_first_token_ms": {
+      "last3": [
+        162.364,
+        164.585,
+        167.774
+      ],
+      "max_relative_deviation_pct": 1.937600631892331
+    },
+    "feat_completed": 10,
+    "feat_stable": true,
+    "feat_stability_field": "first-token"
+  },
+  "profiles": {
+    "integrated_requests": 16,
+    "feat_requests": 16,
+    "integrated_matched_all_rank": 5,
+    "feat_matched_all_rank": 6
+  },
+  "phases": {
+    "prefill": {
+      "integrated": {
+        "matched_values_ms": [
+          137.6928017578125,
+          138.278984375,
+          139.4489169921875,
+          138.1421240234375,
+          138.3948291015625
+        ],
+        "median_ms": 138.278984375,
+        "max_relative_deviation_pct": 0.8460668282135687,
+        "last3_max_relative_deviation_pct": 0.7616526552819725
+      },
+      "feat": {
+        "matched_values_ms": [
+          134.829419921875,
+          147.6062109375,
+          134.97982421875,
+          134.9125283203125,
+          134.0189208984375,
+          134.833134765625
+        ],
+        "median_ms": 134.87283154296875,
+        "max_relative_deviation_pct": 9.441026223635383,
+        "last3_max_relative_deviation_pct": 0.6038677871005667
+      },
+      "integrated_minus_feat_median_ms": 3.406152832031239
+    },
+    "target": {
+      "integrated": {
+        "matched_values_ms": [
+          74.061609375,
+          74.8988330078125,
+          74.4929130859375,
+          73.872619140625,
+          74.5455791015625
+        ],
+        "median_ms": 74.4929130859375,
+        "max_relative_deviation_pct": 0.8326885331989973,
+        "last3_max_relative_deviation_pct": 0.8326885331989973
+      },
+      "feat": {
+        "matched_values_ms": [
+          70.99134375,
+          83.42773828125,
+          71.302611328125,
+          71.2644990234375,
+          71.00384765625,
+          70.9232490234375
+        ],
+        "median_ms": 71.13417333984376,
+        "max_relative_deviation_pct": 17.282220857018604,
+        "last3_max_relative_deviation_pct": 0.36709470795072996
+      },
+      "integrated_minus_feat_median_ms": 3.3587397460937467
+    },
+    "draft": {
+      "integrated": {
+        "matched_values_ms": [
+          63.63067578125,
+          63.381654296875,
+          64.9541669921875,
+          64.27036328125,
+          63.8479482421875
+        ],
+        "median_ms": 63.8479482421875,
+        "max_relative_deviation_pct": 1.7325830828641462,
+        "last3_max_relative_deviation_pct": 1.063948725394846
+      },
+      "feat": {
+        "matched_values_ms": [
+          63.11721875,
+          63.057884765625,
+          62.6194892578125,
+          62.6872685546875,
+          62.317015625,
+          62.972771484375
+        ],
+        "median_ms": 62.83002001953125,
+        "max_relative_deviation_pct": 0.8164956725650763,
+        "last3_max_relative_deviation_pct": 0.5906349697857584
+      },
+      "integrated_minus_feat_median_ms": 1.017928222656252
+    }
+  },
+  "target_kernel_family_cumulative_median_ms": {
+    "integrated": {
+      "AttnRes": 0.586915,
+      "FP8.producer_or_quant": 1.799759,
+      "GEMM.DeepGEMM_unattributed": 7.244601,
+      "GEMM.NVJet_unattributed": 10.653688,
+      "KDA.cuLA_delta": 3.138009,
+      "KDA.other": 3.540827,
+      "KDA.short_conv": 1.423692,
+      "MLA.TokenSpeed": 5.376459,
+      "MoE.MegaMoE": 14.404467,
+      "NCCL": 14.444851,
+      "Other_unattributed": 5.799883,
+      "PD.fused_copy": 0.02368,
+      "Tensor.copy": 1.439691
+    },
+    "feat": {
+      "AttnRes": 0.642841,
+      "AttnRes.fp8_producer": 0.53359,
+      "FP8.producer_or_quant": 1.341312,
+      "GEMM.DeepGEMM_unattributed": 12.224411,
+      "GEMM.NVJet_unattributed": 10.459183,
+      "KDA.cuLA_delta": 3.093962,
+      "KDA.other": 3.242763,
+      "KDA.short_conv": 1.408628,
+      "MLA.TokenSpeed": 5.333454,
+      "MoE.MegaMoE": 16.100904,
+      "MoE.combine": 0.195987,
+      "NCCL": 8.827849,
+      "Other_unattributed": 4.989449,
+      "Tensor.copy": 1.183279
+    }
+  },
+  "raw_trace_archives": {
+    "integrated": {
+      "sha256": "ca0527b5bc3a374331ae9cd1cc9444ccf7b064da949d03c49e2666a652f37709",
+      "bytes": 9097053
+    },
+    "feat": {
+      "sha256": "6297c8fef74832faf9cf1a5b4ad511366146571ee3adc2542cda0a5dfc583901",
+      "bytes": 9083692
+    }
+  },
+  "cold_start_diagnostic": {
+    "first_request": "HTTP 500 8214_KEEP_ALIVE_TIMEOUT during TokenSpeed CuteDSL compilation",
+    "same_input_retry": {
+      "http_status": 200,
+      "elapsed_s": 13.799715018831193,
+      "error_code": null,
+      "message": "",
+      "prompt_tokens": 65536,
+      "output_tokens": 8,
+      "first_token_cost_time": 160.361,
+      "speculative_draft_rounds": 7,
+      "pd_sep": true
+    },
+    "failed_first_token_warmup": "14 completed requests, no first-token ±5% convergence; no profile collected",
+    "r44c": "10 completed requests, both last-three HTTP and first-token latencies within ±5%; profile collected"
+  },
+  "limits": [
+    "Four-layer only.",
+    "GPU kernel family cumulative time overlaps CUDA streams; use phase span for critical path.",
+    "Fixed feat uses FP8 values/scales for all-gather and therefore violates the final BF16 NCCL communication contract.",
+    "The HTTP prompt_tokens field differs between revisions although both runners verified exact debug_info input IDs against the same fixture.",
+    "vLLM was measured on different hosts and is not part of this same-host comparison."
+  ],
+  "raw_request_archives": {
+    "integrated": {
+      "sha256": "51345faa20fef188b06f07869d14a7a563e365aca0a1890e6bb3c632069bcc31",
+      "bytes": 93974
+    },
+    "feat": {
+      "sha256": "0625c009c41413bbb6b1c614bb1597decea5cd588111129384973a1e0e5ed841",
+      "bytes": 87250
+    }
+  }
+}

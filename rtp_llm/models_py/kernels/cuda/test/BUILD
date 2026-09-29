@@ -91,3 +91,9 @@ cuda13_sm100_py_test(
     srcs = ["fused_silu_mul_token_quant_batched_test.py"],
     deps = py_test_deps,
 )
+
+cuda13_sm100_py_test(
+    name = "fused_rmsnorm_gate_quant_test",
+    srcs = ["fused_rmsnorm_gate_quant_test.py"],
+    deps = py_test_deps,
+)

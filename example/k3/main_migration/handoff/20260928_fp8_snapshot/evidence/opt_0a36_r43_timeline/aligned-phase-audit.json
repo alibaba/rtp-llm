@@ -1,0 +1,149 @@
+{
+  "input_tokens": 65536,
+  "model_layers": 4,
+  "world_size": 8,
+  "same_request_match": "nearest target CPU scope timestamp within 2000us",
+  "trace_dir": "/data6/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/timeline-64k-integrated-0a36-r43-111112-20260928/traces",
+  "trace_template": "k3_64k_prefill_opt_0a36_r43_wr{rank}_1.json",
+  "matched_requests": [
+    {
+      "rank_trace_indices": [
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "target_timestamp_us": 7616459951595.02,
+      "phases": {
+        "prefill": {
+          "worst_rank": 0,
+          "max_rank_gpu_span_ms": 139.1452138671875,
+          "max_rank_gpu_union_ms": 130.727490234375,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 10.904604,
+            "PD.fused_copy": 13.647133000000002,
+            "NCCL": 34.65247800000001,
+            "Tensor.copy": 3.0605080000000005,
+            "FP8.producer_or_quant": 1.6692329999999997,
+            "GEMM.DeepGEMM_unattributed": 7.300161999999999,
+            "KDA.short_conv": 1.4244919999999999,
+            "KDA.other": 3.552351000000001,
+            "KDA.cuLA_delta": 3.137471,
+            "GEMM.NVJet_unattributed": 16.210030000000003,
+            "MoE.MegaMoE": 19.785973,
+            "MLA.TokenSpeed": 15.425358000000001
+          }
+        },
+        "target": {
+          "worst_rank": 0,
+          "max_rank_gpu_span_ms": 74.9782890625,
+          "max_rank_gpu_union_ms": 69.6494931640625,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 6.590646000000003,
+            "PD.fused_copy": 0.026047999999999998,
+            "NCCL": 13.912959,
+            "Tensor.copy": 1.4386690000000002,
+            "FP8.producer_or_quant": 1.6692329999999997,
+            "GEMM.DeepGEMM_unattributed": 7.300161999999999,
+            "KDA.short_conv": 1.4244919999999999,
+            "KDA.other": 3.552351000000001,
+            "KDA.cuLA_delta": 3.137471,
+            "GEMM.NVJet_unattributed": 10.756927,
+            "MoE.MegaMoE": 14.355684,
+            "MLA.TokenSpeed": 5.514227
+          }
+        },
+        "draft": {
+          "worst_rank": 2,
+          "max_rank_gpu_span_ms": 64.1433203125,
+          "max_rank_gpu_union_ms": 61.060255859375,
+          "worst_rank_family_cumulative_ms": {
+            "NCCL": 20.984070000000003,
+            "PD.fused_copy": 13.41764,
+            "Other_unattributed": 4.0929269999999995,
+            "Tensor.copy": 1.60891,
+            "GEMM.NVJet_unattributed": 5.4388559999999995,
+            "MLA.TokenSpeed": 9.920654,
+            "MoE.MegaMoE": 5.476523
+          }
+        }
+      }
+    },
+    {
+      "rank_trace_indices": [
+        3,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "target_timestamp_us": 7616462046774.297,
+      "phases": {
+        "prefill": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 138.8174755859375,
+          "max_rank_gpu_union_ms": 130.8722275390625,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 10.593816000000006,
+            "PD.fused_copy": 13.358409,
+            "NCCL": 35.398776000000005,
+            "Tensor.copy": 3.0464870000000004,
+            "FP8.producer_or_quant": 1.667339,
+            "GEMM.DeepGEMM_unattributed": 7.234746,
+            "KDA.short_conv": 1.423849,
+            "KDA.other": 3.538427,
+            "KDA.cuLA_delta": 3.1373689999999996,
+            "GEMM.NVJet_unattributed": 16.050462000000003,
+            "MoE.MegaMoE": 19.873787,
+            "MLA.TokenSpeed": 15.216087
+          }
+        },
+        "target": {
+          "worst_rank": 1,
+          "max_rank_gpu_span_ms": 75.0108935546875,
+          "max_rank_gpu_union_ms": 70.0098017578125,
+          "worst_rank_family_cumulative_ms": {
+            "Other_unattributed": 6.512024000000002,
+            "PD.fused_copy": 0.018784,
+            "NCCL": 14.198480000000002,
+            "Tensor.copy": 1.4405230000000002,
+            "FP8.producer_or_quant": 1.667339,
+            "GEMM.DeepGEMM_unattributed": 7.234746,
+            "KDA.short_conv": 1.423849,
+            "KDA.other": 3.538427,
+            "KDA.cuLA_delta": 3.1373689999999996,
+            "GEMM.NVJet_unattributed": 10.665909,
+            "MoE.MegaMoE": 14.409841,
+            "MLA.TokenSpeed": 5.375818000000001
+          }
+        },
+        "draft": {
+          "worst_rank": 6,
+          "max_rank_gpu_span_ms": 63.806376953125,
+          "max_rank_gpu_union_ms": 60.902744140625,
+          "worst_rank_family_cumulative_ms": {
+            "NCCL": 20.857515999999997,
+            "PD.fused_copy": 13.536357,
+            "Other_unattributed": 4.108628999999999,
+            "Tensor.copy": 1.6160390000000002,
+            "GEMM.NVJet_unattributed": 5.370076,
+            "MLA.TokenSpeed": 9.821138999999999,
+            "MoE.MegaMoE": 5.4687
+          }
+        }
+      }
+    }
+  ],
+  "median_max_rank_gpu_span_ms": {
+    "prefill": 138.9813447265625,
+    "target": 74.99459130859375,
+    "draft": 63.974848632812495
+  }
+}

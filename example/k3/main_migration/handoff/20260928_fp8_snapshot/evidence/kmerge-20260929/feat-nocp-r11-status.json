@@ -1,0 +1,97 @@
+{
+  "run_id": "feat-nocp-a9bf-4layer-3fs-110112-r11-20260929",
+  "feat_commit": "a9bf762e878fc54ee9176da5c34ffbe6babc8d45",
+  "flow_response_audit": {
+    "passed": true,
+    "checked": 10,
+    "semantic_answer_claim": false,
+    "mtp_execution_claim": false
+  },
+  "flow_input_lengths": [
+    8192,
+    12288,
+    16384,
+    20480,
+    65537
+  ],
+  "flow_accepted_draft_tokens": [
+    0,
+    0,
+    -1,
+    0,
+    0,
+    0,
+    -1,
+    -1,
+    -1,
+    -1
+  ],
+  "decode_controller": {
+    "passed": false,
+    "exit_code": 2,
+    "failure": "legacy DCP/Page-RR evidence check requires markers absent under no-CP; overall driver exit 1"
+  },
+  "decode_runtime": {
+    "no_cp_settings_confirmed": true,
+    "dcp_marker_count": 0,
+    "page_rr_target_marker_count": 0,
+    "expected_graph_capture_buckets": [
+      2,
+      4,
+      8
+    ],
+    "graph_capture_ranks_by_bucket": {
+      "2": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "4": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "8": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    "request_time_mtp_device_input_ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "graph_replay_and_draft_kernel_timeline_proven": false
+  },
+  "performance_measurement": {
+    "completed": false,
+    "reason": "110-115 exclusive performance selector returned NO_ELIGIBLE_SELECTION twice; raw selection records retained"
+  },
+  "archive_sha256": {
+    "feat-nocp-r11-prefill-logs.tar.gz": "11c676000fc30de16f9516e44d6ab56fc06c347babc2662a7f74a69f4f4e8246",
+    "feat-nocp-r11-decode-logs.tar.gz": "622589832d3f1d7ddb4e453a8817edba6472c4a569f1b094212706cf59066bbd",
+    "feat-nocp-r11-prefill-engine.log.gz": "f287aa56c39a3b1215e952aa92ef01876c44394bb4ea86fa22fcd5c631db5943",
+    "feat-nocp-r11-decode-engine.log.gz": "145ff64d742ca7619e7fb36d8f4e7f5c29e389682f87048e1725ded9bd954bc6"
+  }
+}

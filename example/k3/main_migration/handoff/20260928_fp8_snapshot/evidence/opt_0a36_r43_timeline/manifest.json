@@ -1,0 +1,78 @@
+{
+  "source_commit": "0a36d6d24829f79e06e229ed53feeefee8913172",
+  "hosts": {
+    "prefill": 111,
+    "decode": 112
+  },
+  "checkpoint": "direct FastSafetensors from /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers",
+  "task_local_3fs_pread_threads": 64,
+  "input_tokens": 65536,
+  "input_token_ids_sha256": "97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee",
+  "max_output_tokens": 8,
+  "warmups": 10,
+  "warmup_last3_http_s": [
+    2.066857222467661,
+    2.043805155903101,
+    2.1528010331094265
+  ],
+  "warmup_last3_max_relative_deviation": 0.04158188079346652,
+  "profiled_requests": 8,
+  "independently_checked_raw_responses": 18,
+  "traces": [
+    {
+      "rank": 0,
+      "target_scopes": 4,
+      "draft_scopes": 4,
+      "events": 23641
+    },
+    {
+      "rank": 1,
+      "target_scopes": 4,
+      "draft_scopes": 4,
+      "events": 21945
+    },
+    {
+      "rank": 2,
+      "target_scopes": 4,
+      "draft_scopes": 4,
+      "events": 21839
+    },
+    {
+      "rank": 3,
+      "target_scopes": 4,
+      "draft_scopes": 4,
+      "events": 21935
+    },
+    {
+      "rank": 4,
+      "target_scopes": 4,
+      "draft_scopes": 4,
+      "events": 21933
+    },
+    {
+      "rank": 5,
+      "target_scopes": 4,
+      "draft_scopes": 4,
+      "events": 21905
+    },
+    {
+      "rank": 6,
+      "target_scopes": 4,
+      "draft_scopes": 4,
+      "events": 21909
+    },
+    {
+      "rank": 7,
+      "target_scopes": 4,
+      "draft_scopes": 4,
+      "events": 21893
+    }
+  ],
+  "matched_full_rank_requests": 2,
+  "median_max_rank_gpu_span_ms": {
+    "prefill": 138.9813447265625,
+    "target": 74.99459130859375,
+    "draft": 63.974848632812495
+  },
+  "note": "Four-layer target and draft GPU phase spans; no full-model or cross-configuration winner claim."
+}

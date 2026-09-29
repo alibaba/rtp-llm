@@ -1,0 +1,171 @@
+{
+  "source_dirname": "timeline-64k-vllm-3df4-fourlayer-nixl-pd-pynccl-profile-20260928",
+  "trace_pattern": "dp0_pp0_tp*_rank*.pt.trace.json",
+  "trace_files": [
+    {
+      "name": "dp0_pp0_tp0_dcp0_ep0_rank0.1790554554862239049.pt.trace.json",
+      "raw_bytes": 14810561,
+      "raw_sha256": "4e3b3e5a26c3c09ddc2b52495e3a8ad43fee8241ece064982c3f0a60e6309a27",
+      "saved_bytes": 809100,
+      "saved_sha256": "e2b82b93a3ad8c2c2160c3c68861ceeab4a125c4a54437a207f212a78927c9c5"
+    },
+    {
+      "name": "dp0_pp0_tp1_dcp0_ep1_rank1.1790554554861440042.pt.trace.json",
+      "raw_bytes": 14806592,
+      "raw_sha256": "50aea40dd3d4e964f6a7bb4f4082bdb2189dde811c2921d481627ae9d6998343",
+      "saved_bytes": 801699,
+      "saved_sha256": "616738f2e7a9fc6dbd72fc4ea731db2646135ee25e44cd2d30a79710baa4ee47"
+    },
+    {
+      "name": "dp0_pp0_tp2_dcp0_ep2_rank2.1790554554872447609.pt.trace.json",
+      "raw_bytes": 14808301,
+      "raw_sha256": "ca323b19caaa573a02bb3e165bf13cc9383ee1b77057084d0701e03d2cfbbccf",
+      "saved_bytes": 793367,
+      "saved_sha256": "7eaaa100a4ba128787c41dafa2465e4f2522a21b6f06865920988e6f056abd28"
+    },
+    {
+      "name": "dp0_pp0_tp3_dcp0_ep3_rank3.1790554554860856517.pt.trace.json",
+      "raw_bytes": 14811311,
+      "raw_sha256": "b668812430d45d3a416a2c04ea80e2afd40e85354655c78865b318d8de510393",
+      "saved_bytes": 790184,
+      "saved_sha256": "eba5ae831a2279ba0f0c7448138cec226c54257b6cefa094b12cbd3d98e501af"
+    },
+    {
+      "name": "dp0_pp0_tp4_dcp0_ep4_rank4.1790554554860857327.pt.trace.json",
+      "raw_bytes": 14819091,
+      "raw_sha256": "88884923c89ff447ec88b016fb100b60aa40aebba1354dfde881eb7674bc3137",
+      "saved_bytes": 787830,
+      "saved_sha256": "ac620c8f4cbcaa53f5e1e78cd85ea710cca5032dd8f386d1e3bedc537bce4993"
+    },
+    {
+      "name": "dp0_pp0_tp5_dcp0_ep5_rank5.1790554554862258583.pt.trace.json",
+      "raw_bytes": 14818751,
+      "raw_sha256": "da6664e9a00341bbdb6e734aca7e09fc1eb2a25609adf0077ffaef066f582ea5",
+      "saved_bytes": 786138,
+      "saved_sha256": "b248c9fea5337fc04e94d9abbee25e3e0dd390aaa311da9b2dfd3eefff19abc6"
+    },
+    {
+      "name": "dp0_pp0_tp6_dcp0_ep6_rank6.1790554554860865839.pt.trace.json",
+      "raw_bytes": 14817646,
+      "raw_sha256": "e553cb6723ab91adc0c57cd0016f473677e4b59fa02d89eeae92062cb8c06be9",
+      "saved_bytes": 785129,
+      "saved_sha256": "5924ea48f3fb355ec1409fc6dc851a9e93a587016dadd9f497b7b38c33abf41d"
+    },
+    {
+      "name": "dp0_pp0_tp7_dcp0_ep7_rank7.1790554554863395264.pt.trace.json",
+      "raw_bytes": 14818293,
+      "raw_sha256": "50b3616901accce4b69250a10e8595502ec9f0a64d75f8e861a0759763a9a7f4",
+      "saved_bytes": 785001,
+      "saved_sha256": "10181de9bee8bab4c1bb3503000e98f0c6c376bfbeb71f005a6bee3784dc22c3"
+    }
+  ],
+  "request_files": [
+    {
+      "name": "input.json",
+      "raw_bytes": 10381,
+      "raw_sha256": "6550602e6084e2bed6397b543c2fe2c1383b0010ab36a33c079bff539f421a79"
+    },
+    {
+      "name": "local-trace-sha256.txt",
+      "raw_bytes": 1016,
+      "raw_sha256": "c6ad2b7550f006a8af38268ccd3f8c58802998317546c0cf7c4e9fbd63cd9eb3"
+    },
+    {
+      "name": "profiled-01.json",
+      "raw_bytes": 639,
+      "raw_sha256": "88095537484715510c255e769cfcaf70a18b20c3a9a4234309ba52e1502d82a7"
+    },
+    {
+      "name": "profiled-02.json",
+      "raw_bytes": 639,
+      "raw_sha256": "7ea3eeb933041a9b2d4bf68d06179ae792783cd12843a2653c4053909e19808d"
+    },
+    {
+      "name": "profiled-03.json",
+      "raw_bytes": 639,
+      "raw_sha256": "c71caa95be308cd5141a1f466dc794e7c1858e6a4aece850c6c3c57b2d2e2720"
+    },
+    {
+      "name": "remote-trace-sha256.txt",
+      "raw_bytes": 1016,
+      "raw_sha256": "c6ad2b7550f006a8af38268ccd3f8c58802998317546c0cf7c4e9fbd63cd9eb3"
+    },
+    {
+      "name": "trace_summary.json",
+      "raw_bytes": 35367,
+      "raw_sha256": "75745ef1f0f443d28eb3e4477d5299e7370d3b16b918af4b35acc6a2d10b42f0"
+    },
+    {
+      "name": "warmup-01.json",
+      "raw_bytes": 628,
+      "raw_sha256": "803a2065bfc0d118608f503a5a274592fb877a7f6513ccfcedc2511ce0427eae"
+    },
+    {
+      "name": "warmup-02.json",
+      "raw_bytes": 633,
+      "raw_sha256": "7e7bf541d17aa441dcb2a784dac580d6a991797f50481da00f64eba5e4a448bc"
+    },
+    {
+      "name": "warmup-03.json",
+      "raw_bytes": 633,
+      "raw_sha256": "3062a0bb6bf8768d9e6df4cceb509f41be6b6f8c2fb2ddf84d53b92112b9eb39"
+    },
+    {
+      "name": "warmup-04.json",
+      "raw_bytes": 628,
+      "raw_sha256": "25a79d99319eddc4e62e88ab25d8532e7851e9f541153a53a8e6cd0c8ee09fdb"
+    },
+    {
+      "name": "warmup-05.json",
+      "raw_bytes": 634,
+      "raw_sha256": "9ae825a1f1b0752b512b4ee83332ac9109825eba4409df8166d07333fb23bd57"
+    },
+    {
+      "name": "warmup-06.json",
+      "raw_bytes": 639,
+      "raw_sha256": "f498837cd7706982760f9afea8d66fde61284918c0070a5a26ba5ba3df2bed19"
+    },
+    {
+      "name": "warmup-07.json",
+      "raw_bytes": 629,
+      "raw_sha256": "63e619df4b81c5f50978b95652af516ec553495890b0271fb2e8e284335cbde4"
+    },
+    {
+      "name": "warmup-08.json",
+      "raw_bytes": 629,
+      "raw_sha256": "d9f367329c66afd517a5adda5937ebace99414649ce15ffffb6abea8e78237dd"
+    },
+    {
+      "name": "warmup-09.json",
+      "raw_bytes": 638,
+      "raw_sha256": "1a870d72ef91bc2dbb85df70402943c67dc807e3f03c7f536fb5260201b58c66"
+    },
+    {
+      "name": "warmup-10.json",
+      "raw_bytes": 633,
+      "raw_sha256": "44816c48416a8b072508197e9d0ad5b140f0727a3a7031898bbd960dadbb3b39"
+    },
+    {
+      "name": "warmup-11.json",
+      "raw_bytes": 629,
+      "raw_sha256": "85947c22463c5ed0dba915389ba98d79fe3dff5b97c601020a35f30b9c610668"
+    },
+    {
+      "name": "warmup-12.json",
+      "raw_bytes": 633,
+      "raw_sha256": "6ca22d22940c43bc1ab72717b2f45eb3bf687f669038a1db66446b9862e371ba"
+    },
+    {
+      "name": "warmup-13.json",
+      "raw_bytes": 638,
+      "raw_sha256": "b15bf332bf50b12aaa35ca684ee6a162122ee7983b84efdf78d541966e575181"
+    },
+    {
+      "name": "warmup-14.json",
+      "raw_bytes": 637,
+      "raw_sha256": "339325f4cba8e181ef1a73a7d63ffdc7f522f112e9e9d427ffe355cb15fd6ed9"
+    }
+  ],
+  "requests_tar_sha256": "b23c7f985b7de21dfa9a9fb770c2b85f3cf3a324dbde99d19a6596f0de16d79f",
+  "requests_tar_bytes": 7073
+}

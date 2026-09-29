@@ -1,0 +1,11 @@
+8754ec8b41ae59791aa6370386276467bde6e8ce8502915dcfb9769ba9990da8  /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/config.json
+eb064b56fc8a782b97594d9888314a430450128d1fe4a7da66662f6d641122b5  /mnt/hf3fs/3fs/models/kimi/kimi-k3-4layers/model.safetensors.index.json
+mtp-experts-rank00-of-08.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-experts-rank00-of-08.safetensors
+mtp-experts-rank01-of-08.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-experts-rank01-of-08.safetensors
+mtp-experts-rank02-of-08.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-experts-rank02-of-08.safetensors
+mtp-experts-rank03-of-08.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-experts-rank03-of-08.safetensors
+mtp-experts-rank04-of-08.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-experts-rank04-of-08.safetensors
+mtp-experts-rank05-of-08.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-experts-rank05-of-08.safetensors
+mtp-experts-rank06-of-08.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-experts-rank06-of-08.safetensors
+mtp-experts-rank07-of-08.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-experts-rank07-of-08.safetensors
+mtp-nonexpert.safetensors -> /mnt/hf3fs/3fs/models/kimi/kimi-k3-mtp/mtp-nonexpert.safetensors

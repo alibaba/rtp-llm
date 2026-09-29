@@ -1,0 +1,862 @@
+{
+  "suite": "flow",
+  "source_reference": "64c6aff3666402228950f1f09031e228c3734277",
+  "profile": "tp8-ep8-sp-no-dcp-text",
+  "deferred_by_user": [],
+  "single_prefill_input_limit": null,
+  "formal_request_deadline_s": 300,
+  "full_original_suite_passed": false,
+  "not_applicable": [
+    "DCP",
+    "PageRR owner",
+    "DP multi-owner",
+    "multimodal",
+    "KTP",
+    "EAGLE3/DSpark"
+  ],
+  "runtime_evidence_gate": "separate; this result alone does not certify RDMA, graph replay or precision",
+  "formal_request_retries": 0,
+  "namespace": "main-k3-fp8-kda47b-r2-3fs-111112-20260929",
+  "passed": true,
+  "error": null,
+  "block_size": 4096,
+  "chunk_tokens": 65536,
+  "reuse_unit_tokens": 4096,
+  "batch_size": 4,
+  "decode_role_addrs": [
+    {
+      "role": "DECODE",
+      "ip": "11.163.39.112",
+      "http_port": 28200,
+      "grpc_port": 28201
+    }
+  ],
+  "max_tokens": 16,
+  "identity_max_tokens": 256,
+  "single_exact_max_tokens": 128,
+  "mtp_chunk_max_tokens": 128,
+  "rdma_prewarm": {
+    "enabled": false,
+    "target_decode_owners": 1,
+    "request_timeout_s": 300,
+    "attempts": []
+  },
+  "elapsed_s": 137.346,
+  "summary": {
+    "case_count": 11,
+    "skipped_case_count": 0,
+    "cache_block_boundary_case_count": 0,
+    "decode_crossing_case_count": 0,
+    "hit_count": 5,
+    "miss_count": 6,
+    "reasoning_count": 0,
+    "mtp_case_count": 0,
+    "mtp_draft_case_count": 1,
+    "multimodal_case_count": 0,
+    "concurrent_stages": 2
+  },
+  "stages": [
+    {
+      "name": "chunkwise_rdma_flow_miss",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "chunkwise_rdma_flow_miss"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 82.9
+    },
+    {
+      "name": "flow_hit_owner_0",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "flow_hit_owner_0"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 4.22
+    },
+    {
+      "name": "flow_uneven_miss",
+      "concurrent": true,
+      "passed": true,
+      "case_names": [
+        "flow_uneven_0",
+        "flow_uneven_1",
+        "flow_uneven_2",
+        "flow_uneven_3"
+      ],
+      "decode_owner_ranks": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "elapsed_s": 16.385
+    },
+    {
+      "name": "flow_uneven_hit_rotated",
+      "concurrent": true,
+      "passed": true,
+      "case_names": [
+        "flow_uneven_3_hit",
+        "flow_uneven_2_hit",
+        "flow_uneven_1_hit",
+        "flow_uneven_0_hit"
+      ],
+      "decode_owner_ranks": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "elapsed_s": 20.231
+    },
+    {
+      "name": "flow_mtp_draft",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "flow_mtp_draft"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 12.279
+    }
+  ],
+  "cases": [
+    {
+      "name": "chunkwise_rdma_flow_miss",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 65536,
+      "prefill_total_reuse_len": 0,
+      "input_len": 65537,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 65537,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 65537,
+      "decode_kv_last_position": 65551,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 82.896,
+      "content": " Bain用完了位的座上建设单位都是被 Fairfaxumbuinangiuin strideuinogic Ur narrowly",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          15262,
+          114483,
+          83190,
+          131076,
+          141000,
+          6585,
+          123012,
+          90386,
+          123012,
+          29841,
+          123012,
+          115361,
+          24644,
+          128432
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_hit_owner_0",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 65536,
+      "reuse_len": 65536,
+      "prefill_total_reuse_len": 65536,
+      "input_len": 65537,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 65537,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 65537,
+      "decode_kv_last_position": 65551,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 4.216,
+      "content": " Bain用完了位的座上建设单位都是被 Fairfaxumbuinangiuin strideuinogic Ur narrowly",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          15262,
+          114483,
+          83190,
+          131076,
+          141000,
+          6585,
+          123012,
+          90386,
+          123012,
+          29841,
+          123012,
+          115361,
+          24644,
+          128432
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_0",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 4096,
+      "prefill_total_reuse_len": 0,
+      "input_len": 8192,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 8192,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 8192,
+      "decode_kv_last_position": 8206,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 16.223,
+      "content": " Bain用完了 itself新月尔或小odonuveLW不透—fromeri绿色生态 competit矩爱不",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          156538,
+          92137,
+          66456,
+          143496,
+          51791,
+          162521,
+          64438,
+          13145,
+          79204
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_3",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 16384,
+      "prefill_total_reuse_len": 0,
+      "input_len": 20480,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 20480,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 20480,
+      "decode_kv_last_position": 20494,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 16.374,
+      "content": " Bain用完了 itself新月尔或小odonántuinuin目不在用evoinges综合运用在旁边",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          123012,
+          87181,
+          77752,
+          75691,
+          153051,
+          131713,
+          98972
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_1",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 8192,
+      "prefill_total_reuse_len": 0,
+      "input_len": 12288,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 12288,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 12288,
+      "decode_kv_last_position": 12302,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 16.377,
+      "content": " Bain用完了位的座上建设单位都是被一卷ordenstride比较常见的公务安全风险王永用完了风和就走",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          15262,
+          114483,
+          83190,
+          131076,
+          111826,
+          85762,
+          66270,
+          131794,
+          16509,
+          141041,
+          105685,
+          152459,
+          73476,
+          55089
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_2",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 12288,
+      "prefill_total_reuse_len": 0,
+      "input_len": 16384,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 16384,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 16384,
+      "decode_kv_last_position": 16398,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 16.381,
+      "content": " Bain用完了 itself新月尔或小odonántuinuin目不 aerial Yanpiluin seper",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          123012,
+          87181,
+          63049,
+          44424,
+          141866,
+          123012,
+          97606
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_3_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 16384,
+      "reuse_len": 16384,
+      "prefill_total_reuse_len": 16384,
+      "input_len": 20480,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 20480,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 20480,
+      "decode_kv_last_position": 20494,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 14.967,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly爱看承租安全检查十有 Gecko",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          145124,
+          62396,
+          136161,
+          127234,
+          73212
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_1_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 8192,
+      "reuse_len": 8192,
+      "prefill_total_reuse_len": 8192,
+      "input_len": 12288,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 12288,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 12288,
+      "decode_kv_last_position": 12302,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 18.972,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly上边 recognbolt corporMom",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          105895,
+          7374,
+          80868,
+          31495,
+          84347
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_0_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 4096,
+      "reuse_len": 4096,
+      "prefill_total_reuse_len": 4096,
+      "input_len": 8192,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 8192,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 8192,
+      "decode_kv_last_position": 8206,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 20.225,
+      "content": " Bain用完了 itself新月尔或小odonuveLW不透 gravity辕爱不之象怎么想就走",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          156538,
+          92137,
+          66456,
+          43458,
+          72367,
+          79204,
+          84634,
+          121778,
+          55089
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_2_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 12288,
+      "reuse_len": 12288,
+      "prefill_total_reuse_len": 12288,
+      "input_len": 16384,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 16384,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 16384,
+      "decode_kv_last_position": 16398,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 20.227,
+      "content": " Bain用完了 itself新月尔或小odonántuin wandering narrowly辅机具不承担 Germpil",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          142750,
+          152459,
+          7662,
+          58691,
+          2452,
+          103836,
+          101801,
+          158856,
+          123012,
+          78840,
+          128432,
+          6609,
+          157752,
+          122634,
+          9405,
+          141866
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_mtp_draft",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 0,
+      "prefill_total_reuse_len": 0,
+      "input_len": 56,
+      "output_len": 16,
+      "iter_count": 16,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 15,
+      "require_mtp": false,
+      "require_mtp_draft": true,
+      "expected_json": null,
+      "expected_input_len": null,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 56,
+      "decode_kv_last_position": 70,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 16,
+      "pd_sep": true,
+      "elapsed_s": 12.278,
+      "content": "unitsuals metaphpurposeMrsnets花色parmisim矜MessAmbientielombo是福一分",
+      "reasoning_content": "",
+      "output_ids": [
+        [
+          53120,
+          161251,
+          95197,
+          131309,
+          91959,
+          59811,
+          79258,
+          121912,
+          68211,
+          77624,
+          137655,
+          110240,
+          1309,
+          103649,
+          132488,
+          23845
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.112",
+        "http_port": 28200,
+        "grpc_port": 28201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.112",
+          "http_port": 28200,
+          "grpc_port": 28201
+        }
+      ],
+      "phase": "formal"
+    }
+  ],
+  "failures": [],
+  "skipped_cases": []
+}

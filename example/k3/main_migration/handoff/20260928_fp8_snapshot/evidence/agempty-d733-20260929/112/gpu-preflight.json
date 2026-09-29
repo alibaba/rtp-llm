@@ -1,0 +1,8 @@
+{
+  "allow_shared_accuracy": false,
+  "performance_validated": false,
+  "min_free_gib": 250.0,
+  "gpus": "0, GPU-67f05232-d6d5-7210-1143-8cb1c0a9eed0, 274110\n1, GPU-d8e3726a-ad64-9d08-19c8-93d0ea2dee1b, 274113\n2, GPU-ded91589-f7d3-bdbb-1314-4b846ff5e26b, 274110\n3, GPU-5697635a-0d42-4522-b7c5-7c8ab799f08a, 274114\n4, GPU-cd108178-963f-c05a-468e-632858d0aef9, 274114\n5, GPU-1e77b981-3775-1133-2d12-96aae95eb0bf, 274114\n6, GPU-41822303-7d2c-90bb-c46a-f55b41419ab1, 274114\n7, GPU-ba961aa8-8c15-759d-ac00-13ed3a80f8b0, 274114\n",
+  "compute_processes": "",
+  "owner_evidence": "See host-side fleet selection and process monitor; host PIDs may be hidden here."
+}
