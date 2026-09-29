@@ -1658,6 +1658,11 @@ int CudaGraphRunner::getCurrentRealGraphSize(const CudaGraphState& state) const 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
+    // GraphRunner owns the captured input object.  The Python FMHA factory
+    // prepares only attention tags and cannot mark PLE/QSA side regions.
+    // Set the mode here so refreshTaggedAttentionInputs propagates it to every
+    // region before the first warmup forward and all subsequent graph copies.
+    inputs.attention_inputs.is_cuda_graph = true;
 
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths        = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
@@ -2123,6 +2128,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_cuda_graph    = true;
     // HC-shaped MTP draft prefill executes a fixed-capacity Python path. Other
     // MTP models must slice to the current graph key so FlashInfer's batch
     // indices length remains equal to the query nnz.
