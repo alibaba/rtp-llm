@@ -217,6 +217,40 @@ class SparsePagedGqaAttentionTest(unittest.TestCase):
                 page_size=4,
             )
 
+    def test_cuda_graph_replay_uses_updated_page_table_lengths_and_selection(self):
+        torch.manual_seed(23)
+        q = torch.randn(1, 2, 1, 64, dtype=torch.bfloat16, device=_DEVICE)
+        cache = torch.randn(3, 2, 1, 4, 64, dtype=torch.bfloat16, device=_DEVICE)
+        table = torch.tensor([[1, 2]], dtype=torch.int32, device=_DEVICE)
+        lengths = torch.tensor([[5]], dtype=torch.int32, device=_DEVICE)
+        selected = torch.tensor([[[0, 1, 4, -1]]], dtype=torch.int32, device=_DEVICE)
+
+        with self.assertRaisesRegex(RuntimeError, "active capture"):
+            sparse_paged_gqa_attn(
+                q, cache, table, lengths, selected, page_size=4, graph_capture=True
+            )
+        # Warm the Triton specialization and validate the initial page mapping.
+        eager = sparse_paged_gqa_attn(q, cache, table, lengths, selected, page_size=4)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = sparse_paged_gqa_attn(
+                q, cache, table, lengths, selected, page_size=4, graph_capture=True
+            )
+
+        graph.replay()
+        torch.testing.assert_close(output, eager, atol=2e-2, rtol=2e-2)
+        table.copy_(torch.tensor([[2, 1]], dtype=torch.int32, device=_DEVICE))
+        lengths.copy_(torch.tensor([[7]], dtype=torch.int32, device=_DEVICE))
+        selected.copy_(
+            torch.tensor([[[0, 4, 6, -1]]], dtype=torch.int32, device=_DEVICE)
+        )
+        graph.replay()
+        torch.testing.assert_close(
+            output, _reference(q, cache, table, lengths, selected), atol=2e-2, rtol=2e-2
+        )
+        self.assertFalse(torch.equal(output, eager))
+
 
 if __name__ == "__main__":
     unittest.main()
