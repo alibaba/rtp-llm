@@ -160,3 +160,70 @@ def gather_fp8_prefix(
             ckv.stride(0), rope.stride(0), latent, rope_dim, scale,
             triton.next_power_of_2(latent + rope_dim),
         )
+
+
+@triton.jit
+def _gather_prefix_slice(
+    O_C, O_R, CACHE, PAGES, INFO,
+    OWNER: tl.constexpr, START: tl.constexpr, PAGE_SIZE: tl.constexpr,
+    CACHE_PAGE_STRIDE: tl.constexpr, CACHE_TOKEN_STRIDE: tl.constexpr,
+    LATENT: tl.constexpr, ROPE: tl.constexpr, SCALE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    absolute = START + row
+    page_offset = tl.load(INFO + OWNER * 4 + 2)
+    page = tl.load(PAGES + page_offset + absolute // PAGE_SIZE)
+    col = tl.arange(0, BLOCK)
+    base = page.to(tl.int64) * CACHE_PAGE_STRIDE + (
+        absolute % PAGE_SIZE
+    ) * CACHE_TOKEN_STRIDE
+    values = tl.load(
+        CACHE + base + col, col < LATENT + ROPE, other=0.0
+    ).to(tl.float32) * SCALE
+    tl.store(O_C + row * LATENT + col, values, col < LATENT)
+    tl.store(O_R + row * ROPE + col - LATENT, values,
+             (col >= LATENT) & (col < LATENT + ROPE))
+
+
+def gather_fp8_prefix_slice(
+    out_ckv: torch.Tensor,
+    out_rope: torch.Tensor,
+    cache: torch.Tensor,
+    pages: torch.Tensor,
+    batch_info: torch.Tensor,
+    page_size: int,
+    *,
+    owner: int,
+    start: int,
+    prefix_len: int,
+    scale: float,
+) -> None:
+    """Gather only one owner's historical cache slice into BF16 staging."""
+    if cache.dtype != torch.float8_e4m3fn or cache.ndim != 3:
+        raise TypeError("MLA historical slice requires a paged E4M3 cache")
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("MLA historical slice scale must be finite and positive")
+    if (out_ckv.ndim != 2 or out_rope.ndim != 2
+            or out_ckv.shape[0] != out_rope.shape[0]
+            or out_ckv.dtype != torch.bfloat16 or out_rope.dtype != torch.bfloat16
+            or out_ckv.shape[1] + out_rope.shape[1] != cache.shape[2]
+            or not out_ckv.is_contiguous() or not out_rope.is_contiguous()):
+        raise ValueError("MLA historical slice output layout mismatch")
+    if (pages.ndim != 1 or pages.dtype != torch.int32 or not pages.is_contiguous()
+            or batch_info.ndim != 2 or batch_info.shape[1] != 4
+            or batch_info.dtype != torch.int32 or not batch_info.is_contiguous()
+            or cache.shape[1] != page_size or cache.stride(-1) != 1):
+        raise ValueError("MLA historical slice cache metadata mismatch")
+    if (owner < 0 or owner >= batch_info.shape[0] or start < 0
+            or prefix_len < 0 or start + out_ckv.shape[0] > prefix_len):
+        raise ValueError("MLA historical slice exceeds historical prefix")
+    if any(t.device != cache.device for t in (out_ckv, out_rope, pages, batch_info)):
+        raise ValueError("MLA historical slice tensors must share a CUDA device")
+    if out_ckv.shape[0]:
+        _gather_prefix_slice[(out_ckv.shape[0],)](
+            out_ckv, out_rope, cache, pages, batch_info,
+            owner, start, page_size, cache.stride(0), cache.stride(1),
+            out_ckv.shape[1], out_rope.shape[1], scale,
+            triton.next_power_of_2(cache.shape[2]),
+        )

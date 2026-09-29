@@ -111,6 +111,22 @@ class CudaFp8GEMMLinear(LinearBase):
             self._deepgemm_linear, "cached_scales_max_len", 0
         )
 
+    def supports_skip_head_mid(
+        self, input: torch.Tensor, head_splits: tuple[int, int, int]
+    ) -> bool:
+        return self._deepgemm_linear.supports_skip_head_mid(input, head_splits)
+
+    def forward_skip_head_mid(
+        self,
+        input: torch.Tensor,
+        head_splits: tuple[int, int, int],
+        *,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self._deepgemm_linear.forward_skip_head_mid(
+            input, head_splits, output=output
+        )
+
     def _should_use_flashinfer(self, input: torch.Tensor) -> bool:
         if self._flashinfer_linear is None:
             return False

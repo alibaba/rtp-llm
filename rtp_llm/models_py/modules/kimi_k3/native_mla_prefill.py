@@ -122,3 +122,35 @@ class KimiK3TokenspeedPrefill:
             max_seq_len_q=self.max_q,
             enable_pdl=False,
         )
+
+    def run_partial(
+        self, q, k, v, *, qo_indptr, kv_indptr, max_q, max_k, causal
+    ):
+        """Return output and natural-log LSE for one bounded KV segment."""
+        if (not self.fp8_compute or q.dtype != self.operand_dtype
+                or k.dtype != self.operand_dtype or v.dtype != self.operand_dtype
+                or q.ndim != 3 or k.ndim != 3 or v.ndim != 3
+                or q.shape[1:] != (self.heads, 192)
+                or k.shape[1:] != (self.heads, 192)
+                or v.shape[1:] != (self.heads, 128)
+                or k.shape[0] != v.shape[0]
+                or qo_indptr.ndim != 1 or kv_indptr.shape != qo_indptr.shape
+                or max_q < 0 or max_k < 0):
+            raise ValueError("K3 FP8 MLA partial attention operand mismatch")
+        if any(x.device != q.device for x in (k, v, qo_indptr, kv_indptr)):
+            raise ValueError("K3 FP8 MLA partial attention device mismatch")
+        return self._run(
+            query=q.contiguous(),
+            key=k.contiguous(),
+            value=v.contiguous(),
+            seq_lens=kv_indptr.diff(),
+            cum_seq_lens=kv_indptr,
+            max_seq_len=max_k,
+            batch_size=qo_indptr.numel() - 1,
+            softmax_scale=self.scale,
+            is_causal=causal,
+            return_lse=True,
+            cum_seq_lens_q=qo_indptr,
+            max_seq_len_q=max_q,
+            enable_pdl=False,
+        )
