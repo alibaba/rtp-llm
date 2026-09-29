@@ -3569,55 +3569,48 @@ class AttentionFP8(nn.Module):
             sm120_swa_lens = sm120_extra_indices = sm120_extra_lens = None
             sm120_extra_page_size = None
             if is_sm120(qkv.q.device):
-                gather_width = wm.M - wm.N
                 sm120_extra_kv = workspace[:, : wm.N, :].contiguous().view(-1, D)
                 sm120_swa_kv = workspace[:, wm.N :, :].contiguous().view(-1, D)
-                combined_2d = combined_indices.squeeze(1).to(torch.int64)
-                valid = combined_2d >= 0
-                request_ids = torch.div(
-                    combined_2d.clamp_min(0), wm.M, rounding_mode="floor"
+                from rtp_llm.models_py.modules.dsv4.fp8._sm120_prefill_indices import (
+                    split_sm120_combined_tables,
                 )
-                local_slots = torch.remainder(combined_2d.clamp_min(0), wm.M)
-                is_extra = valid & (local_slots < wm.N)
-                sm120_extra_lens = is_extra.sum(dim=1, dtype=torch.int32)
-                sm120_swa_lens = combined_lens.to(torch.int32) - sm120_extra_lens
-                extra_width = max(int(cmp_topk.shape[-1]), 1)
-                extra_cols = cached_arange(
-                    extra_width, dtype=torch.int64, device=qkv.q.device
-                ).unsqueeze(0)
-                extra_src = combined_2d[:, :extra_width]
-                extra_req = request_ids[:, :extra_width]
-                extra_local = local_slots[:, :extra_width]
-                sm120_extra_indices = (extra_req * wm.N + extra_local).to(torch.int32)
-                sm120_extra_indices.masked_fill_(
-                    extra_cols >= sm120_extra_lens.to(torch.int64).unsqueeze(1), 0
+
+                (
+                    sm120_swa_indices,
+                    sm120_swa_lens,
+                    sm120_extra_indices,
+                    sm120_extra_lens,
+                    sm120_extra_page_size,
+                ) = split_sm120_combined_tables(
+                    combined_indices,
+                    combined_lens,
+                    M=wm.M,
+                    N=wm.N,
+                    window_size=self.window_size,
+                    extra_width=max(int(cmp_topk.shape[-1]), 1),
+                    ratio=ratio,
+                    device=qkv.q.device,
                 )
-                sm120_extra_indices.masked_fill_(extra_src < 0, 0)
-                aligned_extra_width = (extra_width + 63) // 64 * 64
-                if aligned_extra_width != extra_width:
-                    # P1a: only the pad tail needs zeroing, not the full buffer.
-                    padded_extra = torch.empty(
-                        (combined_2d.shape[0], aligned_extra_width),
-                        dtype=torch.int32,
-                        device=qkv.q.device,
+            sm120_ready = None
+            if sm120_swa_indices is not None:
+                from rtp_llm.models_py.modules.dsv4.fp8._sm120_prefill_indices import (
+                    Sm120PrefillIndices,
+                    index_adapter_mode,
+                )
+
+                if index_adapter_mode() != "off":
+                    # The combine kernel writes a dense valid prefix and the
+                    # split above masks every invalid/tail column to zero, so
+                    # these tables already satisfy the ready-record contract
+                    # (see fp8/_sm120_prefill_indices.py).  Consumer re-checks
+                    # metadata only and falls back to the generic path on any
+                    # mismatch.
+                    sm120_ready = Sm120PrefillIndices(
+                        swa_indices=sm120_swa_indices,
+                        swa_lens=sm120_swa_lens,
+                        extra_indices=sm120_extra_indices,
+                        extra_lens=sm120_extra_lens,
                     )
-                    padded_extra[:, :extra_width] = sm120_extra_indices
-                    padded_extra[:, extra_width:].zero_()
-                    sm120_extra_indices = padded_extra
-                swa_cols = cached_arange(
-                    self.window_size, dtype=torch.int64, device=qkv.q.device
-                ).unsqueeze(0)
-                swa_src_cols = sm120_extra_lens.to(torch.int64).unsqueeze(1) + swa_cols
-                safe_cols = swa_src_cols.clamp_max(int(combined_2d.shape[1]) - 1)
-                swa_src = combined_2d.gather(1, safe_cols)
-                swa_req = torch.div(swa_src.clamp_min(0), wm.M, rounding_mode="floor")
-                swa_local = torch.remainder(swa_src.clamp_min(0), wm.M) - wm.N
-                sm120_swa_indices = (swa_req * gather_width + swa_local).to(torch.int32)
-                sm120_swa_indices.masked_fill_(
-                    swa_cols >= sm120_swa_lens.to(torch.int64).unsqueeze(1), 0
-                )
-                sm120_swa_indices.masked_fill_(swa_src < 0, 0)
-                sm120_extra_page_size = 64 if ratio == 4 else 2
             return self._flash_mla_sparse_fwd_chunked_projected(
                 q=qkv.q,
                 kv=kv_view,
@@ -3634,6 +3627,7 @@ class AttentionFP8(nn.Module):
                 sm120_extra_indices=sm120_extra_indices,
                 sm120_extra_lens=sm120_extra_lens,
                 sm120_extra_page_size=sm120_extra_page_size,
+                sm120_ready=sm120_ready,
             )
         finally:
             if cmp_pending is not None and cmp_reader_for_pending is not None:
@@ -5632,6 +5626,7 @@ class AttentionFP8(nn.Module):
         sm120_extra_indices=None,
         sm120_extra_lens=None,
         sm120_extra_page_size: Optional[int] = None,
+        sm120_ready=None,
     ) -> torch.Tensor:
         """Run sparse prefill attention in Q chunks and project immediately.
 
@@ -5790,11 +5785,28 @@ class AttentionFP8(nn.Module):
                     generic_fallback = uses_generic_fallback(
                         raw_swa_width, raw_extra_width
                     )
-                    chunk_indices, chunk_lens = canonical_topk(
-                        chunk_indices,
-                        chunk_lens,
-                        (raw_swa_width,) if generic_fallback else supported,
-                    )
+                    ready_swa = None
+                    ready_extra = None
+                    if sm120_ready is not None and not generic_fallback:
+                        from rtp_llm.models_py.modules.dsv4.fp8._sm120_prefill_indices import (
+                            _ready_chunk,
+                        )
+
+                        ready_swa = _ready_chunk(
+                            sm120_ready.swa_indices,
+                            sm120_ready.swa_lens,
+                            start,
+                            end,
+                            supported,
+                        )
+                    if ready_swa is not None:
+                        chunk_indices, chunk_lens = ready_swa
+                    else:
+                        chunk_indices, chunk_lens = canonical_topk(
+                            chunk_indices,
+                            chunk_lens,
+                            (raw_swa_width,) if generic_fallback else supported,
+                        )
                     from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
                         validate_slot_mapping,
                     )
@@ -5813,15 +5825,32 @@ class AttentionFP8(nn.Module):
                         chunk_extra_indices = sm120_extra_indices[start:end]
                         if chunk_extra_indices.dim() == 3:
                             chunk_extra_indices = chunk_extra_indices.squeeze(1)
-                        chunk_extra_indices, chunk_extra_lens = canonical_topk(
-                            chunk_extra_indices,
-                            sm120_extra_lens[start:end],
-                            (
-                                (raw_extra_width,)
-                                if generic_fallback
-                                else SM120_EXTRA_TOPK_WIDTHS
-                            ),
-                        )
+                        ready_extra = None
+                        if (
+                            sm120_ready is not None
+                            and not generic_fallback
+                            and sm120_ready.extra_indices is not None
+                            and sm120_ready.extra_lens is not None
+                        ):
+                            ready_extra = _ready_chunk(
+                                sm120_ready.extra_indices,
+                                sm120_ready.extra_lens,
+                                start,
+                                end,
+                                SM120_EXTRA_TOPK_WIDTHS,
+                            )
+                        if ready_extra is not None:
+                            chunk_extra_indices, chunk_extra_lens = ready_extra
+                        else:
+                            chunk_extra_indices, chunk_extra_lens = canonical_topk(
+                                chunk_extra_indices,
+                                sm120_extra_lens[start:end],
+                                (
+                                    (raw_extra_width,)
+                                    if generic_fallback
+                                    else SM120_EXTRA_TOPK_WIDTHS
+                                ),
+                            )
                         validate_slot_mapping(
                             "sm120.prefill.extra_indices",
                             chunk_extra_indices,
@@ -5836,8 +5865,12 @@ class AttentionFP8(nn.Module):
                         else run_sm120_sparse_mla
                     )
                     if not generic_fallback:
-                        chunk_indices.clamp_min_(0)
-                        if chunk_extra_indices is not None:
+                        # Ready tables are producer-normalized (non-negative,
+                        # zero tail): the incumbent -1 clamp is a no-op on them
+                        # and must not run in place on forward-shared storage.
+                        if ready_swa is None:
+                            chunk_indices.clamp_min_(0)
+                        if chunk_extra_indices is not None and ready_extra is None:
                             chunk_extra_indices.clamp_min_(0)
                     if not hasattr(self, "_attn_sink_f32"):
                         self._attn_sink_f32 = self.attn_sink.float()

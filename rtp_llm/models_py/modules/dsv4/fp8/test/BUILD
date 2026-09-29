@@ -74,6 +74,7 @@ _DSV4_FP8_CPU_TESTS = [
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
+    "test_sm120_prefill_indices",
     "test_sm120_sparse_mla",
 ]
 
@@ -108,6 +109,30 @@ py_test(
 py_test(
     name = "test_sm120_indexer_hardware",
     srcs = ["test_sm120_indexer_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_sm120_prefill_indices_hardware",
+    srcs = ["test_sm120_prefill_indices_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_sm120_prefill_indices_producer_matrix",
+    srcs = ["test_sm120_prefill_indices_producer_matrix.py"],
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["RTX_5000_PRO"],
     exec_properties = {
@@ -196,3 +221,13 @@ py_test(
     )
     for name in ["test_compact_cp_contract_cpu", "test_compact_cp_runtime_cpu"]
 ]
+
+
+py_test(
+    name = "test_sm120_prefill_split",
+    srcs = ["test_sm120_prefill_split.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
