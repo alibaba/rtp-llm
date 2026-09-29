@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include <torch/torch.h>
 
@@ -79,21 +80,9 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
 
 static constexpr size_t kStagedAlignment = 16;
 
-static size_t alignUp(size_t value, size_t alignment) {
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
-StagedSmDeviceHostCopyStrategy::~StagedSmDeviceHostCopyStrategy() {
-    for (auto& [_, scratch] : scratch_by_device_) {
-        if (scratch) {
-            releaseStagedMemoryCopyScratch(*scratch);
-        }
-    }
-}
-
 StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
                                                           const DeviceHostCopyOptions& options) {
-    if (!options.staged_sm_copy_enabled) {
+    if (!options.staged_sm_copy_enabled || plan.copy_tiles.empty()) {
         return StrategyResult::notApplicable();
     }
 
@@ -102,12 +91,21 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
     }
 
     const int device_index = plan.copy_tiles.front().device_index;
-    if (device_index < 0) {
+    if (!pool_.allowsDevice(device_index)) {
+        return StrategyResult::notApplicable();
+    }
+
+    const auto limits = pool_.limits();
+    if (plan.copy_tiles.size() > limits.max_tiles_per_device
+        || plan.copy_tiles.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
         return StrategyResult::notApplicable();
     }
 
     size_t total_bytes = 0;
     for (const auto& tile : plan.copy_tiles) {
+        if (tile.device_index != device_index || tile.bytes > limits.max_staging_bytes_per_device - total_bytes) {
+            return StrategyResult::notApplicable();
+        }
         total_bytes += tile.bytes;
     }
 
@@ -126,7 +124,15 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
     staged_params.host_segments.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
-        size_t staging_offset = alignUp(current_staging_offset, kStagedAlignment);
+        if (current_staging_offset > limits.max_staging_bytes_per_device
+            || current_staging_offset > SIZE_MAX - (kStagedAlignment - 1)) {
+            return StrategyResult::notApplicable();
+        }
+        size_t staging_offset = (current_staging_offset + kStagedAlignment - 1) & ~(kStagedAlignment - 1);
+        if (staging_offset > limits.max_staging_bytes_per_device
+            || tile.bytes > limits.max_staging_bytes_per_device - staging_offset) {
+            return StrategyResult::notApplicable();
+        }
 
         StagedMemoryCopyTile staged_tile;
         staged_tile.gpu         = tile.device_addr;
@@ -154,19 +160,25 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
     }
     staged_params.host_bytes = current_staging_offset;
 
-    std::lock_guard<std::mutex> lock(scratch_mutex_);
-    auto&                       entry = scratch_by_device_[device_index];
-    if (!entry) {
-        entry               = std::make_unique<StagedMemoryCopyScratch>();
-        entry->device_index = device_index;
+    auto acquired = pool_.tryAcquire();
+    if (acquired.status == StagedCopyScratchPool::AcquireStatus::DISABLED) {
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
-
-    bool ok = execStagedMemoryCopy(staged_params, entry.get());
-    if (!ok) {
-        // Conservatively fall back to generic
+    if (acquired.status == StagedCopyScratchPool::AcquireStatus::EXHAUSTED) {
         return StrategyResult::notApplicable();
     }
-    return StrategyResult::done();
+    auto& lease = *acquired.lease;
+    const auto status = execStagedMemoryCopy(staged_params, lease.scratchFor(device_index));
+    if (status == StagedMemoryCopyStatus::SUCCESS) {
+        return StrategyResult::done();
+    }
+    if (status == StagedMemoryCopyStatus::NOT_SUPPORTED || status == StagedMemoryCopyStatus::RESOURCE_EXHAUSTED) {
+        return StrategyResult::notApplicable();
+    }
+    if (status == StagedMemoryCopyStatus::UNSAFE) {
+        lease.quarantine();
+    }
+    return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
 }
 
 }  // namespace rtp_llm

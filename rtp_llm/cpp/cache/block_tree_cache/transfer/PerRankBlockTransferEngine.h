@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/StagedCopyScratchPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -40,6 +41,7 @@ private:
 
     std::vector<GroupSetPtr> group_sets_;
 
+    std::unique_ptr<StagedCopyScratchPool>      staged_scratch_pool_;
     std::unique_ptr<BlockTreeTaskPool>          transfer_task_pool_;
     std::unique_ptr<DeviceHostTransferExecutor> device_host_executor_;
     std::unique_ptr<HostDiskTransferExecutor>   host_disk_executor_;

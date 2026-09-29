@@ -16,6 +16,7 @@ class DeviceDiskTransferExecutor;
 class DeviceHostTransferExecutor: public TransferExecutor {
 public:
     DeviceHostTransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
+                               StagedCopyScratchPool&                         scratch_pool,
                                size_t                                         max_descriptors_per_batch,
                                DeviceHostCopyOptions                          options          = {},
                                std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 #include <memory>
+#include <vector>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -20,6 +21,18 @@ std::shared_ptr<AsyncContext> invalidTransferContext() {
         ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"));
 }
 
+std::vector<int> allowedCopyDevices(const std::vector<GroupSetPtr>& group_sets) {
+    std::vector<int> devices;
+    for (const auto& group_set : group_sets) {
+        for (const auto& device_pool : group_set->devicePools()) {
+            if (device_pool->deviceIndex() >= 0) {
+                devices.push_back(device_pool->deviceIndex());
+            }
+        }
+    }
+    return devices;
+}
+
 }  // namespace
 
 PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
@@ -33,11 +46,16 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     group_sets_(std::move(group_sets)), transfer_worker_count_(transfer_worker_count) {
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
+    staged_scratch_pool_ = std::make_unique<StagedCopyScratchPool>(
+        transfer_worker_count,
+        allowedCopyDevices(group_sets_),
+        StagedCopyScratchPool::Limits{device_host_options.staged_sm_max_staging_bytes_per_device,
+                                      device_host_options.staged_sm_max_tiles_per_device});
     transfer_task_pool_ =
         std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferEngine");
     RTP_LLM_CHECK(transfer_task_pool_->start());
     device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(
-        *transfer_task_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter);
+        *transfer_task_pool_, *staged_scratch_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter);
     host_disk_executor_ =
         std::make_unique<HostDiskTransferExecutor>(*transfer_task_pool_, max_descriptors_per_batch, metrics_reporter);
     if (enable_disk_cache && !group_sets_.empty()) {

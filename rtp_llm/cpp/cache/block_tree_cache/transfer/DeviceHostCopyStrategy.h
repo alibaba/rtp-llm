@@ -2,16 +2,13 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/StagedCopyScratchPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
-
-struct StagedMemoryCopyScratch;
 
 // --- Copy Plan types ---
 
@@ -61,13 +58,12 @@ public:
 
 class StagedSmDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
 public:
-    ~StagedSmDeviceHostCopyStrategy() override;
+    explicit StagedSmDeviceHostCopyStrategy(StagedCopyScratchPool& pool): pool_(pool) {}
 
     StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override;
 
 private:
-    std::mutex                                              scratch_mutex_;
-    std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> scratch_by_device_;
+    StagedCopyScratchPool& pool_;
 };
 
 class CudaBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {

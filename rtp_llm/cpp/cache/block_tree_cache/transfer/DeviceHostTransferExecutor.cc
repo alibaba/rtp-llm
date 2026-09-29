@@ -30,13 +30,14 @@ std::string_view configurableStrategyName(const DeviceHostCopyStrategy& strategy
 }  // namespace
 
 DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    transfer_task_pool,
+                                                       StagedCopyScratchPool& scratch_pool,
                                                        size_t                max_descriptors_per_batch,
                                                        DeviceHostCopyOptions options,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
     TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)),
     options_(std::move(options)) {
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
-    strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
+    strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>(scratch_pool));
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
 
     // Promote only a configurable existing strategy. Additional strategies retain

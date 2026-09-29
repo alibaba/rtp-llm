@@ -60,6 +60,13 @@ cc_test(
 )
 
 cc_test(
+    name = "staged_copy_scratch_pool_test",
+    srcs = ["StagedCopyScratchPoolTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)
+
+cc_test(
     name = "per_rank_transfer_engine_host_disk_test",
     exec_properties = {"gpu": "A10"},
     testonly = True,
