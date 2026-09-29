@@ -38,6 +38,10 @@ public:
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
 
+    static GptModelOutputs gatherAcceptedTargetDiagnostics(const GptModelOutputs& target_output,
+                                                           const torch::Tensor& accept_lengths,
+                                                           int64_t verify_width);
+
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
 

@@ -164,6 +164,14 @@ def _get_validated_world_ep_group(cfg, dist):
 
 
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):
+    supports_situ = True
+
+    def _get_backend(self):
+        backend = getattr(self.cfg, "mega_moe_backend", None)
+        if backend is None:
+            import deep_gemm as backend
+        return backend
+
     execute_empty_inputs = True
 
     @property
@@ -183,7 +191,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         checker.check(config.ep_size > 1)
         checker.check(config.world_size == config.ep_size)
         checker.check(config.world_rank == config.ep_rank)
-        checker.check(_mega_moe_available())
+        checker.check(_mega_moe_available(getattr(config, "mega_moe_backend", None)))
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
@@ -207,12 +215,26 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         transform's temporary allocations alive. Splitting keeps the live set
         to at most one input stack.
         """
-        import deep_gemm
+        deep_gemm = self._get_backend()
         import torch.distributed as dist
 
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
+        self._activation = getattr(cfg, "expert_activation", "swiglu")
+        self._activation_kwargs = {}
+        if self._activation == "situ":
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
+                situ_kwargs,
+            )
+
+            self._activation_kwargs = situ_kwargs(
+                deep_gemm.fp8_fp4_mega_moe,
+                cfg.activation_beta,
+                cfg.activation_linear_beta,
+            )
+        elif self._activation != "swiglu":
+            raise ValueError(f"Unsupported MegaMoE activation {self._activation!r}")
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
@@ -226,13 +248,17 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.moe_w1_layout,
         )
         device = w13.device
-        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        s13_int = prepare_fp4_weight_scale_for_deepgemm(
+            s13_raw, 2 * inter, D, E, backend=deep_gemm
+        )
         del s13_raw
         torch.cuda.empty_cache()
 
         w2 = layer_weights.pop(W.moe_w2)
         s2_raw = layer_weights.pop(W.moe_s2)
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        s2_int = prepare_fp4_weight_scale_for_deepgemm(
+            s2_raw, D, inter, E, backend=deep_gemm
+        )
         del s2_raw
         torch.cuda.empty_cache()
 
@@ -241,6 +267,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13, s13_int),
             (w2, s2_int),
+            **({"activation": "situ"} if self._activation == "situ" else {}),
         )
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
@@ -272,7 +299,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             hidden=D,
             intermediate_hidden=inter,
             use_fp8_dispatch=True,
-            activation="swiglu",
+            activation=self._activation,
+            backend=getattr(cfg, "mega_moe_backend", None),
         )
         # Single-layer staging output. All MoE layers execute sequentially, so one
         # process-local buffer is enough and avoids O(layers) persistent memory.
@@ -314,7 +342,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 "MegaMoE JIT warmup must not run inside CUDA graph capture"
             )
 
-        import deep_gemm
+        deep_gemm = self._get_backend()
         import torch.distributed as dist
 
         cfg = self.cfg
@@ -333,11 +361,15 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.moe_inter_dim,
             max_tokens_per_rank,
             cfg.swiglu_limit,
+            self._activation,
+            tuple(self._activation_kwargs.items()),
             cfg.route_scale,
             num_sms,
             tuple(token_counts),
             self.supports_gate_pack,
         )
+        if getattr(cfg, "mega_moe_backend", None) is not None:
+            warmup_key = warmup_key + (deep_gemm,)
         if warmup_key in _MEGA_MOE_JIT_WARMED_KEYS:
             return
 
@@ -456,7 +488,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
-        import deep_gemm
+        deep_gemm = self._get_backend()
 
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
@@ -469,11 +501,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             (self._mega_l2_w, self._mega_l2_sf),
             self._mega_buf,
             recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
+            activation=self._activation,
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            **self._activation_kwargs,
         )
 
     def forward(

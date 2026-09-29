@@ -5,6 +5,7 @@
 #include <exception>
 #include <memory>
 #include <optional>
+#include <numeric>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -61,6 +62,7 @@ public:
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
+        sequence_parallel_size_(graph_params.sequence_parallel_size),
         max_seq_len_(graph_params.max_seq_len),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
@@ -96,6 +98,10 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        if (sequence_parallel_size_ > 1 && role_ != CudaGraphRole::GENERATION_PREFILL) {
+            const int unit = sequence_parallel_size_ / std::gcd(sequence_parallel_size_, num_tokens_per_bs_);
+            max_bs_ = (max_bs_ + unit - 1) / unit * unit;
+        }
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
                                         && generation_prefill_cuda_graph_max_requests_
@@ -242,6 +248,7 @@ private:
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
+    int                     sequence_parallel_size_{1};
     int                     max_num_token_{1};
     int64_t                 max_kernel_block_table_width_{0};
     int                     max_seq_len_{0};

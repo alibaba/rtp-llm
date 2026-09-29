@@ -6,10 +6,12 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <map>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -33,6 +35,38 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
 }
 
 }  // namespace
+
+GptModelOutputs MtpBatchStreamProcessor::gatherAcceptedTargetDiagnostics(
+    const GptModelOutputs& target_output, const torch::Tensor& accept_lengths, int64_t verify_width) {
+    GptModelOutputs result;
+    if (!target_output.logits.defined() && !target_output.hidden_states.defined()) {
+        return result;
+    }
+    TORCH_CHECK(verify_width > 0 && accept_lengths.dim() == 1 && accept_lengths.numel() > 0,
+                "Target diagnostics require nonempty per-request accepted lengths and a positive verify width");
+    TORCH_CHECK(accept_lengths.scalar_type() == torch::kInt32 || accept_lengths.scalar_type() == torch::kInt64,
+                "Target diagnostic accepted lengths must be integers");
+    // Diagnostic requests already return device tensors to the host. Keep this
+    // validation off the default path, and reject invalid rows rather than clamp.
+    TORCH_CHECK(accept_lengths.min().item<int64_t>() >= 1
+                    && accept_lengths.max().item<int64_t>() <= verify_width,
+                "Target diagnostic accepted length is outside the verify window");
+    auto gather = [&](const torch::Tensor& values) {
+        if (!values.defined()) {
+            return torch::Tensor();
+        }
+        const auto batch = accept_lengths.numel();
+        TORCH_CHECK(values.dim() == 2 && values.size(0) >= batch * verify_width,
+                    "Target diagnostic rows do not cover the logical verify batch");
+        auto rows = torch::arange(batch, values.options().dtype(torch::kInt64)) * verify_width
+                    + accept_lengths.to(values.device(), torch::kInt64) - 1;
+        // index_select allocates: these outputs cannot alias graph buffers.
+        return values.index_select(0, rows);
+    };
+    result.logits = gather(target_output.logits);
+    result.hidden_states = gather(target_output.hidden_states);
+    return result;
+}
 
 torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch::Tensor& current_table,
                                                                     const torch::Tensor& previous_seq_lengths,
@@ -1046,6 +1080,46 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     model_input.last_hidden_states = model_output.all_hidden_states;
     const auto& new_all_token_ids  = sampler_output.token_ids;
 
+    // The default one-dimensional position policy reuses the final input
+    // position for the sampled token. Other styles keep the stream policy below.
+    const bool shift_default_positions = model_input.combo_position_ids.defined()
+        && model_input_gatherer_config_.mm_position_ids_style == PositionIdsStyle::DEFAULT
+        && model_input_gatherer_config_.position_id_len_factor == 1;
+    if (!model_input.combo_position_ids.defined() || shift_default_positions) {
+        const int64_t token_stride = new_all_token_ids.size(1);
+        RTP_LLM_CHECK_WITH_INFO(token_stride > 0 && token_stride <= std::numeric_limits<int32_t>::max(),
+                                "invalid MTP Prefill sample stride: %ld", token_stride);
+        auto input_lengths_d = toCudaInt32(model_input.input_lengths, host_holder).contiguous();
+        auto combo_tokens_d  = toCudaInt32(model_input.combo_tokens, host_holder).contiguous();
+        auto sampled_d = new_all_token_ids.is_cuda() ? new_all_token_ids : toCudaInt32(new_all_token_ids, host_holder);
+        if (sampled_d.scalar_type() != torch::kInt32) {
+            sampled_d = sampled_d.to(torch::kInt32);
+        }
+        sampled_d = sampled_d.contiguous();
+        auto offsets_d = input_lengths_d.cumsum(0).to(torch::kInt32);
+        auto shifted_d = torch::empty_like(combo_tokens_d);
+#if USING_CUDA
+        if (shift_default_positions) {
+            auto positions_d = toCudaInt32(model_input.combo_position_ids, host_holder).contiguous();
+            auto shifted_positions_d = torch::empty_like(positions_d);
+            invokeMtpPrefillShiftAppend(combo_tokens_d, input_lengths_d, offsets_d,
+                                        sampled_d, shifted_d, positions_d, shifted_positions_d,
+                                        static_cast<int32_t>(token_stride),
+                                        cuda_graph::graphGetCurrentStream().stream());
+            model_input.combo_position_ids = shifted_positions_d;
+        } else {
+            invokeMtpPrefillShiftAppend(combo_tokens_d, input_lengths_d, offsets_d,
+                                        sampled_d, shifted_d, static_cast<int32_t>(token_stride),
+                                        cuda_graph::graphGetCurrentStream().stream());
+        }
+#else
+        RTP_LLM_CHECK_WITH_INFO(false, "MTP Prefill CUDA shift requires CUDA");
+#endif
+        model_input.input_lengths = input_lengths_d;
+        model_input.combo_tokens  = shifted_d;
+        return;
+    }
+
     // set model_input.combo_tokens
     const size_t batch_size   = new_all_token_ids.size(0);
     const size_t token_stride = new_all_token_ids.size(1);
@@ -1282,6 +1356,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
     model_input.is_target_verify = false;
+    model_input.is_mtp_draft_update = false;
     if (!useMtpDeviceState()) {
         if (speculative_sampler_output.accept_len_cpu.defined()
             && speculative_sampler_output.accept_len_cpu.is_pinned()) {
@@ -1355,6 +1430,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.
     model_input.is_target_verify = false;
+    model_input.is_mtp_draft_update = true;
     int total_tokens             = (propose_step_ + 1) * batch_size;
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
@@ -1506,7 +1582,18 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        StreamSpecUpdateInfo update_info{
+            new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        // Match normal prefill output rows. These are target outputs, not the
+        // draft recurrence feature used to construct the next proposal.
+        if (stream->generateConfig()->return_hidden_states) {
+            update_info.target_hidden_states =
+                prefill_output.model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size).clone();
+        }
+        if (stream->returnLogits()) {
+            update_info.target_logits = prefill_output.model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+        }
+        spec_update_infos.push_back(std::move(update_info));
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1559,6 +1646,13 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
         spec_update_info.speculative_propose_step = propose_step_;
         spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
+        if (stream->generateConfig()->return_hidden_states && spec_decode_output.target_hidden_states.defined()) {
+            spec_update_info.target_hidden_states =
+                spec_decode_output.target_hidden_states.narrow(0, batch_idx_out, next_batch_size);
+        }
+        if (stream->returnLogits() && spec_decode_output.target_logits.defined()) {
+            spec_update_info.target_logits = spec_decode_output.target_logits.narrow(0, batch_idx_out, next_batch_size);
+        }
         // Per-stream verify errors from SpecLogitsVerifyRunner ride the update
         // path so grammar/think mask failures reach the stream (main #1006).
         const size_t stream_idx = spec_update_infos.size();

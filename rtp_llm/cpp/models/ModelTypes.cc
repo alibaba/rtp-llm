@@ -171,6 +171,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.skip_run, GptModelInputControlFlag::kControlSkipRun);
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
+    encode_flag(inputs.is_mtp_draft_update, GptModelInputControlFlag::kControlMtpDraftUpdate);
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
     encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
     encode_flag(inputs.use_opaque_kv_cache_store, GptModelInputControlFlag::kControlOpaqueKvCacheStore);
@@ -319,6 +320,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);
+    inputs.is_mtp_draft_update       = has_flag(GptModelInputControlFlag::kControlMtpDraftUpdate);
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
     inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);
@@ -402,13 +404,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         auto options = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
             options = options.device(torch::kCUDA);
+        } else {
+            options = options.pinned_memory(true);
         }
-        auto tensor = torch::empty(dims, options);
-        // NCCL broadcast requires pinned memory for CPU buffers
-        if (atype != rtp_llm::AllocationType::DEVICE) {
-            tensor = tensor.pin_memory();
-        }
-        return tensor;
+        return torch::empty(dims, options);
     };
 
     bool is_non_root = parallelism_config.tp_rank != 0;
@@ -645,7 +644,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     torch::Tensor cpu_packed, gpu_packed;
 
     if (cpu_total_bytes > 0) {
-        cpu_packed = torch::empty({cpu_total_bytes}, torch::kUInt8).pin_memory();
+        cpu_packed = torch::empty({cpu_total_bytes}, torch::TensorOptions(torch::kUInt8).pinned_memory(true));
         if (is_root) {
             auto* base = static_cast<uint8_t*>(cpu_packed.data_ptr());
             for (auto& e : cpu_entries) {

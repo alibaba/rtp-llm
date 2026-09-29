@@ -126,6 +126,8 @@ class MlaFlashInferImplBase(MlaImplBase):
 
 
 class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
+    prefill_op_type = MlaFlashInferPrefillOp
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -138,11 +140,13 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
+        *,
+        allow_absorb: bool = True,
     ) -> None:
         # RoPE is skipped when cos_sin_cache is None (e.g. Kimi Linear with mla_use_nope=true)
         _need_rope = cos_sin_cache is not None
         super().__init__(
-            MlaFlashInferPrefillOp(
+            self.prefill_op_type(
                 attn_configs.head_num,
                 attn_configs.kv_lora_rank,
                 attn_configs.rope_head_dim,
@@ -165,6 +169,8 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
+                fp8_compute=attn_configs.mla_fp8_compute,
+                kv_scale=attn_configs.mla_fp8_kv_scale,
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,
@@ -190,7 +196,8 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         q_len = attn_inputs.input_lengths.sum().item()
         self.absorb_fmha: Optional[MlaFlashInferDecodeOp] = None
         if (
-            q_len < self.absorb_opt_len
+            allow_absorb
+            and q_len < self.absorb_opt_len
             and self.has_reuse_cache
             and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
         ):
@@ -326,6 +333,8 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
+                fp8_compute=attn_configs.mla_fp8_compute,
+                kv_scale=attn_configs.mla_fp8_kv_scale,
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,
