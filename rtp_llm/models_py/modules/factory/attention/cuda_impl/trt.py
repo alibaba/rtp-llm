@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
     is_cuda_12_9_or_later,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import is_sm12x, is_sm90
+from rtp_llm.models_py.utils.arch import is_sm120, is_sm12x, is_sm90
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
@@ -378,8 +378,8 @@ class TRTLLMFMHAv2PrefillOp:
             input_layout = "CONTIGUOUS_Q_KV"
 
         use_sm120_bert_specialization = (
-            is_sm12x()
-            and self.attention_type == "mha"
+            self.attention_type == "mha"
+            and is_sm120(qkv.device)
             and compute_dtype == torch.bfloat16
             and self.head_dim == 64
             and params.max_q_len == 128
