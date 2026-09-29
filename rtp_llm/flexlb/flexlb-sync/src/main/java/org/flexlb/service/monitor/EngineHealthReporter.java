@@ -220,7 +220,7 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS);
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_INPUT_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS,
