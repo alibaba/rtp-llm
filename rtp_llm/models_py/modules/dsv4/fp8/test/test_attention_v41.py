@@ -21,6 +21,61 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
+    def test_source_pool_views_follow_backing_storage_and_layout(self):
+        region = attention_v41_module.HCA_KV
+        attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(attn)
+        attn.layer_id, attn.kv_source_layer_id = 24, 22
+        attn._shared_attention = {"layers": {24: attn}}
+        attn._pool_spec = {region: (torch.uint8, 8)}
+        layer = SimpleNamespace(kv_cache_base=torch.arange(256).byte().view(4, 64))
+        attn._kv_cache = SimpleNamespace(get_layer_cache=lambda *args: layer)
+
+        first = attn._source_pool(region)
+        self.assertIs(first, attn._source_pool(region))
+        torch.testing.assert_close(first, layer.kv_cache_base.view(4, 8, 8))
+        layer.kv_cache_base.fill_(7)
+        self.assertTrue(torch.equal(first, torch.full_like(first, 7)))
+
+        # A cache allocation can be rebound through either a new Tensor or set_.
+        layer.kv_cache_base = torch.ones((4, 64), dtype=torch.uint8)
+        rebound = attn._source_pool(region)
+        self.assertIsNot(first, rebound)
+        replacement = torch.full((4, 64), 9, dtype=torch.uint8)
+        layer.kv_cache_base.set_(replacement)
+        relocated = attn._source_pool(region)
+        self.assertIsNot(rebound, relocated)
+        torch.testing.assert_close(relocated, replacement.view(4, 8, 8))
+        layer.kv_cache_base.resize_(2, 128)
+        resized = attn._source_pool(region)
+        self.assertEqual(resized.shape, (2, 16, 8))
+        self.assertIsNot(relocated, resized)
+
+        attn._begin_forward()
+        self.assertNotIn("source_pool_views", attn._shared_attention)
+        self.assertIsNot(resized, attn._source_pool(region))
+        attn._kv_cache = None
+        self.assertIsNone(attn._source_pool(region))
+
+    def test_source_pool_views_preserve_padding_and_float_state(self):
+        region, state = attention_v41_module.HCA_KV, attention_v41_module.CSA_STATE
+        attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(attn)
+        attn.layer_id = attn.kv_source_layer_id = 2
+        attn._shared_attention = {}
+        attn._pool_spec = {region: (torch.uint8, 7), state: (torch.float32, 4)}
+        base = torch.arange(256).float().view(4, 64)
+        attn._kv_cache = SimpleNamespace(
+            get_layer_cache=lambda *args: SimpleNamespace(kv_cache_base=base)
+        )
+        packed = attn._source_pool(region)
+        self.assertEqual(packed.stride(), (256, 7, 1))
+        self.assertEqual(packed.shape, (4, 36, 7))
+        torch.testing.assert_close(packed[1].flatten(), base.view(torch.uint8)[1, :252])
+        floats = attn._source_pool(state)
+        torch.testing.assert_close(floats, base.view(-1, 4))
+        self.assertIs(floats, attn._source_pool(state))
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_prefill_chunk_meta_cuda_mixed_replay(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_metadata
@@ -224,6 +279,7 @@ class AttentionV41Test(unittest.TestCase):
         req_ids = torch.tensor([0, 1, 1])
         common = SimpleNamespace(
             cp_on=False,
+            cp_ctx=None,
             input_lengths=torch.tensor([4, 6]),
             prefix_lengths=torch.zeros(2, dtype=torch.long),
         )

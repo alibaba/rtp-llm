@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_swa_triton as codec
 
@@ -105,6 +106,46 @@ def write(keys, raw, slots, compaction, dest, out, rank=0):
         fresh_out=out,
         fresh_slots=dest if out is not None else None,
     )
+
+
+class SwaWorkspaceViewTest(unittest.TestCase):
+    def test_ragged_views_preserve_offsets_strides_and_aliasing(self):
+        owner = load_attention()()
+        owner.swa_bounded_replay = False
+        owner.window_size = 128
+        lengths, prefixes = [139, 37, 0, 1], [127, 0, 5, 64]
+        owner._host_prefill_lengths = lambda _: lengths
+        owner._host_prefill_prefixes = lambda _: prefixes
+        common = SimpleNamespace(batch_size=4, any_cont=True)
+        for padded in (False, True):
+            with self.subTest(padded=padded):
+                storage = torch.arange(5 * 270 * 16).view(5, 270, 16)
+                buf = storage[1:, 2:, ::2] if padded else storage[:4]
+                owner._swa_prefill_concat = lambda *args, **kw: buf
+                expected = [
+                    buf[b, : min(p, 127) + n]
+                    for b, (p, n) in enumerate(zip(prefixes, lengths))
+                ]
+
+                class RecordViews(TorchDispatchMode):
+                    def __init__(self):
+                        self.ops = []
+
+                    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                        self.ops.append(func)
+                        return func(*args, **(kwargs or {}))
+
+                with RecordViews() as views:
+                    actual, starts = owner._swa_prefill_workspace(None, common)
+                self.assertEqual(starts, [0, 0, 0, 0])
+                self.assertNotIn(torch.ops.aten.select.int, views.ops)
+                self.assertNotIn(torch.ops.aten.slice.Tensor, views.ops)
+                for got, want in zip(actual, expected):
+                    torch.testing.assert_close(got, want)
+                    self.assertEqual(got.stride(), want.stride())
+                    self.assertEqual(got.storage_offset(), want.storage_offset())
+                actual[1].fill_(-1)
+                torch.testing.assert_close(expected[1], actual[1])
 
 
 class SwaFreshGpuTest(unittest.TestCase):

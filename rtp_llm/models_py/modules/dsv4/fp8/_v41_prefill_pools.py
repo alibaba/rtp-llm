@@ -16,6 +16,10 @@ _KEY_ALIGNMENT = 256
 _MAX_REQUESTS = 128
 
 
+def _trim_rows(tensor, count):
+    return tensor if count == tensor.shape[0] else tensor[:count]
+
+
 @triton.jit(do_not_specialize=["FIRST", "STOP", "ROWS", "END_STRIDE"])
 def _pool_row_metadata_kernel(
     seq_ends, output, FIRST, STOP, ROWS, END_STRIDE, RATIO: tl.constexpr
@@ -162,7 +166,10 @@ def try_gather_prefill_pools(attn, main_pool, index_pool, ends, seq_ends):
         # Split only the leading dimension: these contiguous views share the
         # slabs and require no GPU work or per-request device allocation.
         result.extend(
-            (keys[:count], PrefillIndexerKeys(payload[:count], sf[:count]))
+            (
+                _trim_rows(keys, count),
+                PrefillIndexerKeys(_trim_rows(payload, count), _trim_rows(sf, count)),
+            )
             for count, keys, payload, sf in zip(
                 counts[first:stop],
                 global_keys.split(group_counts, dim=0),

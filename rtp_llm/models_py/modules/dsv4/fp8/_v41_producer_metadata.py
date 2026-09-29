@@ -17,6 +17,10 @@ _MAX_METADATA_BYTES = 16 * 1024**2
 _RAW_TILE_ROWS = 32768
 
 
+def _slice_rows(tensor, start, end):
+    return tensor if start == 0 and end == tensor.shape[0] else tensor[start:end]
+
+
 @dataclass(frozen=True)
 class SlotLayout:
     table: torch.Tensor
@@ -49,15 +53,19 @@ class ProducerMetadata:
             raise ValueError("CP producer metadata does not match the original segment")
         return (
             (
-                self.raw_indices[first:stop]
+                _slice_rows(self.raw_indices, first, stop)
                 if self.raw_indices is not None
-                else self.indices[phase][: stop - first]
+                else _slice_rows(self.indices[phase], 0, stop - first)
             ),
-            self.positions[first:stop],
-            self.requests[first:stop],
-            self.main_slots[first:stop],
-            self.index_slots[first:stop],
-            self.state_slots[start:end] if self.state_slots is not None else None,
+            _slice_rows(self.positions, first, stop),
+            _slice_rows(self.requests, first, stop),
+            _slice_rows(self.main_slots, first, stop),
+            _slice_rows(self.index_slots, first, stop),
+            (
+                _slice_rows(self.state_slots, start, end)
+                if self.state_slots is not None
+                else None
+            ),
         )
 
 

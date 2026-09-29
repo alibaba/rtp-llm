@@ -10,6 +10,28 @@ from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_pools as pools
 
 
 class PrefillPoolsHostTest(unittest.TestCase):
+    def test_aligned_request_rows_reuse_split_views(self):
+        backing = torch.arange(2 * 256 * 8).reshape(2 * 256, 8)
+        for request in backing.split(256):
+            actual = pools._trim_rows(request, 256)
+            self.assertIs(actual, request)
+            self.assertEqual(actual.storage_offset(), request.storage_offset())
+
+    def test_padded_request_trim_preserves_strides_and_aliases(self):
+        backing = torch.arange(257 * 8).reshape(257, 8)
+        request = backing[1:, ::2]
+        for count in (0, 127, 255):
+            with self.subTest(count=count):
+                actual = pools._trim_rows(request, count)
+                torch.testing.assert_close(actual, request[:count])
+                self.assertEqual(actual.stride(), request.stride())
+                self.assertEqual(actual.storage_offset(), request.storage_offset())
+                if count:
+                    actual[-1, -1] = -count
+                    self.assertEqual(backing[count, 6].item(), -count)
+        empty = request[:0]
+        self.assertIs(pools._trim_rows(empty, 0), empty)
+
     def test_joint_dispatch_starts_at_qualified_batch_boundary(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_joint_pool as joint
 

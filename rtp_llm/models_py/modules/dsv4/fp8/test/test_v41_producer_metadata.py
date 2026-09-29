@@ -85,6 +85,67 @@ def slot_reference(region, positions, requests, state_end=None, rank=0):
 
 
 class ProducerMetadataCPU(unittest.TestCase):
+    def test_whole_raw_tile_reuses_metadata_views(self):
+        backing = torch.arange(6 * 16, dtype=torch.int64).reshape(6, 16)
+        fields = tuple(row[1::2] for row in backing)
+        plan = metadata.ProducerMetadata(
+            {0: (8, 0, 8, 0)},
+            (),
+            fields[1],
+            fields[2],
+            fields[3],
+            fields[4],
+            fields[5],
+            torch.tensor([8]),
+            raw_indices=fields[0],
+        )
+        for actual, source in zip(plan.tile(0, 8), fields):
+            self.assertIs(actual, source)
+        plan.tile(0, 8)[3][0] = -17
+        self.assertEqual(backing[3, 1].item(), -17)
+
+    def test_partial_tiles_preserve_offsets_strides_and_aliasing(self):
+        backing = torch.arange(6 * 32, dtype=torch.int64).reshape(6, 32)
+        fields = tuple(row[1::2] for row in backing)
+        plan = metadata.ProducerMetadata(
+            {4: (12, 2, 6, 0)},
+            (),
+            fields[1],
+            fields[2],
+            fields[3],
+            fields[4],
+            fields[5],
+            torch.tensor([12]),
+            raw_indices=fields[0],
+        )
+        result = plan.tile(4, 12)
+        for index, (actual, source) in enumerate(zip(result, fields)):
+            start, end = (4, 12) if index == 5 else (2, 6)
+            torch.testing.assert_close(actual, source[start:end])
+            self.assertEqual(actual.stride(), source.stride())
+            self.assertEqual(
+                actual.storage_offset(),
+                source.storage_offset() + start * source.stride(0),
+            )
+            actual[0] = -index - 1
+            self.assertEqual(source[start].item(), -index - 1)
+
+    def test_whole_phase_tile_and_empty_tile_do_not_create_views(self):
+        for count in (0, 8):
+            with self.subTest(count=count):
+                fields = tuple(torch.arange(count) for _ in range(5))
+                plan = metadata.ProducerMetadata(
+                    {0: (count, 0, count, 1)},
+                    (torch.empty(0), fields[0]),
+                    *fields[1:],
+                    None,
+                    torch.tensor([count]),
+                )
+                actual = plan.tile(0, count)
+                for value, source in zip(actual[:5], fields):
+                    self.assertIs(value, source)
+                self.assertIsNone(actual[-1])
+
     def test_product_default_gate_excludes_unsharded_cp_and_single_request(self):
         tree = ast.parse((ROOT / "attention_v41.py").read_text())
         cls = next(

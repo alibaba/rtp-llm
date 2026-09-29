@@ -377,8 +377,9 @@ def prepare_plan(
     bounds = torch.empty(
         (4 if batched else 3, rows), dtype=torch.int32, device=candidates.device
     )
-    row_ks, row_ke, sparse_end = bounds[:3].unbind(0)
-    offsets = bounds[3] if batched else None
+    bound_rows = bounds.unbind(0)
+    row_ks, row_ke, sparse_end = bound_rows[:3]
+    offsets = bound_rows[3] if batched else None
     indices = torch.empty((rows, count), dtype=torch.int32, device=candidates.device)
     _prepare_sparse_prefill_plan_kernel[(rows,)](
         candidates,
@@ -588,8 +589,8 @@ def remap(
     return out
 
 
-def _joined_keys(keys):
-    """Metadata-only alias of one bounded pool slab, never concatenate K."""
+def _joined_key_layout(keys):
+    """Validate adjacent padded storage without constructing tensor aliases."""
     if not keys or any(not isinstance(key, PrefillIndexerKeys) for key in keys):
         return None
     first = keys[0]
@@ -605,22 +606,45 @@ def _joined_keys(keys):
         for key in keys
     ):
         return None
-    from ._v41_grouped_prefill_score import _slab_view
-
-    quant = _slab_view([key.quant for key in keys], padded=True)
-    scale = _slab_view([key.scale for key in keys], padded=True)
-    if (
-        quant is None
-        or scale is None
-        or not 0 < scale.numel() <= 1 << 20
-        or first.scale.data_ptr() % 16
-    ):
+    if first.scale.data_ptr() % 16:
         return None
-    offsets = tuple(
-        key.scale.storage_offset() - first.scale.storage_offset() for key in keys
-    )
+    quant_storage = first.quant.untyped_storage().data_ptr()
+    scale_storage = first.scale.untyped_storage().data_ptr()
+    quant_start = first.quant.storage_offset()
+    scale_start = first.scale.storage_offset()
+    quant_stride = first.quant.stride(0)
+    scale_stride = first.scale.stride(0)
+    offsets, padded_count, span = [], 0, 0
+    for key in keys:
+        if (
+            key.quant.untyped_storage().data_ptr() != quant_storage
+            or key.scale.untyped_storage().data_ptr() != scale_storage
+            or key.quant.storage_offset() != quant_start + padded_count * quant_stride
+            or key.scale.storage_offset() != scale_start + padded_count * scale_stride
+        ):
+            return None
+        offsets.append(padded_count * scale_stride)
+        span = padded_count + len(key)
+        padded_count += (len(key) + 255) // 256 * 256
+    if not 0 < span <= 1 << 20:
+        return None
+    return span, tuple(offsets)
+
+
+def _joined_keys(keys):
+    """Metadata-only alias of one bounded pool slab, never concatenate K."""
+    layout = _joined_key_layout(keys)
+    if layout is None:
+        return None
+    span, offsets = layout
+    first = keys[0]
+    if len(keys) == 1:
+        return first, offsets
     return (
-        PrefillIndexerKeys(quant, scale),
+        PrefillIndexerKeys(
+            first.quant.as_strided((span, 64), first.quant.stride()),
+            first.scale.as_strided((span,), first.scale.stride()),
+        ),
         offsets,
     )
 
@@ -643,7 +667,8 @@ def _batch_groups(keys, slices, rows):
         start = span.start
         while start < span.stop:
             if pieces and (
-                _joined_keys([keys[p[0]] for p in pieces] + [keys[request]]) is None
+                _joined_key_layout([keys[p[0]] for p in pieces] + [keys[request]])
+                is None
             ):
                 groups.append(tuple(pieces))
                 pieces = []
@@ -666,6 +691,30 @@ def _batch_groups(keys, slices, rows):
         slab, offsets = joined
         result.append((pieces, slab, offsets))
     return result
+
+
+def _cached_batch_groups(keys, slices, rows, shared):
+    if slices is None or any(not isinstance(span, slice) for span in slices):
+        return None
+    # Retain the original tensors in the key: an allocator-reused pointer must
+    # never match an earlier source. The owner clears this dictionary per forward.
+    key = (
+        "sparse_group_layout",
+        tuple((item.quant, item.scale) for item in keys),
+        tuple((span.start, span.stop, span.step) for span in slices),
+        rows,
+    )
+    cache = shared.setdefault("prefill_score_bounds", {})
+    groups = cache.get(key)
+    if groups is None:
+        groups = _batch_groups(keys, slices, rows)
+        if groups is not None:
+            cache[key] = groups
+    return groups
+
+
+def _row_view(value, start, stop):
+    return value if start == 0 and stop == value.shape[0] else value[start:stop]
 
 
 def try_batched_sparse(
@@ -734,7 +783,7 @@ def try_batched_sparse(
         )
     ):
         return False
-    groups = _batch_groups(keys, slices, q.shape[0])
+    groups = _cached_batch_groups(keys, slices, q.shape[0], shared)
     if not groups:
         return False
     from . import _v41_deepselect as deepselect
@@ -747,8 +796,9 @@ def try_batched_sparse(
         and (stream.device.index, stream.cuda_stream) not in _WARMED_STREAMS
     ):
         return False
+    prepared_groups = []
     for pieces, slab, offsets in groups:
-        span = slice(pieces[0][1], pieces[-1][2])
+        start, stop = pieces[0][1], pieces[-1][2]
         first = pieces[0][0]
         expected = tuple(
             sum((len(keys[b]) + 255) // 256 * 256 for b in range(first, p[0]))
@@ -756,17 +806,43 @@ def try_batched_sparse(
         )
         if offsets != expected:
             return False
+        (
+            q_rows,
+            sf_rows,
+            weight_rows,
+            candidate_rows,
+            position_rows,
+            request_rows,
+            target,
+        ) = (
+            _row_view(value, start, stop)
+            for value in (q, sf, weights, candidates, positions, req_ids, out)
+        )
         if not is_supported(
-            q[span],
-            sf[span],
+            q_rows,
+            sf_rows,
             slab,
-            weights[span],
-            candidates[span],
-            positions[span],
+            weight_rows,
+            candidate_rows,
+            position_rows,
             block_size,
             topk,
         ):
             return False
+        prepared_groups.append(
+            (
+                pieces,
+                slab,
+                offsets,
+                q_rows,
+                sf_rows,
+                weight_rows,
+                candidate_rows,
+                position_rows,
+                request_rows,
+                target,
+            )
+        )
 
     source = shared.get("candidates", candidates)
     if source is not candidates:
@@ -778,9 +854,18 @@ def try_batched_sparse(
     limit = max(
         0, int(os.environ.get("DSV41_SPARSE_PREFILL_PLAN_MAX_BYTES", 256 * 1024**2))
     )
-    for pieces, slab, offsets in groups:
-        start, stop = pieces[0][1], pieces[-1][2]
-        span = slice(start, stop)
+    for (
+        pieces,
+        slab,
+        offsets,
+        q_rows,
+        sf_rows,
+        weight_rows,
+        candidate_rows,
+        position_rows,
+        request_rows,
+        target,
+    ) in prepared_groups:
         counts = tuple(len(keys[p[0]]) for p in pieces)
         key = (
             "batched",
@@ -800,11 +885,11 @@ def try_batched_sparse(
         plan = cache[1].get(key)
         if plan is None:
             plan = prepare_plan(
-                candidates[span],
-                positions[span],
+                candidate_rows,
+                position_rows,
                 len(slab),
                 block_size,
-                request_ids=req_ids[span],
+                request_ids=request_rows,
                 request_key_counts=key_counts,
                 request_start=pieces[0][0],
                 request_stop=pieces[-1][0] + 1,
@@ -815,14 +900,11 @@ def try_batched_sparse(
             if cache[2] + plan.nbytes <= limit:
                 cache[1][key] = plan
                 cache[2] += plan.nbytes
-        logits = score(q[span], sf[span], slab, weights[span], plan)
+        logits = score(q_rows, sf_rows, slab, weight_rows, plan)
         if logits is None:
             raise RuntimeError("batched sparse scorer rejected after preflight")
         columns = deepselect.try_select_sparse_tokens(logits, plan.end)
-        if (
-            columns is None
-            or remap(columns, plan, logits=logits, out=out[span]) is None
-        ):
+        if columns is None or remap(columns, plan, logits=logits, out=target) is None:
             raise RuntimeError(
                 "batched sparse selection/remap rejected after preflight"
             )

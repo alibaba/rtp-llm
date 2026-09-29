@@ -971,6 +971,7 @@ class AttentionV41FP8(AttentionFP8):
             # stale entry.
             self._shared_attention.pop("prefill_meta_common", None)
             self._shared_attention.pop("decode_rope_metadata", None)
+            self._shared_attention.pop("source_pool_views", None)
 
     def _owner(self):
         return self._shared_attention["layers"][self.kv_source_layer_id]
@@ -988,12 +989,22 @@ class AttentionV41FP8(AttentionFP8):
         if base is None or base.numel() == 0:
             return None
         dtype, width = self._pool_spec[region]
+        views = self._shared_attention.setdefault("source_pool_views", {})
+        key = (layer_id, region, dtype, width)
+        layout = (base.shape, base.stride(), base.data_ptr(), base.dtype, base.device)
+        cached = views.get(key)
+        if cached is not None and cached[0] is base and cached[1] == layout:
+            return cached[2]
         stride_bytes = base.shape[1] * base.element_size()
         eb = stride_bytes // (width * dtype.itemsize)
-        raw = base.view(torch.uint8)
+        raw = base if base.dtype == torch.uint8 else base.view(torch.uint8)
         if dtype == torch.uint8:
-            return raw.as_strided((base.shape[0], eb, width), (stride_bytes, width, 1))
-        return raw.view(dtype).view(-1, width)
+            pool = raw.as_strided((base.shape[0], eb, width), (stride_bytes, width, 1))
+        else:
+            pool = raw.view(dtype).view(-1, width)
+        # Keep the backing tensor alive; rebinding or resizing invalidates the view.
+        views[key] = (base, layout, pool)
+        return pool
 
     def _source_entries(self, region, pool):
         if region == CSA_STATE:
@@ -2075,8 +2086,15 @@ class AttentionV41FP8(AttentionFP8):
         buf = self._swa_prefill_concat(qkv, common, fuse_cache_write=fuse_cache_write)
         prefixes_host = self._host_prefill_prefixes(common)
         tails = [min(int(p), self.window_size - 1) for p in prefixes_host]
+        row_stride, width_stride = buf.stride()[1:]
+        base_offset, batch_stride = buf.storage_offset(), buf.stride(0)
         return [
-            buf[b, : tails[b] + int(lengths_host[b])] for b in range(common.batch_size)
+            buf.as_strided(
+                (tails[b] + int(lengths_host[b]), buf.shape[2]),
+                (row_stride, width_stride),
+                base_offset + b * batch_stride,
+            )
+            for b in range(common.batch_size)
         ], [int(p) - t for p, t in zip(prefixes_host, tails)]
 
     def _swa_prefill_concat(self, qkv, common, *, fuse_cache_write=False):

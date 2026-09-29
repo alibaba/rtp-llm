@@ -106,6 +106,76 @@ def make_candidates(rows, width, key_count, seed=811):
 
 
 class SparsePrefillReferenceCPU(unittest.TestCase):
+    def test_grouping_only_creates_aliases_for_completed_groups(self):
+        sparse = sparse_module()
+        quant = torch.empty(8 * 32768, 64, dtype=torch.int8)
+        scale = torch.empty(8 * 32768, dtype=torch.int32)
+        keys = [
+            dense_indexer.PrefillIndexerKeys(a, b)
+            for a, b in zip(quant.split(32768), scale.split(32768))
+        ]
+        spans = [slice(i, i + 1) for i in range(8)]
+        original = torch.Tensor.as_strided
+        aliases = []
+
+        def track_alias(value, *args, **kwargs):
+            result = original(value, *args, **kwargs)
+            aliases.append(result)
+            return result
+
+        with patch.object(torch.Tensor, "as_strided", track_alias):
+            groups = sparse._batch_groups(keys, spans, 8)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(aliases), 2)
+        self.assertIs(groups[0][1].quant, aliases[0])
+        self.assertIs(groups[0][1].scale, aliases[1])
+        self.assertEqual(groups[0][2], tuple(i * 32768 for i in range(8)))
+
+    def test_group_cache_uses_tensor_identity_ranges_and_forward_lifetime(self):
+        sparse = sparse_module()
+        quant = torch.empty(1024, 64, dtype=torch.int8)
+        scale = torch.empty(1024, dtype=torch.int32)
+        keys = [
+            dense_indexer.PrefillIndexerKeys(a, b)
+            for a, b in zip(quant.split(512), scale.split(512))
+        ]
+        spans = [slice(0, 1), slice(1, 3)]
+        shared = {}
+        with patch.object(sparse, "_batch_groups", wraps=sparse._batch_groups) as build:
+            groups = sparse._cached_batch_groups(keys, spans, 3, shared)
+            self.assertIs(
+                sparse._cached_batch_groups(list(keys), list(spans), 3, shared),
+                groups,
+            )
+            self.assertEqual(build.call_count, 1)
+            changed_ranges = sparse._cached_batch_groups(
+                keys, [slice(0, 2), slice(2, 3)], 3, shared
+            )
+            self.assertEqual(changed_ranges[0][0], ((0, 0, 2), (1, 2, 3)))
+            new_keys = [
+                dense_indexer.PrefillIndexerKeys(a, b)
+                for a, b in zip(quant.split(512), scale.split(512))
+            ]
+            changed_tensors = sparse._cached_batch_groups(new_keys, spans, 3, shared)
+            self.assertIsNot(changed_tensors, groups)
+            self.assertEqual(build.call_count, 3)
+            shared.pop("prefill_score_bounds")
+            self.assertIsNot(
+                sparse._cached_batch_groups(keys, spans, 3, shared), groups
+            )
+            self.assertEqual(build.call_count, 4)
+
+    def test_full_row_range_reuses_tensor_and_partial_range_preserves_alias(self):
+        sparse = sparse_module()
+        source = torch.arange(35).view(5, 7)
+        self.assertIs(sparse._row_view(source, 0, 5), source)
+        part = sparse._row_view(source, 1, 4)
+        torch.testing.assert_close(part, source[1:4])
+        self.assertEqual(
+            part.untyped_storage().data_ptr(), source.untyped_storage().data_ptr()
+        )
+        self.assertEqual(part.storage_offset(), 7)
+
     def test_shared_slab_groups_are_aliases_and_bounded_without_device_work(self):
         sparse = sparse_module()
         with torch.inference_mode():
