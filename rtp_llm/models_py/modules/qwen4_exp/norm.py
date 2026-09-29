@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch import nn
 
@@ -26,9 +28,8 @@ class Qwen4ExpFusedQKRMSNorm(nn.Module):
     folding the one in costs up to ~4e-3 relative on the gain. Measured on the real
     checkpoint's ``layers.11.self_attn.k_norm``: 195 of 256 elements shift.
 
-    Consequence: q/k norm runs in torch rather than one fused kernel, on the 12
-    full-attention layers. Correctness over speed for now; a fused kernel that
-    takes the one into account is left to the performance milestone.
+    A gated Triton path applies the gain in FP32 and keeps V untouched. The
+    Torch implementation remains the fallback for other dtypes and platforms.
     """
 
     def __init__(
@@ -69,6 +70,32 @@ class Qwen4ExpFusedQKRMSNorm(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert hidden_states.dim() == 2
         rows, width = hidden_states.shape
+        fused_enabled = (
+            os.environ.get("RTP_LLM_QWEN4_FUSED_QK_NORM", "0").strip().lower()
+        )
+        if fused_enabled in ("1", "true", "on"):
+            from rtp_llm.models_py.modules.qwen4_exp.norm_triton import (
+                fused_qk_rmsnorm_,
+                is_supported,
+            )
+
+            if is_supported(
+                hidden_states,
+                self.q_weight,
+                self.k_weight,
+                self.head_num,
+                self.kv_head_num,
+                self.size_per_head,
+            ):
+                return fused_qk_rmsnorm_(
+                    hidden_states,
+                    self.q_weight,
+                    self.k_weight,
+                    self.head_num,
+                    self.kv_head_num,
+                    self.size_per_head,
+                    self.eps,
+                )
         qkv = hidden_states.reshape(
             rows, self.head_num + self.kv_head_num * 2, self.size_per_head
         )

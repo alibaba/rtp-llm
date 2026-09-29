@@ -92,6 +92,13 @@ py_test(
 )
 
 py_test(
+    name = "norm_triton_test",
+    srcs = ["norm_triton_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "sparse_gqa_impl_test",
     srcs = ["sparse_gqa_impl_test.py"],
     deps = ["//rtp_llm:testlib"],
