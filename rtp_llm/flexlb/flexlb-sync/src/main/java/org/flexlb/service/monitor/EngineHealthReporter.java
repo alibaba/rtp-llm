@@ -43,6 +43,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKE
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
@@ -233,6 +234,8 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -776,6 +779,11 @@ public class EngineHealthReporter {
         if (localStandbyPrediction != null) {
             monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, tags,
                     comparison.actualHitTokens() - localStandbyPrediction.predictedHitTokens());
+            if (inputTokens > 0) {
+                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO, tags,
+                        (comparison.actualHitTokens() - localStandbyPrediction.predictedHitTokens())
+                                / (double) inputTokens);
+            }
         }
     }
 
