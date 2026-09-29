@@ -75,6 +75,30 @@ class IndexerRuntimeContractTest(unittest.TestCase):
                 device=torch.device("cpu"),
             )
 
+    def test_mrope_rejects_sections_outside_interleaved_axis_slots(self):
+        position_ids = torch.tensor([2, 2, 2], dtype=torch.int32)
+        for sections in ((2, 2, 0), (2, 0, 2), (5, -1, 0)):
+            with self.subTest(sections=sections):
+                config = SimpleNamespace(
+                    style="Mrope",
+                    index_factor=3,
+                    dim=8,
+                    mrope_dim1=sections[0],
+                    mrope_dim2=sections[1],
+                    mrope_dim3=sections[2],
+                    mrope_interleaved=True,
+                    base=10000,
+                    scale=1.0,
+                )
+                with self.assertRaisesRegex(ValueError, "interleaved rotary slots"):
+                    build_interleaved_mrope(
+                        position_ids,
+                        config,
+                        token_count=1,
+                        dtype=torch.float32,
+                        device=torch.device("cpu"),
+                    )
+
     def test_base_rope_factor_one_and_three_match_reference(self):
         logical_positions = torch.tensor([2, 5], dtype=torch.int32)
 
