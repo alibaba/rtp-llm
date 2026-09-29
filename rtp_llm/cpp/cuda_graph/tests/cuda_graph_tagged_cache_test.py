@@ -47,6 +47,17 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class TaggedPhysicalBlockTableModel(TaggedBlockTableModel):
+    """Read allocator-page maps used by model-local side-cache kernels."""
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention_inputs = inputs.attention_inputs
+        full_id = attention_inputs["full"].kv_cache_block_id_device[0, 0]
+        aux_id = attention_inputs["aux"].kv_cache_block_id_device[0, 0]
+        signature = (full_id + 16 * aux_id).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
 class TaggedSequenceLengthModel:
     """Expose the cumulative lengths used by a tagged captured graph."""
 
@@ -625,6 +636,71 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         torch.cuda.synchronize()
         expected_output = torch.full_like(output.hidden_states, expected)
         torch.testing.assert_close(output.hidden_states, expected_output)
+
+    def test_tagged_physical_block_tables_refresh_on_replay(self) -> None:
+        for target_verify in (False, True):
+            with self.subTest(target_verify=target_verify):
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    TaggedPhysicalBlockTableModel(),
+                    HIDDEN_SIZE,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    [2],
+                    GROUP_TAGS,
+                    target_verify,
+                    2 if target_verify else 1,
+                )
+                for full, aux in ((3, 7), (5, 2)):
+                    inputs = (
+                        _build_target_verify_inputs(
+                            GROUP_TAGS,
+                            {"full": 1, "aux": 1},
+                            batch_size=2,
+                            query_len=2,
+                            prefix_len=1,
+                        )
+                        if target_verify
+                        else _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 1})
+                    )
+                    for tag, value in (("full", full), ("aux", aux)):
+                        inputs.attention_inputs[tag].kv_cache_block_id_device = (
+                            torch.full(
+                                (2, 1), value, dtype=torch.int32, device="cuda"
+                            )
+                        )
+                    self._assert_replay_signature(runner, inputs, full + 16 * aux)
+
+    def test_mtp_block_table_update_refreshes_side_physical_tables(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedPhysicalBlockTableModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+            True,
+            2,
+        )
+        inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 1, "aux": 1},
+            batch_size=2,
+            query_len=2,
+            prefix_len=1,
+        )
+        self.assertTrue(runner.prepare(inputs))
+        inputs.attention_inputs["full"].kv_cache_block_id_device.fill_(4)
+        inputs.attention_inputs["aux"].kv_cache_block_id_device.fill_(6)
+        runner.updateBlockTables(inputs)
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.hidden_states, torch.full_like(output.hidden_states, 100)
+        )
 
     def test_prepare_sync_policy_is_role_scoped(self) -> None:
         # Run in a fresh process for each async environment: the production
