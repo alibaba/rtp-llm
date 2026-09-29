@@ -97,6 +97,8 @@ class EngineHealthReporterTest {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.delta.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.local.standby.delta.ratio",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.actual.ratio",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
@@ -528,6 +530,7 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.cache.hit.comparison.kvcm.predicted.tokens", expectedTags, 100.0);
         verify(monitor).report("app.cache.hit.comparison.delta.tokens", expectedTags, 20.0);
         verify(monitor).report("app.cache.hit.comparison.local.standby.delta.tokens", expectedTags, 40.0);
+        verify(monitor).report("app.cache.hit.comparison.local.standby.delta.ratio", expectedTags, 0.2);
         verify(monitor).report("app.cache.hit.comparison.actual.ratio", expectedTags, 0.6);
         verify(monitor).report("app.cache.hit.comparison.input.tokens", expectedTags, 200.0);
         assertEquals(Map.of(

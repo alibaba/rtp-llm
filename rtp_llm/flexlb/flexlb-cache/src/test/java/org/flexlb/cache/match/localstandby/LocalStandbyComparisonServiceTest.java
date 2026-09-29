@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -30,6 +31,32 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class LocalStandbyComparisonServiceTest {
+
+    @Test
+    void waitsForLocalStandbyPredictionBeforeCompletingComparison() throws Exception {
+        LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
+        LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
+                kvcm(modelMetaConfig()), provider, mock(CacheMetricsReporter.class));
+        CacheMatchQuery query = new CacheMatchQuery(
+                "request-pending", List.of(11L), 2192, null, 4096, RoleType.PREFILL, "default");
+        CompletableFuture<CacheMatchResult> pendingMatch = new CompletableFuture<>();
+        when(provider.asyncLocalStandbyMatch(query)).thenReturn(pendingMatch);
+        comparisonService.trackLocalStandbyPrediction(query);
+
+        CacheHitFeedback feedback = new CacheHitFeedback(
+                "cache_hit_comparison", "request-pending", "KVCM", "PREFILL", "default",
+                "10.0.0.1", 8080, "running", 8000, 2192, 4384,
+                true, 4000, 10000, 6000, 1616);
+        CompletableFuture<CacheHitComparisonResult> comparison =
+                comparisonService.captureComparison(feedback.requestId(), RoleType.PREFILL).apply(feedback);
+
+        assertFalse(comparison.isDone());
+        pendingMatch.complete(new CacheMatchResult(
+                Map.of("10.0.0.1:8080@0", HostCacheMatch.local(1)),
+                CacheMatchSource.LOCAL_STANDBY, 10, 4096));
+
+        assertEquals(4096, comparison.get(1, TimeUnit.SECONDS).localStandbyPrediction().predictedHitTokens());
+    }
 
     @Test
     void buildsUnifiedComparisonWithLocalStandbyPrediction() throws Exception {

@@ -355,6 +355,11 @@ public class MetricConstant {
             "app.cache.hit.comparison.delta.tokens";
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS =
             "app.cache.hit.comparison.local.standby.delta.tokens";
+    /**
+     * Per-request actual hit ratio minus Local Standby predicted hit ratio.
+     */
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_RATIO =
+            "app.cache.hit.comparison.local.standby.delta.ratio";
     public static final String CACHE_HIT_COMPARISON_ACTUAL_RATIO =
             "app.cache.hit.comparison.actual.ratio";
     /**
