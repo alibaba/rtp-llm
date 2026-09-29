@@ -114,6 +114,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self.multipliers = multipliers
         self._triton_shard_ptrs: Optional[torch.Tensor] = None
         self._triton_shard_signature: Optional[tuple[int, ...]] = None
+        self._graph_gather_required = False
 
     def _shift_right_ignore_eos(
         self, token_ids: torch.Tensor, shift: int
@@ -163,9 +164,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         return torch.cat(blocks, dim=-1)[:, -seq_len:]
 
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
-        if os.environ.get("RTP_LLM_QWEN4_TRITON_PLE_GATHER", "0").lower() in (
-            "1", "true", "yes", "on"
-        ):
+        use_triton = self._graph_gather_required or os.environ.get(
+            "RTP_LLM_QWEN4_TRITON_PLE_GATHER", "0"
+        ).lower() in ("1", "true", "yes", "on")
+        if use_triton:
             from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
                 gather_local,
                 is_supported,
@@ -188,6 +190,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     self.shard_indices,
                     self.total_shards,
                     self._triton_shard_ptrs,
+                )
+            if self._graph_gather_required:
+                raise RuntimeError(
+                    "qwen4_exp PLE CUDA Graph requires the supported "
+                    "fixed-shape shard gather"
                 )
         shard_idx = torch.div(ngram_ids, self.shard_rows, rounding_mode="floor")
         row_idx = ngram_ids - shard_idx * self.shard_rows

@@ -1319,6 +1319,82 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         torch.testing.assert_close(ctx_pool[2], ids_seed[0, 1:] + 100)
         torch.testing.assert_close(ctx_pool[4], ids_seed[1, :2] + 100)
 
+    def test_target_ple_forward_captures_and_replays_exact_batch(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for Graph replay")
+        device = torch.device("cuda")
+        embedding = self.ple.ple_embedding
+        gpu_embedding = Qwen4ExpNGramEmbedding(
+            [shard.to(device) for shard in embedding.shards],
+            embedding.vocab_sizes,
+            embedding.offsets,
+            embedding.multipliers,
+            ngram_size=embedding.ngram_size,
+            eos_token_id=embedding.eos_token_id,
+        )
+        gpu_embedding.vocab_sizes = gpu_embedding.vocab_sizes.to(device)
+        gpu_embedding.offsets = gpu_embedding.offsets.to(device)
+        gpu_embedding.multipliers = gpu_embedding.multipliers.to(device)
+        self.ple = Qwen4ExpPLELayer(
+            gpu_embedding,
+            self.ple.key_proj.to(device),
+            self.ple.value_proj.to(device),
+            self.ple.conv_weight.to(device),
+            self.ple.norm_key.to(device),
+            self.ple.norm_query.to(device),
+            self.ple.norm_conv.to(device),
+            hc_mult=_HC,
+            hidden_size=_HIDDEN,
+            conv_kernel_size=2,
+            norm_eps=_EPS,
+        )
+        self.model.ple_layers = nn.ModuleDict({"1": self.ple})
+        self.state_base = self.state_base.to(device)
+        self.ctx_base = self.ctx_base.to(device)
+        self.model.kv_cache.layers[PLE_STATE_TAG].kv_cache_base = self.state_base
+        self.model.kv_cache.layers[PLE_NGRAM_CTX_TAG].kv_cache_base = self.ctx_base
+        self.state_blocks = self.state_blocks.to(device)
+        self.ctx_blocks = self.ctx_blocks.to(device)
+
+        prefixes = (self._PAGE - 1, self._PAGE)
+        initial_state, initial_context = self._seed_target_history(prefixes)
+        initial_state = initial_state.to(device)
+        initial_context = initial_context.to(device)
+        ids = torch.tensor([[4, 5, 6], [3, 4, 5]], dtype=torch.long, device=device)
+        hyper = torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16, device=device)
+        inputs = self._target_inputs(prefixes, 3)
+        for value in inputs.values():
+            value.prefix_lengths = value.prefix_lengths.pin_memory()
+            value.input_lengths = value.input_lengths.pin_memory()
+            value.is_cuda_graph = True
+            value.is_s_padded = True
+
+        self.model._apply_ple(1, hyper, ids.flatten(), inputs)
+        self.assertIsNotNone(gpu_embedding._triton_shard_ptrs)
+        self.model.clear_speculative_target_graph_capture()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            got = self.model._apply_ple(1, hyper, ids.flatten(), inputs)
+        self.model.save_speculative_target_graph_capture(2)
+        graph.replay()
+
+        baseline, _ = self.ple.decode_chunk(
+            hyper.view(2, 3, -1),
+            torch.cat([initial_context, ids], dim=1),
+            initial_state,
+        )
+        torch.testing.assert_close(got.view(2, 3, -1), hyper.view(2, 3, -1) + baseline)
+
+        ids.add_(1)
+        hyper.add_(0.125)
+        graph.replay()
+        baseline, _ = self.ple.decode_chunk(
+            hyper.view(2, 3, -1),
+            torch.cat([initial_context, ids], dim=1),
+            initial_state,
+        )
+        torch.testing.assert_close(got.view(2, 3, -1), hyper.view(2, 3, -1) + baseline)
+
     def test_target_verify_commit_finalize_and_next_decode_match_baseline(self):
         prefixes = (self._PAGE - 1, self._PAGE)
         query_len = 5

@@ -727,9 +727,14 @@ class Qwen4ExpModel(Qwen35Model):
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
         if is_target_verify and not allow_target_verify:
             raise RuntimeError("qwen4_exp PLE does not support target-verify/MTP yet")
-        if getattr(attention_inputs, "is_cuda_graph", False):
-            raise RuntimeError("qwen4_exp PLE does not support CUDA Graph yet")
-        if getattr(attention_inputs, "is_s_padded", False):
+        is_cuda_graph = bool(getattr(attention_inputs, "is_cuda_graph", False))
+        if is_cuda_graph and not is_target_verify:
+            raise RuntimeError("qwen4_exp PLE only supports target-verify CUDA Graph")
+        # C++ chooses an exact batch graph whenever a speculative target has
+        # side-state hooks. is_s_padded also labels that exact-batch graph.
+        if getattr(attention_inputs, "is_s_padded", False) and not (
+            is_cuda_graph and is_target_verify
+        ):
             raise RuntimeError("qwen4_exp PLE does not support padded execution yet")
         if getattr(attention_inputs, "context_parallel_info", None) is not None:
             raise RuntimeError("qwen4_exp PLE does not support context parallelism yet")
@@ -1229,6 +1234,10 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError("qwen4_exp PLE cache page size must be positive")
 
         if is_target_verify:
+            if bool(state_inputs.is_cuda_graph):
+                # Warmup initializes the pointer table and Triton specialization
+                # before graphCaptureBegin; eager masked indexing is dynamic.
+                ple.ple_embedding._graph_gather_required = True
             return self._stage_ple_target_verify(
                 layer_idx=layer_idx,
                 ple=ple,
