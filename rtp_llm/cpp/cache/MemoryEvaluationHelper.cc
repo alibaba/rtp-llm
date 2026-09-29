@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <numeric>
 
 #if USING_CUDA
@@ -91,6 +93,21 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                                                     const std::optional<SpeculativeExecutionConfig>& sp_config) {
     size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
     size_t runtime_required_bytes       = 0;
+
+#if USING_CUDA
+    const char* memory_debug = std::getenv("K3_GPU_MEMORY_DEBUG");
+    if (memory_debug && std::strcmp(memory_debug, "1") == 0) {
+        size_t free_bytes  = 0;
+        size_t total_bytes = 0;
+        check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
+        RTP_LLM_LOG_INFO("[K3_GPU_MEM] stage=kv_cache_sizing total_mib=%.1f free_mib=%.1f "
+                         "driver_used_mib=%.1f cached_available_mib=%.1f",
+                         double(total_bytes) / 1048576.0,
+                         double(free_bytes) / 1048576.0,
+                         double(total_bytes - free_bytes) / 1048576.0,
+                         double(device_reserved_memory_bytes) / 1048576.0);
+    }
+#endif
 
     if (kv_cache_config.kv_cache_mem_mb > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",

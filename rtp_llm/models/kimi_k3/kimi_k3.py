@@ -521,10 +521,13 @@ class KimiK3(BaseModel):
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
+        from rtp_llm.utils.gpu_memory_debug import log_k3_gpu_memory
 
         # Release inactive blocks left by checkpoint loading before the expert
         # weight transform allocates its large temporary buffer.
+        log_k3_gpu_memory("before_k3_python_model")
         torch.cuda.empty_cache()
+        log_k3_gpu_memory("after_k3_pre_transform_empty_cache")
 
         self.py_model = KimiK3Model(
             self.model_config,
@@ -536,9 +539,11 @@ class KimiK3(BaseModel):
             device_resource_config=self.device_resource_config,
             moe_config=self.moe_config,
         )
+        log_k3_gpu_memory("after_k3_python_model_transform")
         # Release rank-dependent inactive blocks before the native engine
         # allocates KV cache and workspaces.
         torch.cuda.empty_cache()
+        log_k3_gpu_memory("after_k3_python_model_empty_cache")
         return self.py_model
 
     @staticmethod
