@@ -63,16 +63,14 @@ class LocalStandbyHashServiceTest {
             assertEquals(
                     List.of(-3488128144981237669L),
                     result.blockCacheKeys());
-            assertEquals(
-                    List.of(-3488128144981237669L),
-                    request.getLocalStandbyCacheableBlockCacheKeys());
+            assertSame(result.blockCacheKeys(), request.getLocalStandbyBlockCacheKeys());
         } finally {
             hashService.shutdown();
         }
     }
 
     @Test
-    void publishesSglangEagleBigramHashesAndOnlyFullPages() throws Exception {
+    void publishesSglangEagleBigramHashes() throws Exception {
         LocalStandbyHashService hashService =
                 new LocalStandbyHashService(
                         configuration(),
@@ -89,9 +87,7 @@ class LocalStandbyHashServiceTest {
             assertEquals(
                     List.of(-638950109823820341L),
                     result.blockCacheKeys());
-            assertEquals(
-                    List.of(-638950109823820341L),
-                    request.getLocalStandbyCacheableBlockCacheKeys());
+            assertSame(result.blockCacheKeys(), request.getLocalStandbyBlockCacheKeys());
         } finally {
             hashService.shutdown();
         }

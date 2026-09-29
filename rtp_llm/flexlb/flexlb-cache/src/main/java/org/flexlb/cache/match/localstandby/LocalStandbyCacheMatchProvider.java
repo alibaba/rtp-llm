@@ -107,7 +107,7 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
                             request.getLocalStandbyBlockCacheKeys(),
                             request.getLocalStandbyBlockSize())
                     .thenAcceptAsync(
-                            hashResult -> updateCacheMetadataNow(request, hashResult, selectedWorkers),
+                            hashResult -> updateCacheMetadataNow(hashResult, selectedWorkers),
                             updateExecutor)
                     .exceptionally(error -> {
                         log.warn("Failed to update Local Standby cache metadata, requestId={}", request.getRequestId(), error);
@@ -118,17 +118,9 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
         }
     }
 
-    private void updateCacheMetadataNow(Request request,
-                                        LocalStandbyHashResult hashResult,
+    private void updateCacheMetadataNow(LocalStandbyHashResult hashResult,
                                         List<ServerStatus> selectedWorkers) {
         if (hashResult.blockCacheKeys().isEmpty() || hashResult.blockSize() <= 0) {
-            return;
-        }
-        List<Long> cacheableBlockCacheKeys = request.getLocalStandbyCacheableBlockCacheKeys();
-        if (cacheableBlockCacheKeys == null) {
-            cacheableBlockCacheKeys = hashResult.blockCacheKeys();
-        }
-        if (cacheableBlockCacheKeys.isEmpty()) {
             return;
         }
         for (ServerStatus selectedWorker : selectedWorkers) {
@@ -141,7 +133,7 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
             }
             cacheManager.addRoutedRequestBlocks(
                     selectedWorker.getLogicalIpPort(),
-                    cacheableBlockCacheKeys);
+                    hashResult.blockCacheKeys());
         }
     }
 
