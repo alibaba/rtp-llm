@@ -129,4 +129,27 @@ class FlexlbScheduleProtocolTest {
                 .parseFrom(query.toByteArray()).getPhase());
     }
 
+    @Test
+    void encoderCacheHitLengthDistinguishesOmittedFromKnownZero() throws Exception {
+        var omitted = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setSeqLen(1000)
+                .build();
+        var knownMiss = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setSeqLen(1000)
+                .setEncoderCacheHitLen(0)
+                .build();
+        var partialHit = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setSeqLen(1000)
+                .setEncoderCacheHitLen(200)
+                .build();
+
+        assertFalse(omitted.hasEncoderCacheHitLen());
+        assertTrue(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(knownMiss.toByteArray())
+                .hasEncoderCacheHitLen());
+        assertEquals(200, FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(partialHit.toByteArray())
+                .getEncoderCacheHitLen());
+        assertEquals(18, partialHit.getDescriptorForType()
+                .findFieldByName("encoder_cache_hit_len").getNumber());
+    }
+
 }

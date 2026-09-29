@@ -12,9 +12,10 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 未配置角色以及非法枚举值返回 `INVALID_REQUEST`。现有 VIT 不属于该新增请求枚举，
 其选点仍使用 `RandomStrategy`。
 
-Encoder 使用独立的 `EncoderStrategy`：候选必须是已发布且存活的 Encoder endpoint，
-`available_kv_cache >= 0`；先比较 `running_query_len + waiting_query_len + 本地待观察请求数`，
-并列时选可用 KV cache 更多的 worker。Encoder 单独请求时走 DIRECT，FlexLB 返回
+Encoder 使用独立的 `EncoderStrategy`：候选必须是已发布且存活的 Encoder endpoint。
+请求携带可选 `encoder_cache_hit_len` 时，先比较各节点在途的未命中编码工作量代理值，
+并列时比较 `running_query_len + waiting_query_len + 本地待观察请求数`；未携带时仅比较并发数。
+Encoder 不按可用 KV cache 筛选或决胜。Encoder 单独请求时走 DIRECT，FlexLB 返回
 `ENCODER` 端点，不调用 EnqueueBatch；没有候选时返回 `NO_ENCODER_WORKER` (8408)。
 本地待观察请求在 endpoint 的并发 map 中逐请求更新，选点读取允许短暂滞后；并发请求可能依据
 同一份负载快照选中同一 worker。Prefill/Decode 与 PDFusion 的既有策略保持原样。
@@ -51,7 +52,7 @@ ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 | PDFUSION / PREFILL | `loadBalanceStrategy` | `SHORTEST_TTFT` | `WAIT_TIME` |
 | DECODE | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE` | `REMAINING_KV_CACHE` |
 | VIT | `vitLoadBalanceStrategy` | `RANDOM` | `WAIT_TIME` |
-| ENCODER | 独立 `EncoderStrategy` | 最少并发、可用 KV cache 并列打破 | `running + waiting + 本地待观察请求` |
+| ENCODER | 独立 `EncoderStrategy` | 提供命中长度时最少编码工作量，否则最少并发 | 在途预测／实际输入长度、`running + waiting + 本地待观察请求` |
 
 ### gRPC Schedule 响应
 
