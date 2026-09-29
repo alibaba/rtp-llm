@@ -1,4 +1,5 @@
 import math
+import os
 from typing import List, Optional
 
 import torch
@@ -111,6 +112,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self.vocab_sizes = vocab_sizes
         self.offsets = offsets
         self.multipliers = multipliers
+        self._triton_shard_ptrs: Optional[torch.Tensor] = None
+        self._triton_shard_signature: Optional[tuple[int, ...]] = None
 
     def _shift_right_ignore_eos(
         self, token_ids: torch.Tensor, shift: int
@@ -160,6 +163,32 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         return torch.cat(blocks, dim=-1)[:, -seq_len:]
 
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+        if os.environ.get("RTP_LLM_QWEN4_TRITON_PLE_GATHER", "0").lower() in (
+            "1", "true", "yes", "on"
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
+                gather_local,
+                is_supported,
+            )
+
+            if is_supported(ngram_ids, self.shards):
+                signature = tuple(shard.data_ptr() for shard in self.shards)
+                if self._triton_shard_signature != signature:
+                    pointers = [0] * self.total_shards
+                    for index, pointer in zip(self.shard_indices, signature):
+                        pointers[index] = pointer
+                    self._triton_shard_ptrs = torch.tensor(
+                        pointers, dtype=torch.int64, device=ngram_ids.device
+                    )
+                    self._triton_shard_signature = signature
+                assert self._triton_shard_ptrs is not None
+                return gather_local(
+                    ngram_ids,
+                    self.shards,
+                    self.shard_indices,
+                    self.total_shards,
+                    self._triton_shard_ptrs,
+                )
         shard_idx = torch.div(ngram_ids, self.shard_rows, rounding_mode="floor")
         row_idx = ngram_ids - shard_idx * self.shard_rows
         out = self.shards[0].new_zeros(*ngram_ids.shape, self.shards[0].shape[-1])

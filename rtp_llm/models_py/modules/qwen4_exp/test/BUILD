@@ -20,6 +20,13 @@ py_test(
 )
 
 py_test(
+    name = "ple_gather_triton_test",
+    srcs = ["ple_gather_triton_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "ple_decode_test",
     srcs = ["ple_decode_test.py"],
     deps = ["//rtp_llm:testlib"],
