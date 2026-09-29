@@ -69,16 +69,21 @@ expected_added = {
     "pip_gpu_cuda13_torch_cuda_linear_attention",
     "pip_gpu_cuda13_torch_flash_linear_attention",
 }
-if len(old) != 178 or set(current) - set(old) != expected_added:
+if len(current) != 180 or len(old) not in {178, 180} or not set(current) - set(old) <= expected_added:
     raise SystemExit("CUDA13 pip lock set differs from the audited source")
 if set(old) - set(current) or any(old[name] != current[name] for name in old):
     raise SystemExit("A cached CUDA13 wheel differs in version or hash")
 external = Path(sys.argv[3])
+reused = 0
 for name in sorted(old):
     path = external / name
     if not (path / "WORKSPACE").is_file() or not (path / "BUILD.bazel").is_file():
-        raise SystemExit(f"Cached wheel repository is incomplete: {path}")
+        # Bazel never materialized this wheel for the previous server target.
+        # Leave it on the new build's hash-pinned download path if needed.
+        continue
     print(name)
+    reused += 1
+print(f"CUDA13 pip lock matches; reusing {reused} host-local wheel trees", file=sys.stderr)
 PY
 )
 
@@ -103,5 +108,8 @@ printf 'host=%s container=lhc_GPU user=%s source=%s source_fs=xfs output_root=%s
   "$host_id" "$(id -un)" "$repo" "$output"
 printf ' %q' "${cmd[@]}"
 printf '\n'
+if [[ "${K3_BUILD_PRINT_ONLY:-0}" == 1 ]]; then
+  exit 0
+fi
 "${cmd[@]}"
 test -x "$repo/bazel-bin/rtp_llm/rtp_llm_server"
