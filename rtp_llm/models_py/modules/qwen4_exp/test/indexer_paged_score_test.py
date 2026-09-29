@@ -40,6 +40,36 @@ def _ref(q, w, pool, bt, ctx, bs):
 
 
 class PagedScoreTest(unittest.TestCase):
+    def test_graph_replay_reads_refreshed_block_table_and_length(self):
+        q = torch.ones(1, 1, 1, _D, dtype=torch.bfloat16, device=_DEV)
+        w = torch.ones(1, 1, dtype=torch.float32, device=_DEV)
+        pool = torch.zeros(12, _D, dtype=torch.bfloat16, device=_DEV)
+        pool[4:8].fill_(1)
+        pool[8:12].fill_(2)
+        bt = torch.tensor([[1]], dtype=torch.int32, device=_DEV)
+        ctx = torch.tensor([[4]], dtype=torch.int32, device=_DEV)
+
+        def score():
+            return qsa_paged_indexer_score(
+                q, w, pool, bt, ctx, block_size=4, max_ctx_len=4,
+                validate_block_table=False,
+            )
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            score()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = score()
+        bt.fill_(2)
+        ctx.fill_(2)
+        graph.replay()
+        torch.testing.assert_close(replayed, score())
+        self.assertEqual(float(replayed[0, 0]), 2.0 * _D)
+        self.assertTrue(bool(torch.isneginf(replayed[0, 2:]).all()))
+
     def test_negative_weight_is_applied_after_relu(self):
         # dot(q, k) is positive.  The expected negative contribution proves
         # the kernel implements weight * relu(dot), not relu(weight * dot).
