@@ -19,11 +19,6 @@ public class MetricConstant {
 
     public static final String ENGINE_ENCODER_WORKER_NUMBER = "app.engine.health.check.engine.encoder.worker.number";
 
-    /**
-     * Service discovery client request result
-     */
-    public static final String ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT = "app.engine.health.check.engine.worker.number.service.discovery.result";
-
     public static final String ENGINE_STATUS_VISITOR_RT = "app.engine.health.check.visitor.rt";
 
     /**
