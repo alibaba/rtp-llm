@@ -88,6 +88,19 @@ def validate_device(address: str) -> None:
 def topology(pc, *, wait: bool = False) -> dict[int, str]:
     if not 0 <= pc.world_rank < pc.world_size:
         raise ValueError("SCR world rank is outside the topology")
+    if pc.local_world_size <= 0 or pc.world_size % pc.local_world_size:
+        raise ValueError("SCR VIP requires equally sized nodes")
+    # The runc interposer reads node topology separately from RTP's GPU ranks.
+    # Missing RANK_SIZE silently selects its single-node IPC registry.
+    expected = {
+        "RANK_SIZE": pc.world_size // pc.local_world_size,
+        "RANK_ID": pc.world_rank // pc.local_world_size,
+    }
+    for name, value in expected.items():
+        if os.environ.get(name) != str(value):
+            raise ValueError(
+                f"SCR VIP requires {name}={value} in the worker environment"
+            )
     deadline = time.monotonic() + (120 if wait else 0)
     while True:
         try:

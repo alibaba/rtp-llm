@@ -26,6 +26,8 @@ class ScrVipTest(unittest.TestCase):
                 "RTP_LLM_SCR_VIP_INTERFACE": "scr_vxlan0",
                 "RTPLLM_ENABLE_SCR": "1",
                 "SCR_PHASE": "checkpoint",
+                "RANK_SIZE": "2",
+                "RANK_ID": "1",
             },
             clear=True,
         )
@@ -43,6 +45,15 @@ class ScrVipTest(unittest.TestCase):
         with patch.object(scr_vip, "validate_device") as check:
             self.assertEqual(scr_vip.internal_ip(self.pc, "10.0.0.3"), "22.0.1.3")
             check.assert_called_once_with("22.0.1.3")
+
+    def test_worker_node_topology_must_match_gpu_topology(self):
+        for name, wrong in (("RANK_SIZE", "1"), ("RANK_ID", "0"), ("RANK_SIZE", "")):
+            with self.subTest(name=name, value=wrong), patch.dict(
+                os.environ, {name: wrong}
+            ), patch.object(scr_vip, "validate_device") as device:
+                with self.assertRaisesRegex(ValueError, name):
+                    scr_vip.topology(self.pc, wait=True)
+                device.assert_not_called()
 
     def test_incomplete_duplicate_and_unmerged_maps_fail(self):
         bad_maps = [
