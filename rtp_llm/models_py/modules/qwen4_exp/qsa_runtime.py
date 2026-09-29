@@ -1487,7 +1487,7 @@ class Qwen4ExpQSARuntimeContext:
             device=raw_keys.device,
         )
         fused_writer = os.environ.get(
-            "RTP_LLM_QWEN4_TRITON_DECODE_WRITER", "0"
+            "RTP_LLM_QWEN4_TRITON_DECODE_WRITER", "1"
         ).strip().lower() in ("1", "true", "yes", "on")
         if fused_writer:
             from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
@@ -1658,7 +1658,7 @@ class Qwen4ExpQSARuntimeContext:
             device=raw_keys.device,
         )
         target_writer = os.environ.get(
-            "RTP_LLM_QWEN4_TRITON_TARGET_WRITER", "0"
+            "RTP_LLM_QWEN4_TRITON_TARGET_WRITER", "1"
         ).strip().lower() in ("1", "true", "yes", "on")
         target_writer = target_writer and (
             query_len == ratio == 4
