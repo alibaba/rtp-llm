@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class VllmBlockHashStrategyTest {
@@ -34,13 +33,6 @@ class VllmBlockHashStrategyTest {
                 List.of(-7527834946346035334L, -7860823284622341314L),
                 strategy.calculate(TokenIds.wrap(IntStream.range(0, 130).toArray()), 64, 0));
         assertEquals(List.of(), strategy.calculate(TokenIds.wrap(new int[]{1, 2}), 4, 0));
-    }
-
-    @Test
-    void keepsAllCalculatedBlocksInTheCacheablePrefix() {
-        List<Long> hashes = List.of(11L, 22L);
-
-        assertSame(hashes, strategy.cacheablePrefix(hashes, 9, 4, 1));
     }
 
     @Test

@@ -112,7 +112,7 @@ class BlockHashExecutorTest {
     }
 
     @Test
-    void calculatesSglangEagleBigramHashAndCacheablePrefix() {
+    void calculatesSglangEagleBigramHash() {
         BlockHashExecutor sglangExecutor =
                 new BlockHashExecutor(monitor, new SglangBlockHashStrategy(), 1, 2, 60, 1);
 
@@ -124,9 +124,6 @@ class BlockHashExecutorTest {
             assertEquals(
                     List.of(-638950109823820341L),
                     result.blockCacheKeys());
-            assertEquals(
-                    List.of(-638950109823820341L),
-                    sglangExecutor.cacheablePrefix(result.blockCacheKeys(), 6, 4, 1));
         } finally {
             sglangExecutor.shutdown();
         }

@@ -53,20 +53,6 @@ public final class SglangBlockHashStrategy implements BlockHashStrategy {
         return blockCacheKeys;
     }
 
-    @Override
-    public List<Long> cacheablePrefix(
-            List<Long> blockCacheKeys, int inputTokenCount, long blockSize, int lookaheadTokens) {
-        if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
-            return Collections.emptyList();
-        }
-        if (inputTokenCount <= 0 || blockSize <= 0) {
-            return blockCacheKeys;
-        }
-        int logicalLength = Math.max(0, inputTokenCount - lookaheadTokens);
-        int fullPageCount = (int) Math.min(blockCacheKeys.size(), logicalLength / blockSize);
-        return List.copyOf(blockCacheKeys.subList(0, fullPageCount));
-    }
-
     private static void updateLittleEndianInt(MessageDigest digest, int value) {
         digest.update((byte) value);
         digest.update((byte) (value >>> Byte.SIZE));
