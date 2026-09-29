@@ -1,11 +1,24 @@
 """TokenSpeed's native ragged MLA kernel behind RTP's cache planning."""
 
 import logging
+from functools import cache
 from importlib.metadata import version
 
 import torch
 
 from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+
+@cache
+def _load_backend():
+    setup_cutlass_import_path()
+    try:
+        from tokenspeed_mla.mla_prefill import tokenspeed_mla_prefill
+    except ImportError as error:
+        raise ImportError(
+            "K3 native MLA requires deps/requirements_kimi_k3_native.txt"
+        ) from error
+    return tokenspeed_mla_prefill, version("tokenspeed-mla")
 
 
 class KimiK3TokenspeedPrefill:
@@ -14,17 +27,10 @@ class KimiK3TokenspeedPrefill:
     def __init__(self, fp8_compute: bool = False):
         self.fp8_compute = fp8_compute
         self.operand_dtype = torch.float8_e4m3fn if fp8_compute else torch.bfloat16
-        setup_cutlass_import_path()
-        try:
-            from tokenspeed_mla.mla_prefill import tokenspeed_mla_prefill
-        except ImportError as error:
-            raise ImportError(
-                "K3 native MLA requires deps/requirements_kimi_k3_native.txt"
-            ) from error
-        self._run = tokenspeed_mla_prefill
+        self._run, backend_version = _load_backend()
         logging.info(
             "K3 MLA prefill backend=tokenspeed_mla version=%s Q/K/V=%s output=BF16",
-            version("tokenspeed-mla"),
+            backend_version,
             "E4M3" if fp8_compute else "BF16",
         )
 
