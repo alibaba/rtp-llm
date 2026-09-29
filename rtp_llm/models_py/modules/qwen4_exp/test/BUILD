@@ -85,6 +85,13 @@ py_test(
 )
 
 py_test(
+    name = "qsa_decode_graph_test",
+    srcs = ["qsa_decode_graph_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "indexer_paged_score_test",
     srcs = ["indexer_paged_score_test.py"],
     deps = ["//rtp_llm:testlib"],
