@@ -61,6 +61,7 @@ def _worker(rank: int, port: int) -> None:
             torch.cuda.synchronize()
             expected = torch.full_like(graph_output, value * 3)
             torch.testing.assert_close(graph_output, expected, rtol=0, atol=0)
+        dist.barrier()
     finally:
         communicator.destroy()
         dist.destroy_process_group()
