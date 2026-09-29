@@ -1,0 +1,53 @@
+{
+  "errors": [],
+  "graph_buckets": [
+    2,
+    4,
+    8
+  ],
+  "graph_capture_ranks": {
+    "2": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "4": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "8": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  "graph_replay_proven": false,
+  "mtp_device_input_ranks": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "mtp_draft_gpu_kernels_proven": false,
+  "status": "PASS"
+}

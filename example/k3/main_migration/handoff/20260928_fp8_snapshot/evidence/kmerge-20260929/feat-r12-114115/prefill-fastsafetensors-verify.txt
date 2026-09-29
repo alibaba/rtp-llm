@@ -1,0 +1,3 @@
+[PASS] FastSafetensors startup evidence at /data0/luohaocheng.lhc/artifacts/k3-fp8-opt-20260927/feat-flow-114115-nocp-r12/feat-nocp-a9bf-4layer-3fs-114115-r12-20260929/prefill/service.log:10:   load method:     fastsafetensors
+[PASS] no scratch-loader, weight-loader fallback, or explicit alternate-loader evidence found
+[RESULT] PASS

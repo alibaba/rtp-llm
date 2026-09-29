@@ -20,6 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefill-tar", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--decode-ip", default="11.163.39.112")
     parser.add_argument("--decode-port", type=int, default=26400)
     args = parser.parse_args()
     with tarfile.open(args.prefill_tar, "r:gz") as archive:
@@ -56,7 +57,7 @@ def main():
                     raise ValueError("PD marker absent")
                 role_addrs = aux.get("role_addrs", [])
                 if not any(addr.get("role") == "DECODE"
-                           and addr.get("ip") == "11.163.39.112"
+                           and addr.get("ip") == args.decode_ip
                            and addr.get("http_port") == args.decode_port for addr in role_addrs):
                     raise ValueError("Decode route differs")
                 if observed.get("output_len") != 16 or wire["usage"]["completion_tokens"] != 16:
