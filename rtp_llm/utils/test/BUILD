@@ -40,6 +40,7 @@ py_test(
         "//rtp_llm:sdk",
         "//rtp_llm:torch",
         "//rtp_llm/model_loader/tipc",
+        "//rtp_llm/test/utils:jit_sys_path_setup",
     ],
 )
 

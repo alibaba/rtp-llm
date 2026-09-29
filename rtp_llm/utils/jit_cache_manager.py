@@ -1,4 +1,5 @@
 import importlib.metadata
+import json
 import logging
 import os
 import platform
@@ -25,6 +26,7 @@ from rtp_llm.utils import jit_cache_store as store
 SYNC_POLL_S, STOP_TIMEOUT_S = 120.0, 10.0
 RTP_JIT_VERSION, CUDA, ROCM = "v1", "cuda", "rocm"
 LOCKS_DIR, STAGING_DIR = ".locks", ".staging"
+_AUTOMATIC_CACHE_ENVS = "_RTP_LLM_AUTOMATIC_JIT_CACHE_ENVS"
 # Fixed path: build artifacts embed absolute paths, so relocating voids snapshots; opt out via --manage_jit_cache.
 LOCAL_JIT_ROOT = Path("/tmp/rtp-llm/.jit_cache")
 GPU_PROBE = """import torch
@@ -116,6 +118,14 @@ Scope = namedtuple("Scope", "scope_id root components")
 # fmt: on
 
 
+def _automatic_cache_envs() -> dict[str, str]:
+    try:
+        values = json.loads(os.environ.get(_AUTOMATIC_CACHE_ENVS, "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return values if isinstance(values, dict) else {}
+
+
 def resolve_scope(local_root: Path) -> Scope | None:
     import torch
 
@@ -138,8 +148,12 @@ def resolve_scope(local_root: Path) -> Scope | None:
     flags = [f"{k}={v}" for k in COMPILE_FLAG_ENVS if (v := os.environ.get(k))]
     if flags:  # toolchain overrides change codegen: they belong in the key
         keys.append("flags-" + sha256("\0".join(flags).encode()).hexdigest()[:12])
+    automatic = _automatic_cache_envs()
     for item in COMPONENTS:
-        if item.backend not in (None, backend) or item.env_name in os.environ:
+        preset = os.environ.get(item.env_name, "").strip()
+        if item.backend not in (None, backend) or (
+            preset and automatic.get(item.env_name) != preset
+        ):
             continue
         with suppress(importlib.metadata.PackageNotFoundError):
             parts = tuple(
@@ -196,11 +210,17 @@ def setup_jit_cache_env() -> Scope | None:
         logging.info("JIT shared root %s mode %o", local_root, mode)
         if scope.root.exists() and not os.access(scope.root, os.W_OK):
             raise OSError(f"scope root not shared by its owner: {scope.root}")
+        automatic = _automatic_cache_envs()
         for item in scope.components:
             os.environ[item.env_name] = str(item.local_dir)
+            automatic.pop(item.env_name, None)
             # Only torch/aiter use existence batons; tvm_ffi's same-named file is flocked.
             if item.name in ("torch_extensions", "aiter"):
                 store.reap_stale_batons(item.local_dir)
+        if automatic:
+            os.environ[_AUTOMATIC_CACHE_ENVS] = json.dumps(automatic, sort_keys=True)
+        else:
+            os.environ.pop(_AUTOMATIC_CACHE_ENVS, None)
         return scope
     except Exception:
         logging.warning("JIT_CACHE_FAIL_OPEN: env setup failed", exc_info=True)
