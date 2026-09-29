@@ -326,6 +326,7 @@ class Qwen4ExpQSARuntimeContext:
         allow_target_verify: bool = False,
         allow_draft_incremental: bool = False,
         allow_prefix_reuse: bool = False,
+        allow_graph_decode: bool = False,
     ) -> list[int]:
         if str(self.indexer_kv_cache.tag) != INDEXER_KV_TAG:
             raise RuntimeError("qwen4_exp QSA received the wrong indexer KV cache")
@@ -351,10 +352,19 @@ class Qwen4ExpQSARuntimeContext:
                 "draft context"
             )
         for inputs in all_inputs:
-            if bool(inputs.is_cuda_graph):
+            graph_decode = allow_graph_decode and not expect_prefill
+            if bool(inputs.is_cuda_graph) and not graph_decode:
                 raise RuntimeError("qwen4_exp QSA does not support CUDA Graph")
-            if bool(inputs.is_s_padded):
+            if bool(inputs.is_s_padded) and not graph_decode:
                 raise RuntimeError("qwen4_exp QSA does not support padded execution")
+            if graph_decode and not bool(inputs.is_cuda_graph):
+                raise RuntimeError("qwen4_exp QSA Graph decode cache modes disagree")
+            if graph_decode and not bool(
+                getattr(inputs, "is_exact_cuda_graph_batch", False)
+            ):
+                raise RuntimeError(
+                    "qwen4_exp QSA Graph decode requires an exact batch graph"
+                )
             if inputs.context_parallel_info is not None:
                 raise RuntimeError("qwen4_exp QSA does not support context parallelism")
             if inputs.cache_store_inputs is not None:
@@ -1340,7 +1350,12 @@ class Qwen4ExpQSARuntimeContext:
         compression group, to the compressed KV pool).  The same projected q is
         then rotated and scored against every visible compressed entry.
         """
-        input_lengths = self._validate_mode_and_metadata(expect_prefill=False)
+        graph_decode = bool(self.main_inputs.is_cuda_graph)
+        if graph_decode and self.is_mtp_draft:
+            raise RuntimeError("qwen4_exp QSA MTP draft CUDA Graph is not supported")
+        input_lengths = self._validate_mode_and_metadata(
+            expect_prefill=False, allow_graph_decode=graph_decode
+        )
         sequence_lengths = self.main_inputs.sequence_lengths
         batch_size = int(sequence_lengths.numel())
         head_dim = int(indexer.head_dim)
@@ -1380,7 +1395,12 @@ class Qwen4ExpQSARuntimeContext:
         sequence_lengths = sequence_lengths.to(
             device=q.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
-        if bool(torch.any(sequence_lengths < 0).item()):
+        invalid_lengths = (
+            bool(torch.any(sequence_lengths < 0).item())
+            if host_max_compressed is None
+            else bool(torch.any(self.main_inputs.sequence_lengths < 0).item())
+        )
+        if invalid_lengths:
             raise RuntimeError("qwen4_exp QSA sequence_lengths must be non-negative")
         position_ids = self.main_inputs.combo_position_ids
         index_factor = int(rope_config.index_factor)
@@ -1399,14 +1419,25 @@ class Qwen4ExpQSARuntimeContext:
         # only non-draft decodes can be validated against sequence_lengths.
         decode_logical_positions = None if self.is_mtp_draft else sequence_lengths
         try:
-            current_cos, current_sin = build_qsa_rope(
-                position_ids,
-                rope_config,
-                token_count=batch_size,
-                dtype=raw_keys.dtype,
-                device=raw_keys.device,
-                logical_positions=decode_logical_positions,
-            )
+            if graph_decode and not self.is_mtp_draft:
+                # Exact-batch Graph capture uses the engine's canonical text
+                # positions. The C++ graph owner refreshes lengths before replay.
+                current_cos, current_sin = build_qsa_rope_from_logical_positions(
+                    sequence_lengths,
+                    rope_config,
+                    token_count=batch_size,
+                    dtype=raw_keys.dtype,
+                    device=raw_keys.device,
+                )
+            else:
+                current_cos, current_sin = build_qsa_rope(
+                    position_ids,
+                    rope_config,
+                    token_count=batch_size,
+                    dtype=raw_keys.dtype,
+                    device=raw_keys.device,
+                    logical_positions=decode_logical_positions,
+                )
         except ValueError as error:
             raise RuntimeError(f"qwen4_exp QSA ordinary decode {error}") from error
 
@@ -1468,12 +1499,13 @@ class Qwen4ExpQSARuntimeContext:
         required_kv_columns = (
             compressed_lengths + kv_entries_per_block - 1
         ) // kv_entries_per_block
-        _validate_required_blocks(
-            kv_table,
-            required_kv_columns,
-            pool_blocks=int(kv_pool.shape[0]),
-            tag=INDEXER_KV_TAG,
-        )
+        if not graph_decode:
+            _validate_required_blocks(
+                kv_table,
+                required_kv_columns,
+                pool_blocks=int(kv_pool.shape[0]),
+                tag=INDEXER_KV_TAG,
+            )
 
         # Only rows that close a compression group consume these values. Build
         # one block-start RoPE row per request instead of [0, context_len).
@@ -1508,6 +1540,10 @@ class Qwen4ExpQSARuntimeContext:
                 kv_tokens_per_block=kv_tokens_per_block,
                 state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
                 ratio=ratio,
+            )
+        if graph_decode and not fused_writer:
+            raise RuntimeError(
+                "qwen4_exp QSA Graph decode requires the fixed-shape Triton writer"
             )
         if fused_writer:
             if self._side_cache_undo is not None:
