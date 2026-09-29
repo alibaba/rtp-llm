@@ -19,6 +19,7 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+from rtp_llm.utils import scr_vip
 from rtp_llm.utils.scr_local_comm import local_comm_enabled, validate_local_members
 
 
@@ -144,7 +145,10 @@ def get_local_world_info(
     distribute_config: DistributeConfig,
     parallelism_config: ParallelismConfig,
 ) -> WorldInfo:
-    ip = server_config.ip or socket.gethostbyname(socket.gethostname())
+    ip = scr_vip.internal_ip(
+        parallelism_config,
+        server_config.ip or socket.gethostbyname(socket.gethostname()),
+    )
     self_info = WorkerInfo(
         ip=ip,
         local_rank=parallelism_config.local_rank,
@@ -172,7 +176,7 @@ def get_local_world_info(
             + local_rank
         )
         new_member = WorkerInfo(
-            ip=socket.gethostbyname(socket.gethostname()),
+            ip=ip,
             local_rank=local_rank,
             world_rank=rank,
             name=f"{distribute_config.zone_name}_rank_{rank}_{local_rank}",
@@ -182,12 +186,17 @@ def get_local_world_info(
         )
         all_members.append(new_member)
 
-    return WorldInfo(
+    result = WorldInfo(
         members=all_members,
         self=self_info,
         master=None,
         num_nodes=num_nodes,
         initialized=True,
+    )
+    return (
+        scr_vip.world_info(result, parallelism_config)
+        if scr_vip.enabled(parallelism_config)
+        else result
     )
 
 
@@ -206,7 +215,9 @@ class DistributedServer(object):
         server_config = py_env_configs.server_config
         distribute_config = py_env_configs.distribute_config
         pc = py_env_configs.parallelism_config
-        ip = server_config.ip or socket.gethostbyname(socket.gethostname())
+        ip = scr_vip.internal_ip(
+            pc, server_config.ip or socket.gethostbyname(socket.gethostname())
+        )
         self.worker_info = WorkerInfo(
             ip=ip,
             local_rank=pc.local_rank,
@@ -342,10 +353,12 @@ class DistributedServer(object):
 
     def regist(self) -> None:
         key = self.REGISTRY_RANK_ADDRESS_KEY + str(self.rank)
-        ip = "127.0.0.1" if _template_loopback_enabled(self.py_env_configs.parallelism_config) else self.worker_info.ip
-        self.safe_store_set(
-            key, f"{ip}:{self.worker_info.server_port}"
+        ip = (
+            "127.0.0.1"
+            if _template_loopback_enabled(self.py_env_configs.parallelism_config)
+            else self.worker_info.ip
         )
+        self.safe_store_set(key, f"{ip}:{self.worker_info.server_port}")
 
     def bootstrap(self) -> None:
         timeout_minutes = self.py_env_configs.distribute_config.gang_timeout_min
@@ -464,6 +477,8 @@ def get_master(
     parallelism_config: ParallelismConfig,
 ) -> (str, str):
     port = ""
+    if scr_vip.enabled(parallelism_config):
+        return scr_vip.topology(parallelism_config, wait=True)[0], port
     if parallelism_config.local_world_size < parallelism_config.world_size:
         # from config file
         if distribute_config.distribute_config_file:
@@ -497,7 +512,7 @@ def get_master(
 def get_master_from_json(gang_info_json: Dict[str, Any]) -> (str, str):
     # here is only the fake ip
     for name, info in gang_info_json.items():
-        if name.endswith("part0"):
+        if name.endswith("part0") or name.endswith("-rank-0"):
             port = info.get("port", 0)
             port_str = str(port) if port else ""
             return info["ip"], port_str

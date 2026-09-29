@@ -37,6 +37,7 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+from rtp_llm.utils import scr_vip
 from rtp_llm.utils.scr_local_comm import cache_store_advertise_ip
 
 
@@ -335,6 +336,15 @@ def update_worker_addrs(
     worker_addrs = []
     worker_grpc_addrs = []
     advertise_ip = cache_store_advertise_ip(world_info, parallelism_config)
+    external_nodes = (
+        scr_vip.read_topology(
+            parallelism_config.world_size,
+            parallelism_config.local_world_size,
+            external=True,
+        )
+        if scr_vip.enabled(parallelism_config)
+        else {}
+    )
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
         if (
@@ -344,8 +354,12 @@ def update_worker_addrs(
             )
             == parallelism_config.dp_rank
         ):
+            cache_ip = external_nodes.get(
+                member.world_rank // parallelism_config.local_world_size,
+                advertise_ip or member.ip,
+            )
             worker_addrs.append(
-                f"{advertise_ip or member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
+                f"{cache_ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
             )
             worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
             logging.info(
