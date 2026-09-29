@@ -57,6 +57,8 @@ class ExactBatchTaggedModel(TaggedBlockTableModel):
         for tag, attn_inputs in inputs.attention_inputs.items():
             if not attn_inputs.is_exact_cuda_graph_batch:
                 raise RuntimeError(f"exact batch metadata missing for {tag}")
+            if not attn_inputs.is_cuda_graph:
+                raise RuntimeError(f"CUDA Graph mode missing for {tag}")
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         self.assert_exact(inputs)

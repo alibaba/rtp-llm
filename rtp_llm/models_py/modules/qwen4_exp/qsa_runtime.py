@@ -327,6 +327,7 @@ class Qwen4ExpQSARuntimeContext:
         allow_draft_incremental: bool = False,
         allow_prefix_reuse: bool = False,
         allow_graph_decode: bool = False,
+        allow_graph_target: bool = False,
     ) -> list[int]:
         if str(self.indexer_kv_cache.tag) != INDEXER_KV_TAG:
             raise RuntimeError("qwen4_exp QSA received the wrong indexer KV cache")
@@ -353,17 +354,19 @@ class Qwen4ExpQSARuntimeContext:
             )
         for inputs in all_inputs:
             graph_decode = allow_graph_decode and not expect_prefill
-            if bool(inputs.is_cuda_graph) and not graph_decode:
+            graph_target = allow_graph_target and expect_prefill and is_target_verify
+            graph_mode = graph_decode or graph_target
+            if bool(inputs.is_cuda_graph) and not graph_mode:
                 raise RuntimeError("qwen4_exp QSA does not support CUDA Graph")
-            if bool(inputs.is_s_padded) and not graph_decode:
+            if bool(inputs.is_s_padded) and not graph_mode:
                 raise RuntimeError("qwen4_exp QSA does not support padded execution")
-            if graph_decode and not bool(inputs.is_cuda_graph):
-                raise RuntimeError("qwen4_exp QSA Graph decode cache modes disagree")
-            if graph_decode and not bool(
+            if graph_mode and not bool(inputs.is_cuda_graph):
+                raise RuntimeError("qwen4_exp QSA Graph cache modes disagree")
+            if graph_mode and not bool(
                 getattr(inputs, "is_exact_cuda_graph_batch", False)
             ):
                 raise RuntimeError(
-                    "qwen4_exp QSA Graph decode requires an exact batch graph"
+                    "qwen4_exp QSA Graph requires an exact batch graph"
                 )
             if inputs.context_parallel_info is not None:
                 raise RuntimeError("qwen4_exp QSA does not support context parallelism")
@@ -744,8 +747,11 @@ class Qwen4ExpQSARuntimeContext:
         either the QSA projection or the production main-cache writer, then the
         target selection path repeats it immediately before its side-pool write.
         """
+        graph_target = bool(self.main_inputs.is_cuda_graph)
         lengths = self._validate_mode_and_metadata(
-            expect_prefill=True, allow_target_verify=True
+            expect_prefill=True,
+            allow_target_verify=True,
+            allow_graph_target=graph_target,
         )
         if not self._target_verify_enabled():
             raise RuntimeError("qwen4_exp QSA expected a target-verify invocation")
@@ -804,14 +810,22 @@ class Qwen4ExpQSARuntimeContext:
             raise RuntimeError(
                 "qwen4_exp QSA target-verify prefix lengths must be int32"
             )
-        if sequence_lengths.numel() != 0:
+        # GraphRunner retains a decode-length mirror for capture bookkeeping;
+        # target scoring addresses history through prefix_lengths.
+        if sequence_lengths.numel() != 0 and not graph_target:
             raise RuntimeError(
                 "qwen4_exp QSA target-verify requires an empty sequence_lengths tensor"
+            )
+        if graph_target and prefixes.device.type != "cpu":
+            raise RuntimeError("qwen4_exp QSA target Graph requires host prefixes")
+        if graph_target and bool(torch.any(prefixes < 0).item()):
+            raise RuntimeError(
+                "qwen4_exp QSA target-verify prefix lengths must be non-negative"
             )
         prefixes_device = prefixes.to(
             device=device, dtype=torch.int32, non_blocking=True
         ).contiguous()
-        if bool(torch.any(prefixes_device < 0).item()):
+        if not graph_target and bool(torch.any(prefixes_device < 0).item()):
             raise RuntimeError(
                 "qwen4_exp QSA target-verify prefix lengths must be non-negative"
             )
@@ -827,7 +841,8 @@ class Qwen4ExpQSARuntimeContext:
         if (
             cu_seqlens.dtype != torch.int32
             or cu_seqlens.device != device
-            or not bool(torch.equal(cu_seqlens, expected_cu))
+            or tuple(cu_seqlens.shape) != (batch_size + 1,)
+            or (not graph_target and not bool(torch.equal(cu_seqlens, expected_cu)))
         ):
             raise RuntimeError(
                 "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
@@ -838,7 +853,8 @@ class Qwen4ExpQSARuntimeContext:
         if (
             cu_kv_seqlens.dtype != torch.int32
             or cu_kv_seqlens.device != device
-            or not bool(torch.equal(cu_kv_seqlens, expected_cu_kv))
+            or tuple(cu_kv_seqlens.shape) != (batch_size + 1,)
+            or (not graph_target and not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)))
         ):
             raise RuntimeError(
                 "qwen4_exp QSA target-verify cu_kv_seqlens do not match prefix+gamma+1"
@@ -857,7 +873,7 @@ class Qwen4ExpQSARuntimeContext:
         offsets = torch.arange(query_len, dtype=torch.int32, device=device)
         expected_positions = prefixes_device[:, None, None] + offsets[None, :, None]
         expected_positions = expected_positions.expand(-1, -1, 3)
-        if not bool(torch.equal(positions, expected_positions)):
+        if not graph_target and not bool(torch.equal(positions, expected_positions)):
             raise RuntimeError(
                 "qwen4_exp QSA target-verify only supports contiguous text-only "
                 "MRoPE whose three axes equal prefix+j"
@@ -918,18 +934,25 @@ class Qwen4ExpQSARuntimeContext:
         required_kv_columns = (
             compressed_lengths[:, -1] + kv_entries_per_block - 1
         ) // kv_entries_per_block
-        _validate_required_blocks(
-            kv_table,
-            required_kv_columns,
-            pool_blocks=int(kv_pool.shape[0]),
-            tag=INDEXER_KV_TAG,
-        )
+        if graph_target:
+            required_host = (max_ctx_len + kv_entries_per_block - 1) // kv_entries_per_block
+            if required_host > int(kv_table.shape[1]):
+                raise RuntimeError(
+                    "QSA cache 'indexer_kv' block table does not cover target verification"
+                )
+        else:
+            _validate_required_blocks(
+                kv_table,
+                required_kv_columns,
+                pool_blocks=int(kv_pool.shape[0]),
+                tag=INDEXER_KV_TAG,
+            )
 
         # STATE_RING payload offsets wrap, but the framework block table keeps
         # absolute logical-page columns (including sentinel holes). Validate the
         # small committed-tail + candidate window explicitly before any write.
         state_table_width = int(state_table.shape[1])
-        for request_idx, prefix in enumerate(prefixes_device.tolist()):
+        for request_idx, prefix in enumerate(prefixes.tolist() if graph_target else prefixes_device.tolist()):
             first_needed = max(0, prefix - (prefix % ratio))
             logical_blocks = {
                 position // state_tokens_per_block
@@ -941,12 +964,13 @@ class Qwen4ExpQSARuntimeContext:
                         "QSA cache 'indexer_state' block table does not cover the "
                         "target-verify tail"
                     )
-                block_id = int(state_table[request_idx, logical_block].item())
-                if block_id <= 0 or block_id >= int(state_pool.shape[0]):
-                    raise RuntimeError(
-                        "QSA cache 'indexer_state' target-verify tail resolves to "
-                        "an unallocated or out-of-range physical block"
-                    )
+                if not graph_target:
+                    block_id = int(state_table[request_idx, logical_block].item())
+                    if block_id <= 0 or block_id >= int(state_pool.shape[0]):
+                        raise RuntimeError(
+                            "QSA cache 'indexer_state' target-verify tail resolves to "
+                            "an unallocated or out-of-range physical block"
+                        )
 
         return {
             "batch_size": batch_size,
@@ -1351,8 +1375,6 @@ class Qwen4ExpQSARuntimeContext:
         then rotated and scored against every visible compressed entry.
         """
         graph_decode = bool(self.main_inputs.is_cuda_graph)
-        if graph_decode and self.is_mtp_draft:
-            raise RuntimeError("qwen4_exp QSA MTP draft CUDA Graph is not supported")
         input_lengths = self._validate_mode_and_metadata(
             expect_prefill=False, allow_graph_decode=graph_decode
         )
@@ -1702,6 +1724,8 @@ class Qwen4ExpQSARuntimeContext:
             and int(plan["kv_tokens_per_block"]) == 128
             and int(plan["state_tokens_per_block"]) == 128
         )
+        if bool(self.main_inputs.is_cuda_graph) and not target_writer:
+            raise RuntimeError("qwen4_exp QSA target Graph requires Triton writer")
         if target_writer:
             from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
                 write_target_window_with_undo_,

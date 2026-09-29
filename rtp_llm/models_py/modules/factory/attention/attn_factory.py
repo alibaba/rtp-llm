@@ -357,15 +357,17 @@ def get_sparse_gqa_impl(
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
     )
-    ordinary_decode_graph = (
+    exact_decode_or_target_graph = (
         selection_mode == CudaGraphSelectionMode.DECODE_GRAPH
-        and not bool(attn_inputs.is_prefill)
-        and not bool(attn_inputs.is_target_verify)
+        and (
+            not bool(attn_inputs.is_prefill)
+            or bool(attn_inputs.is_target_verify)
+        )
         and bool(getattr(attn_inputs, "is_exact_cuda_graph_batch", False))
     )
-    if selection_mode != CudaGraphSelectionMode.EAGER and not ordinary_decode_graph:
+    if selection_mode != CudaGraphSelectionMode.EAGER and not exact_decode_or_target_graph:
         raise RuntimeError(
-            "qwen4_exp sparse GQA only supports exact-batch ordinary decode CUDA Graph "
+            "qwen4_exp sparse GQA only supports exact-batch decode/target CUDA Graph "
             f"(selection mode: {selection_mode.value}, "
             f"prefill={attn_inputs.is_prefill}, "
             f"target_verify={attn_inputs.is_target_verify}, "

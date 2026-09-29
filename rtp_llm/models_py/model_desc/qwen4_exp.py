@@ -792,6 +792,7 @@ class Qwen4ExpModel(Qwen35Model):
         lengths = state_inputs.input_lengths
         prefixes = state_inputs.prefix_lengths
         sequence_lengths = state_inputs.sequence_lengths
+        graph_capture = bool(getattr(state_inputs, "is_cuda_graph", False))
         if (
             lengths.dim() != 1
             or lengths.dtype not in (torch.int32, torch.int64)
@@ -806,7 +807,9 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError(
                 "qwen4_exp PLE target verify requires one uniform gamma+1 width"
             )
-        if sequence_lengths.numel() != 0:
+        # GraphRunner keeps a host sequence-length mirror even for context-style
+        # target verification.  The target path uses prefix_lengths instead.
+        if sequence_lengths.numel() != 0 and not graph_capture:
             raise RuntimeError(
                 "qwen4_exp PLE target verify requires empty sequence_lengths"
             )
@@ -821,7 +824,6 @@ class Qwen4ExpModel(Qwen35Model):
         prefixes_device = prefixes.to(
             device=hyper_states.device, dtype=torch.long, non_blocking=True
         ).contiguous()
-        graph_capture = bool(getattr(state_inputs, "is_cuda_graph", False))
         if not graph_capture and bool(torch.any(prefixes_device <= 0).item()):
             raise RuntimeError(
                 "qwen4_exp PLE target verify requires a non-empty committed history"

@@ -88,16 +88,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError(
                 "qwen4_exp sparse GQA target verification must use context-style prefill"
             )
-        graph_decode = bool(inputs.is_cuda_graph and not self.is_prefill)
-        if inputs.is_cuda_graph and not graph_decode:
+        graph_paged = bool(
+            inputs.is_cuda_graph and (not self.is_prefill or self.is_target_verify)
+        )
+        if inputs.is_cuda_graph and not graph_paged:
             raise RuntimeError("qwen4_exp sparse GQA prefill CUDA Graph is not supported")
-        if graph_decode and not bool(
+        if graph_paged and not bool(
             getattr(inputs, "is_exact_cuda_graph_batch", False)
         ):
             raise RuntimeError(
                 "qwen4_exp sparse GQA Graph decode requires an exact batch graph"
             )
-        if inputs.is_s_padded and not graph_decode:
+        if inputs.is_s_padded and not graph_paged:
             raise RuntimeError("qwen4_exp sparse GQA does not support padded execution")
         if inputs.context_parallel_info is not None:
             raise RuntimeError(
@@ -361,7 +363,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             sequence_bases,
             query_lengths,
             hidden_states.device,
-            graph_capture=bool(self.attn_inputs.is_cuda_graph and not self.is_prefill),
+            graph_capture=bool(
+                self.attn_inputs.is_cuda_graph
+                and (not self.is_prefill or self.is_target_verify)
+            ),
         )
 
     def set_selected_indices(self, selected_indices: torch.Tensor) -> None:
@@ -437,15 +442,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 raise ValueError(
                     "qwen4_exp target-verify input lengths must match query_len"
                 )
-        graph_decode = bool(self.attn_inputs.is_cuda_graph and not self.is_prefill)
-        if graph_decode and lengths_source.device.type != "cpu":
+        graph_paged = bool(
+            self.attn_inputs.is_cuda_graph
+            and (not self.is_prefill or self.is_target_verify)
+        )
+        if graph_paged and lengths_source.device.type != "cpu":
             raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
-        if graph_decode and bool(torch.any(lengths_source < 0).item()):
+        if graph_paged and bool(torch.any(lengths_source < 0).item()):
             raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
         sequence_lengths = lengths_source.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
-        if not graph_decode and bool(torch.any(sequence_lengths < 0).item()):
+        if not graph_paged and bool(torch.any(sequence_lengths < 0).item()):
             raise ValueError(
                 "qwen4_exp sparse GQA sequence lengths must be non-negative"
             )
@@ -521,14 +529,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         exceeds_capacity = (
             bool(torch.any((lengths_source + query_len + page_size - 1) // page_size
                            > int(block_table.shape[1])).item())
-            if graph_decode
+            if graph_paged
             else bool(torch.any(required_columns > int(block_table.shape[1])).item())
         )
         if exceeds_capacity:
             raise RuntimeError(
                 "qwen4_exp sparse GQA main block table does not cover the visible KV"
             )
-        if graph_decode:
+        if graph_paged:
             return {
                 "batch": batch,
                 "query_len": query_len,
@@ -716,7 +724,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def support_cuda_graph(self) -> bool:
-        return bool(self.attn_inputs.is_cuda_graph and not self.is_prefill)
+        return bool(
+            self.attn_inputs.is_cuda_graph
+            and (not self.is_prefill or self.is_target_verify)
+        )
 
     def forward(
         self,

@@ -249,6 +249,91 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exact batch graph"):
             SparseGqaFmhaImpl(attn_configs, attn_inputs)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_target_graph_replays_updated_prefix_and_main_pages(self):
+        attn_configs, inputs = _configs(is_prefill=True)
+        inputs.is_target_verify = True
+        inputs.is_cuda_graph = True
+        inputs.is_exact_cuda_graph_batch = True
+        inputs.is_s_padded = True
+        inputs.input_lengths = torch.tensor([4], dtype=torch.int32).pin_memory()
+        inputs.prefix_lengths = torch.tensor([8], dtype=torch.int32).pin_memory()
+        inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
+        inputs.kv_cache_kernel_block_id_device = torch.tensor(
+            [[1, 2, 3]], dtype=torch.int32, device=_DEV
+        )
+        with patch.object(
+            sparse_gqa_impl, "FusedRopeKVCachePrefillOpQKVOut", self._IdentityRopeWriter
+        ):
+            impl = SparseGqaFmhaImpl(attn_configs, inputs)
+        self.assertTrue(impl.support_cuda_graph())
+        cache = SimpleNamespace(
+            kv_cache_base=torch.randn(
+                4, 2, _H_KV, 4, _D, dtype=torch.bfloat16, device=_DEV
+            )
+        )
+        qkv = torch.randn(
+            4, (_H_Q + 2 * _H_KV) * _D, dtype=torch.bfloat16, device=_DEV
+        )
+        selected = torch.tensor(
+            [[[0, 4, 8, -1], [0, 4, 8, 9], [0, 4, 8, 10], [0, 4, 8, 11]]],
+            dtype=torch.int32,
+            device=_DEV,
+        )
+        runtime = SimpleNamespace(
+            main_cache=cache,
+            main_inputs=inputs,
+            validate_before_projection=lambda **kwargs: None,
+        )
+
+        def forward(instance, runtime_context):
+            instance.validate_qsa_before_side_write(
+                runtime_context,
+                object(),
+                torch.empty(4, 16, dtype=torch.bfloat16, device=_DEV),
+            )
+            return instance.forward(qkv, cache, selected_indices=selected)
+
+        with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+            forward(impl, runtime)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            got = forward(impl, runtime)
+
+        qkv.copy_(torch.randn_like(qkv.float()).bfloat16())
+        inputs.prefix_lengths[0] = 7
+        inputs.kv_cache_kernel_block_id_device[0].copy_(
+            torch.tensor([3, 2, 1], dtype=torch.int32, device=_DEV)
+        )
+        selected.copy_(
+            torch.tensor(
+                [[[0, 4, 7, -1], [0, 4, 7, 8], [0, 4, 7, 9], [0, 4, 7, 10]]],
+                dtype=torch.int32,
+                device=_DEV,
+            )
+        )
+        graph.replay()
+
+        eager_configs, eager_inputs = _configs(is_prefill=True)
+        eager_inputs.is_target_verify = True
+        eager_inputs.input_lengths = inputs.input_lengths
+        eager_inputs.prefix_lengths = inputs.prefix_lengths
+        eager_inputs.sequence_lengths = inputs.sequence_lengths
+        eager_inputs.kv_cache_kernel_block_id_device = (
+            inputs.kv_cache_kernel_block_id_device
+        )
+        with patch.object(
+            sparse_gqa_impl, "FusedRopeKVCachePrefillOpQKVOut", self._IdentityRopeWriter
+        ):
+            eager = SparseGqaFmhaImpl(eager_configs, eager_inputs)
+        eager_runtime = SimpleNamespace(
+            main_cache=cache,
+            main_inputs=eager_inputs,
+            validate_before_projection=lambda **kwargs: None,
+        )
+        expected = forward(eager, eager_runtime)
+        torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
+
     def test_main_cache_phase_is_marked_before_fused_writer(self):
         impl = self._impl(batch=1, seq_len=1)
         impl.rope_kvcache_impl = self._FailingRopeWriter()
