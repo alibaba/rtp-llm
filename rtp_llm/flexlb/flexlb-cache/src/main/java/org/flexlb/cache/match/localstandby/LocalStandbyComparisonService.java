@@ -7,10 +7,12 @@ import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheHitFeedback;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
@@ -29,12 +31,16 @@ public class LocalStandbyComparisonService {
 
     private final boolean enabled;
     private final LocalStandbyCacheMatchProvider localStandbyProvider;
-    private final Cache<LocalStandbyPredictionKey, CompletableFuture<StandbyPrediction>> pendingLocalStandbyPredictions;
+    private final CacheMetricsReporter cacheMetricsReporter;
+    private final Cache<LocalStandbyPredictionKey, PendingPrediction> pendingLocalStandbyPredictions;
 
-    public LocalStandbyComparisonService(CacheMatchConfiguration configuration, LocalStandbyCacheMatchProvider localStandbyProvider) {
+    public LocalStandbyComparisonService(CacheMatchConfiguration configuration,
+                                         LocalStandbyCacheMatchProvider localStandbyProvider,
+                                         CacheMetricsReporter cacheMetricsReporter) {
         LocalStandbyConfig config = configuration.getLocalStandbyConfig();
         this.enabled = configuration.isLocalStandbyEnabled();
         this.localStandbyProvider = localStandbyProvider;
+        this.cacheMetricsReporter = cacheMetricsReporter;
         int queueCapacity = enabled
                 ? config.getAsyncQueueCapacity()
                 : LocalStandbyConfig.DEFAULT_ASYNC_QUEUE_CAPACITY;
@@ -48,10 +54,18 @@ public class LocalStandbyComparisonService {
         if (!canTrack(query)) {
             return;
         }
+        if (query.localStandbyBlockCacheKeys() != null && query.localStandbyBlockCacheKeys().isEmpty()) {
+            storePrediction(query, CompletableFuture.completedFuture(new StandbyPrediction(Collections.emptyMap(), 0)));
+            return;
+        }
         CompletableFuture<StandbyPrediction> localStandbyPredictionTask =
                 localStandbyProvider.asyncLocalStandbyMatch(query)
-                        .thenApply(matchResult ->
-                                new StandbyPrediction(matchResult.hostMatches(), matchResult.blockSize()));
+                        .thenApply(matchResult -> {
+                            if (!matchResult.querySucceeded()) {
+                                throw new IllegalStateException("Local Standby prediction failed");
+                            }
+                            return new StandbyPrediction(matchResult.hostMatches(), matchResult.blockSize());
+                        });
         storePrediction(query, localStandbyPredictionTask);
     }
 
@@ -62,18 +76,29 @@ public class LocalStandbyComparisonService {
         if (!canTrack(query)
                 || matchResult == null
                 || matchResult.source() != CacheMatchSource.LOCAL_STANDBY
-                || matchResult.blockSize() <= 0) {
+                || !matchResult.querySucceeded()) {
             return;
         }
         storePrediction(query, CompletableFuture.completedFuture(
                 new StandbyPrediction(matchResult.hostMatches(), matchResult.blockSize())));
     }
 
+    public void recordSelectedWorker(String requestId, RoleType role, WorkerStatus worker, long inputTokens) {
+        PendingPrediction pending = pendingLocalStandbyPredictions.getIfPresent(
+                new LocalStandbyPredictionKey(requestId, role));
+        if (pending == null) {
+            return;
+        }
+        pending.selectedWorker().complete(new SelectedWorker(
+                role, worker.getLogicalIpPort(), worker.getMetricIpPort(), inputTokens));
+    }
+
     public Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> captureComparison(String requestId,
                                                                                                      RoleType role) {
-        CompletableFuture<StandbyPrediction> prediction = enabled
+        PendingPrediction pending = enabled
                 ? pendingLocalStandbyPredictions.asMap().remove(new LocalStandbyPredictionKey(requestId, role))
                 : null;
+        CompletableFuture<StandbyPrediction> prediction = pending == null ? null : pending.prediction();
         return feedback -> {
             if (prediction == null) {
                 return CompletableFuture.completedFuture(withoutLocalStandbyPrediction(feedback));
@@ -91,9 +116,6 @@ public class LocalStandbyComparisonService {
 
     private CacheHitComparisonResult withLocalStandbyPrediction(CacheHitFeedback feedback,
                                                                 StandbyPrediction standbyPrediction) {
-        if (standbyPrediction.blockSize() <= 0) {
-            return withoutLocalStandbyPrediction(feedback);
-        }
         String workerIpPort = feedback.logicalWorkerId();
         HostCacheMatch match = standbyPrediction.matches().get(workerIpPort);
         long localStandbyPredictedHitTokens = match == null
@@ -118,8 +140,20 @@ public class LocalStandbyComparisonService {
     }
 
     private void storePrediction(CacheMatchQuery query, CompletableFuture<StandbyPrediction> prediction) {
+        CompletableFuture<SelectedWorker> selectedWorker = new CompletableFuture<>();
+        prediction.thenAcceptBoth(selectedWorker, (result, selected) -> {
+            HostCacheMatch match = result.matches().get(selected.logicalWorkerId());
+            long hitTokens = CacheMatchResult.matchedTokens(
+                    match == null ? 0 : match.localMatchBlocks(), result.blockSize(), selected.inputTokens());
+            cacheMetricsReporter.reportLocalStandbyPrediction(
+                    selected.role(), selected.metricIpPort(), hitTokens, selected.inputTokens());
+        }).exceptionally(error -> {
+            log.warn("Local Standby prediction metrics unavailable, requestId={}", query.requestId(), error);
+            return null;
+        });
         pendingLocalStandbyPredictions.put(
-                new LocalStandbyPredictionKey(query.requestId(), query.roleType()), prediction);
+                new LocalStandbyPredictionKey(query.requestId(), query.roleType()),
+                new PendingPrediction(prediction, selectedWorker));
     }
 
     private CacheHitComparisonResult result(CacheHitFeedback feedback,
@@ -150,6 +184,13 @@ public class LocalStandbyComparisonService {
     }
 
     private record LocalStandbyPredictionKey(String requestId, RoleType roleType) {
+    }
+
+    private record PendingPrediction(CompletableFuture<StandbyPrediction> prediction,
+                                     CompletableFuture<SelectedWorker> selectedWorker) {
+    }
+
+    private record SelectedWorker(RoleType role, String logicalWorkerId, String metricIpPort, long inputTokens) {
     }
 
     private record StandbyPrediction(Map<String, HostCacheMatch> matches, long blockSize) {

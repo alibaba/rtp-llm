@@ -4,9 +4,11 @@ import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheHitFeedback;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
@@ -18,11 +20,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
+import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class LocalStandbyComparisonServiceTest {
@@ -31,7 +35,7 @@ class LocalStandbyComparisonServiceTest {
     void buildsUnifiedComparisonWithLocalStandbyPrediction() throws Exception {
         LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
         LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
-                kvcm(modelMetaConfig()), provider);
+                kvcm(modelMetaConfig()), provider, mock(CacheMetricsReporter.class));
         CacheMatchQuery query = new CacheMatchQuery(
                 "request-1",
                 List.of(11L),
@@ -76,7 +80,7 @@ class LocalStandbyComparisonServiceTest {
     void buildsUnifiedComparisonFromResolvedFallbackPrediction() throws Exception {
         LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
         LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
-                kvcm(modelMetaConfig()), provider);
+                kvcm(modelMetaConfig()), provider, mock(CacheMetricsReporter.class));
         CacheMatchQuery query = new CacheMatchQuery(
                 "request-1",
                 List.of(11L),
@@ -110,7 +114,7 @@ class LocalStandbyComparisonServiceTest {
     void matchesLocalStandbyPredictionByEngineIndex() throws Exception {
         LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
         LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
-                kvcm(modelMetaConfig()), provider);
+                kvcm(modelMetaConfig()), provider, mock(CacheMetricsReporter.class));
         CacheMatchQuery query = new CacheMatchQuery(
                 "request-index-1",
                 List.of(11L),
@@ -145,7 +149,7 @@ class LocalStandbyComparisonServiceTest {
     void degradesToZeroStandbyHitWhenPredictionMissesLogicalWorker() throws Exception {
         LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
         LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
-                kvcm(modelMetaConfig()), provider);
+                kvcm(modelMetaConfig()), provider, mock(CacheMetricsReporter.class));
         CacheMatchQuery query = new CacheMatchQuery(
                 "request-miss-1",
                 List.of(11L),
@@ -172,6 +176,68 @@ class LocalStandbyComparisonServiceTest {
         assertNotNull(result.localStandby());
         assertEquals(0, result.localStandby().hit());
         assertEquals(9000, result.localStandby().delta());
+    }
+
+    @Test
+    void selectedPredictionIsAvailableBeforeEngineFeedback() throws Exception {
+        LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
+        CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
+        LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
+                kvcm(modelMetaConfig()), provider, metricsReporter);
+        CacheMatchQuery query = new CacheMatchQuery(
+                "request-1", List.of(11L), 2192, List.of(101L), 4096, RoleType.PREFILL, "default");
+        CompletableFuture<CacheMatchResult> pendingMatch = new CompletableFuture<>();
+        when(provider.asyncLocalStandbyMatch(query)).thenReturn(pendingMatch);
+        WorkerStatus worker = workerStatus("10.0.0.1", 8080, RoleType.PREFILL);
+
+        comparisonService.trackLocalStandbyPrediction(query);
+        comparisonService.recordSelectedWorker("request-1", RoleType.PREFILL, worker, 8000);
+        verifyNoInteractions(metricsReporter);
+        pendingMatch.complete(new CacheMatchResult(
+                Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(1)),
+                CacheMatchSource.LOCAL_STANDBY, 10, 4096));
+
+        verify(metricsReporter).reportLocalStandbyPrediction(
+                RoleType.PREFILL, worker.getMetricIpPort(), 4096, 8000);
+    }
+
+    @Test
+    void completedPredictionIsReportedWhenWorkerIsSelected() {
+        LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
+        CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
+        LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
+                kvcm(modelMetaConfig()), provider, metricsReporter);
+        CacheMatchQuery query = new CacheMatchQuery(
+                "request-1", List.of(11L), 2192, List.of(101L), 4096, RoleType.PREFILL, "default");
+        WorkerStatus worker = workerStatus("10.0.0.1", 8080, RoleType.PREFILL);
+        when(provider.asyncLocalStandbyMatch(query)).thenReturn(CompletableFuture.completedFuture(
+                new CacheMatchResult(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(1)),
+                        CacheMatchSource.LOCAL_STANDBY, 10, 4096)));
+
+        comparisonService.trackLocalStandbyPrediction(query);
+        verifyNoInteractions(metricsReporter);
+        comparisonService.recordSelectedWorker("request-1", RoleType.PREFILL, worker, 8000);
+
+        verify(metricsReporter).reportLocalStandbyPrediction(
+                RoleType.PREFILL, worker.getMetricIpPort(), 4096, 8000);
+    }
+
+    @Test
+    void emptyLocalStandbyKeysProduceZeroPrediction() throws Exception {
+        LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
+        CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
+        LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
+                kvcm(modelMetaConfig()), provider, metricsReporter);
+        CacheMatchQuery query = new CacheMatchQuery(
+                "request-1", List.of(), 2192, List.of(), 4096, RoleType.PREFILL, "default");
+        WorkerStatus worker = workerStatus("10.0.0.1", 8080, RoleType.PREFILL);
+
+        comparisonService.trackLocalStandbyPrediction(query);
+        comparisonService.recordSelectedWorker("request-1", RoleType.PREFILL, worker, 100);
+
+        verify(metricsReporter).reportLocalStandbyPrediction(
+                RoleType.PREFILL, worker.getMetricIpPort(), 0, 100);
+        verify(provider, never()).asyncLocalStandbyMatch(query);
     }
 
     private ModelMetaConfig modelMetaConfig() {

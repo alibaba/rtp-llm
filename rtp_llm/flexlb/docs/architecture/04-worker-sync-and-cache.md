@@ -184,9 +184,8 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 3. 否则查 KVCM；成功时同步做一次 standby 影子预测记录；**内部重试耗尽后查询抛异常时当前请求同步降级
    查 standby，但 active source 保持 KVCM**（`standby_fallback{kvcm_query_failure}`）。KVCM gRPC client 同时报告
    `app.cache.kvcm.query.failure.qps`。
-   每个实际走 Local Standby 的结果都会登记 resolved standby prediction，以便后续 engine feedback 产出
-   同一 `cacheMatchSource=LOCAL_STANDBY` 标签下的 cache-hit comparison 指标和 PV。Standby prediction
-   登记的异常只影响 comparison，不触发 KVCM 降级或 Local Standby 路由失败。
+   Local Standby 的结果登记为预测；预测结果与选定 Worker 齐备时由 Local Standby 组件上报该 Worker 的预测命中值。有效的 engine feedback
+   可进一步生成 cache-hit comparison 指标和 PV。预测登记异常不触发 KVCM 降级或 Local Standby 路由失败。
 
 `CacheMatchFailoverManager`：监听 KVCM 健康——不健康且 `autoSwitch` 开 → 切 LOCAL_STANDBY；恢复健康 →
 切回 KVCM；手动 `ACTIVATE_FALLBACK` 覆盖一切，
@@ -194,8 +193,9 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 （HTTP 入口 `POST /flexlb/cache_match/failover`，非 master 会转发给 master；状态查询
 `GET /flexlb/cache_match/status`）。
 
-`CacheMatchResult` 恒携带**应答源自己的 blockSize**（KVCM/standby 的块大小可能与请求主
-hash 不同），路由侧统一用 `blockSize × 匹配块数` 折算 token，并以请求 token 数作为上限。
+`CacheMatchResult` 携带**应答源自己的 blockSize**（KVCM/standby 的块大小可能与请求主
+hash 不同）和 `querySucceeded`。空匹配是成功结果，查询失败的结果不产生预测指标。
+路由侧统一用 `blockSize × 匹配块数` 折算 token，并以请求 token 数作为上限。
 
 ## Block hash 计算
 

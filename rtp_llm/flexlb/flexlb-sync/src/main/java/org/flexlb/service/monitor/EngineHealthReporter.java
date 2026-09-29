@@ -45,11 +45,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKE
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_RATIO;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
@@ -232,13 +227,9 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS);
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
-        this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_TOKENS,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_INPUT_TOKENS,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -246,15 +237,9 @@ public class EngineHealthReporter {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO,
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_USED_KV_CACHE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_AVAILABLE_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
@@ -804,10 +789,7 @@ public class EngineHealthReporter {
         long inputTokens = comparison.inputTokens();
         if (inputTokens > 0) {
             monitor.report(CACHE_HIT_COMPARISON_INPUT_TOKENS, tags, inputTokens);
-            monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, tags, routing.hit());
             monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, actual.hit());
-            monitor.report(CACHE_HIT_COMPARISON_PREDICTED_RATIO,
-                    tags, routing.hit() / (double) inputTokens);
             monitor.report(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
                     tags, actual.hit() / (double) inputTokens);
         }
@@ -815,14 +797,6 @@ public class EngineHealthReporter {
         if (localStandby != null) {
             monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
                     tags, localStandby.delta());
-            if (inputTokens > 0) {
-                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS,
-                        tags, inputTokens);
-                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS,
-                        tags, localStandby.hit());
-                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO,
-                        tags, localStandby.hit() / (double) inputTokens);
-            }
         }
     }
 

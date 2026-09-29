@@ -25,11 +25,15 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_INPUT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_MAPPING_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_MATCH_ACTIVE_SOURCE;
 import static org.flexlb.constant.MetricConstant.CACHE_MATCH_SOURCE_CHANGE_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_MATCH_STANDBY_FALLBACK_QPS;
@@ -98,6 +102,10 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_KVCM_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
@@ -190,6 +198,22 @@ public class CacheMetricsReporter {
             monitor.report(CACHE_INPUT_TOKENS, baseTags, inputTokens);
         }
         monitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
+    }
+
+    public void reportKvcmPrediction(RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
+        monitor.report(CACHE_KVCM_PREDICTED_TOKENS, tags, hitTokens);
+        if (inputTokens > 0) {
+            monitor.report(CACHE_KVCM_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
+        }
+    }
+
+    public void reportLocalStandbyPrediction(RoleType roleType, String ipIndex, long hitTokens, long inputTokens) {
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
+        monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, hitTokens);
+        if (inputTokens > 0) {
+            monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
+        }
     }
 
     /**

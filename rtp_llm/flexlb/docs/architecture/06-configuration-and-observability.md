@@ -260,9 +260,12 @@ Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`projected
 
 缓存反馈以请求 ID、角色和 Worker 实例代次关联路由预测，`worker` 使用完整的
 `ip:port@engineIndex` 逻辑身份；`prefill_worker_status` 同时记录 `workerIp` 和 `engineIndex`。
+选定 Worker 时上报 `app.cache.kvcm.predicted.tokens/ratio`；Local Standby 预测结果与所选 Worker 齐备时上报
+`app.cache.local.standby.predicted.tokens/ratio`。有效的空匹配产生 0，查询失败不产生预测数据点。
 Engine 的 `prefixLengthValid`
 表示实际命中值有效；有效的 0 表示零命中，无效值不参与差异计算。每个关联记录最多生成一次
-`cache_hit_comparison` 和一次 `prefill_worker_status`。比较事件包含实际命中、路由预测、
+`cache_hit_comparison` 和一次 `prefill_worker_status`。实际命中 Counter 及输入 Tokens Counter
+仅在收到有效反馈后上报，用于计算实际全局命中率。比较事件包含实际命中、路由预测、
 KVCM 本地匹配、KVCM 本地加远端的 global 总匹配，以及 Local Standby 预测；差值统一为实际值减预测值。
 预测关联最多保留 100,000 条，保存期限为一小时。Local Standby 对照异步完成，反馈等待上限
 为一秒；不可用时省略 Standby 对照，其余比较正常输出。观测回调在 Worker 状态锁外执行。

@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.MicrometerFlexMonitor;
@@ -20,9 +21,13 @@ import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_INPUT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
@@ -114,6 +119,22 @@ class CacheMetricsReporterTest {
         verify(monitor).report(CACHE_HIT_COUNT, tags, 0L);
         verify(monitor).report(CACHE_INPUT_TOKENS, tags, 100L);
         verify(monitor).report(CACHE_INPUT_TOKENS, tags, 200L);
+    }
+
+    @Test
+    void zero_predictions_have_data_points_for_both_sources() {
+        reporter.init();
+        reporter.reportKvcmPrediction(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 100);
+        reporter.reportLocalStandbyPrediction(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 100);
+
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080@0");
+        verify(monitor).register(CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).report(CACHE_KVCM_PREDICTED_TOKENS, tags, 0L);
+        verify(monitor).report(CACHE_KVCM_PREDICTED_RATIO, tags, 0.0);
+        verify(monitor).report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, 0L);
+        verify(monitor).report(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, 0.0);
     }
 
     @Test
