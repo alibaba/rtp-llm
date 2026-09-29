@@ -684,10 +684,22 @@ void NormalEngine::loop() {
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
     while (running_) {
-        auto status = step();
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
-            THROW_IF_STATUS_ERROR(trySaveStepError());
+        try {
+            auto status = step();
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+                THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+        } catch (const std::exception& e) {
+            // A peer may close its TP broadcast socket after stop() clears
+            // running_ but before this rank returns from its current step.
+            // Treat that exception as part of shutdown; an exception during
+            // normal service must still fail the process.
+            if (running_) {
+                throw;
+            }
+            RTP_LLM_LOG_WARN("normal engine loop stopped during shutdown: %s", e.what());
+            break;
         }
     }
 }
