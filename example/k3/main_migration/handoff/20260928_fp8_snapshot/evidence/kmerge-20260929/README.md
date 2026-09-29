@@ -100,6 +100,8 @@ r8 的 `concat_and_cache_mla_kernel` 在固定 feat trace 中每 rank 约 0.074 
 
 在独占的 112 GPU 1 上，用集成版 b24 构建产物单独测同一个普通 E4M3 写入核。每组先完成惰性初始化及至少 10 次稳定预热，再采 50 组、每组 10 次调用。64K token 全部有有效槽位时，128-token page、4096-token page 和四倍物理 page 间距分别为 0.2031、0.2031、0.2006 ms；仅 1/8 token 有有效槽位的诊断组为 0.0557 ms。原始样本、预热和输入布局见 `bench-mla-cache-writer-layout-112.json`，脚本为 `bench_mla_cache_writer_layout.py`，GPU 筛选记录在 `host-selection-mla-cache-writer-*.json`。该结果说明 page 大小和物理间距没有解释 0.14 ms 差距；有效槽位比例能明显改变耗时。它**不能**证明固定 feat 的真实 slot mapping 恰好只有 1/8 有效，需要结合 CP 映射及 PD 正确性继续核查。当前不能把同名 kernel 当作“feat 更快的实现”直接迁移。
 
+9 月 29 日又把集成版 `869efba9` 与固定 feat `a9bf762e` 的 `rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.cu` 逐行比较：`concat_and_cache_mla_kernel` 的 kernel 函数体相同。feat 额外提供一个可选的清页前置 kernel，另有一处不属于此写入核的 CP gather 边界判断差异。r8 脚本设置 4096-token 物理 page；feat 的 `build_mla_page_rr_slot_mapping()` 只为 `global_page % shard_size == shard_rank` 的 token 写有效 slot，其余返回 `-1`。对从位置 0 开始、无复用的 65,536-token 请求，16 个 page 均匀分到 8 rank，源码计算每 rank 恰好 8192 个有效 slot。这个 **1/8 是根据配置与源码推算的**，还不是 r8 运行时 slot 张量的逐元素记录；但已有同核诊断中 1/8 有效槽位耗时 0.0557 ms，与 r8 较短的写入核时间方向一致。因此 0.074 ms 与集成版的 0.212 ms **不是两种不同写入核实现的 A/B**，不能把 feat 的同一 kernel 再迁入一次。
+
 保留 r8 原始数据后，我只停止了本任务在 111/112 的两个已核实进程组；服务管理器逐个退出 rank 后还有本任务孤儿 rank，复查 PID/UID/进程组后清理完毕。两端端口已关闭，GPU 无活动计算进程。保留服务模式的外层控制器因这次主动退出返回 1，原始输出在 `feat-a9bf-r8-controller-after-intentional-teardown.log.gz`；flow runner 自身及 64K 采集 runner 均退出 0，控制器返回值不能用于否定已归档的请求结果。
 
 ## 集成版 CP8 诊断 r1：首条 flow 失败
