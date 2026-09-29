@@ -698,7 +698,7 @@ void NormalEngine::loop() {
             if (running_) {
                 throw;
             }
-            RTP_LLM_LOG_WARN("normal engine loop stopped during shutdown: %s", e.what());
+            RTP_LLM_LOG_WARNING("normal engine loop stopped during shutdown: %s", e.what());
             break;
         }
     }
