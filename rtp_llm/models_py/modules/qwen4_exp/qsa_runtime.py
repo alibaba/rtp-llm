@@ -900,6 +900,11 @@ class Qwen4ExpQSARuntimeContext:
 
         visible_lengths = prefixes_device[:, None] + offsets[None, :] + 1
         compressed_lengths = visible_lengths // ratio
+        max_ctx_len = (
+            (int(prefixes.max().item()) + query_len) // ratio
+            if prefixes.device.type == "cpu"
+            else int(compressed_lengths.max().item())
+        )
         required_kv_columns = (
             compressed_lengths[:, -1] + kv_entries_per_block - 1
         ) // kv_entries_per_block
@@ -940,6 +945,7 @@ class Qwen4ExpQSARuntimeContext:
             "cu_seqlens": expected_cu,
             "visible_lengths": visible_lengths,
             "compressed_lengths": compressed_lengths,
+            "max_ctx_len": max_ctx_len,
             "kv_tokens_per_block": kv_tokens_per_block,
             "kv_entries_per_block": kv_entries_per_block,
             "state_tokens_per_block": state_tokens_per_block,
@@ -1363,6 +1369,14 @@ class Qwen4ExpQSARuntimeContext:
         if q.device != raw_keys.device:
             raise RuntimeError("qwen4_exp QSA decode q/raw keys must share a device")
 
+        # The engine keeps decode lengths on pinned CPU memory. Derive the
+        # scorer's output width there, before the H2D copy, rather than
+        # synchronizing a GPU max reduction after every sparse layer.
+        host_max_compressed = (
+            (int(sequence_lengths.max().item()) + 1) // ratio
+            if sequence_lengths.device.type == "cpu"
+            else None
+        )
         sequence_lengths = sequence_lengths.to(
             device=q.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
@@ -1441,7 +1455,12 @@ class Qwen4ExpQSARuntimeContext:
         visible_token_lengths = sequence_lengths + 1
         compressed_lengths = visible_token_lengths // ratio
         compressed_capacity = int(kv_table.shape[1]) * kv_entries_per_block
-        if bool(torch.any(compressed_lengths > compressed_capacity).item()):
+        exceeds_capacity = (
+            host_max_compressed > compressed_capacity
+            if host_max_compressed is not None
+            else bool(torch.any(compressed_lengths > compressed_capacity).item())
+        )
+        if exceeds_capacity:
             raise RuntimeError(
                 "qwen4_exp QSA compressed decode length exceeds its tag-local "
                 "indexer KV block table"
@@ -1554,9 +1573,9 @@ class Qwen4ExpQSARuntimeContext:
             # the score kernel also masks invalid IDs before reading the pool.
             validate_block_table=False,
             max_ctx_len=(
-                int(compressed_lengths.max().item())
-                if int(compressed_lengths.numel())
-                else 0
+                host_max_compressed
+                if host_max_compressed is not None
+                else int(compressed_lengths.max().item())
             ),
         )
         return select_qsa_paged_tokens(
@@ -1711,11 +1730,7 @@ class Qwen4ExpQSARuntimeContext:
             compressed_lengths,
             block_size=int(plan["kv_entries_per_block"]),
             validate_block_table=False,
-            max_ctx_len=(
-                int(compressed_lengths.max().item())
-                if int(compressed_lengths.numel())
-                else 0
-            ),
+            max_ctx_len=int(plan["max_ctx_len"]),
         )
         return select_qsa_paged_tokens(
             block_logits,
