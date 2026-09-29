@@ -1,3 +1,4 @@
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -17,6 +18,17 @@ def grouped_rms_norm(
     and cost bit-exactness. So these norms deliberately do NOT take the loader's
     ``plus_one``, unlike the rest of the repo's RMSNorms.
     """
+    fused_enabled = os.environ.get(
+        "RTP_LLM_QWEN4_FUSED_GROUP_NORM", "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if fused_enabled:
+        from rtp_llm.models_py.modules.qwen4_exp.gated_residual_norm_triton import (
+            grouped_rms_norm_triton,
+            is_supported,
+        )
+
+        if is_supported(x, gamma, group_size):
+            return grouped_rms_norm_triton(x, gamma, group_size, eps)
     out = x.float().unflatten(-1, (x.shape[-1] // group_size, group_size))
     out = out * torch.rsqrt(out.pow(2).mean(-1, keepdim=True) + eps)
     return (out.flatten(-2) * (1.0 + gamma.float())).type_as(x)

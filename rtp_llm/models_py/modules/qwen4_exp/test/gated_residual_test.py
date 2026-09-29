@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.qwen4_exp.gated_residual import (
     Qwen4ExpGatedResidual,
+    grouped_rms_norm,
     inject_into_residual,
 )
 
@@ -148,6 +150,30 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
                 torch.randn(_HC + 1, self.hc_hidden),
                 hc_mult=_HC,
                 norm_eps=_EPS,
+            )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_fused_group_norm_matches_torch_and_replays(self):
+        width = 4 * 2560
+        gamma = (torch.randn(width, device="cuda") * 0.1).bfloat16()
+        source = torch.randn(4, width, device="cuda", dtype=torch.bfloat16)
+
+        with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_GROUP_NORM": "0"}):
+            reference = grouped_rms_norm(source, gamma, 2560, _EPS)
+        with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_GROUP_NORM": "1"}):
+            actual = grouped_rms_norm(source, gamma, 2560, _EPS)
+            torch.testing.assert_close(
+                actual.float(), reference.float(), atol=0.016, rtol=0.01
+            )
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                replayed = grouped_rms_norm(source, gamma, 2560, _EPS)
+            source.copy_(torch.randn_like(source))
+            with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_GROUP_NORM": "0"}):
+                reference = grouped_rms_norm(source, gamma, 2560, _EPS)
+            graph.replay()
+            torch.testing.assert_close(
+                replayed.float(), reference.float(), atol=0.016, rtol=0.01
             )
 
 
