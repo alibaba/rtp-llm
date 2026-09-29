@@ -8,6 +8,7 @@
 
 - `3fs-owner-read-report-20260928.md`：原始慢读、并发探针、FastSafetensors 加载路径及证据边界。
 - `3fs-parallel-pread-prototype-20260928.md`、`parallel_3fs_pread.c`：只作用于任务进程的并发读取原型、启用条件和回滚办法。该原型尚未纳入 RTP 运行时代码。
+- `3fs-mtp-first-read-stall-20260929.md`：114/115 同时卡在 MTP shard 首个 1 MiB 读取的现场记录；权重读取恢复前不启动新的四层服务。
 - `bench_*.py`、`verify_fss_parallel_two_shards_113.py`、`run_fss_parallel_abba_113.sh`：单 shard 性能、全张量摘要和同大小双 shard 切换复核。
 - `run_fp8_3fs_*.sh`、`run_64k_*.sh`、`analyze_r41_aligned_phases.py`、`analyze_phase_by_launch_correlation.py`：当时的四层 Prefill 启动和 timeline 复现脚本。
 - `timeline-input-64k/`：固定 65,536 token 输入及 14 条独立预热变体；主输入 token ID SHA256 为 `97a53100491426d80436747b477dbe592ea1106eed6308a99ab83ba1bd3863ee`。
