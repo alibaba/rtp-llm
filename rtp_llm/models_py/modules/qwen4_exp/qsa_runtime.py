@@ -49,6 +49,7 @@ def select_qsa_paged_tokens(
     *,
     compress_ratio: int,
     token_budget: int,
+    validate_lengths: bool = True,
 ) -> torch.Tensor:
     """Expand scored block top-k plus the unscored partial tail to token ids.
 
@@ -74,15 +75,16 @@ def select_qsa_paged_tokens(
             "token_budget must be positive and divisible by compress_ratio"
         )
     complete_blocks = token_lengths // compress_ratio
-    invalid_lengths = (token_lengths < 0) | (
-        complete_blocks > int(block_logits.shape[1])
-    )
-    if bool(torch.any(invalid_lengths).item()):
-        if bool(torch.any(token_lengths < 0).item()):
-            raise ValueError("token_lengths must be non-negative")
-        raise ValueError(
-            "block_logits do not cover every completed block in token_lengths"
+    if validate_lengths:
+        invalid_lengths = (token_lengths < 0) | (
+            complete_blocks > int(block_logits.shape[1])
         )
+        if bool(torch.any(invalid_lengths).item()):
+            if bool(torch.any(token_lengths < 0).item()):
+                raise ValueError("token_lengths must be non-negative")
+            raise ValueError(
+                "block_logits do not cover every completed block in token_lengths"
+            )
 
     rows = int(block_logits.shape[0])
     block_topk = token_budget // compress_ratio
@@ -1519,6 +1521,10 @@ class Qwen4ExpQSARuntimeContext:
             visible_token_lengths,
             compress_ratio=ratio,
             token_budget=token_budget,
+            # Sequence lengths and required block-table capacity were checked
+            # above; repeating the device-to-host check per sparse layer adds
+            # a synchronization to every decode step.
+            validate_lengths=False,
         )
 
     def select_target_verify_tokens(
@@ -1624,6 +1630,7 @@ class Qwen4ExpQSARuntimeContext:
             plan["kv_table"],
             compressed_lengths,
             block_size=int(plan["kv_entries_per_block"]),
+            validate_block_table=False,
             max_ctx_len=(
                 int(compressed_lengths.max().item())
                 if int(compressed_lengths.numel())
@@ -1635,4 +1642,5 @@ class Qwen4ExpQSARuntimeContext:
             plan["visible_lengths"].reshape(-1),
             compress_ratio=ratio,
             token_budget=token_budget,
+            validate_lengths=False,
         )
