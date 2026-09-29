@@ -33,6 +33,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 from rtp_llm.models_py.modules.qwen4_exp.indexer import (
     apply_partial_rope,
     build_qsa_rope,
+    build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
 )
 from rtp_llm.models_py.modules.qwen4_exp.indexer_compressor import (
@@ -140,14 +141,6 @@ def _same_tensor_metadata(lhs: Any, rhs: Any) -> bool:
     if lhs.stride() == rhs.stride() and lhs.data_ptr() == rhs.data_ptr():
         return True
     return bool(torch.equal(lhs, rhs))
-
-
-def _transported_logical_positions(
-    logical_positions: torch.Tensor, rope_config: Any
-) -> torch.Tensor:
-    """Expand scalar cache positions to the configured position ABI."""
-    index_factor = int(rope_config.index_factor)
-    return logical_positions.reshape(-1, 1).expand(-1, index_factor).reshape(-1)
 
 
 def _typed_2d_pool(
@@ -691,13 +684,12 @@ class Qwen4ExpQSARuntimeContext:
 
         block_starts = logical_positions - logical_positions.remainder(ratio)
         try:
-            rope_cos, rope_sin = build_qsa_rope(
-                _transported_logical_positions(block_starts, rope_config),
+            rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+                block_starts,
                 rope_config,
                 token_count=token_count,
                 dtype=torch.bfloat16,
                 device=device,
-                logical_positions=block_starts,
             )
         except ValueError as error:
             raise RuntimeError(
@@ -1468,13 +1460,12 @@ class Qwen4ExpQSARuntimeContext:
         # one block-start RoPE row per request instead of [0, context_len).
         block_starts = sequence_lengths.to(torch.int64)
         block_starts = block_starts - block_starts.remainder(ratio)
-        rope_cos, rope_sin = build_qsa_rope(
-            _transported_logical_positions(block_starts, rope_config),
+        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+            block_starts,
             rope_config,
             token_count=batch_size,
             dtype=raw_keys.dtype,
             device=raw_keys.device,
-            logical_positions=block_starts,
         )
         fused_writer = os.environ.get(
             "RTP_LLM_QWEN4_TRITON_DECODE_WRITER", "0"
@@ -1633,21 +1624,19 @@ class Qwen4ExpQSARuntimeContext:
         query_positions = plan["visible_lengths"] - 1
         flat_query_positions = query_positions.reshape(-1).to(torch.int64)
         block_starts = flat_query_positions - flat_query_positions.remainder(ratio)
-        rope_cos, rope_sin = build_qsa_rope(
-            _transported_logical_positions(block_starts, rope_config),
+        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+            block_starts,
             rope_config,
             token_count=token_count,
             dtype=raw_keys.dtype,
             device=raw_keys.device,
-            logical_positions=block_starts,
         )
-        current_cos, current_sin = build_qsa_rope(
-            _transported_logical_positions(flat_query_positions, rope_config),
+        current_cos, current_sin = build_qsa_rope_from_logical_positions(
+            flat_query_positions,
             rope_config,
             token_count=token_count,
             dtype=raw_keys.dtype,
             device=raw_keys.device,
-            logical_positions=flat_query_positions,
         )
         target_writer = os.environ.get(
             "RTP_LLM_QWEN4_TRITON_TARGET_WRITER", "0"
