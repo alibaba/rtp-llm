@@ -1,0 +1,11 @@
+[INFO] checkpoint requested=/data0/luohaocheng.lhc/models/kimi-k3-4layers-ms-3fs-view-20260929
+[INFO] checkpoint realpath=/data0/luohaocheng.lhc/models/kimi-k3-4layers-ms-3fs-view-20260929
+[INFO] mount target=/data0 source=/dev/md0 fstype=xfs stat_fstype=xfs options=rw,relatime,attr2,inode64,logbufs=8,logbsize=32k,sunit=1024,swidth=4096,noquota
+[INFO] stat device=2304 inode=2368678862 kind=directory; df size=15360340262912 used=4115323248640 available=11245017014272 (10.23 TiB)
+[PASS] checkpoint resolves to an allowed local data-disk mount
+[PASS] index metadata.total_size matches shard payloads: 58480464384 bytes
+[PASS] checkpoint structure: index=model.safetensors.index.json, shards=7, tensors=16402, bytes=58482942648 (54.47 GiB)
+[PASS] all Safetensors headers and index-to-tensor mappings are structurally valid
+[PASS] explicit load method from environment LOAD_METHOD: fastsafetensors
+[INFO] checkpoint tree bytes=58487929410 (54.47 GiB); weight shard bytes=58482942648 (54.47 GiB)
+[RESULT] PASS warnings=0

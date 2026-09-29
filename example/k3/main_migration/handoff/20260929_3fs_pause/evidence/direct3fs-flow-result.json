@@ -1,0 +1,785 @@
+{
+  "suite": "flow",
+  "source_reference": "64c6aff3666402228950f1f09031e228c3734277",
+  "profile": "tp8-ep8-sp-no-dcp-text",
+  "deferred_by_user": [],
+  "single_prefill_input_limit": null,
+  "formal_request_deadline_s": 300,
+  "full_original_suite_passed": false,
+  "not_applicable": [
+    "DCP",
+    "PageRR owner",
+    "DP multi-owner",
+    "multimodal",
+    "KTP",
+    "EAGLE3/DSpark"
+  ],
+  "runtime_evidence_gate": "separate; this result alone does not certify RDMA, graph replay or precision",
+  "formal_request_retries": 0,
+  "namespace": "integrated-fp8-4l-3fsview-110115-r18-20260929",
+  "passed": true,
+  "error": null,
+  "block_size": 4096,
+  "chunk_tokens": 65536,
+  "reuse_unit_tokens": 4096,
+  "batch_size": 4,
+  "decode_role_addrs": [
+    {
+      "role": "DECODE",
+      "ip": "11.163.39.115",
+      "http_port": 27200,
+      "grpc_port": 27201
+    }
+  ],
+  "max_tokens": 8,
+  "identity_max_tokens": 256,
+  "single_exact_max_tokens": 128,
+  "mtp_chunk_max_tokens": 128,
+  "rdma_prewarm": {
+    "enabled": false,
+    "target_decode_owners": 1,
+    "request_timeout_s": 300,
+    "attempts": []
+  },
+  "elapsed_s": 46.965,
+  "summary": {
+    "case_count": 11,
+    "skipped_case_count": 0,
+    "cache_block_boundary_case_count": 0,
+    "decode_crossing_case_count": 0,
+    "hit_count": 5,
+    "miss_count": 6,
+    "reasoning_count": 0,
+    "mtp_case_count": 0,
+    "mtp_draft_case_count": 1,
+    "multimodal_case_count": 0,
+    "concurrent_stages": 2
+  },
+  "stages": [
+    {
+      "name": "chunkwise_rdma_flow_miss",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "chunkwise_rdma_flow_miss"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 36.254
+    },
+    {
+      "name": "flow_hit_owner_0",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "flow_hit_owner_0"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 2.221
+    },
+    {
+      "name": "flow_uneven_miss",
+      "concurrent": true,
+      "passed": true,
+      "case_names": [
+        "flow_uneven_0",
+        "flow_uneven_1",
+        "flow_uneven_2",
+        "flow_uneven_3"
+      ],
+      "decode_owner_ranks": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "elapsed_s": 2.811
+    },
+    {
+      "name": "flow_uneven_hit_rotated",
+      "concurrent": true,
+      "passed": true,
+      "case_names": [
+        "flow_uneven_3_hit",
+        "flow_uneven_2_hit",
+        "flow_uneven_1_hit",
+        "flow_uneven_0_hit"
+      ],
+      "decode_owner_ranks": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "elapsed_s": 2.238
+    },
+    {
+      "name": "flow_mtp_draft",
+      "concurrent": false,
+      "passed": true,
+      "case_names": [
+        "flow_mtp_draft"
+      ],
+      "decode_owner_ranks": [
+        0
+      ],
+      "elapsed_s": 2.207
+    }
+  ],
+  "cases": [
+    {
+      "name": "chunkwise_rdma_flow_miss",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 65536,
+      "prefill_total_reuse_len": 0,
+      "input_len": 65537,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 65537,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 65537,
+      "decode_kv_last_position": 65543,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 36.25,
+      "content": "作为主端的usc旧时不承担 Kin的灵 poll",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          33113,
+          20809,
+          101371,
+          122634,
+          49527,
+          157664,
+          16603
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_hit_owner_0",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 65536,
+      "reuse_len": 65536,
+      "prefill_total_reuse_len": 65536,
+      "input_len": 65537,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 65537,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 65537,
+      "decode_kv_last_position": 65543,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.217,
+      "content": "作为主端的usc旧时不承担 Kin的灵 poll",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          33113,
+          20809,
+          101371,
+          122634,
+          49527,
+          157664,
+          16603
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_3",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 16384,
+      "prefill_total_reuse_len": 0,
+      "input_len": 20480,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 20480,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 20480,
+      "decode_kv_last_position": 20486,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.294,
+      "content": "作为主端antecahanThunk LR-Barommu",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          3359,
+          150369,
+          24915,
+          77055,
+          74265,
+          150593,
+          74895
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_0",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 4096,
+      "prefill_total_reuse_len": 0,
+      "input_len": 8192,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 8192,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 8192,
+      "decode_kv_last_position": 8198,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.798,
+      "content": "作为主端antecinguther作主 Warwick rested",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          3359,
+          150369,
+          288,
+          34182,
+          146359,
+          106360,
+          112631
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_1",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 8192,
+      "prefill_total_reuse_len": 0,
+      "input_len": 12288,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 12288,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 12288,
+      "decode_kv_last_position": 12294,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.804,
+      "content": "作为主端antecahanThunk LR-Barommu",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          3359,
+          150369,
+          24915,
+          77055,
+          74265,
+          150593,
+          74895
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_2",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 12288,
+      "prefill_total_reuse_len": 0,
+      "input_len": 16384,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 16384,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 16384,
+      "decode_kv_last_position": 16390,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.808,
+      "content": "作为主端antecahanThunk上位 unitedoung",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          3359,
+          150369,
+          24915,
+          77055,
+          87521,
+          53091,
+          126386
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_1_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 8192,
+      "reuse_len": 8192,
+      "prefill_total_reuse_len": 8192,
+      "input_len": 12288,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 12288,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 12288,
+      "decode_kv_last_position": 12294,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.21,
+      "content": "作为主端antecing Baptistmann司长 disguise",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          3359,
+          150369,
+          288,
+          51197,
+          28958,
+          81831,
+          128960
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_2_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 12288,
+      "reuse_len": 12288,
+      "prefill_total_reuse_len": 12288,
+      "input_len": 16384,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 16384,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 16384,
+      "decode_kv_last_position": 16390,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.219,
+      "content": "作为主端antecahanThunk上位 united中奖",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          3359,
+          150369,
+          24915,
+          77055,
+          87521,
+          53091,
+          59166
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_0_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 4096,
+      "reuse_len": 4096,
+      "prefill_total_reuse_len": 4096,
+      "input_len": 8192,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 8192,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 8192,
+      "decode_kv_last_position": 8198,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.221,
+      "content": "作为主端 mentallyustoingu Vanderbiltistiši",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          3359,
+          54897,
+          69978,
+          18601,
+          145546,
+          80402,
+          82559
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_uneven_3_hit",
+      "expected_reuse": "hit",
+      "effective_reuse_len": 16384,
+      "reuse_len": 16384,
+      "prefill_total_reuse_len": 16384,
+      "input_len": 20480,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": false,
+      "expected_json": null,
+      "expected_input_len": 20480,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 20480,
+      "decode_kv_last_position": 20486,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.234,
+      "content": "_adistratorunk Beautyinan有句端的ipt",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          15321,
+          57729,
+          4526,
+          45423,
+          127355,
+          92625,
+          33113,
+          14510
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    },
+    {
+      "name": "flow_mtp_draft",
+      "expected_reuse": "miss",
+      "effective_reuse_len": 0,
+      "reuse_len": 0,
+      "prefill_total_reuse_len": 0,
+      "input_len": 54,
+      "output_len": 8,
+      "iter_count": 8,
+      "mtp_accepted_tokens": 0,
+      "mtp_draft_rounds": 7,
+      "require_mtp": false,
+      "require_mtp_draft": true,
+      "expected_json": null,
+      "expected_input_len": null,
+      "expected_reuse_len": null,
+      "cache_block_boundary": null,
+      "cache_block_phase": null,
+      "decode_crossings": [],
+      "decode_kv_first_position": 54,
+      "decode_kv_last_position": 60,
+      "require_multimodal": false,
+      "multimodal_lengths": {},
+      "input_urls": [],
+      "max_tokens": 8,
+      "pd_sep": true,
+      "elapsed_s": 2.207,
+      "content": "作为主变色 styledizogi后起ingu `{}",
+      "reasoning_content": "",
+      "finish_reason": "length",
+      "output_ids": [
+        [
+          137684,
+          50162,
+          34818,
+          584,
+          80417,
+          161749,
+          18601,
+          138674
+        ]
+      ],
+      "decode_owner_rank": 0,
+      "selected_decode_role_addr": {
+        "role": "DECODE",
+        "ip": "11.163.39.115",
+        "http_port": 27200,
+        "grpc_port": 27201
+      },
+      "observed_decode_role_addrs": [
+        {
+          "role": "DECODE",
+          "ip": "11.163.39.115",
+          "http_port": 27200,
+          "grpc_port": 27201
+        }
+      ],
+      "phase": "formal"
+    }
+  ],
+  "failures": [],
+  "skipped_cases": []
+}
