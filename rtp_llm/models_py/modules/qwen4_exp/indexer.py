@@ -197,6 +197,7 @@ def build_base_rope(
     dtype: torch.dtype,
     device: torch.device,
     logical_positions: Optional[torch.Tensor] = None,
+    validate_position_axes: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build one-axis Base RoPE for the Qwen4 MTP draft indexer.
 
@@ -223,7 +224,7 @@ def build_base_rope(
         index_factor=index_factor,
         device=device,
     )
-    if index_factor == 3 and not bool(
+    if index_factor == 3 and validate_position_axes and not bool(
         torch.equal(positions, positions[:, :1].expand_as(positions))
     ):
         raise ValueError(
@@ -288,6 +289,44 @@ def build_qsa_rope(
             )
         return build_interleaved_mrope(
             position_ids,
+            rope_config,
+            token_count=token_count,
+            dtype=dtype,
+            device=device,
+        )
+    raise ValueError(f"qwen4 QSA does not support RoPE style {rope_config.style!r}")
+
+
+def build_qsa_rope_from_logical_positions(
+    logical_positions: torch.Tensor,
+    rope_config: Any,
+    *,
+    token_count: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build canonical text positions without rechecking a generated equality."""
+    if logical_positions.dim() != 1 or int(logical_positions.numel()) != token_count:
+        raise ValueError("qwen4 QSA logical position count does not match tokens")
+    index_factor = int(rope_config.index_factor)
+    positions = (
+        logical_positions.to(device=device, dtype=torch.long)
+        .view(-1, 1)
+        .expand(-1, index_factor)
+        .reshape(-1)
+    )
+    if is_qsa_rope_style(rope_config, "Base"):
+        return build_base_rope(
+            positions,
+            rope_config,
+            token_count=token_count,
+            dtype=dtype,
+            device=device,
+            validate_position_axes=False,
+        )
+    if is_qsa_rope_style(rope_config, "Mrope"):
+        return build_interleaved_mrope(
+            positions,
             rope_config,
             token_count=token_count,
             dtype=dtype,
