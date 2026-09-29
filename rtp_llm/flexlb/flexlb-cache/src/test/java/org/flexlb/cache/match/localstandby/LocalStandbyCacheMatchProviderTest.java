@@ -61,6 +61,27 @@ class LocalStandbyCacheMatchProviderTest {
         }
     }
 
+    @Test
+    void emptyHashIsAValidZeroMatch() throws Exception {
+        LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
+        LocalStandbyHashService hashService = mock(LocalStandbyHashService.class);
+        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
+                kvcm(modelMetaConfig()), cacheManager, hashService);
+        CacheMatchQuery query = new CacheMatchQuery(
+                "request-1", List.of(11L), 2192, null, 4096, RoleType.PREFILL, "default");
+        when(hashService.getHashResult("request-1", null, 4096))
+                .thenReturn(CompletableFuture.completedFuture(LocalStandbyHashResult.empty()));
+
+        try {
+            CacheMatchResult result = provider.asyncLocalStandbyMatch(query).get(1, TimeUnit.SECONDS);
+            assertEquals(4096, result.blockSize());
+            assertEquals(Map.of(), result.hostMatches());
+            verifyNoInteractions(cacheManager);
+        } finally {
+            provider.shutdown();
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"0, 1, 10.0.0.1:8080@0", "1, 2, 10.0.0.1:8080@1"})
     void updatesRequestDerivedCacheMetadataAsynchronously(

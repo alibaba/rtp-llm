@@ -19,9 +19,12 @@ import java.util.Map;
 
 import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class CacheAwareServiceTest {
@@ -31,12 +34,13 @@ class CacheAwareServiceTest {
             mock(CacheMatchQueryOrchestrator.class);
     private final CacheMetadataUpdateOrchestrator updateOrchestrator =
             mock(CacheMetadataUpdateOrchestrator.class);
+    private final LocalStandbyComparisonService comparisonService = mock(LocalStandbyComparisonService.class);
     private final RequestBlockHashService requestBlockHashService =
             mock(RequestBlockHashService.class);
     private final CacheAwareService service = new CacheAwareService(
             metricsReporter,
             queryOrchestrator,
-            mock(LocalStandbyComparisonService.class),
+            comparisonService,
             updateOrchestrator,
             requestBlockHashService);
 
@@ -96,5 +100,38 @@ class CacheAwareServiceTest {
 
         assertEquals(CacheMatchSource.KVCM, result.source());
         assertEquals(Map.of(), result.hostMatches());
+        assertFalse(result.querySucceeded());
+    }
+
+    @Test
+    void reportsZeroKvcmPredictionBeforeWorkerFeedback() {
+        WorkerStatus worker = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
+
+        service.trackRoutingPrediction("short-request", RoleType.PREFILL, "default", worker,
+                100, 0, CacheMatchResult.empty(CacheMatchSource.KVCM));
+
+        verify(metricsReporter).reportKvcmPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 0, 100);
+    }
+
+    @Test
+    void failedKvcmQueryDoesNotBecomeZeroPrediction() {
+        WorkerStatus worker = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
+
+        service.trackRoutingPrediction("request-1", RoleType.PREFILL, "default", worker,
+                100, 0, CacheMatchResult.failed(CacheMatchSource.KVCM, 10));
+
+        verifyNoInteractions(metricsReporter);
+    }
+
+    @Test
+    void localStandbySelectionIsRecordedWhenKvcmMetricReportingFails() {
+        WorkerStatus worker = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
+        doThrow(new IllegalStateException("monitor unavailable")).when(metricsReporter)
+                .reportKvcmPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 0, 100);
+
+        service.trackRoutingPrediction("request-1", RoleType.PREFILL, "default", worker,
+                100, 0, CacheMatchResult.empty(CacheMatchSource.KVCM));
+
+        verify(comparisonService).recordSelectedWorker("request-1", RoleType.PREFILL, worker, 100);
     }
 }

@@ -73,7 +73,12 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
             return localStandbyHashService
                     .getHashResult(query.requestId(), query.localStandbyBlockCacheKeys(), query.localStandbyBlockSize())
                     .thenApplyAsync(hashResult -> {
-                        if (hashResult.blockCacheKeys().isEmpty() || hashResult.blockSize() <= 0) {
+                        if (hashResult.blockCacheKeys().isEmpty()) {
+                            long queryTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
+                            return new CacheMatchResult(Map.of(), CacheMatchSource.LOCAL_STANDBY,
+                                    queryTimeUs, query.localStandbyBlockSize());
+                        }
+                        if (hashResult.blockSize() <= 0) {
                             long queryTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
                             return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, queryTimeUs);
                         }
