@@ -114,7 +114,7 @@ class Qwen4ExpMTP(Qwen4Exp):
         return Qwen4ExpMTPWeight
 
     def support_cuda_graph(self) -> bool:
-        return False
+        return super().support_cuda_graph()
 
     def load(self, skip_python_model: bool = False):
         config = getattr(self, "model_config", None)

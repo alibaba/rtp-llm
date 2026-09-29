@@ -31,6 +31,23 @@ def _raw_gamma_rms_norm(
 
 
 class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
+    def test_draft_prefill_graph_stays_disabled(self):
+        self.assertFalse(
+            Qwen4ExpMTPModel.supports_cuda_graph_draft_prefill(SimpleNamespace())
+        )
+
+    def test_graph_captures_explicit_base_rope_positions(self):
+        draft = SimpleNamespace(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(
+                    rope_config=SimpleNamespace(index_factor=3)
+                )
+            )
+        )
+        self.assertEqual(
+            Qwen4ExpMTPModel.cuda_graph_position_id_len_factor(draft), 3
+        )
+
     def test_target_forward_exports_precollapse_rows_to_graph_output(self):
         inputs = PyModelInputs()
         inputs.attention_inputs = PyAttentionInputs()

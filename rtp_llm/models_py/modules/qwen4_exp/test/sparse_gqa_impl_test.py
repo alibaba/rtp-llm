@@ -113,6 +113,25 @@ def _configs(is_sparse=True, use_mla=False, is_prefill=True, opt_in=True):
 
 
 class SparseGqaRoutingTest(unittest.TestCase):
+    def test_graph_prepare_refreshes_captured_page_offsets(self):
+        for target_verify in (False, True):
+            with self.subTest(target_verify=target_verify):
+                impl = SparseGqaFmhaImpl.__new__(SparseGqaFmhaImpl)
+                impl.attn_inputs = SimpleNamespace(is_cuda_graph=True)
+                impl.is_prefill = target_verify
+                impl.is_target_verify = target_verify
+                captured = torch.zeros(2, 3, dtype=torch.int32)
+                refreshed = torch.arange(6, dtype=torch.int32).reshape(2, 3)
+                impl.rope_params = SimpleNamespace(kv_cache_offset=captured)
+                impl.rope_kvcache_impl = SimpleNamespace(
+                    prepare_kv_cache_offset=lambda _: refreshed,
+                    prepare=lambda _, forbid_reallocation: SimpleNamespace(
+                        kv_cache_offset=refreshed
+                    ),
+                )
+                impl.prepare_cuda_graph(impl.attn_inputs)
+                torch.testing.assert_close(captured, refreshed)
+
     def test_sparse_qwen4_prefill_routes_to_sparse_gqa(self):
         attn_configs, attn_inputs = _configs()
         self.assertEqual(

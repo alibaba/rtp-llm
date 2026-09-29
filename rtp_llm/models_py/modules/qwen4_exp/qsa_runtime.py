@@ -32,6 +32,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 )
 from rtp_llm.models_py.modules.qwen4_exp.indexer import (
     apply_partial_rope,
+    build_base_rope,
     build_qsa_rope,
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
@@ -1405,6 +1406,9 @@ class Qwen4ExpQSARuntimeContext:
             )
         if q.device != raw_keys.device:
             raise RuntimeError("qwen4_exp QSA decode q/raw keys must share a device")
+        # The draft projection yields a strided raw-key view.  The fixed-shape
+        # writer accepts contiguous rows, and this copy is captured in Graph.
+        raw_keys = raw_keys.contiguous()
 
         # The engine keeps decode lengths on pinned CPU memory. Derive the
         # scorer's output width there, before the H2D copy, rather than
@@ -1441,7 +1445,22 @@ class Qwen4ExpQSARuntimeContext:
         # only non-draft decodes can be validated against sequence_lengths.
         decode_logical_positions = None if self.is_mtp_draft else sequence_lengths
         try:
-            if graph_decode and not self.is_mtp_draft:
+            if graph_decode and self.is_mtp_draft:
+                if not is_qsa_rope_style(rope_config, "Base"):
+                    raise RuntimeError(
+                        "qwen4_exp draft Graph requires text-only Base RoPE"
+                    )
+                # MTP's text position generator repeats one scalar across its
+                # axes. Eager checks equality; Graph capture cannot synchronize.
+                current_cos, current_sin = build_base_rope(
+                    position_ids,
+                    rope_config,
+                    token_count=batch_size,
+                    dtype=raw_keys.dtype,
+                    device=raw_keys.device,
+                    validate_position_axes=False,
+                )
+            elif graph_decode:
                 # Exact-batch Graph capture uses the engine's canonical text
                 # positions. The C++ graph owner refreshes lengths before replay.
                 current_cos, current_sin = build_qsa_rope_from_logical_positions(
