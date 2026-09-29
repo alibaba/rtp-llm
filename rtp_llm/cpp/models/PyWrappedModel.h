@@ -415,6 +415,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // Create GraphParams from individual config fields
         GraphParams graph_params;
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
+        graph_params.exact_batch_only             = requires_exact_cuda_graph_batch_;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;
