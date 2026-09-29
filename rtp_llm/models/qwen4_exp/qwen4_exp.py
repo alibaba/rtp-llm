@@ -28,6 +28,7 @@ _SKELETON_WARNING = (
 _EXPERIMENTAL_SERVING_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL"
 _PLE_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_PLE"
 _QSA_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_QSA"
+_GRAPH_EXPERIMENTAL_ENV = "RTP_LLM_QWEN4_EXP_GRAPH_EXPERIMENTAL"
 
 
 class Qwen4Exp(Qwen35Moe):
@@ -48,10 +49,16 @@ class Qwen4Exp(Qwen35Moe):
         # validation, so only the development variant without them may use
         # that backbone graph path. The MTP draft has a separate graph contract.
         config = getattr(self, "model_config", None)
-        return config is not None and not (
+        if config is None:
+            return False
+        side_cache_or_draft = (
             bool(getattr(config, "enable_qwen4_ple", False))
             or bool(getattr(config, "enable_qwen4_qsa", False))
             or bool(getattr(config, "is_mtp", False))
+        )
+        return not side_cache_or_draft or (
+            self._experimental_serving_enabled()
+            and str_to_bool(os.environ.get(_GRAPH_EXPERIMENTAL_ENV, "false"))
         )
 
     @staticmethod
