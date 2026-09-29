@@ -12,3 +12,9 @@ MTP checkpoint 视图在各主机的 `/data0/luohaocheng.lhc/models/kimi-k3-mtp-
 这是 shard 首个 1 MiB 读取的等待，尚未进入 FastSafetensors 的大块权重加载或 GPU 实验。此次 guard 没有注入任务级 64 线程 `pread` 库，因此没有测量并发加载时的吞吐；但单次 1 MiB 读取超过四分钟，不能据此归因于 64 线程上限。此前真实 FastSafetensors SHM 读取在 64、128、256 线程下约为 2.1–2.2 秒，继续增线程未见可确认收益，见 [并发原型记录](3fs-parallel-pread-prototype-20260928.md) 与 [存储侧读取报告](3fs-owner-read-report-20260928.md) 第 14 项。
 
 已暂停 114/115 的新服务启动，没有修改共享 FUSE、集群配置或权重文件，也没有触碰受保护的 `/3fs-data/3fs/mtp_test`。请存储侧重点查看该 shard 对应的服务端对象与副本、09:27–09:32 的 RPC/重试/限流及两个客户端的 FUSE 请求，同时确认 112 挂载消失是否为预期维护。客户端恢复后，再重做两端 guard 和正式加载日志检查；只有实际加载完成才计入后续 smoke。
+
+## 09:41 后的定位补充
+
+114、115 此时均无外部 GPU 进程，满足独占测量的机器条件；112 仍无 3FS 挂载。115 再读同一 MTP rank00 shard 的首个 1 MiB，约 21 秒后仍停在 `folio_wait_bit_common`、fd 3 的位置仍为 0，已向本任务探针发 `SIGTERM`，探针退出 143。作为对照，在同一 115 容器内，`kimi-k3-4layers/model-00001-of-000007.safetensors` 的首个 1 MiB 用时 0.005 秒，`kimi-k3-mtp/mtp-experts-rank01-of-08.safetensors` 用时 0.007 秒。这两次只是小块热读，不能据此估计整文件吞吐；它们说明本次并非同一客户端所有 3FS 文件都无法读取。
+
+尝试读取 rank00 文件偏移 4 MiB 时，探针在 `openat` 阶段就进入 `D` 状态，尚未获得 fd，因此**不能推断 4 MiB 数据块是否可读**。容器内 PID 25038 在至少 1 分 24 秒后仍处于 `folio_wait_bit_common`，`SIGTERM` 已待处理；观察时该诊断进程尚未退出，没有启动任何 GPU 服务，也不会继续向这个 shard 增加读请求。请存储侧连同 inode 3146980 的 open/read 等待一起核查，尤其与相邻 inode 3146981 的正常首读作对照。
