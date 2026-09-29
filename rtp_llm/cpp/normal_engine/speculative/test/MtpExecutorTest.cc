@@ -1426,6 +1426,13 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
         EXPECT_EQ(draft_input.last_hidden_states.size(0), 2);
         EXPECT_EQ(draft_output.all_hidden_states.size(0), 2);
     }
+    if (!simulate_cp_mutation) {
+        // Draft prefill uses the output's own row count. The public MTP hidden
+        // tensor must replace the ordinary hidden states without requiring an
+        // explicit row count from the caller.
+        draft_output.mtp_target_hidden_states =
+            torch::tensor({0.21f, 0.22f, 0.23f, 0.24f, 0.25f, 0.26f, 0.27f, 0.28f}).reshape({4, 2});
+    }
 
     components.fake_draft_model->setInputs({draft_input});
     components.fake_draft_model->setOutputs({draft_output});
@@ -1477,7 +1484,8 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     }
 
     // check stream result
-    checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
+    checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0},
+                simulate_cp_mutation ? std::vector<float>{0.17, 0.18} : std::vector<float>{0.27, 0.28});
     if (simulate_cp_mutation) {
         EXPECT_EQ(target_model->forwardCount(), 1);
         EXPECT_EQ(draft_model->forwardCount(), 1);
