@@ -30,3 +30,9 @@ MTP checkpoint 视图在各主机的 `/data0/luohaocheng.lhc/models/kimi-k3-mtp-
 启动前在两端各执行一次 `sha256sum`，参数依次为四层 target 的 `config.json` 和 `model.safetensors.index.json`。两端读取进程约 40 秒后仍未产生第一行哈希，均处于 `D` 状态、等待点 `folio_wait_bit_common`。已只向这两个本任务进程发送 `SIGTERM`；两端命令均结束，没有修改权重或其他人的进程。这表明阻塞已不局限于此前的 MTP rank00：连四层 target 的小型配置文件读取也出现等待。但当前证据只能定位到客户端读等待，不能断定服务端根因或判断所有 3FS 文件都受影响。
 
 两端 3FS 仍以 `fuse.hf3fs` 挂载；共享的 `hf3fs-fuse` 容器处于 running。FUSE 连接的 `max_background` 等参数为 root-only，本次个人账号无法读取，也没有修改由其他用户管理的 FUSE 容器、挂载或集群配置。先前 64、128、256 线程的真实 FastSafetensors 读取耗时接近；当前连小文件首读都等待，继续增加本任务的并发读请求没有可验证的收益，反而会累积挂起请求。待存储侧排查 10:00 左右 114/115 对四层 target 配置文件的 FUSE/RPC 等待，以及此前 MTP rank00 的 inode 3146980 后，再复查同路径读取和完整模型加载。
+
+### 114 的 FUSE 错误与 112 存储端口
+
+随后以个人 UID 只读检查 114 的 FUSE 错误日志，找到了与本任务 MTP 首读对应的服务端结果：09:32:42，UID 19357313 的 `batchRead` 对 `ChainId(90000007)`、chunk `00000000-00000030-04E40000-00000000` 重试约 300 秒后返回 `StorageClient::NotAvailable(7005)`；紧接着 `hf3fs_read` 报 inode `0x3004e4`（十进制 3146980）、偏移 0、大小 131072 字节、错误 `-7005`。这是此前内核等待的直接错误记录。日志在 09:17–09:18 还反复报告连向 `11.163.39.112:8001` 的 TCP/RDMA 连接被拒绝；目前不能仅凭这些行断言该 chunk 的唯一副本就在 112。
+
+10:04 后从 114 和 115 分别连接 `11.163.39.112:8001`，两次 `connect_ex` 都立即返回 `111`（Connection refused）。112 上没有该端口监听，Docker daemon 也不可连接，`/mnt/hf3fs` 退回本地 ext4。两端 target 小文件读取等待与 MTP 的 `NotAvailable` 一起说明当前应先恢复/核查 3FS 存储服务及路由，不宜通过增加读取线程或修改共享 FUSE 配置掩盖故障。此检查只读取了日志和端口状态，未启动或重启任何共享服务。
