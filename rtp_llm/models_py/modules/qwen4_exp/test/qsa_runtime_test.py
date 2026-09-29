@@ -1531,6 +1531,18 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         )
         torch.testing.assert_close(selected, expected)
 
+        # The runtime has already checked both length and table capacity. Its
+        # decode path must avoid a per-layer device-to-host scalar read here.
+        with patch.object(torch.Tensor, "item", side_effect=AssertionError("sync")):
+            prevalidated = select_qsa_paged_tokens(
+                block_logits,
+                token_lengths,
+                compress_ratio=self.RATIO,
+                token_budget=8,
+                validate_lengths=False,
+            )
+        torch.testing.assert_close(prevalidated, expected)
+
 
 if __name__ == "__main__":
     main()
