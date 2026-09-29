@@ -41,6 +41,56 @@ class TestTRTLLMWorkspaceReuse(unittest.TestCase):
             self.assertTrue(torch.all(reused == 2).item())
 
 
+class TestSM120EncoderSpecialization(TRTLLMFMHAv2TestBase):
+    @unittest.skipUnless(is_sm12x(), "requires SM12x specialization")
+    def test_sm120_encoder_specialization_and_fallback(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl import (
+            flashinfer_sm120,
+        )
+
+        torch.manual_seed(20260929)
+        # Two hit cases plus shape/mask misses; do not mock the GPU compute.
+        for lengths, causal in (
+            ([128], False),
+            ([128, 128], False),
+            ([64, 128], False),
+            ([128], True),
+        ):
+            with self.subTest(lengths=lengths, causal=causal):
+                config = self._create_config(
+                    head_num=4,
+                    head_num_kv=4,
+                    size_per_head=64,
+                    seq_size_per_block=64,
+                    data_type="bf16",
+                )
+                config.is_causal = causal
+                inputs = self._create_prefill_attention_inputs(
+                    len(lengths), lengths, 64, prefix_lengths=None
+                )
+                op = TRTLLMFMHAv2PrefillOp(config)
+                params = op.prepare(inputs)
+                qkv = torch.randn(
+                    sum(lengths), 3 * 4 * 64, device=self.device, dtype=torch.bfloat16
+                )
+                with mock.patch.object(
+                    flashinfer_sm120,
+                    "sm120_bert_fmha_v2_prefill",
+                    wraps=flashinfer_sm120.sm120_bert_fmha_v2_prefill,
+                ) as specialized:
+                    actual = op.forward(qkv, None, params)
+                self.assertEqual(
+                    specialized.call_count,
+                    int(not causal and all(n == 128 for n in lengths)),
+                )
+                expected = compute_pytorch_prefill_reference(
+                    qkv.float(), lengths, 4, 4, 64, is_causal=causal
+                )
+                torch.testing.assert_close(
+                    actual.float(), expected.float(), rtol=2e-2, atol=2e-2
+                )
+
+
 class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
     """Test suite for TRTLLMFMHAv2PrefillOp in non-padded mode
 

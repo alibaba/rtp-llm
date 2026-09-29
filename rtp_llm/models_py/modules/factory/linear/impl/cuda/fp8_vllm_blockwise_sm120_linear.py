@@ -9,7 +9,6 @@ keep using DeepGEMM via `CudaFp8GEMMLinear`.
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
@@ -61,8 +60,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
     causing a stride mismatch for non-multiple-of-4 M values.
     """
 
-    # Materialize GEMM+bias in BF16 before separate GELU and quantization.
-    # In particular, do not move output bias into residual LayerNorm.
+    # GEMM optionally fuses bias and exact GELU, but activation quantization
+    # remains separate. Do not move output bias into residual LayerNorm.
     supports_deferred_bias = False
     supports_fused_bias_gelu_quant = False
     fused_activation_quant_format = None
@@ -302,8 +301,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         return self._forward_impl(input, apply_bias=False)
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
-        # Match the unfused path's BF16 rounding before exact GELU.
-        return F.gelu(self.forward(input), approximate="none")
+        # Apply exact erf GELU in the epilogue before the BF16 output cast.
+        return self._forward_impl(input, use_gelu=True)
 
     def forward_quantized(
         self,

@@ -49,11 +49,18 @@ class CudaF16Linear(LinearBase):
         return F.linear(input, self.weight, None)
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        # The shared Linear interface also accepts FP32 and arbitrary leading
+        # dimensions. The BERT fast path supports packed FP16/BF16 rows only.
+        if (
+            input.ndim != 2
+            or input.dtype not in (torch.float16, torch.bfloat16)
+            or torch.is_autocast_enabled()
+            or (self.bias is not None and self.bias.dtype != input.dtype)
+        ):
+            return super().forward_with_bias_gelu(input)
         output = self.forward_without_bias(input)
         if self.bias is None:
             return F.gelu(output)
-        if self.bias.dtype != output.dtype:
-            return F.gelu(output + self.bias.to(output.dtype))
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
         rtp_llm_ops.fused_bias_gelu(output, self.bias)

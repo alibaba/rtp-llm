@@ -296,7 +296,7 @@ def fused_bias_add(input: torch.Tensor, bias: torch.Tensor) -> None:
     """In-place per-column bias add kernel."""
 def fused_bias_gelu(input: torch.Tensor, bias: torch.Tensor) -> None:
     """In-place fused bias add and exact GELU kernel."""
-def fused_bias_gelu_quant_fp8(input: torch.Tensor, bias: torch.Tensor, output: torch.Tensor, scales: torch.Tensor, add_bias: bool = True) -> None:
+def fused_bias_gelu_quant_fp8(input: torch.Tensor, bias: torch.Tensor, output: torch.Tensor, scales: torch.Tensor) -> None:
     """Fused optional bias, exact GELU, and per-block FP8 quantization."""
 def fused_add_rmsnorm(input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float, cuda_stream: int = 0) -> None:
     """
