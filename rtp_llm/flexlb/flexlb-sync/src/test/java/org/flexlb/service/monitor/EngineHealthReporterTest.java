@@ -154,6 +154,7 @@ class EngineHealthReporterTest {
     void shouldRegisterRequestPayloadMetrics() {
         reporter.init();
 
+        verify(monitor).register("app.request.block.size", FlexMetricType.GAUGE);
         verify(monitor).register("app.request.seq.len",
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         verify(monitor).register("app.request.message.bytes",
@@ -168,6 +169,8 @@ class EngineHealthReporterTest {
         context.setSuccess(false);
         Request request = new Request();
         request.setSeqLen(512L);
+        request.setCacheKeyBlockSize(1024L);
+        request.setBlockSize(2048L);
         context.setRequest(request);
         context.setRequestMessageBytes(8192L);
         context.setRequestBodyBytes(5_242_881L);
@@ -176,6 +179,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of("success", "false");
         verify(monitor).report("app.request.seq.len", expectedTags, 512.0);
+        verify(monitor).report("app.request.block.size", expectedTags, 1024.0);
         verify(monitor).report("app.request.body.bytes", expectedTags, 5_242_881.0);
         verify(monitor).report("app.request.message.bytes", expectedTags, 8192.0);
     }
@@ -217,6 +221,7 @@ class EngineHealthReporterTest {
     void shouldSkipUnknownRequestPayloadMetrics() {
         reporter.reportRequestPayload(new BalanceContext());
 
+        verify(monitor, never()).report(eq("app.request.block.size"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.request.seq.len"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.request.message.bytes"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.request.body.bytes"), any(FlexMetricTags.class), anyDouble());
@@ -451,6 +456,32 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void shouldReportOneWorkerBlockSizePerRole() {
+        WorkerStatus prefill = workerStatusWithCacheStatus();
+        WorkerStatus decode = workerStatus("10.0.0.2", RoleType.DECODE, 800L, 1000L,
+                CacheStatus.builder().blockSize(128).build());
+        when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null))
+                .thenReturn(List.of(workerStatus("10.0.0.3", RoleType.PREFILL), prefill, prefill));
+        when(workerDirectory.getWorkerStatuses(RoleType.DECODE, null)).thenReturn(List.of(decode));
+
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(reporter, "reportWorkerBlockSizes");
+
+        verify(monitor).report("app.cache.block.size", FlexMetricTags.of("role", "PREFILL"), 64.0);
+        verify(monitor).report("app.cache.block.size", FlexMetricTags.of("role", "DECODE"), 128.0);
+    }
+
+    @Test
+    void shouldSkipWorkerBlockSizeBeforeStatusIsAvailable() {
+        when(workerDirectory.getWorkerStatuses(RoleType.PREFILL, null)).thenReturn(List.of());
+        when(workerDirectory.getWorkerStatuses(RoleType.DECODE, null))
+                .thenReturn(List.of(workerStatus("10.0.0.2", RoleType.DECODE)));
+
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(reporter, "reportWorkerBlockSizes");
+
+        verify(monitor, never()).report(eq("app.cache.block.size"), any(FlexMetricTags.class), anyDouble());
+    }
+
+    @Test
     void shouldReportConfiguredLocalStandbyBlockSize() {
         localStandbyConfig.setBlockSize(4096);
         WorkerStatus workerStatus = workerStatusWithCacheStatus();
@@ -679,18 +710,18 @@ class EngineHealthReporterTest {
                 cacheStatus, 0L, 0L);
     }
 
-    private WorkerStatus workerStatus(
-            String ip,
-            RoleType role,
-            long availableKvCacheTokens,
-            long totalKvCacheTokens,
-            CacheStatus cacheStatus,
-            long runningQueryLen,
-            long waitingQueryLen) {
+    private WorkerStatus workerStatus(String ip,
+                                      RoleType role,
+                                      long availableKvCacheTokens,
+                                      long totalKvCacheTokens,
+                                      CacheStatus cacheStatus,
+                                      long runningQueryLen,
+                                      long waitingQueryLen) {
         WorkerStatus workerStatus = WorkerStatus.createDiscovered(
                 role, null, ip, 8080, 8081, "test-site");
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
+        response.setCacheStatus(cacheStatus);
         response.setAlive(true);
         response.setStatusVersion(1L);
         response.setLatestFinishedVersion(0L);

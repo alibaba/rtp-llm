@@ -634,6 +634,11 @@ public class MetricConstant {
     /** Request sequence length observed at the Master request boundary. */
     public static final String REQUEST_SEQ_LEN = "app.request.seq.len";
 
+    /**
+     * Caller-provided cache_key_block_size in tokens.
+     */
+    public static final String REQUEST_BLOCK_SIZE = "app.request.block.size";
+
     /** Protobuf message size excluding gRPC framing and compression. */
     public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
 
