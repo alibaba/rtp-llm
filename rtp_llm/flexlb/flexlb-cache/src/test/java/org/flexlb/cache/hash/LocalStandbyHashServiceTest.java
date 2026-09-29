@@ -10,15 +10,42 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.List;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.Mockito.mock;
 
 class LocalStandbyHashServiceTest {
+
+    @Test
+    void createsHashExecutorOnlyWhenSubmittingHashWork() throws Exception {
+        LocalStandbyHashService hashService =
+                new LocalStandbyHashService(
+                        configuration(),
+                        mock(FlexMonitor.class),
+                        new VllmBlockHashStrategy());
+        Request request = new Request();
+        request.setRequestId("lazy");
+
+        try {
+            hashService.reportThreadPoolMetrics();
+            assertNull(executorOf(hashService));
+
+            hashService.submit(request, TokenIds.wrap(new int[]{1, 2, 3, 4}), 4, 0)
+                    .get(5, TimeUnit.SECONDS);
+
+            assertNotNull(executorOf(hashService));
+        } finally {
+            hashService.shutdown();
+        }
+    }
 
     @Test
     void calculatesAndPublishesStandbyHashAsynchronously() throws Exception {
@@ -106,5 +133,11 @@ class LocalStandbyHashServiceTest {
             runtime.getLocalStandby().setHashThreadCount(1);
             runtime.getLocalStandby().setHashQueueCapacity(4);
         });
+    }
+
+    private ThreadPoolExecutor executorOf(LocalStandbyHashService hashService) throws Exception {
+        Field field = LocalStandbyHashService.class.getDeclaredField("executor");
+        field.setAccessible(true);
+        return (ThreadPoolExecutor) field.get(hashService);
     }
 }
