@@ -6,6 +6,7 @@ a small production-like geometry.
 """
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -71,6 +72,28 @@ class SparseFmhaTest(unittest.TestCase):
         triton_out = sparse_prefill_attn(q, k, v, sel)
         torch_out = sparse_prefill_attn_torch_reference(q, k, v, sel)
         torch.testing.assert_close(triton_out, torch_out, atol=1e-2, rtol=1e-2)
+
+    def test_online_matches_two_pass_across_sparse_widths(self):
+        torch.manual_seed(11)
+        for width in (1, 63, 64, 65, 257, 1027):
+            with self.subTest(width=width):
+                q = torch.randn(1, _H_Q, 3, _D, device=_DEV).to(torch.bfloat16)
+                k = torch.randn(1, _H_KV, 2048, _D, device=_DEV).to(torch.bfloat16)
+                v = torch.randn_like(k)
+                selected = torch.randint(
+                    0, 2048, (1, 3, width), device=_DEV, dtype=torch.int32
+                )
+                selected[:, 0] = -1
+                selected[:, 1, width // 2 :] = -1
+                with patch.dict(
+                    "os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_ONLINE": "0"}
+                ):
+                    baseline = sparse_prefill_attn(q, k, v, selected)
+                with patch.dict(
+                    "os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_ONLINE": "1"}
+                ):
+                    candidate = sparse_prefill_attn(q, k, v, selected)
+                torch.testing.assert_close(candidate, baseline, atol=1e-2, rtol=1e-2)
 
 
 if __name__ == "__main__":
