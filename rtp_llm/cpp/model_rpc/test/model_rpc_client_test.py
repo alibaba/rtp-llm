@@ -430,26 +430,27 @@ class ModelRpcClientTest(TestCase):
                     expected_status,
                 )
 
-    @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()
         generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False)
         input = GenerateInput(
+            request_id=1,
             token_ids=torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]),
+            mm_inputs=[],
             generate_config=generate_config,
         )
         res = asyncio.run(self._run(client, input))
         self.assertEqual(len(res), 3)
-        self.assertEqual(list(res[0].output_ids.shape), [1, 1])
-        self.assertEqual(res[0].output_ids.tolist(), [[0]])
+        self.assertEqual(list(res[0].output_ids.shape), [1])
+        self.assertEqual(res[0].output_ids.tolist(), [0])
         self.assertEqual(res[0].finished, False)
-        self.assertEqual(res[0].aux_info.iter_count, 2)
+        self.assertEqual(res[0].aux_info.iter_count, 1)
         self.assertEqual(res[0].aux_info.output_len, 1)
 
-        self.assertEqual(list(res[1].output_ids.shape), [1, 2])
-        self.assertEqual(res[1].output_ids.tolist(), [[0, 1]])
+        self.assertEqual(list(res[1].output_ids.shape), [2])
+        self.assertEqual(res[1].output_ids.tolist(), [0, 1])
         self.assertEqual(res[1].finished, False)
-        self.assertEqual(res[1].aux_info.iter_count, 3)
+        self.assertEqual(res[1].aux_info.iter_count, 2)
         self.assertEqual(res[1].aux_info.output_len, 2)
 
         self.assertEqual(res[2].finished, True)

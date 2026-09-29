@@ -168,6 +168,11 @@ class FrontendWorker:
                 aux = out.aux_info
                 if gc.has_num_beams():
                     aux.beam_responses = generate_texts
+                    aux.cum_log_probs = [
+                        float(output.aux_info.cum_log_probs[0])
+                        for output in gen_response.generate_outputs.generate_outputs
+                        if output.aux_info.cum_log_probs
+                    ]
                 aux_info_dict = asdict(aux)
             prompt_logits_dict = (
                 build_prompt_logits_dict(out.prompt_logits)
@@ -278,6 +283,11 @@ class FrontendWorker:
             aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
             if generate_config.has_num_beams():
                 aux_info.beam_responses = generate_texts
+                aux_info.cum_log_probs = [
+                    float(output.aux_info.cum_log_probs[0])
+                    for output in gen_responses.generate_outputs.generate_outputs
+                    if output.aux_info.cum_log_probs
+                ]
         hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
         output_ids = gen_responses.generate_outputs.generate_outputs[0].output_ids
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids

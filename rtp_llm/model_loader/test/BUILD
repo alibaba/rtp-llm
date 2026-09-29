@@ -13,9 +13,8 @@ py_test(
 py_test(
     name = "test_pure_tp_preshard",
     srcs = ["test_pure_tp_preshard.py"],
-    # Accelerator hooks, FP8 device copies, and handle recycling need a GPU target.
-    env = {"CUDA_VISIBLE_DEVICES": ""},
-    # auto_model: this test imports rtp_llm.models weight infos.
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
     deps = ["//rtp_llm/models_py/standalone:auto_model"],
 )
 

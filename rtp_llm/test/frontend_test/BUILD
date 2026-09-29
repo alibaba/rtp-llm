@@ -3,9 +3,9 @@ py_test(
     srcs = [
         "vip_server_test.py",
     ],
-    exec_properties = {"gpu": "H20_CU13"},
+    exec_properties = {"gpu": "A10_CU13"},
     tags = [
-        "H20_CU13",
+        "A10_CU13",
         "frontend",
     ],
     deps = [

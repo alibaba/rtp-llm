@@ -8,39 +8,23 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierLoadFailureReleasesRefsAndC
     ASSERT_NO_FATAL_FAILURE(runLowerTierLoadFailureScenario(source));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4ConcurrentLowerHitJoinsLoading) {
-    if (GetParam() != TierLayout::HOST_ONLY) {
-        GTEST_SKIP() << "manager join coverage uses the HostOnly lower source";
-    }
+TEST_P(KVCacheManagerWithTierCacheHostOnlyTest, DSV4ConcurrentLowerHitJoinsLoading) {
     ASSERT_NO_FATAL_FAILURE(runConcurrentLowerHitJoinScenario(Tier::HOST, /*transfer_success=*/true));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4ConcurrentLowerHitFailureSettlesAllJoinersAndCanRetry) {
-    if (GetParam() != TierLayout::HOST_ONLY) {
-        GTEST_SKIP() << "manager join failure coverage uses the HostOnly lower source";
-    }
+TEST_P(KVCacheManagerWithTierCacheHostOnlyTest, DSV4ConcurrentLowerHitFailureSettlesAllJoinersAndCanRetry) {
     ASSERT_NO_FATAL_FAILURE(runConcurrentLowerHitJoinScenario(Tier::HOST, /*transfer_success=*/false));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4ConcurrentDiskLowerHitJoinsLoading) {
-    if (GetParam() != TierLayout::HOST_DISK) {
-        GTEST_SKIP() << "DISK join coverage requires the HostDisk layout";
-    }
+TEST_P(KVCacheManagerWithTierCacheHostDiskTest, DSV4ConcurrentDiskLowerHitJoinsLoading) {
     ASSERT_NO_FATAL_FAILURE(runConcurrentLowerHitJoinScenario(Tier::DISK, /*transfer_success=*/true));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4ConcurrentDiskLowerHitFailureSettlesAllJoinersAndCanRetry) {
-    if (GetParam() != TierLayout::HOST_DISK) {
-        GTEST_SKIP() << "DISK join failure coverage requires the HostDisk layout";
-    }
+TEST_P(KVCacheManagerWithTierCacheHostDiskTest, DSV4ConcurrentDiskLowerHitFailureSettlesAllJoinersAndCanRetry) {
     ASSERT_NO_FATAL_FAILURE(runConcurrentLowerHitJoinScenario(Tier::DISK, /*transfer_success=*/false));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitPermanentCapacityRejectsBeforeCommit) {
-    if (GetParam() != TierLayout::HOST_ONLY) {
-        GTEST_SKIP() << "pre-commit capacity rejection isolates a HostOnly source";
-    }
-
+TEST_P(KVCacheManagerWithTierCacheHostOnlyTest, DSV4LowerHitPermanentCapacityRejectsBeforeCommit) {
     // Two physical blocks expose exactly one usable block in each independent
     // device pool. The complete two-sequence footprint cannot fit, so typed
     // admission must reject it before materializing or committing the lower hit.

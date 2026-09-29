@@ -5,11 +5,7 @@
 namespace rtp_llm::test {
 using namespace tier_cache_test_detail;
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroughDisk) {
-    if (GetParam() != TierLayout::HOST_DISK) {
-        GTEST_SKIP() << "CP disk round-trip requires the HostDisk layout";
-    }
-
+TEST_P(KVCacheManagerWithTierCacheHostDiskTest, DSV4CpCanonicalFullAndSwaRoundTripThroughDisk) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/8));
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
@@ -283,10 +279,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack) {
-    if (GetParam() != TierLayout::HOST_DISK) {
-        GTEST_SKIP() << "mixed DEVICE+HOST+DISK segmentation requires HostDisk layout";
-    }
+TEST_P(KVCacheManagerWithTierCacheHostDiskTest, DSV4MixedDeviceHostDiskSegmentsLoadBack) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     auto cache  = manager_->blockTreeCache();
     auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
@@ -671,10 +664,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapacity) {
-    if (GetParam() != TierLayout::HOST_DISK) {
-        GTEST_SKIP() << "long disk round-trip requires HostDisk layout";
-    }
+TEST_P(KVCacheManagerWithTierCacheHostDiskTest, DSV4LongDiskRoundTripExceedsStagingCapacity) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     auto             cache               = manager_->blockTreeCache();
     constexpr size_t staging_block_count = 2;

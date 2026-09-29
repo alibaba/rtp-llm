@@ -8,4 +8,14 @@ INSTANTIATE_TEST_SUITE_P(TierLayouts,
                          ::testing::Values(TierLayout::HOST_ONLY, TierLayout::HOST_DISK),
                          [](const ::testing::TestParamInfo<TierLayout>& info) { return layoutName(info.param); });
 
+INSTANTIATE_TEST_SUITE_P(TierLayouts,
+                         KVCacheManagerWithTierCacheHostOnlyTest,
+                         ::testing::Values(TierLayout::HOST_ONLY),
+                         [](const ::testing::TestParamInfo<TierLayout>& info) { return layoutName(info.param); });
+
+INSTANTIATE_TEST_SUITE_P(TierLayouts,
+                         KVCacheManagerWithTierCacheHostDiskTest,
+                         ::testing::Values(TierLayout::HOST_DISK),
+                         [](const ::testing::TestParamInfo<TierLayout>& info) { return layoutName(info.param); });
+
 }  // namespace rtp_llm::test

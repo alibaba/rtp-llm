@@ -92,7 +92,8 @@ cc_test(
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )
 
 cc_test(

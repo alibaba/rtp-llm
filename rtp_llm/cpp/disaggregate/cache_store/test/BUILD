@@ -52,9 +52,13 @@ cc_test(
     copts = ["-fno-access-control"] + copts(),
     env = {
         "CACHE_STORE_RDMA_MODE": "0",
+        "GPU_COUNT": "2",
     },
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "2",
+    },
+    tags = ["H20_CU13"],
     deps = [
         ":cache_store_test_base",
         "//rtp_llm/cpp/disaggregate/cache_store",

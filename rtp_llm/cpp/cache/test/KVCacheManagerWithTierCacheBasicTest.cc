@@ -164,11 +164,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4AllocatorPressureUsesDirectDropNotDe
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDisturbInFlightLoad) {
-    if (GetParam() != TierLayout::HOST_ONLY) {
-        GTEST_SKIP() << "the in-flight device-pressure case isolates a HostOnly source";
-    }
-
+TEST_P(KVCacheManagerWithTierCacheHostOnlyTest, DSV4ReuseCacheFalsePressureDoesNotDisturbInFlightLoad) {
     // Five physical blocks expose four usable blocks per independent device pool.
     // The first request consumes all four while its 3-block prefix is loading:
     // three load targets plus one incremental/tail block.
@@ -441,10 +437,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     (void)seed;
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTarget) {
-    if (GetParam() != TierLayout::HOST_ONLY) {
-        GTEST_SKIP() << "batch common-prefix load coverage isolates a HostOnly source";
-    }
+TEST_P(KVCacheManagerWithTierCacheHostOnlyTest, DSV4BatchCommonLowerHitSharesOneLoadedTarget) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     auto cache  = manager_->blockTreeCache();
     auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());

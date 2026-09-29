@@ -1,10 +1,4 @@
-"""
-Verify all transformers imports across source code and model custom code resolve correctly.
-
-Scans two sources:
-1. rtp_llm/ source directories — always runs
-2. Model checkpoint directories from smoke test JSON configs — skips if not found
-"""
+"""Verify transformers imports in source, bundled fixtures, and accessible models."""
 
 import ast
 import importlib
@@ -32,6 +26,11 @@ SCAN_SUBDIRS = [
 SMOKE_JSON_DIRS = [
     "rtp_llm/test/smoke/data/model",
     "internal_source/rtp_llm/test/smoke/data/model",
+]
+
+MODEL_CODE_FIXTURES = [
+    "rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer",
+    "rtp_llm/test/model_test/fake_test/testdata/qwen_7b/tokenizer",
 ]
 
 EXCLUDE_DIRS = {"__pycache__", "3rdparty"}
@@ -153,11 +152,19 @@ class TestTransformersImports(unittest.TestCase):
     def test_model_custom_code_imports(self):
         root = _find_workspace_root()
         model_paths = _extract_model_paths(root)
-        if not model_paths:
-            self.skipTest("No smoke JSON configs found in runfiles")
+        self.assertTrue(model_paths, "No smoke JSON configs found in runfiles")
+
+        all_imports = set()
+        for fixture in MODEL_CODE_FIXTURES:
+            imports = _scan_transformers_imports(
+                os.path.join(root, fixture), exclude_prefixes=["modeling_"]
+            )
+            self.assertTrue(
+                imports, f"No model custom code imports in fixture: {fixture}"
+            )
+            all_imports.update(imports)
 
         scanned = 0
-        all_imports = set()
         for model_path in sorted(model_paths):
             if not os.path.isdir(model_path):
                 continue
@@ -166,9 +173,6 @@ class TestTransformersImports(unittest.TestCase):
                 _scan_transformers_imports(model_path, exclude_prefixes=["modeling_"])
             )
 
-        if scanned == 0:
-            self.skipTest("No model directories accessible")
-
         failures = _check_imports(all_imports)
         if failures:
             import transformers
@@ -176,7 +180,9 @@ class TestTransformersImports(unittest.TestCase):
             self.fail(
                 f"\ntransformers=={transformers.__version__}: "
                 f"{len(failures)} broken import(s) in model custom code "
-                f"({scanned} dirs scanned):\n" + "\n".join(f"  {f}" for f in failures)
+                f"({len(MODEL_CODE_FIXTURES)} bundled fixtures, "
+                f"{scanned} accessible smoke dirs):\n"
+                + "\n".join(f"  {f}" for f in failures)
             )
 
 

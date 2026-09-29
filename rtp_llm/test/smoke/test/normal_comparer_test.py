@@ -120,6 +120,49 @@ class NormalComparerGraphStatusTest(unittest.TestCase):
                     )
 
 
+class NormalComparerBeamOrderingTest(unittest.TestCase):
+    def setUp(self):
+        self.comparer = NormalComparer(None, "", {}, Tracer(), False)
+
+    def _response(self, beams, scores):
+        return self.comparer.format_result(
+            {
+                "response": beams[0] if beams else "same",
+                "aux_info": {
+                    "beam_responses": beams,
+                    "cum_log_probs": scores,
+                },
+            }
+        )
+
+    def test_non_beam_empty_responses_pass(self):
+        expected = self._response([], [0.0])
+        actual = self._response([], [0.0])
+        self.comparer.compare_result(expected, actual)
+
+    def test_near_equal_beams_may_swap(self):
+        expected = self._response(["primary", "second", "third"], [-1.0])
+        actual = self._response(["primary", "third", "second"], [-1.0, -2.0, -2.005])
+        self.comparer.compare_result(expected, actual)
+
+    def test_distinct_score_beams_must_keep_order(self):
+        expected = self._response(["primary", "second", "third"], [-1.0])
+        actual = self._response(["primary", "third", "second"], [-1.0, -2.0, -3.0])
+        with self.assertRaises(SmokeException) as raised:
+            self.comparer.compare_result(expected, actual)
+        self.assertIn("beam_responses", raised.exception.message)
+
+    def test_beam_scores_must_be_complete_and_descending(self):
+        expected = self._response(["primary", "second", "third"], [-1.0])
+        for scores in ([-1.0], [-1.0, -3.0, -2.0]):
+            with self.subTest(scores=scores):
+                with self.assertRaises(SmokeException) as raised:
+                    self.comparer.compare_result(
+                        expected, self._response(["primary", "second", "third"], scores)
+                    )
+                self.assertIn("beam_responses", raised.exception.message)
+
+
 class NormalComparerDiskReuseTest(unittest.TestCase):
     DISK_FIELDS = (
         "disk_reuse_len",

@@ -269,11 +269,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskAndLoadBack) {
-    if (GetParam() != TierLayout::HOST_DISK) {
-        GTEST_SKIP() << "disk round-trip requires the HostDisk layout";
-    }
-
+TEST_P(KVCacheManagerWithTierCacheHostDiskTest, DSV4DeviceAndHostWatermarksDemoteToDiskAndLoadBack) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/8));
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
@@ -539,10 +535,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostSourceMatchableAndCanRetry) {
-    if (GetParam() != TierLayout::HOST_DISK) {
-        GTEST_SKIP() << "HOST-to-DISK failure serviceability requires HostDisk layout";
-    }
+TEST_P(KVCacheManagerWithTierCacheHostDiskTest, DSV4HostToDiskWatermarkFailureKeepsHostSourceMatchableAndCanRetry) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();

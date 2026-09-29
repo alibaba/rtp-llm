@@ -11,8 +11,8 @@ py_test(
     # Not sm90-bound: the only hard constraint is Triton's fp8e4nv storage type,
     # which needs compute capability >= 89. A10 (sm86) would hard-fail with
     # "type fp8e4nv not supported in this architecture", so this runs on L20
-    # (sm89) instead of H20. The H20 latency assertion in this file is inert in
-    # CI (guarded by RUN_KERNEL_BENCHMARK and an "H20" device-name skip).
+    # (sm89) instead of H20. The H20 latency benchmark in this file is not
+    # collected as a unit test.
     tags = ["L20_CU13"],
     deps = [
         "//rtp_llm:matplotlib",

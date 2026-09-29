@@ -108,6 +108,34 @@ class OpenaiComparerGraphStatusTest(unittest.TestCase):
                         self._parse(self._response({GRAPH_STATUS: status})),
                     )
 
+    def test_cache_warmup_contract_skips_text_but_requires_cache_metrics(self):
+        self.comparer.qr_info["compare_config"] = {
+            "skip_choices": True,
+            "skip_usage": True,
+            "required_aux_info": {
+                "input_len": 98,
+                "reuse_len": 0,
+                "remote_reuse_len": 0,
+            },
+        }
+        actual = copy.deepcopy(self.golden)
+        actual["choices"][0]["message"]["content"] = "runtime-specific warmup"
+        actual["usage"] = {
+            "prompt_tokens": 98,
+            "completion_tokens": 1,
+            "total_tokens": 99,
+        }
+        actual["aux_info"] = {
+            "input_len": 98,
+            "reuse_len": 0,
+            "remote_reuse_len": 0,
+        }
+        self.comparer.compare_result(self._parse(self.golden), self._parse(actual))
+        actual["aux_info"]["remote_reuse_len"] = 8
+        with self.assertRaises(SmokeException) as raised:
+            self.comparer.compare_result(self._parse(self.golden), self._parse(actual))
+        self.assertIn("required aux_info", raised.exception.message)
+
     def test_legacy_golden_without_compare_config_remains_compatible(self):
         del self.comparer.qr_info["compare_config"]
         self.comparer.compare_result(

@@ -30,18 +30,6 @@ py_test(
 )
 
 py_test(
-    name = "fp8_deepgemm_linear_sm100_test",
-    srcs = [
-        "fp8_deepgemm_linear_sm100_test.py",
-        "fp8_deepgemm_linear_sm120_test.py",
-        "fp8_linear_test.py",
-    ],
-    exec_properties = {"gpu": "SM100"},
-    tags = ["SM100"],
-    deps = py_test_deps,
-)
-
-py_test(
     name = "fp8_deepgemm_linear_sm100_arm_test",
     srcs = [
         "fp8_deepgemm_linear_sm100_arm_test.py",

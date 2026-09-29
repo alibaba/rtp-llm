@@ -232,8 +232,9 @@ class HandleRecyclingTest(unittest.TestCase):
 
     def test_recycling_enabled_on_real_rocm_build(self):
         # The ROCm target reaches this without patching the production gate.
-        if torch.version.hip is None:
-            self.skipTest("requires a ROCm build")
+        self.assertIsNotNone(
+            torch.version.hip, "Handle recycling requires a ROCm build"
+        )
         with tempfile.TemporaryDirectory() as tmp:
             self._write_shards(tmp)
             db = CkptDatabase(tmp, recycle_handles=True)
@@ -289,6 +290,29 @@ class HandleRecyclingTest(unittest.TestCase):
         # No layer number anywhere means recycling stays off for that checkpoint.
         for name in ("model.embed_tokens.weight", "model.sublayers.3.w"):
             self.assertIsNone(_LAYER_RE.search(name), name)
+
+
+def load_tests(loader, tests, pattern):
+    suite = unittest.TestSuite()
+    for test_case in (
+        CkptDataBaseTest,
+        LoraTest,
+        TensorIndexTest,
+        SafetensorHandleCacheTest,
+        HandleRecyclingTest,
+    ):
+        for test in loader.loadTestsFromTestCase(test_case):
+            if (
+                torch.version.hip is None
+                and test._testMethodName == "test_recycling_enabled_on_real_rocm_build"
+            ):
+                continue
+            suite.addTest(test)
+    if suite.countTestCases() == 0:
+        raise ValueError(
+            "No applicable checkpoint tests selected; handle recycling requires ROCm"
+        )
+    return suite
 
 
 if __name__ == "__main__":

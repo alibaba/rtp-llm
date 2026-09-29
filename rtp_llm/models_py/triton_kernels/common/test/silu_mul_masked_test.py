@@ -2,7 +2,6 @@ import gc
 import itertools
 import os
 import random
-import shutil
 import unittest
 from typing import Callable, Optional
 
@@ -45,19 +44,12 @@ class SiluMulMaskedTest(unittest.TestCase):
     BEAM_SEARCH_EXPECTED_M = (
         sum(BEAM_SEARCH_MASKED_M) + BEAM_SEARCH_NUM_LOCAL_EXPERTS - 1
     ) // BEAM_SEARCH_NUM_LOCAL_EXPERTS
-
-    # @classmethod
-    # def setUpClass(cls) -> None:
-    #     cls.output_dir = r"./silu_mul_masked_test_output"
-    #     if os.path.exists(cls.output_dir):
-    #         shutil.rmtree(cls.output_dir)
-    #     os.makedirs(cls.output_dir)
+    output_dir = "./silu_mul_masked_test_output"
 
     def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            raise unittest.SkipTest("CUDA is not available")
+        self.assertTrue(torch.cuda.is_available(), "Silu masked tests require CUDA")
         torch.set_default_device("cuda")
-        # self.output_dir = SiluMulMaskedTest.output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
 
     def _generate_ref_output(self, up_gate_output: torch.Tensor) -> torch.Tensor:
         N = up_gate_output.shape[2]
@@ -464,11 +456,7 @@ class SiluMulMaskedTest(unittest.TestCase):
                 )
         self._clean_test_data_cache(0)
 
-    @unittest.skipUnless(
-        os.environ.get("RUN_KERNEL_BENCHMARK") == "1",
-        "Set RUN_KERNEL_BENCHMARK=1 to run the H20 latency guard",
-    )
-    def test_silu_mul_masked_fp8_beam_search_skew_performance(self):
+    def benchmark_silu_mul_masked_fp8_beam_search_skew_performance(self):
         """Manual H20 guard for the 96-expert production beam-search shape.
 
         `_calc_latency` captures after two warmups, then reports the arithmetic
@@ -477,8 +465,9 @@ class SiluMulMaskedTest(unittest.TestCase):
         neither a portable baseline nor a required correctness/CI gate.
         """
         device_name = torch.cuda.get_device_name()
-        if "H20" not in device_name:
-            self.skipTest(f"H20-only latency guard, found {device_name}")
+        self.assertIn(
+            "H20", device_name, f"H20-only latency guard, found {device_name}"
+        )
         masked_m, up_gate_output, output, output_scale = (
             self._generate_beam_search_skew_data()
         )
@@ -647,8 +636,7 @@ class SiluMulMaskedTest(unittest.TestCase):
                 self.assertLess(diff, 0.001)
                 self._clean_test_data_cache(i)
 
-    @unittest.skip("Skip profile fp8 silu mul masked test")
-    def test_profile_fp8_silu_mul_masked(self):
+    def profile_fp8_silu_mul_masked(self):
         # Generate test data
         masked_m, up_gate_output, test_new_output, test_new_output_scale = (
             self._generate_test_data(
@@ -706,8 +694,7 @@ class SiluMulMaskedTest(unittest.TestCase):
         )
         self._clean_test_data_cache(0)
 
-    @unittest.skip("Skip profile bf16 silu mul masked test")
-    def test_profile_bf16_silu_mul_masked(self):
+    def profile_bf16_silu_mul_masked(self):
         # Generate test data
         masked_m, up_gate_output, test_new_output = self._generate_test_data(
             self.NUM_LOCAL_EXPERTS,
@@ -760,8 +747,7 @@ class SiluMulMaskedTest(unittest.TestCase):
         )
         self._clean_test_data_cache(0)
 
-    @unittest.skip("Skip plot fp8 silu mul masked latency vs num local experts test")
-    def test_plot_silu_mul_masked_fp8_latency_vs_num_local_experts(self):
+    def plot_silu_mul_masked_fp8_latency_vs_num_local_experts(self):
         # Iterate over all possible values of NUM_LOCAL_EXPERTS
         old_latency_list = []
         new_latency_list = []
@@ -822,8 +808,7 @@ class SiluMulMaskedTest(unittest.TestCase):
             ),
         )
 
-    @unittest.skip("Skip plot fp8 silu mul masked latency vs expected m test")
-    def test_plot_silu_mul_masked_fp8_latency_vs_expected_m(self):
+    def plot_silu_mul_masked_fp8_latency_vs_expected_m(self):
         # Iterate over all possible values of EXPECTED_M
         old_latency_list = []
         new_latency_list = []
@@ -882,10 +867,7 @@ class SiluMulMaskedTest(unittest.TestCase):
             output_path=os.path.join(self.output_dir, "fp8_vs_expected_m_latency.png"),
         )
 
-    @unittest.skip(
-        "Skip plot fp8 silu mul masked latency vs moe intermediate size test"
-    )
-    def test_plot_silu_mul_masked_fp8_latency_vs_moe_intermediate_size(self):
+    def plot_silu_mul_masked_fp8_latency_vs_moe_intermediate_size(self):
         # Iterate over all possible values of MOE_INTERMEDIATE_SIZE
         old_latency_list = []
         new_latency_list = []
@@ -946,8 +928,7 @@ class SiluMulMaskedTest(unittest.TestCase):
             ),
         )
 
-    @unittest.skip("Skip plot bf16 silu mul masked latency vs num local experts test")
-    def test_plot_silu_mul_masked_bf16_latency_vs_num_local_experts(self):
+    def plot_silu_mul_masked_bf16_latency_vs_num_local_experts(self):
         # Iterate over all possible values of NUM_LOCAL_EXPERTS
         old_latency_list = []
         new_latency_list = []
@@ -1002,8 +983,7 @@ class SiluMulMaskedTest(unittest.TestCase):
             ),
         )
 
-    @unittest.skip("Skip plot bf16 silu mul masked latency vs expected m test")
-    def test_plot_silu_mul_masked_bf16_latency_vs_expected_m(self):
+    def plot_silu_mul_masked_bf16_latency_vs_expected_m(self):
         # Iterate over all possible values of EXPECTED_M
         old_latency_list = []
         new_latency_list = []
@@ -1056,10 +1036,7 @@ class SiluMulMaskedTest(unittest.TestCase):
             output_path=os.path.join(self.output_dir, "bf16_vs_expected_m_latency.png"),
         )
 
-    @unittest.skip(
-        "Skip plot bf16 silu mul masked latency vs moe intermediate size test"
-    )
-    def test_plot_silu_mul_masked_bf16_latency_vs_moe_intermediate_size(self):
+    def plot_silu_mul_masked_bf16_latency_vs_moe_intermediate_size(self):
         # Iterate over all possible values of MOE_INTERMEDIATE_SIZE
         old_latency_list = []
         new_latency_list = []

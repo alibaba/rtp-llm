@@ -36,8 +36,7 @@ class CudaFp8LinearTestBase:
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        if self.device == "cpu":
-            self.skipTest("FP8 tests require CUDA")
+        self.assertEqual(self.device, "cuda", "FP8 tests require CUDA")
         logging.getLogger(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear"
         ).setLevel(logging.WARNING)
@@ -589,8 +588,9 @@ class CudaFp8LinearTestBase:
 
     def test_fp8_input_with_cached_scales(self):
         """Test FP8 input with cached scales (cache hit)"""
-        if not is_deep_gemm_e8m0_used():
-            self.skipTest("UE8M0 is required for FP8 input tests")
+        self.assertTrue(
+            is_deep_gemm_e8m0_used(), "UE8M0 is required for FP8 input tests"
+        )
 
         # Create linear layer
         cuda_fp8_linear = self._create_cuda_fp8_linear(with_bias=False)
@@ -631,8 +631,9 @@ class CudaFp8LinearTestBase:
 
     def test_fp8_input_without_cached_scales(self):
         """Test FP8 input without cached scales (cache miss - no cache created)"""
-        if not is_deep_gemm_e8m0_used():
-            self.skipTest("UE8M0 is required for FP8 input tests")
+        self.assertTrue(
+            is_deep_gemm_e8m0_used(), "UE8M0 is required for FP8 input tests"
+        )
 
         # Create linear layer without caching scales
         cuda_fp8_linear = self._create_cuda_fp8_linear(with_bias=False)
@@ -671,8 +672,9 @@ class CudaFp8LinearTestBase:
 
     def test_fp8_input_cache_miss_m_exceeds_max_len(self):
         """Test FP8 input when M > cached max_len (cache miss)"""
-        if not is_deep_gemm_e8m0_used():
-            self.skipTest("UE8M0 is required for FP8 input tests")
+        self.assertTrue(
+            is_deep_gemm_e8m0_used(), "UE8M0 is required for FP8 input tests"
+        )
 
         # Create linear layer
         cuda_fp8_linear = self._create_cuda_fp8_linear(with_bias=False)
@@ -712,8 +714,9 @@ class CudaFp8LinearTestBase:
 
     def test_global_scale_cache_sharing(self):
         """Test that global scale cache is shared across Linear instances"""
-        if not is_deep_gemm_e8m0_used():
-            self.skipTest("UE8M0 is required for cache sharing tests")
+        self.assertTrue(
+            is_deep_gemm_e8m0_used(), "UE8M0 is required for cache sharing tests"
+        )
 
         # Clear global cache first
         self.get_cache_owner_cls()._global_scale_cache.clear()
@@ -736,8 +739,10 @@ class CudaFp8LinearTestBase:
 
     def test_fp8_input_reproducibility(self):
         """Test FP8 input produces reproducible results"""
-        if not is_deep_gemm_e8m0_used():
-            self.skipTest("UE8M0 is required for FP8 input reproducibility tests")
+        self.assertTrue(
+            is_deep_gemm_e8m0_used(),
+            "UE8M0 is required for FP8 input reproducibility tests",
+        )
 
         # Generate random weights and scale
         weight_bf16 = torch.randn(
@@ -785,8 +790,7 @@ class CudaFp8LinearTestBase:
                 self.assertFalse(torch.isnan(fp8_output1).any())
                 self.assertFalse(torch.isinf(fp8_output1).any())
 
-    @unittest.skip("Skip profiling tests")
-    def test_profile_cuda_fp8_deepgemm_linear(self):
+    def profile_cuda_fp8_deepgemm_linear(self):
         """Profile CUDA FP8 DeepGEMM linear"""
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cpu":
@@ -1046,8 +1050,35 @@ class CudaFp8GEMMDispatchTest(CudaFp8LinearTestBase, unittest.TestCase):
             self.assertIsNone(linear._flashinfer_linear)
 
 
-CudaFp8DeepGEMMLinearTestBase = CudaFp8GEMMLinearTestBase
-CudaFp8DeepGEMMLinearTest = CudaFp8GEMMLinearTest
+def load_tests(loader, tests, pattern):
+    excluded = set()
+    if not is_deep_gemm_e8m0_used():
+        excluded.update(
+            {
+                "test_fp8_input_with_cached_scales",
+                "test_fp8_input_without_cached_scales",
+                "test_fp8_input_cache_miss_m_exceeds_max_len",
+                "test_global_scale_cache_sharing",
+                "test_fp8_input_reproducibility",
+            }
+        )
+    dispatch_tests = {
+        name for name in CudaFp8GEMMDispatchTest.__dict__ if name.startswith("test_")
+    }
+    suite = unittest.TestSuite()
+    for test_case in (CudaFp8GEMMLinearTest, CudaFp8GEMMDispatchTest):
+        for test in loader.loadTestsFromTestCase(test_case):
+            if test._testMethodName in excluded:
+                continue
+            if (
+                test_case is CudaFp8GEMMDispatchTest
+                and test._testMethodName not in dispatch_tests
+            ):
+                continue
+            suite.addTest(test)
+    if suite.countTestCases() == 0:
+        raise ValueError("No applicable FP8 linear tests selected")
+    return suite
 
 
 if __name__ == "__main__":

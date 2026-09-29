@@ -125,17 +125,24 @@ cc_test_wrapper(
     name = "cache_store_async_writer_test",
     srcs = ["CacheStoreAsyncWriterTest.cpp"],
     copts = test_copts,
+    env = {
+        "GPU_COUNT": "2",
+    },
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "A10_CU13"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "@//:using_cuda": {
+            "gpu": "H20_CU13",
+            "gpu_count": "2",
+        },
+        "@//:using_rocm": {
+            "gpu": "MI308X-ROCM7",
+            "gpu_count": "2",
+        },
         "//conditions:default": {},
     }),
-    # A select needs its own CUDA branch: with only the rocm branch present, CUDA
-    # falls through to "//conditions:default": {} -- empty exec_properties, which
-    # is not a GPU request at all. The test then lands on a CPU-only worker and
-    # dies with "libnvidia-ml.so.1: cannot open shared object file" (exit 127),
-    # as it did in run 69714248.
-    tags = ["A10_CU13"],
+    tags = [
+        "H20_CU13",
+        "MI308X-ROCM7",
+    ],
     # Own dep list rather than exec_ops_test_deps: that one is unconditionally
     # CUDA-only. cache_store_async_writer is deliberately under-linked, so each
     # platform has to supply the provider for its runtime* symbols.

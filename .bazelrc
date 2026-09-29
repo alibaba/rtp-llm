@@ -206,7 +206,7 @@ build:cuda13_sm86_x86 --config=cuda13
 build:cuda13_sm86_x86 --repo_env=TF_CUDA_COMPUTE_CAPABILITIES=8.6
 build:cuda13_sm86_x86 --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.6"
 build:cuda13_sm86_x86 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="8.6"
-build:cuda13_sm86_x86 --test_env=LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64:/usr/local/nvidia/lib64:/usr/local/lib64:/lib64
+build:cuda13_sm86_x86 --test_env=LD_LIBRARY_PATH=/usr/local/cuda/compat:/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/conda310/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib64:/usr/local/lib64:/lib64
 
 build:cuda13_sm89_x86 --config=cuda13
 build:cuda13_sm89_x86 --repo_env=TF_CUDA_COMPUTE_CAPABILITIES=8.9

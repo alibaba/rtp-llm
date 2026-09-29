@@ -2194,5 +2194,8 @@ private:
     bool old_core_dump_on_exception_{false};
 };
 
+class KVCacheManagerWithTierCacheHostOnlyTest: public KVCacheManagerWithTierCacheTest {};
+class KVCacheManagerWithTierCacheHostDiskTest: public KVCacheManagerWithTierCacheTest {};
+
 }  // namespace tier_cache_test_detail
 }  // namespace rtp_llm::test

@@ -198,9 +198,18 @@ cc_test(
         "BlockPoolDeviceMallocTest.cc",
     ],
     copts = test_copts,
+    env = {
+        "GPU_COUNT": "2",
+    },
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20_CU13"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "@//:using_cuda": {
+            "gpu": "H20_CU13",
+            "gpu_count": "2",
+        },
+        "@//:using_rocm": {
+            "gpu": "MI308X-ROCM7",
+            "gpu_count": "2",
+        },
         "//conditions:default": {},
     }),
     tags = ["H20_CU13"],

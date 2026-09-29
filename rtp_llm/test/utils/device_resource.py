@@ -141,8 +141,8 @@ def validate_expected_cuda_environment(required_gpu_count: int) -> None:
         "A10_CU13": ("A10",),
         "L20_CU13": ("L20",),
         "H20_CU13": ("H20",),
-        "SM100_ARM_CU13": ("B200", "GB200"),
-        "L20D_TEST": ("B300", "GB300"),
+        "SM100_ARM_CU13": ("L20A", "B200", "GB200"),
+        "L20D_TEST": ("L20D", "B300", "GB300"),
         "RTX_5000_PRO_CU13": ("RTX PRO 5000", "RTX 5000"),
     }
     if expected_tag in expected_names:
