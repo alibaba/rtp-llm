@@ -631,14 +631,14 @@ exceptiongroup==1.3.0 \
 fast-hadamard-transform @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/fast-hadamard-transform/fast_hadamard_transform-1.1.0%2Be7706fa.cu132.torch2.11.cxx11abitrue-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:b57df45e19b1d7f86d142ebb266a9cba75041d12a72d61c676be954844295e25
     # via -r deps/requirements_torch_gpu_cuda13.txt
-fast-safetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl \
+fast-safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:dd6aa7fe17acf6bfb3ea00dbfb934146b78d852ef3e0b1979dd0edb8bfaaf19a
     # via -r deps/requirements_torch_gpu_cuda13.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r deps/requirements_base.txt
-fastsafetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl \
+fastsafetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:04f3a2e8b082af33e7c78536d79db2e6ebb72debebc934fc90087b9b873db552
     # via -r deps/requirements_torch_gpu_cuda13.txt
 filelock==3.20.0 \
@@ -652,7 +652,7 @@ filelock==3.20.0 \
 flash-attn @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2Bcu13torch2.11cxx11abitrue.r1-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:a45ff2133f720c0042971de1f3a1c987176d19b7305e440abeb04c33a813fad0
     # via -r deps/requirements_torch_gpu_cuda13.txt
-flash-mla @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl \
+flash-mla @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f
     # via -r deps/requirements_torch_gpu_cuda13.txt
 flashinfer-cubin @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl \
@@ -3535,7 +3535,7 @@ tomli==2.4.1 \
     --hash=sha256:ff18e6a727ee0ab0388507b89d1bc6a22b138d1e2fa56d1ad494586d61d2eae9 \
     --hash=sha256:ff2983983d34813c1aeb0fa89091e76c3a22889ee83ab27c5eeb45100560c049
     # via huggingface-hub
-torch @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl \
+torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl \
     --hash=sha256:4c5be01584b7fee22d3c0d04062fd28026044acd07ffd0ee64cbd54b60e62d39
     # via
     #   -r deps/requirements_torch_gpu_cuda13.txt
@@ -3578,7 +3578,7 @@ torch-c-dlpack-ext==0.1.5 \
     --hash=sha256:e6f9da4bb9af70e27facc777458be62e10dbbbddda7672d16138db0553c5a524 \
     --hash=sha256:fba674110e1fab0b176bb5a28223e157db65c90767d4ba74abdbee9f537b0e9d
     # via tilelang
-torchvision @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl \
+torchvision @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl \
     --hash=sha256:7d820708732d2467caf2ef16c3ad60c8ff402bd05bd246b108ee080f3fbfdc6e
     # via
     #   -r deps/requirements_torch_gpu_cuda13.txt

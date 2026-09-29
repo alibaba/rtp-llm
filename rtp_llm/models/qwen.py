@@ -224,6 +224,7 @@ class QWenBase(BaseModel):
                 fmha_config=fmha_config,
                 py_hw_kernel_config=py_hw_kernel_config,
                 device_resource_config=self.device_resource_config,
+                apply_pp_partition=self._apply_pp_partition,
             )
 
     def support_cuda_graph(self) -> bool:

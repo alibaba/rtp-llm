@@ -7,10 +7,6 @@ namespace rtp_llm {
 
 class NormalGenerateStream: public GenerateStream {
 public:
-    NormalGenerateStream(const GenerateStream& stream): GenerateStream(stream) {
-        CopyOnWrite(stream);
-    }
-
     NormalGenerateStream(const std::shared_ptr<GenerateInput>& query,
                          const ModelConfig&                    model_config,
                          const RuntimeConfig&                  runtime_config,
@@ -45,4 +41,11 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     std::deque<GenerateOutputs> generate_outputs_;
 };
+
+std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
+                                                  size_t                 reserved_blocks,
+                                                  const ModelConfig&     model_config,
+                                                  const RuntimeConfig&   runtime_config,
+                                                  const ResourceContext& resource_context);
+
 }  // namespace rtp_llm

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -484,6 +485,7 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                     && inputs.kv_cache_block_id.size(1) == inputs.kv_cache_kernel_block_id.size(1)),
                             "physical KV block table must match kernel table group and batch dimensions");
 
+    /** Match payload rows by tag: a PP stage's local group order can differ from the incoming plan. */
     torch_ext::AttentionInputsByTag by_tag;
     for (const auto& group : model_groups) {
         const auto payload_row  = std::find(group_tags.begin(), group_tags.end(), group.tag) - group_tags.begin();
@@ -1026,8 +1028,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp && has_context_request) {
-            // CP accepts pure-prefill batches without MTP/speculative hidden states;
-            // handleInputs enforces both constraints before mutating the batch.
+            /** Build rank-local inputs and CP metadata, including configured MTP hidden-state layout. */
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
@@ -1082,7 +1083,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                               attention_inputs_,
                                               attention_inputs_by_tag_,
                                               bert_embedding_inputs});
-
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
@@ -1090,8 +1090,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
         }
+        py_model_inputs.pp_intermediates = inputs.pp_intermediates;
         PyModelOutputs py_model_outputs;
-        torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         auto*      graph_runner = selectGraphRunner(py_model_inputs.attention_inputs);
@@ -1120,7 +1120,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
+            py_model_outputs = graph_runner->forward(py_model_inputs, graph_state);
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
@@ -1137,39 +1137,36 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs = outputs.cast<PyModelOutputs>();
         }
 
-        if (capture_hidden_states) {
-            // Capture consumes the Python output directly. CP restoration below
-            // remains the sole distributed layout operation on this path, and
-            // publish() validates the restored/local packed tensor once before store.
-            hidden_states = py_model_outputs.hidden_states;
-        } else {
-            hidden_states = py_model_outputs.hidden_states.clone();
-        }
-
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        auto attach_mtp_target_hidden_states = [&py_model_outputs](GptModelOutputs outputs) {
+        auto attach_model_outputs = [&py_model_outputs](GptModelOutputs outputs) {
             if (py_model_outputs.mtp_target_hidden_states.defined()) {
                 outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states;
             }
+            outputs.pp_intermediates = py_model_outputs.pp_intermediates;
             return outputs;
         };
+        if (!py_model_outputs.pp_intermediates.empty()) {
+            /** Non-tail stages may return only boundary tensors; leave their layout intact for the next stage. */
+            return with_generation_prefill_cuda_graph_status(attach_model_outputs(GptModelOutputs{}));
+        }
+        /** Capture consumes the packed Python output directly; ordinary outputs retain their owned clone. */
+        auto hidden_states =
+            capture_hidden_states ? py_model_outputs.hidden_states : py_model_outputs.hidden_states.clone();
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
-                // Python returns normalized [B*gamma, hidden_dim]. Reuse the
-                // regular C++ lm_head and TP logits gather for every proposal
-                // row; the speculative executor owns only Markov sampling.
+                /** Python returns normalized [B*gamma, hidden_dim]. Reuse the regular C++ lm_head and
+                 * TP logits gather for every proposal row; the speculative executor owns Markov sampling. */
                 return with_generation_prefill_cuda_graph_status(
-                    attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
+                    attach_model_outputs(callForwardPostLayers(hidden_states, inputs, true)));
             }
-            // Commit only updates the draft KV cache and has no logits
-            // consumer. Preserve its row-aligned hidden output for the common
-            // CUDA graph contract without running lm_head.
+            /** COMMIT only updates draft KV and has no logits consumer; preserve row-aligned hidden output
+             * for the common CUDA graph contract without running lm_head. */
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(std::move(outputs)));
+            return with_generation_prefill_cuda_graph_status(attach_model_outputs(std::move(outputs)));
         }
         if (capture_hidden_states) {
             auto        capture_input_lengths  = inputs.input_lengths;
@@ -1196,7 +1193,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 hidden_state_capture_publisher_->rejectLayout(std::move(local_layout_error));
                 auto fallback_last_hidden = hidden_state_capture_publisher_->makeFallback(
                     hidden_states, capture_input_ids.numel(), token_ids.device());
-                return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(
+                return with_generation_prefill_cuda_graph_status(attach_model_outputs(
                     callForwardPostLayers(fallback_last_hidden, inputs, true, fallback_last_hidden.size(0))));
             }
 
@@ -1213,21 +1210,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                                                capture_expected_rows,
                                                                                capture_layout_context,
                                                                                token_ids.device());
-            return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(
+            return with_generation_prefill_cuda_graph_status(attach_model_outputs(
                 callForwardPostLayers(last_hidden_states, inputs, true, last_hidden_states.size(0))));
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
                 return with_generation_prefill_cuda_graph_status(
-                    attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs)));
+                    attach_model_outputs(forwardPostLayersLastHidden(hidden_states, inputs)));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return with_generation_prefill_cuda_graph_status(
-                attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens)));
+                attach_model_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens)));
         }
         return with_generation_prefill_cuda_graph_status(
-            attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
+            attach_model_outputs(callForwardPostLayers(hidden_states, inputs, true)));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -1496,6 +1493,41 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     // 3rd field (all_hidden_states) is the small [num_lm, hidden_size] — the whole
     // point of this path is to never materialize the full [seq, hidden] sequence.
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
+}
+
+PPIntermediateTensors PyWrappedModel::makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) {
+    /** Keep request inputs global; only fabricated upstream activations use the local token count. */
+    int64_t    local_token_num   = inputs.combo_tokens.numel();
+    const auto decode_batch_size = inputs.sequence_lengths.size(0);
+    const auto batch_size        = inputs.input_lengths.size(0);
+    if (enable_cp && batch_size != decode_batch_size) {
+        /** Match CP handleInputs by padding each prefill sequence before splitting. */
+        const auto* input_lengths = inputs.input_lengths.data_ptr<int32_t>();
+        local_token_num          = decode_batch_size;
+        for (int64_t i = decode_batch_size; i < batch_size; ++i) {
+            local_token_num += makeZigzagTokenLayout(input_lengths[i], device_props_.tp_size).token_count_per_rank;
+        }
+    }
+
+    auto hidden_template =
+        torch::zeros({local_token_num, hidden_size_},
+                     torch::TensorOptions().dtype(dataTypeToTorchType(description_.data_type)).device(torch::kCUDA));
+
+    py::gil_scoped_acquire gil;
+    try {
+        auto tensors = py_model_.attr("make_empty_intermediate_tensors")(hidden_template)
+                           .cast<std::map<std::string, torch::Tensor>>();
+        RTP_LLM_CHECK_WITH_INFO(!tensors.empty(), "Python model returned no PP warmup intermediate tensors");
+        for (const auto& [name, tensor] : tensors) {
+            RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "PP warmup intermediate tensor [%s] is undefined", name.c_str());
+            RTP_LLM_CHECK_WITH_INFO(
+                tensor.is_cuda(), "PP warmup intermediate tensor [%s] must be on CUDA", name.c_str());
+        }
+        return PPIntermediateTensors{std::move(tensors)};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python model failed to construct PP warmup intermediate tensors:\n%s", e.what());
+        throw;
+    }
 }
 
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {

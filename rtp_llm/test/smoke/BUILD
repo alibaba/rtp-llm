@@ -85,6 +85,8 @@ load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
 load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
+load("//rtp_llm/test/smoke:suites_pp.bzl", "pp_suites")
 
 h20_oss_suites()
 cuda13_suites()
@@ -93,6 +95,7 @@ sm100_suites()
 sm120_suites()
 rocm_oss_suites()
 remote_cache_suites()
+pp_suites(gpu_type = ["H20_CU13"])
 
 # ============================================================================
 # Top-level CI suites (OSS tests only)

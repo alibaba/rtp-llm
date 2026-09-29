@@ -1,5 +1,6 @@
 #pragma once
 
+#include <utility>
 #include <torch/extension.h>
 #include "rtp_llm/cpp/models/eplb/ExpertBalancerPythonWrapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -59,7 +60,7 @@ struct LoadFlags {
     void init();
 
     void setReady(bool ready);
-    bool isReady(size_t world_size);
+    bool isReady(size_t eplb_group_size, ParallelMode parallel_mode);
 };
 
 enum class EplbPlanStatus {
@@ -84,7 +85,7 @@ public:
     void       init(const EPLBConfig& eplb_control_data, const EPLBConfig& eplb_config);
     void       setData(const EPLBConfig& updated_control_data);
     bool       stepAndCheckSyncStep();
-    EPLBConfig getAndSyncData(size_t world_size);
+    EPLBConfig getAndSyncData(size_t eplb_group_size, ParallelMode parallel_mode);
 };
 
 class ExpertBalancer {
@@ -94,9 +95,8 @@ public:
                                                           size_t                       num_layers,
                                                           size_t                       moe_size,
                                                           size_t                       hidden_size,
-                                                          size_t                       ep_rank,
-                                                          size_t                       ep_size,
-                                                          size_t                       world_size,
+                                                          const ParallelismConfig&     parallelism_config,
+                                                          std::pair<int64_t, int64_t>  layer_range,
                                                           py::object                   py_eplb,
                                                           DataType                     dtype,
                                                           QuantAlgo                    quant_algo,
@@ -104,14 +104,14 @@ public:
                                                           const EPLBConfig&            eplb_config);
     ~ExpertBalancer();
 
-    void stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector);
+    void stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector, bool record_stats = true);
 
     bool updateEplbConfig(const EPLBConfig& config);
 
 private:
     void syncController();
     void reportStats(OverallExpertStats& stats);
-    void excuteEplbPlan(OverallExpertStats& stats, ModelBase& model);
+    void excuteEplbPlan(OverallExpertStats& stats, ModelBase& model, bool record_stats);
 
     void           setPlanStatus(EplbPlanStatus status);
     EplbPlanStatus getPlanStatus() const;
@@ -138,9 +138,14 @@ private:
 
     size_t eplb_plan_cnt_ = 0;
 
-    size_t ep_rank_    = 0;
-    size_t ep_size_    = 1;
-    size_t world_size_ = 1;
+    size_t ep_rank_            = 0;
+    size_t ep_size_            = 1;
+    size_t eplb_group_size_    = 1;
+    bool   is_eplb_group_root_ = false;
+    ParallelMode parallel_mode_ = ParallelMode::WORLD;
+
+    int64_t layer_begin_ = 0;
+    int64_t layer_end_   = 0;
 
     size_t balance_layer_cnt_      = 0;
     size_t balance_layer_per_step_ = 1;

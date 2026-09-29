@@ -216,8 +216,15 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
-        self.num_nodes: int = (
-            parallelism_config.world_size // parallelism_config.local_world_size
+        self.pp_size = parallelism_config.pp_size
+        self.pp_rank = parallelism_config.pp_rank
+        # Materialized layer partition from startup; absent only at pp_size=1 or in test mocks.
+        pp_counts = getattr(parallelism_config, "pp_stage_layer_counts", None)
+        self.pp_stage_layer_counts = list(pp_counts) if pp_counts else None
+        self.num_nodes = (
+            max(self.ep_size // parallelism_config.local_world_size, 1)
+            if self.pp_size > 1
+            else parallelism_config.world_size // parallelism_config.local_world_size
         )
         self.ffn_tp_rank = parallelism_config.get_ffn_tp_rank()
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
@@ -789,6 +796,9 @@ class ModelDeployWeightInfo:
             ep_rank=self.ep_rank,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            pp_size=getattr(self, "pp_size", 1),
+            pp_rank=getattr(self, "pp_rank", 0),
+            pp_stage_layer_counts=getattr(self, "pp_stage_layer_counts", None),
             lm_head_tp_rank=self.lm_head_tp_rank,
             lm_head_tp_size=self.lm_head_tp_size,
             num_nodes=self.num_nodes,

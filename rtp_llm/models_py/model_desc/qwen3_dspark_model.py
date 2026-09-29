@@ -176,6 +176,7 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        apply_pp_partition: bool = False,
     ) -> None:
         if quant_config is not None:
             raise NotImplementedError("Qwen3 DSpark quantization is not supported")
@@ -188,6 +189,7 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
+            apply_pp_partition=apply_pp_partition,
         )
         proposal_width = int(config.gen_num_per_cycle)
         query_width = proposal_width + int(not config.dspark_sample_from_anchor)

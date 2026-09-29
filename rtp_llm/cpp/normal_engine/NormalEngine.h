@@ -36,6 +36,7 @@ public:
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
+    absl::Status pp_step();
     absl::Status startLoop();
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
@@ -47,6 +48,8 @@ public:
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
 private:
+    static int calculateReserveStep(const EngineInitParams& params);
+
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
@@ -65,15 +68,17 @@ private:
                                                                      std::shared_ptr<KVCacheManager>             cache_manager,
                                                                      const std::function<bool(KVCacheManager&)>& initializer);
     absl::Status                    initSystemPrompt();
-    std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
-    size_t                          getWarmUpInputLength() const;
-    static size_t                   reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only);
+    size_t        reserveStepForStream(bool is_prefill_only) const;
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
     static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate);
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
-    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
-    void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
+    bool                           isFirstStageRoot() const;
+    std::shared_ptr<GenerateInput> makeFakeInput(size_t seq_len);
+    size_t                         getWarmUpInputLength() const;
+    void                           mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+
+    void initExecutor(const EngineInitParams& params);
 
     bool isMTPEagle() override;
     bool isEagle() override;

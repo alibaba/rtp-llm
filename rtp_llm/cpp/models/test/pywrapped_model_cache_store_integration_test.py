@@ -1112,6 +1112,80 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_after"], result["available_before"])
         self.assertFalse(result["manager_retained"])
 
+    def test_pp_boundary_preserves_activations_and_auxiliary_features(self) -> None:
+        class BoundaryModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+                super()._forward_one(inputs)
+                self.boundaries = inputs.pp_intermediates
+                self.engram_windows = inputs.engram_token_windows
+                self.output_flags = (
+                    inputs.need_all_logits,
+                    inputs.need_all_hidden_states,
+                )
+                # A non-tail stage can supply only boundary tensors. The wrapper
+                # must return before reading or validating a final hidden output.
+                output = PyModelOutputs()
+                output.pp_intermediates = self.boundaries
+                return output
+
+        model = BoundaryModel()
+        result = run_scenario(model, "pp_boundary")
+
+        self.assertEqual(model.capture_flags, [False])
+        self.assertEqual(model.output_flags, (False, False))
+        self.assertFalse(result["logits_defined"])
+        self.assertEqual(result["forward_hidden_states"], [None])
+        self.assertIsNone(result["mtp_target_hidden_states"])
+        self.assertEqual(result["deferred_capture_errors"], [])
+        self.assertEqual(result["capture_failure_count"], 0)
+        rows = sum(model.seen_input_lengths[0])
+        hidden = torch.arange(rows, dtype=torch.float16, device="cuda").reshape(rows, 1)
+        expected = {
+            "hidden_states": hidden,
+            "residual": hidden + 10,
+            "mtp_aux_hidden_states": torch.cat((hidden + 20, hidden + 30), dim=-1),
+        }
+        self.assertEqual(set(result["pp_intermediates"]), set(expected))
+        for name, tensor in expected.items():
+            actual = result["pp_intermediates"][name]
+            torch.testing.assert_close(actual, tensor)
+            self.assertEqual(actual.data_ptr(), model.boundaries[name].data_ptr())
+        self.assertTrue(model.engram_windows.is_cuda)
+        torch.testing.assert_close(
+            model.engram_windows.cpu(),
+            torch.arange(rows * 2, dtype=torch.int32).reshape(rows, 2),
+        )
+        self.assertTrue(result["records"])
+
+    def test_capture_layout_failure_preserves_mtp_features(self) -> None:
+        class MtpFeatureModel(MalformedCaptureLayoutModel):
+            def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+                output = super()._forward_one(inputs)
+                self.features = torch.full(
+                    (inputs.input_ids.numel(), 2),
+                    37.0,
+                    dtype=torch.float16,
+                    device=inputs.input_ids.device,
+                )
+                output.mtp_target_hidden_states = self.features
+                return output
+
+        model = MtpFeatureModel()
+        result = run_scenario(model, "capture_bf16", ignore_deferred_errors=True)
+
+        self.assertEqual(model.capture_flags, [True])
+        self.assertEqual(len(result["deferred_capture_errors"]), 1)
+        self.assertIn("expected packed width 3", result["deferred_capture_errors"][0])
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertEqual(result["pp_intermediates"], {})
+        torch.testing.assert_close(
+            result["mtp_target_hidden_states"], torch.full_like(model.features, 37.0)
+        )
+        self.assertEqual(
+            result["mtp_target_hidden_states"].data_ptr(), model.features.data_ptr()
+        )
+        self.assertEqual(_FakeEagleMooncakeStore.instances[-1].puts, [])
+
     def test_mtp_placeholders_preserve_model_tag_set_with_extra_payload_rows(self):
         for scenario in ("mtp_placeholders", "mtp_placeholders_extra_payload"):
             with self.subTest(scenario=scenario):

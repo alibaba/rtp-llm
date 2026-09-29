@@ -78,6 +78,7 @@ public:
         return autil::TimeUtility::currentTimeInMilliSeconds();
     }
 
+    /** These queries describe the configured algorithm, independently of local draft ownership. */
     virtual bool isMTPEagle() {
         return false;
     }

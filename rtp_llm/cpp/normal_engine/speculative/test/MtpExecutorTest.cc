@@ -379,6 +379,7 @@ public:
     }
 
     torch::Tensor getMtpTargetHiddenStates(int64_t num_tokens) override {
+        mtp_hidden_requests.push_back(num_tokens);
         if (!mtp_target_hidden_rows_.defined()) {
             return torch::Tensor();
         }
@@ -437,6 +438,8 @@ public:
     void setForwardObserver(std::function<void()> observer) {
         forward_observer_ = std::move(observer);
     }
+
+    std::vector<int64_t> mtp_hidden_requests;
 
 private:
     void recordEvent(const char* event) {
@@ -506,12 +509,15 @@ class FakeSpeculativeSampler: public spec::SpeculativeSampler {
 public:
     FakeSpeculativeSampler(size_t propose_step): spec::SpeculativeSampler(torch::Tensor(), propose_step) {}
 
-    spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
-                                           SamplerOutput&                      draft_sampler_output,
-                                           SamplerOutput&                      target_sampler_output) override {
+    spec::SpeculativeSamplerOutput forward(const spec::SpeculativeSamplingParams& params,
+                                          SamplerOutput&                        draft_sampler_output,
+                                          SamplerOutput&                        target_sampler_output) override {
         ++forward_count_;
+        last_params = params;
         return output_holder.get();
     }
+
+    spec::SpeculativeSamplingParams last_params;
 
     size_t forwardCount() const {
         return forward_count_;
@@ -666,6 +672,8 @@ struct MtpExecutorComponents {
 
 class MtpExecutorTest: public DeviceTestBase {
 public:
+    void runMultiBatchDecode(bool use_mtp_hidden_buffer);
+
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
                                           const RuntimeConfig&   runtime_config,
                                           const ResourceContext& resource_context,
@@ -975,7 +983,7 @@ public:
                         std::move(components.fake_sampler),
                         std::move(components.fake_draft_prefill_model));
 
-        auto status = components.executor->process({target_only_stream});
+        auto status = components.executor->process(ScheduleOutput{{target_only_stream}});
         ASSERT_TRUE(status.ok());
         if (deferred_capture_error.has_value()) {
             EXPECT_TRUE(target_only_stream->hasError());
@@ -1094,7 +1102,7 @@ public:
             components.executor->sp_prefill_draft_model_ = sp_prefill_draft_model;
         }
 
-        ASSERT_TRUE(components.executor->process({}).ok());
+        ASSERT_TRUE(components.executor->process(ScheduleOutput{}).ok());
         EXPECT_EQ(forward_trace, expected_trace);
         EXPECT_EQ(target_model->forwardCount(), expected_counts[0]);
         EXPECT_EQ(draft_model->forwardCount(), expected_counts[1]);
@@ -1217,6 +1225,33 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
 
+TEST_F(MtpExecutorTest, testMtpConstructorRejectsMissingProposal) {
+    EngineInitParams params;
+    params.model_id = 0;
+    params.sp_config.gen_num_per_cycle = 3;
+    std::unique_ptr<ProposeModelEngineInitParams> proposal;
+
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+        params.parallelism_config.role_type = role;
+        params.pd_sep_config.role_type      = role;
+        for (const auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+            params.sp_config.type = type;
+            for (const bool warm_up : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "role=" << static_cast<int>(role)
+                                                  << " type=" << static_cast<int>(type) << " warm_up=" << warm_up);
+                try {
+                    MtpExecutor executor(params, proposal, nullptr, MlaOpsType::AUTO, 1, warm_up);
+                    FAIL() << "MtpExecutor without a proposer must fail construction";
+                } catch (const std::exception& error) {
+                    EXPECT_NE(std::string(error.what()).find("MtpExecutor requires local proposal parameters"),
+                              std::string::npos)
+                        << error.what();
+                }
+            }
+        }
+    }
+}
+
 TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     MtpExecutorTestConfig test_config;
     test_config.sp_type           = SP_TYPE_MTP;
@@ -1319,7 +1354,7 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     if (simulate_cp_mutation && !with_cp_hidden_buffers) {
         EXPECT_FALSE(target_model->hasMtpTargetHiddenBuffer());
         try {
-            (void)components.executor->process({stream1});
+            (void)components.executor->process(ScheduleOutput{{stream1}});
             FAIL() << "expected CP prefill to reject a missing draft last-hidden buffer";
         } catch (const std::exception& error) {
             EXPECT_NE(std::string(error.what()).find("CP MTP draft last-hidden buffer must contain per-request rows"),
@@ -1329,7 +1364,7 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     }
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1});
+    auto status = components.executor->process(ScheduleOutput{{stream1}});
     ASSERT_TRUE(status.ok());
     if (simulate_cp_mutation) {
         EXPECT_FALSE(stream1->hasError());
@@ -1606,7 +1641,7 @@ TEST_F(MtpExecutorTest, testDecodeRoleRejectsPrefillOnlyWithoutModelWorkWhenFfnD
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok());
     ASSERT_TRUE(stream->hasError());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
@@ -1701,7 +1736,7 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
                     std::move(components.fake_sampler),
                     std::move(components.fake_draft_prefill_model));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_EQ((std::vector<std::string>{
                   "target.forward", "draft.forward", "target.wait_publication", "draft.wait_publication"}),
@@ -1740,12 +1775,6 @@ TEST_F(MtpExecutorTest, testDSparkPublicationFailurePreventsPrefillDispatch) {
     bool draft_waited = false;
     components.fake_draft_prefill_model->setPublicationObserver([&draft_waited]() { draft_waited = true; });
     components.fake_draft_prefill_model->setPublicationResult("draft store failed");
-    size_t reduction_count                                           = 0;
-    components.executor->dspark_cache_store_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
-        ++reduction_count;
-        EXPECT_FALSE(local_ok);
-        return local_ok;
-    };
 
     GptModelInputs commit_input     = target_input;
     commit_input.last_hidden_states = target_output.all_hidden_states;
@@ -1767,73 +1796,12 @@ TEST_F(MtpExecutorTest, testDSparkPublicationFailurePreventsPrefillDispatch) {
                     std::move(components.fake_sampler),
                     std::move(components.fake_draft_prefill_model));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_EQ(draft_prefill->forwardCount(), 1u);
     EXPECT_TRUE(draft_waited);
-    EXPECT_EQ(reduction_count, 1u);
     EXPECT_TRUE(stream->hasError());
-    EXPECT_EQ((std::vector<int>{0, 1, 2, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
-}
-
-TEST_F(MtpExecutorTest, testDSparkRemoteTpRankFailurePreventsPrefillDispatch) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle    = 3;
-    test_config.vocab_size_override  = test_config.vocab_size;
-    test_config.sp_type              = SP_TYPE_DSPARK;
-    test_config.dspark_mask_token_id = 0;
-    test_config.role_type            = RoleType::PREFILL;
-    auto components                  = createMtpExecutorComponents(test_config);
-
-    GenerateStreamPtr stream = createContextStream(
-        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
-
-    GptModelInputs target_input;
-    target_input.combo_tokens      = torch::tensor({0, 1, 2, 3}, torch::kInt32);
-    target_input.input_lengths     = torch::tensor({4}, torch::kInt32);
-    target_input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
-    target_input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
-
-    GptModelOutputs target_output;
-    target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
-    target_output.all_hidden_states =
-        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
-    components.fake_target_model->setInputs({target_input});
-    components.fake_target_model->setOutputs({target_output});
-
-    GptModelInputs commit_input     = target_input;
-    commit_input.last_hidden_states = target_output.all_hidden_states;
-    components.fake_draft_prefill_model->setInputs({commit_input});
-    components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
-    components.fake_draft_prefill_model->expectTargetVerify(false);
-
-    bool   observed_local_ok                                         = false;
-    size_t reduction_count                                           = 0;
-    components.executor->dspark_cache_store_status_reducer_for_test_ = [&observed_local_ok,
-                                                                        &reduction_count](bool local_ok) {
-        observed_local_ok = local_ok;
-        ++reduction_count;
-        return false;  // Simulate one different TP rank publishing a failure.
-    };
-
-    auto sampler_input  = SamplerInputs{target_output.logits};
-    auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({1, 1})};
-    components.fake_sampler->setInputs({sampler_input});
-    components.fake_sampler->setOutputs({sampler_output});
-
-    setupFakeModels(components.executor.get(),
-                    std::move(components.fake_target_model),
-                    std::move(components.fake_draft_model),
-                    std::move(components.fake_fast_topk_sampler),
-                    std::move(components.fake_speculative_sampler),
-                    std::move(components.fake_sampler),
-                    std::move(components.fake_draft_prefill_model));
-
-    auto status = components.executor->process({stream});
-    ASSERT_TRUE(status.ok()) << status.ToString();
-    EXPECT_TRUE(observed_local_ok);
-    EXPECT_EQ(reduction_count, 1u);
-    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
     EXPECT_EQ((std::vector<int>{0, 1, 2, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
 }
 
@@ -1909,7 +1877,7 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1, stream2});
+    auto status = components.executor->process(ScheduleOutput{{stream1, stream2}});
     ASSERT_TRUE(status.ok());
 
     // check stream result
@@ -1938,7 +1906,8 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     auto stream1_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto stream1_draft_token_probs = torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}});
 
-    StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens, 1, 3, stream1_hidden_states, stream1_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info1{
+        stream1_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream1_hidden_states, stream1_draft_token_probs};
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info1);
@@ -1961,6 +1930,10 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
         prefill_only_input.skip_lm_head          = true;
         prefill_only_input.capture_hidden_states = true;
     }
+
+    /** A disabled sampling request stays greedy even when its configured top_k is not one. */
+    stream1->generateConfig()->do_sample = false;
+    stream1->generateConfig()->top_k     = 4;
 
     // set 3 step draft model outputs
     auto draft_input_1  = GptModelInputs{};
@@ -2096,6 +2069,7 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     auto* active_draft_model       = components.fake_draft_model.get();
     auto* draft_prefill_fake_model = components.fake_draft_prefill_model.get();
     auto* fake_target_model        = components.fake_target_model.get();
+    auto* fake_speculative_sampler = components.fake_speculative_sampler.get();
 
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
@@ -2107,8 +2081,8 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
                     std::move(components.fake_draft_prefill_model));
 
     // Verify executor was created successfully
-    auto status = with_prefill_only ? components.executor->process({prefill_only_stream, stream1}) :
-                                      components.executor->process({stream1});
+    auto status = with_prefill_only ? components.executor->process(ScheduleOutput{{prefill_only_stream, stream1}}) :
+                                      components.executor->process(ScheduleOutput{{stream1}});
     ASSERT_TRUE(status.ok());
     if (with_prefill_only) {
         EXPECT_TRUE(prefill_only_stream->hasEvent(StreamEvents::GenerateDone));
@@ -2118,6 +2092,12 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
         EXPECT_TRUE(prefill_output.value().generate_outputs[0].finished);
         EXPECT_EQ(prefill_output.value().generate_outputs[0].output_ids.sizes(), (torch::IntArrayRef{1, 0}));
     }
+    const auto& do_sample = fake_speculative_sampler->last_params.do_sample;
+    ASSERT_TRUE(do_sample.defined());
+    EXPECT_TRUE(do_sample.device().is_cpu());
+    ASSERT_EQ(do_sample.scalar_type(), torch::kBool);
+    ASSERT_EQ(do_sample.sizes().vec(), (std::vector<int64_t>{1}));
+    EXPECT_FALSE(do_sample[0].item<bool>());
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step - 1);
     EXPECT_EQ(draft_prefill_fake_model->forwardCount(), 1u);
     if (with_prefill_only) {
@@ -2151,11 +2131,12 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{
+        stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(
+    stream->sampling_state_.logits_processors.push_back(
         std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
 
     auto draft_input_1               = GptModelInputs{};
@@ -2224,7 +2205,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok());
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
@@ -2286,13 +2267,14 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     // Simulate the commit-only prefill handoff: append the first target token
     // but leave proposal/probability/hidden state empty. The first decode
     // round must produce its proposal at the round head.
-    StreamSpecUpdateInfo spec_update_info{torch::tensor({{2}}, torch::kInt32), 1, -1, {}, {}};
+    StreamSpecUpdateInfo spec_update_info{
+        torch::tensor({{2}}, torch::kInt32), 1, torch::Tensor(), torch::Tensor(), torch::Tensor()};
     stream->specUpdate(spec_update_info);
     EXPECT_TRUE(stream->getProposeToken().empty());
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
-    stream->logits_processor_list_.push_back(processor);
+    stream->sampling_state_.logits_processors.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
 
     GptModelInputs target_input;
@@ -2368,7 +2350,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
                     std::move(components.fake_sampler),
                     std::move(components.fake_draft_prefill_model));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_NE(std::thread::id(), processor->invocationThreadId());
     EXPECT_NE(main_thread_id, processor->invocationThreadId());
@@ -2597,11 +2579,12 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{
+        stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(
+    stream->sampling_state_.logits_processors.push_back(
         std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
 
     auto target_input              = GptModelInputs{};
@@ -2656,13 +2639,50 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok());
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {});
 }
 
+TEST_F(MtpExecutorTest, testDraftPrefillReadsHiddenFromActualCommitModel) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* commit_model = components.fake_target_model.get();
+    auto* draft_model  = components.fake_draft_model.get();
+    GptModelInputs input;
+    input.combo_tokens      = torch::tensor({11, 12}, torch::kInt32);
+    input.input_lengths     = torch::tensor({2}, torch::kInt32);
+    input.prefix_lengths    = torch::tensor({3}, torch::kInt32);
+    input.sequence_lengths  = torch::empty({0}, torch::kInt32);
+    input.lm_output_indexes = torch::tensor({1}, torch::kInt32);
+    GptModelOutputs output;
+    output.all_hidden_states = torch::zeros({2, 2});
+    auto commit_hidden = torch::arange(16, torch::kFloat32).reshape({4, 4});
+    commit_model->setInputs({input});
+    commit_model->setOutputs({output});
+    commit_model->setMtpTargetHiddenStates(commit_hidden);
+    draft_model->setMtpTargetHiddenStates(torch::full({4, 4}, -1.0f));
+    components.executor->sp_prefill_draft_model_ = std::move(components.fake_target_model);
+    components.executor->draft_model_           = std::move(components.fake_draft_model);
+
+    auto resolved_output = components.executor->runDraftPrefillForward(input);
+    EXPECT_TRUE(torch::equal(resolved_output.all_hidden_states, commit_hidden.narrow(0, 0, 2)));
+    EXPECT_EQ(resolved_output.all_hidden_states.data_ptr(), commit_hidden.data_ptr());
+    EXPECT_EQ(commit_model->mtp_hidden_requests, (std::vector<int64_t>{2}));
+    EXPECT_EQ(commit_model->forwardCount(), 1);
+    EXPECT_TRUE(draft_model->mtp_hidden_requests.empty());
+    EXPECT_EQ(draft_model->forwardCount(), 0);
+}
+
 TEST_F(MtpExecutorTest, testMultiBatchDecode) {
+    runMultiBatchDecode(false);
+}
+
+TEST_F(MtpExecutorTest, testMultiBatchDecodeCompactsMtpHiddenBuffer) {
+    runMultiBatchDecode(true);
+}
+
+void MtpExecutorTest::runMultiBatchDecode(bool use_mtp_hidden_buffer) {
     // test multi batch decode not accept & accept all
     // input s1:[0, 1, 2, 3] + [2] s2:[3, 2, 1] + [3]
     // darft s1:[2]+[1,2,3] s2:[3]+[0,2,2]
@@ -2688,8 +2708,10 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto stream2_hidden_states     = torch::tensor({{2.1f, 2.12f}});
     auto stream2_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
 
-    StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens, 1, 2, stream1_hidden_states, stream1_draft_token_probs};
-    StreamSpecUpdateInfo spec_update_info2{stream2_new_tokens, 1, 3, stream2_hidden_states, stream2_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info1{
+        stream1_new_tokens, 1, torch::tensor({2}, torch::kInt32), stream1_hidden_states, stream1_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info2{
+        stream2_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream2_hidden_states, stream2_draft_token_probs};
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, spec_update_info1);
@@ -2757,8 +2779,15 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
                        0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f, 0.19f, 0.20f})
             .reshape({(int64_t)(batch_size * (propose_step + 1)), 2});
 
+    auto target_hidden = target_output.all_hidden_states;
+    if (use_mtp_hidden_buffer) {
+        /** Extra capacity and distinct values expose both fallback misuse and a post-COMPACT prefix overwrite. */
+        auto mtp_hidden_buffer = torch::arange(24, torch::kFloat32).reshape({12, 2}) + 100;
+        components.fake_target_model->setMtpTargetHiddenStates(mtp_hidden_buffer);
+        target_hidden = mtp_hidden_buffer.narrow(0, 0, 10);
+    }
     next_draft_input.last_hidden_states =
-        torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
+        torch::cat({target_hidden.narrow(0, 0, 1), target_hidden.narrow(0, 5, 5)});
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
@@ -2826,6 +2855,8 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     components.fake_speculative_sampler->setInputs({draft_spec_sample_input, target_spec_sample_input});
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
 
+    auto* target_model = components.fake_target_model.get();
+
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
                     std::move(components.fake_target_model),
@@ -2835,12 +2866,13 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1, stream2});
+    auto status = components.executor->process(ScheduleOutput{{stream1, stream2}});
     ASSERT_TRUE(status.ok());
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 3}, {3, 1}, {0, 1, 0, 0}, {0.1, 0.11});
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
+    EXPECT_EQ(target_model->mtp_hidden_requests, (std::vector<int64_t>{10}));
 }
 
 TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
@@ -3013,7 +3045,11 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     StreamSpecUpdateInfo update_info{
-        torch::tensor({7}, torch::kInt32).reshape({1, 1}), 1, -1, torch::Tensor(), torch::Tensor()};
+        torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+        1,
+        torch::Tensor(),
+        torch::Tensor(),
+        torch::Tensor()};
     update_info.speculative_propose_step = 3;
     update_info.accepted_draft_tokens    = 2;
     stream->specUpdate(update_info);
@@ -3148,11 +3184,12 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{
+        stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(std::make_shared<IncompatibleMtpProcessor>());
+    stream->sampling_state_.logits_processors.push_back(std::make_shared<IncompatibleMtpProcessor>());
     stream->reportError(ErrorCode::INVALID_PARAMS, "grammar accept_token error: parser rejected token");
 
     auto target_input              = GptModelInputs{};
@@ -3205,7 +3242,7 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(stream->hasError());
 }

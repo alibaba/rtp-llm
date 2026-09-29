@@ -496,5 +496,6 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     ASSERT_EQ(batch.cacheResource(0).kernelBlocks("group0"), (BlockIndicesType{6, 7}));
 }
 
+
 }  // namespace test
 }  // namespace rtp_llm
