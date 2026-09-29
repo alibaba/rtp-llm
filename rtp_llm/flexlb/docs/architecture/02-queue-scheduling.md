@@ -1,10 +1,13 @@
 # Scheduling and Request Lifecycle
 
 同一个业务 `request_id` 在 FlexLB 内按 `RequestPhase` 分为 `ENCODER` 与 `GENERATION`
-两条生命周期。Encoder 单独决策始终走 DIRECT：登记请求后选点，选中端点接管请求时进入
+两条生命周期。Encoder 单独决策按 `scheduler.type` 走 DIRECT 或独立 QUEUE：登记请求后选点，选中端点接管请求时进入
 `DISPATCHING`，确认并提交路由成功响应时进入 `ACKNOWLEDGED`，随后由 Encoder 的 WorkerStatus 活跃任务、
 完成任务或失活超时推进状态。Frontend 负责把请求发给选中的 Encoder，FlexLB 不做
-Encoder 批量派发，也不调用 Encoder Cancel RPC。Generation 沿用原调度流程。
+Encoder 批量派发，也不调用 Encoder Cancel RPC。Encoder QUEUE 只在模型配置包含 Encoder role 时创建，
+按照 FIFO 或 PRIORITY 顺序决策，并用 `dispatcher.maxInflightPerEncoderWorker` 限制每个 Encoder 的
+`running + waiting + 本地待观察请求` 数量。WorkerStatus 更新、请求结束和 endpoint 退役会唤醒等待的
+Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generation 沿用原调度流程及独立队列。
 
 `Cancel` 和 `GetRequestState` 可传 `phase` 查找对应阶段；省略或传默认值时定位
 Generation，以兼容旧客户端。常见 EPD 调用先单独决策 Encoder，处理完成后再以同一个

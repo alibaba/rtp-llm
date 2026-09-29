@@ -19,6 +19,7 @@ import java.util.Objects;
  */
 @Component
 public final class EndpointEventProjector {
+
     private final RequestRegistry scheduler;
 
     public EndpointEventProjector(RequestRegistry scheduler) {
@@ -56,6 +57,15 @@ public final class EndpointEventProjector {
                 logErrorNoFail("Encoder finished fact projection isolated: request_id={}",
                         task.requestId(), failure);
             }
+        }
+        onEncoderCapacityChanged();
+    }
+
+    public void onEncoderCapacityChanged() {
+        try {
+            scheduler.encoderCapacityChanged();
+        } catch (Throwable failure) {
+            logErrorNoFail("Encoder capacity notification isolated", failure);
         }
     }
 
