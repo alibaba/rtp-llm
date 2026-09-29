@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/engine_base/stream/SamplingState.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
@@ -56,14 +57,13 @@ struct StreamSpecUpdateInfo {
     const torch::Tensor new_tokens;
     int                 num_new_tokens;
 
-    int                 draft_token;
+    torch::Tensor       draft_tokens;
     const torch::Tensor draft_hidden_states;
     const torch::Tensor draft_token_probs;
-    // GPU proposal update for the next step. The optional is intentionally
-    // tri-state: nullopt keeps the previous mirror, a defined tensor replaces
-    // it, and an undefined tensor explicitly clears it so readers use the
-    // current CPU draft_token instead. Per-stream tensor shape is
-    // [stream_batch, token_stride].
+    /** GPU proposal update for the next step. nullopt keeps the previous mirror,
+     * a defined tensor replaces it, and an undefined tensor explicitly clears it
+     * so readers use the current CPU draft_tokens instead. The per-stream GPU
+     * tensor shape is [stream_batch, token_stride]. */
     std::optional<torch::Tensor> draft_token_gpu = std::nullopt;
 
     bool                     update_remote_generate = true;
@@ -165,8 +165,8 @@ public:
     virtual GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const {
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
-    void update(const StreamUpdateInfo& update_info);
-    void specUpdate(const StreamSpecUpdateInfo& update_info);
+    void update(const StreamUpdateInfo& update_info, bool update_processor = true);
+    void specUpdate(const StreamSpecUpdateInfo& update_info, bool update_processor = true);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
@@ -236,6 +236,7 @@ public:
     int     reuseLength() const;
     int     initialReuseLength() const;
     size_t  maxTokenNum() const;
+    size_t  nextStepSeqLengthLimit() const;
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
     void    setDeviceReuseLength(int length);
@@ -340,6 +341,12 @@ public:
     }
     StreamState moveToNext();
 
+    /** A PP stream stays inflight until dispatch has committed or discarded its returned result.
+     * The release/acquire pair publishes that update before the stream can be rescheduled. */
+    void setPPInflight();
+    void clearPPInflight();
+    bool isPPInflight() const;
+
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
     // Complete a Decode stream owned by the RPC handler, before scheduler enqueue.
@@ -402,11 +409,11 @@ public:
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
 
     void setReturnAllProbs(ReturnAllProbsMode return_all_probs) {
-        return_all_probs_ = return_all_probs;
+        sampling_state_.return_all_probs = return_all_probs;
     }
 
     ReturnAllProbsMode getReturnAllProbs() const {
-        return return_all_probs_;
+        return sampling_state_.return_all_probs;
     }
 
     torch::Tensor generateContextPositionIds();
@@ -567,11 +574,11 @@ public:
     }
 
     const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
-        return logits_processor_list_;
+        return sampling_state_.logits_processors;
     }
 
     at::Generator getGenerator() {
-        return generator_;
+        return sampling_state_.generator;
     }
 
     void setSPOutputBuffer(SpeculativeExecutorStreamOutputPtr sp_output_buffer) {
@@ -874,6 +881,7 @@ protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;
+    std::atomic<bool>                     pp_inflight_{false};
     std::vector<StreamState>              sub_generate_status_;
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
@@ -919,7 +927,7 @@ protected:
     bool released_              = false;
     bool need_release_resource_ = true;
 
-    ReturnAllProbsMode return_all_probs_ = ReturnAllProbsMode::NONE;
+    SamplingState sampling_state_;
 
     bool last_block_aligned_ = false;
 
@@ -936,9 +944,6 @@ protected:
     // shared_ptr; neither resource nor state machine points back here, so no
     // ownership cycle is created.
 
-    torch::Tensor                            cum_log_probs_;
-    torch::Tensor                            all_probs_;
-    torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
     torch::Tensor                            custom_output_;
@@ -989,9 +994,6 @@ protected:
 
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
-
-    std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
-    at::Generator                       generator_;
 
     // just for bool test
     bool perf_test_ = false;

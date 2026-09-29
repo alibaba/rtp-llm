@@ -32,6 +32,8 @@ __all__: list[str] = [
     "init_exec_ctx",
     "register_comm_ops",
     "clear_comm_ops",
+    "register_pp_ops",
+    "clear_pp_ops",
     "init_cpu_tp_broadcaster",
     "destroy_cpu_tp_broadcaster",
     "rtp_llm_ops",
@@ -388,6 +390,11 @@ class PyModelInputs:
     @multimodal_inputs.setter
     def multimodal_inputs(self, arg0: PyMultimodalInputs) -> None: ...
 
+    @property
+    def pp_intermediates(self) -> dict[str, torch.Tensor]: ...
+    @pp_intermediates.setter
+    def pp_intermediates(self, arg0: dict[str, torch.Tensor]) -> None: ...
+
 class PyModelOutputs:
     @typing.overload
     def __init__(self) -> None:
@@ -428,6 +435,11 @@ class PyModelOutputs:
 
     @mtp_target_hidden_states.setter
     def mtp_target_hidden_states(self, arg0: torch.Tensor | None) -> None: ...
+
+    @property
+    def pp_intermediates(self) -> dict[str, torch.Tensor]: ...
+    @pp_intermediates.setter
+    def pp_intermediates(self, arg0: dict[str, torch.Tensor]) -> None: ...
 
 class PyMultimodalInputs:
     mm_features_spans: torch.Tensor
@@ -496,6 +508,15 @@ def clear_comm_ops() -> None:
     """
     Clear registered Python communication callbacks.
     """
+
+def register_pp_ops(
+    isend_fn: typing.Callable[[torch.Tensor, int, int], typing.Any],
+    irecv_fn: typing.Callable[[torch.Tensor, int, int], typing.Any],
+    pp_snapshot_exchange_fn: typing.Callable,
+) -> None:
+    """Register P2P callbacks taking (tensor, global_peer, backend: 0=NCCL, 1=GLOO)."""
+
+def clear_pp_ops() -> None: ...
 
 def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...
 def destroy_cpu_tp_broadcaster() -> None: ...

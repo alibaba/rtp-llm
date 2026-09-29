@@ -103,6 +103,37 @@ class TreeLogitsProcessorTest: public DeviceTestBase {};
         EXPECT_TRUE(similar) << "Vectors are not similar";                                                             \
     } while (0)
 
+TEST_F(TreeLogitsProcessorTest, OrdinaryMultiReturnLatestTokens) {
+    PrefixToCandidateTokens::instance()->reloadPrefixDict(
+        "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json");
+    auto input = std::make_shared<GenerateInput>();
+    input->input_ids = torch::zeros({7}, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->generate_config->num_return_sequences = 2;
+    auto processor = TreeLogitsProcessor::fromGenerateInput(input, 2);
+    ASSERT_NE(processor, nullptr);
+
+    // The spare storage makes an erroneous history offset read a deterministic invalid token.
+    auto storage = torch::full({64}, -1, torch::kInt32);
+    auto latest = storage.narrow(0, 0, 2).reshape({2, 1});
+    latest[0][0].fill_(64000);
+    latest[1][0].fill_(64006);
+    ASSERT_FALSE(processor->updateStatus(latest, 1).has_value());
+    EXPECT_EQ(processor->getStatus(), (std::vector<std::string>{"225_64000", "225_64006"}));
+    latest[0][0].fill_(64001);
+    latest[1][0].fill_(64004);
+    ASSERT_FALSE(processor->updateStatus(latest, 1).has_value());
+    EXPECT_EQ(processor->getStatus(), (std::vector<std::string>{"225_64000_64001", "225_64006_64004"}));
+
+    SamplerInputs sample;
+    sample.logits = torch::zeros({2, 64012}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    ASSERT_FALSE(processor->process(sample, 0, 2).has_value());
+    auto probabilities = torch::softmax(sample.logits, -1).cpu();
+    auto expected = torch::zeros({2, 64012}, torch::kFloat32);
+    expected.select(1, 2).fill_(1.0f);
+    EXPECT_TRUE(torch::equal(probabilities, expected));
+}
+
 TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
     SamplerDataBuilder     builder;
     std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";

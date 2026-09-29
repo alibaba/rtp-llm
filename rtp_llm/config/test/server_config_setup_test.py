@@ -788,7 +788,7 @@ class GenerateConfigTest(TestCase):
             "TP_SIZE": "4",
             "PP_SIZE": "1",
             "WORLD_SIZE": "4",
-            "WORLD_RANK": "4",
+            "WORLD_RANK": "2",
             "LOCAL_WORLD_SIZE": "2",
             "CONCURRENCY_LIMIT": "32",
             "START_PORT": "20000",
@@ -803,7 +803,7 @@ class GenerateConfigTest(TestCase):
         set_parallelism_config(py_env_configs.parallelism_config)
         pc = py_env_configs.parallelism_config
         self.assertIsNotNone(pc.world_rank)
-        self.assertEqual(pc.world_rank, 4)
+        self.assertEqual(pc.world_rank, 2)
 
     @patch.dict(
         "os.environ",

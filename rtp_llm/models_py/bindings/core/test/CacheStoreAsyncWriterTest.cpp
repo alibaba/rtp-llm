@@ -558,16 +558,19 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     EXPECT_EQ(other_pool->freeBlocksNum(), other_free_before);
 }
 
-class CacheStoreAsyncWriterTpTest: public ::testing::TestWithParam<std::tuple<int, bool, bool>> {};
+class CacheStoreAsyncWriterTpTest: public ::testing::TestWithParam<std::tuple<int, int, bool, bool>> {};
 
 TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
-    const auto [tp_rank, tracked, store_success] = GetParam();
+    const auto [pp_rank, tp_rank, tracked, store_success] = GetParam();
     auto              config = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/2);
     ParallelismConfig parallelism;
+    parallelism.pp_size = 2;
+    parallelism.pp_rank = pp_rank;
     parallelism.tp_size = 4;
     parallelism.tp_rank = tp_rank;
     parallelism.dp_size = 2;
     parallelism.dp_rank = 1;
+    const bool allocator_owner = pp_rank == 0 && tp_rank == 0;
     // Skip constructor collectives, then initialize real pools on every simulated rank.
     auto cache_manager = std::make_shared<KVCacheManager>(
         config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
@@ -577,14 +580,14 @@ TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
     ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 1u);
     auto    pool     = cache_manager->coordinator_manager_->groupBlockPools().front();
     int32_t block_id = 1;
-    if (tp_rank == 0) {
+    if (allocator_owner) {
         auto allocated = pool->malloc(1);
         ASSERT_TRUE(allocated.has_value());
         block_id = allocated->front();
         pool->incRef(block_id);
     }
     // Followers receive a valid physical ID without a local allocator allocation.
-    ASSERT_EQ(pool->isAllocated(block_id), tp_rank == 0);
+    ASSERT_EQ(pool->isAllocated(block_id), allocator_owner);
     auto cache_store = std::make_shared<DelayedCacheStore>();
     cache_manager->setCacheStore(cache_store);
 
@@ -614,11 +617,11 @@ TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
         ASSERT_NO_THROW(writer.waitAllDone());
     }
     ASSERT_TRUE(cache_store->hasPendingStore());
-    if (tp_rank == 0) {
+    if (allocator_owner) {
         pool->decRef(block_id);
         EXPECT_EQ(pool->refCount(block_id), 1);
     }
-    EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks - (tp_rank == 0 ? 1 : 0));
+    EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks - (allocator_owner ? 1 : 0));
 
     ASSERT_TRUE(cache_store->completeStore(store_success));
     if (tracked) {
@@ -634,9 +637,12 @@ TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
     EXPECT_NO_THROW(writer.waitAllDone());
 }
 
-INSTANTIATE_TEST_SUITE_P(TpRanks,
+INSTANTIATE_TEST_SUITE_P(PpTpRanks,
                          CacheStoreAsyncWriterTpTest,
-                         ::testing::Combine(::testing::Values(0, 1, 2, 3), ::testing::Bool(), ::testing::Bool()));
+                         ::testing::Combine(::testing::Values(0, 1),
+                                            ::testing::Values(0, 1, 2, 3),
+                                            ::testing::Bool(),
+                                            ::testing::Bool()));
 
 TEST_F(CacheStoreAsyncWriterTest, PublicationCancellationFailsWaitAndReleasesCycle) {
     CacheStoreAsyncWriter writer(

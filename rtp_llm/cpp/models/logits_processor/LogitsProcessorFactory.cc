@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
+#include <exception>
 #include <memory>
 #include <string>
 #include <utility>
@@ -82,11 +83,57 @@ void LogitsProcessorFactory::init(const ModelConfig&           model_config,
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 }
 
+void LogitsProcessorFactory::shutdown() {
+    grammarBackend().reset();
+}
+
+GrammarPrefetchContext LogitsProcessorFactory::prefetchGrammars(const std::vector<GrammarKeyCpp>& keys) {
+    GrammarPrefetchContext context;
+    auto&                  backend = grammarBackend();
+    if (!backend) {
+        return context;
+    }
+
+    for (const auto& key : keys) {
+        try {
+            const auto id = key.id();
+            if (context.handles.find(id) != context.handles.end()) {
+                continue;
+            }
+            context.handles.emplace(id, backend->prefetch(key));
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("grammar prefetch submit failed; deferring to sampling: type=%s, len=%zu, err=%s",
+                                key.key_type.c_str(),
+                                key.key_string.size(),
+                                e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("grammar prefetch submit failed; deferring to sampling: type=%s, len=%zu",
+                                key.key_type.c_str(),
+                                key.key_string.size());
+        }
+    }
+    return context;
+}
+
+std::optional<ErrorInfo>
+LogitsProcessorFactory::validateMtpCompatibility(const std::vector<BaseLogitsProcessorPtr>& processors) {
+    for (size_t i = 0; i < processors.size(); ++i) {
+        const auto capability = processors[i]->mtpCapability();
+        if (capability.mode == MtpProcessorMode::UNSUPPORTED) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                             "MTP decode is incompatible with logits processor: processor_index=" + std::to_string(i)
+                                 + ", mode=unsupported, reason=" + std::string(capability.reason));
+        }
+    }
+    return std::nullopt;
+}
+
 ErrorResult<std::vector<BaseLogitsProcessorPtr>>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,
                                                int32_t                        max_batch_size,
-                                               int64_t                        eos_token_id) {
+                                               int64_t                        eos_token_id,
+                                               GrammarPrefetchContext*        grammar_prefetch) {
     std::vector<BaseLogitsProcessorPtr> result;
 
     auto& config = *generate_input->generate_config;
@@ -117,7 +164,9 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                           grammar_key.key_string.size(),
                           static_cast<int>(config.in_think_mode));
 
-        auto matcher_or = backend->createMatcherFromKey(grammar_key);
+        auto* grammar_handle = grammar_prefetch ? grammar_prefetch->find(grammar_key) : nullptr;
+        auto  matcher_or = grammar_handle ? backend->createMatcherFromHandle(*grammar_handle) :
+                                           backend->createMatcherFromKey(grammar_key);
         if (!matcher_or.ok()) {
             ErrorCode error_code = ErrorCode::UNKNOWN_ERROR;
             if (matcher_or.status().code() == absl::StatusCode::kInvalidArgument) {

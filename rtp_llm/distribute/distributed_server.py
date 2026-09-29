@@ -18,6 +18,7 @@ from rtp_llm.config.py_config_modules import (
     ServerConfig,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.models_py.distributed.rank_layout import Coord, RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
@@ -88,12 +89,10 @@ def get_world_info(
 def get_dp_addrs_from_world_info(
     world_info: WorldInfo, parallelism_config: ParallelismConfig
 ) -> list[str]:
-    """RPC addresses for DP fan-out: one per DP group (tp_rank==0 per group), or a
-    single serving rank when FFN disaggregate is enabled.
+    """Select serving RPC addresses from the supplied members only.
 
-    Pure function over WorldInfo / ParallelismConfig — shared by FrontendWorker and
-    any other caller that needs to address the backend model_rpc servers (e.g.
-    DashScApp building its own BackendRPCServerVisitor).
+    This does not discover remote ranks. Frontends should use get_dp_rpc_addresses
+    to resolve stage 0 when it is on another node.
     """
     ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
     logging.info(
@@ -109,10 +108,13 @@ def get_dp_addrs_from_world_info(
             f"FFN disaggregate enabled, limiting addresses to {serving_ranks} serving ranks: {members}"
         )
     else:
+        """Only the leading stage admits requests (downstream stages never run the scheduler);
+        the pp filter is a no-op at pp_size=1."""
+        layout = RankLayout.from_parallelism_config(parallelism_config)
         members = [
             member
             for member in world_info.members
-            if (member.world_rank % parallelism_config.tp_size) == 0
+            if (coord := layout.coord_of(member.world_rank)).tp == 0 and coord.pp == 0
         ]
 
     addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
@@ -121,6 +123,91 @@ def get_dp_addrs_from_world_info(
         f"using addresses from world_info: {addresses}"
     )
     return addresses
+
+
+def get_dp_rpc_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
+    """Resolve request-admitting backends, including remote stage 0 under PP.
+
+    Without PP, preserve the existing local DP / FFN-disaggregate routing.
+    With PP, every frontend needs the TP=0 rank of each DP lane in stage 0.
+    """
+    pc = py_env_configs.parallelism_config
+    world_info = get_world_info(
+        py_env_configs.server_config, py_env_configs.distribute_config, pc
+    )
+    layout = RankLayout.from_parallelism_config(pc)
+    if layout.pp_size == 1:
+        return get_dp_addrs_from_world_info(world_info, pc)
+
+    serving_ranks = [layout.world_rank_of(Coord(dp=dp)) for dp in range(layout.dp_size)]
+    # Stage 0 discovery shares the gang bootstrap timeout.
+    timeout = timedelta(minutes=py_env_configs.distribute_config.gang_timeout_min)
+    addresses = _resolve_rank_rpc_addresses(
+        py_env_configs, world_info, serving_ranks, timeout
+    )
+    logging.info("[world_rank: %s] stage 0 RPC addresses: %s", pc.world_rank, addresses)
+    return addresses
+
+
+def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
+    """Resolve one control root (DP=0, TP=0) per stage, including remote nodes.
+
+    Called on a config update, after backend bootstrap has registered its ranks.
+    Frontend WorldInfo contains only local ranks; missing roots come from the
+    existing bootstrap registry, without registering another worker.
+    """
+    pc = py_env_configs.parallelism_config
+    layout = RankLayout.from_parallelism_config(pc)
+    root_ranks = [
+        layout.world_rank_of(Coord(pp=stage)) for stage in range(layout.pp_size)
+    ]
+    world_info = get_world_info(
+        py_env_configs.server_config, py_env_configs.distribute_config, pc
+    )
+    return _resolve_rank_rpc_addresses(
+        py_env_configs, world_info, root_ranks, timedelta(seconds=3)
+    )
+
+
+def _resolve_rank_rpc_addresses(
+    py_env_configs: PyEnvConfigs,
+    world_info: WorldInfo,
+    ranks: list[int],
+    timeout: Optional[timedelta],
+) -> list[str]:
+    """Read missing ranks from the backend registry without joining bootstrap."""
+    pc = py_env_configs.parallelism_config
+    addresses = {
+        member.world_rank: f"{member.ip}:{member.rpc_server_port}"
+        for member in world_info.members
+        if member.world_rank in ranks
+    }
+    missing = [rank for rank in ranks if rank not in addresses]
+    if missing:
+        master_ip, master_port = get_master(py_env_configs.distribute_config, pc)
+        master_port = int(master_port or py_env_configs.server_config.start_port)
+        store = TCPStore(
+            host_name=master_ip,
+            port=master_port - 1,
+            is_master=False,
+            wait_for_workers=False,
+            timeout=timeout,
+        )
+        for rank in missing:
+            address = store.get(
+                DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
+            ).decode()
+            ip, server_port = split_ip_port(address)
+            member = WorkerInfo(
+                ip=ip,
+                local_rank=rank % pc.local_world_size,
+                world_rank=rank,
+                name="",
+                server_port=server_port,
+                worker_info_port_num=0,  # Registered port already includes the local-rank offset.
+            )
+            addresses[rank] = f"{member.ip}:{member.rpc_server_port}"
+    return [addresses[rank] for rank in ranks]
 
 
 def get_local_world_info(

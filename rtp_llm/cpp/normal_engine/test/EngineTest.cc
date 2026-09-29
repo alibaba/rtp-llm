@@ -12,6 +12,8 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
@@ -32,6 +34,79 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+namespace {
+
+/** Exercise real speculative initialization without loading a checkpoint or submitting model work. */
+std::unique_ptr<ProposeModelEngineInitParams> makeLocalProposalParams(const EngineInitParams& params) {
+    auto modules    = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    auto draft      = std::make_unique<EngineInitParams>(params);
+    draft->model_id = params.model_id + 1;
+    if (params.sp_config.type == SP_TYPE_DSPARK) {
+        const auto options                = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        draft->gpt_weights.dspark_markov_w1 = torch::zeros({params.model_config_.vocab_size, 1}, options);
+        draft->gpt_weights.dspark_markov_w2 = torch::zeros({params.model_config_.vocab_size, 1}, options);
+    }
+    modules->push_back(std::move(draft));
+    return std::make_unique<ProposeModelEngineInitParams>(
+        params.sp_config.type, params.sp_config.gen_num_per_cycle, std::move(modules));
+}
+
+}
+
+#if USING_CUDA
+namespace {
+
+struct PPWarmupObserved {};
+struct UnexpectedWarmupExecutor {};
+
+/** Stop inside the real constructor's warmup before cache negotiation or the engine loop starts. */
+class PPWarmupProbeModel: public ModelBase {
+public:
+    using Observer = std::function<void(const GptModelInputs&)>;
+
+    PPWarmupProbeModel(int stage, Observer observer): stage_(stage), observer_(std::move(observer)) {}
+
+    GptModelOutputs forward(const GptModelInputs& input) override {
+        EXPECT_EQ(input.pp_intermediates.empty(), stage_ == 0);
+        if (stage_ != 0) {
+            EXPECT_TRUE(torch::equal(input.pp_intermediates.at("hidden_states"),
+                                    torch::zeros({input.combo_tokens.numel(), 4})));
+        }
+        observer_(input);
+        throw PPWarmupObserved{};
+    }
+
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& input, bool) override {
+        return {{{"hidden_states", torch::zeros({input.combo_tokens.numel(), 4})}}};
+    }
+
+private:
+    int      stage_;
+    Observer observer_;
+};
+
+struct PPWarmupFactoryGuard {
+    NormalExecutor::ModelFactory normal_factory = std::move(NormalExecutor::test_model_factory);
+    PPExecutor::ModelFactory     pp_factory     = std::move(PPExecutor::test_model_factory);
+
+    PPWarmupFactoryGuard() {
+        NormalExecutor::test_model_factory = [](const GptModelInitParams&) -> std::unique_ptr<ModelBase> {
+            ADD_FAILURE() << "NormalEngine selected NormalExecutor for PP warmup";
+            throw UnexpectedWarmupExecutor{};
+        };
+    }
+
+    ~PPWarmupFactoryGuard() {
+        NormalExecutor::test_model_factory = std::move(normal_factory);
+        PPExecutor::test_model_factory = std::move(pp_factory);
+        /** These fixtures initialize runtime tracing as false; the sentinel interrupts warmup's normal reset. */
+        setTraceMemory(false);
+    }
+};
+
+}
+#endif
 
 TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     class CopyPayloadProcessor: public NormalBatchStreamProcessor {
@@ -128,10 +203,10 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         resource.mutableBlockIds(0, "second").assign({1, 2});
         stream->setKVCache(resource);
         if (invalid_row) {
-            EXPECT_ANY_THROW((void)executor.process({stream}));
+            EXPECT_ANY_THROW((void)executor.process(ScheduleOutput{{stream}}));
             EXPECT_FALSE(reached_model);
         } else {
-            EXPECT_THROW((void)executor.process({stream}), StopBeforeSampling);
+            EXPECT_THROW((void)executor.process(ScheduleOutput{{stream}}), StopBeforeSampling);
             EXPECT_TRUE(reached_model);
         }
         runtimeSyncAndCheck();
@@ -166,10 +241,179 @@ TEST(NormalEnginePolicyTest, testBatchDecodeSchedulerCannotSuppressMultiDpMtpFak
         /*has_prefill=*/false, /*use_batch_decode_scheduler=*/false, /*dp_size=*/1));
 }
 
-TEST(NormalEnginePolicyTest, testPrefillOnlyStreamDoesNotReserveSpeculativeSteps) {
-    EXPECT_EQ(NormalEngine::reserveStepForStream(/*configured_reserve_step=*/4, /*is_prefill_only=*/true), 0);
-    EXPECT_EQ(NormalEngine::reserveStepForStream(/*configured_reserve_step=*/4, /*is_prefill_only=*/false), 4);
-    EXPECT_EQ(NormalEngine::reserveStepForStream(/*configured_reserve_step=*/0, /*is_prefill_only=*/true), 0);
+TEST_F(NormalEngineTest, testMultiDpSpeculativeFakeStreamsPreserveBothPhases) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    /** Exercise padding on a stopped engine without starting distributed model communication. */
+    engine->parallelism_config.dp_size   = 2;
+    engine->parallelism_config.role_type = RoleType::PDFUSION;
+    engine->pd_sep_config.role_type      = RoleType::PDFUSION;
+    engine->sp_config.gen_num_per_cycle  = 3;
+    EngineInitParams proposal_params;
+    proposal_params.model_id      = 0;
+    proposal_params.model_config_ = engine->model_config_;
+
+    for (const auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+        engine->sp_config.type    = type;
+        proposal_params.sp_config = engine->sp_config;
+        engine->propose_params_    = makeLocalProposalParams(proposal_params);
+        for (const bool batch_decode : {false, true}) {
+            engine->runtime_config.use_batch_decode_scheduler = batch_decode;
+            for (const int phases : {0, 1, 2, 3}) {
+                SCOPED_TRACE(::testing::Message() << "type=" << static_cast<int>(type)
+                                                  << " batch_decode=" << batch_decode << " phases=" << phases);
+                const bool has_prefill = (phases & 1) != 0;
+                const bool has_decode  = (phases & 2) != 0;
+                std::list<GenerateStreamPtr> streams;
+                for (const bool context : {true, false}) {
+                    if (context ? !has_prefill : !has_decode) {
+                        continue;
+                    }
+                    auto query                            = std::make_shared<GenerateInput>();
+                    query->input_ids                      = torch::tensor({1, 2}, torch::kInt32);
+                    query->generate_config                = std::make_shared<GenerateConfig>();
+                    query->generate_config->max_new_tokens = 2;
+                    auto stream = engine->makeStream(query);
+                    ASSERT_FALSE(stream->hasError());
+                    stream->setIsContextStream(context);
+                    streams.push_back(stream);
+                }
+                const auto original_streams = streams;
+                engine->mayAddFakeStream(streams);
+                ASSERT_EQ(streams.size(), 2u);
+                auto next = streams.begin();
+                for (const auto& stream : original_streams) {
+                    EXPECT_EQ(*next++, stream);
+                }
+                if (!has_prefill) {
+                    EXPECT_TRUE((*next)->isFakeStream());
+                    EXPECT_TRUE((*next)->isContextStream());
+                    ++next;
+                }
+                if (!has_decode) {
+                    EXPECT_TRUE((*next)->isFakeStream());
+                    EXPECT_FALSE((*next)->isContextStream());
+                    ASSERT_NE((*next)->getSPOutputBuffer(), nullptr);
+                    EXPECT_EQ((*next)->getSPOutputBuffer()->propose_step, 3);
+                    ++next;
+                }
+                EXPECT_EQ(next, streams.end());
+                const auto padded_streams = streams;
+                engine->mayAddFakeStream(streams);
+                EXPECT_EQ(streams, padded_streams);
+            }
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testPpFakeStreamsOnlyFillEmptyBatchWithoutLocalProposal) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    /** Model execution is stopped before selecting a PP stage that does not own the proposer. */
+    engine->parallelism_config.pp_size  = 3;
+    engine->parallelism_config.pp_rank  = 0;
+    engine->parallelism_config.dp_size  = 2;
+    engine->sp_config.gen_num_per_cycle = 3;
+    ASSERT_EQ(engine->propose_params_, nullptr);
+
+    for (const auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+        engine->sp_config.type = type;
+        for (const auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+            SCOPED_TRACE(::testing::Message() << "type=" << static_cast<int>(type)
+                                              << " role=" << static_cast<int>(role));
+            engine->parallelism_config.role_type = role;
+            engine->pd_sep_config.role_type      = role;
+            std::list<GenerateStreamPtr> empty_batch;
+            engine->mayAddFakeStream(empty_batch);
+            ASSERT_EQ(empty_batch.size(), 1u);
+            EXPECT_TRUE(empty_batch.front()->isFakeStream());
+            EXPECT_EQ(empty_batch.front()->isContextStream(), role != RoleType::DECODE);
+            if (role == RoleType::DECODE && type != SP_TYPE_NONE) {
+                ASSERT_NE(empty_batch.front()->getSPOutputBuffer(), nullptr);
+                EXPECT_EQ(empty_batch.front()->getSPOutputBuffer()->propose_step, 3);
+            }
+
+            for (const bool context : {true, false}) {
+                if ((role == RoleType::PREFILL && !context) || (role == RoleType::DECODE && context)) {
+                    continue;
+                }
+                auto query                            = std::make_shared<GenerateInput>();
+                query->input_ids                      = torch::tensor({1, 2}, torch::kInt32);
+                query->generate_config                = std::make_shared<GenerateConfig>();
+                query->generate_config->max_new_tokens = 2;
+                auto stream = engine->makeStream(query);
+                ASSERT_FALSE(stream->hasError());
+                stream->setIsContextStream(context);
+                std::list<GenerateStreamPtr> real_batch{stream};
+                engine->mayAddFakeStream(real_batch);
+                ASSERT_EQ(real_batch.size(), 1u);
+                EXPECT_EQ(real_batch.front(), stream);
+                EXPECT_FALSE(real_batch.front()->isFakeStream());
+            }
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testPrefillOnlyReservesRealKvForPpDraftAlignment) {
+    struct ReserveCase {
+        int             pp_size;
+        int             dp_size;
+        SpeculativeType sp_type;
+        size_t          prefill_reserve;
+        size_t          fusion_reserve;
+    };
+    const ReserveCase cases[] = {
+        {1, 2, SP_TYPE_MTP, 0, 0},
+        {1, 2, SP_TYPE_EAGLE, 0, 0},
+        {1, 2, SP_TYPE_DSPARK, 0, 0},
+        {3, 1, SP_TYPE_MTP, 0, 0},
+        {3, 1, SP_TYPE_EAGLE, 0, 0},
+        {3, 1, SP_TYPE_DSPARK, 0, 0},
+        {3, 2, SP_TYPE_NONE, 0, 0},
+        {3, 2, SP_TYPE_MTP, 4, 7},
+        {3, 2, SP_TYPE_EAGLE, 4, 7},
+        {3, 2, SP_TYPE_DSPARK, 9, 9},
+    };
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        CustomConfig config;
+        config.role_type        = role;
+        config.tokens_per_block = 8;
+        auto engine             = createMockEngine(config);
+        ASSERT_TRUE(engine->stop().ok());
+        ASSERT_EQ(engine->propose_params_, nullptr);
+        for (const auto& test_case : cases) {
+            SCOPED_TRACE(testing::Message() << "role=" << role << ", PP=" << test_case.pp_size
+                                           << ", DP=" << test_case.dp_size << ", type=" << test_case.sp_type);
+            /** Stage 0 must reserve from global SP config even though it has no local proposer. */
+            EngineInitParams params;
+            params.parallelism_config.pp_size  = test_case.pp_size;
+            params.parallelism_config.dp_size  = test_case.dp_size;
+            params.pd_sep_config.role_type     = role;
+            params.sp_config.type             = test_case.sp_type;
+            params.sp_config.gen_num_per_cycle = 3;
+            engine->parallelism_config = params.parallelism_config;
+            engine->sp_config          = params.sp_config;
+            engine->reserve_step_      = NormalEngine::calculateReserveStep(params);
+            const auto expected_reserve =
+                role == RoleType::PREFILL ? test_case.prefill_reserve : test_case.fusion_reserve;
+            EXPECT_EQ(engine->reserveStepForStream(false), engine->reserve_step_);
+            for (int extra : {0, 1}) {
+                /** Test exactly at a block boundary and one token beyond it. */
+                const int prompt_length               = 8 - static_cast<int>(expected_reserve % 8) + extra;
+                auto query                            = std::make_shared<GenerateInput>();
+                query->input_ids                       = torch::arange(1, prompt_length + 1, torch::kInt32);
+                query->generate_config                 = std::make_shared<GenerateConfig>();
+                query->generate_config->max_new_tokens = 0;
+                auto stream = engine->makeStream(query);
+                ASSERT_FALSE(stream->hasError());
+                EXPECT_EQ(stream->reserveStep(), expected_reserve);
+                EXPECT_EQ(stream->completeTokenIdsPtr()->getReserveStep(), expected_reserve);
+                const auto status = stream->streamCacheResource().initKVBlock();
+                ASSERT_TRUE(status.ok()) << status.ToString();
+                EXPECT_EQ(stream->curBlocksNum(), expected_reserve / 8 + 1 + extra);
+            }
+        }
+    }
 }
 
 TEST_F(NormalEngineTest, testMakeStreamReservesKVBeforeEnqueue) {
@@ -379,10 +623,10 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
     params.hw_kernel_config.enable_cuda_graph                        = true;
     params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
     params.runtime_config.warm_up                                    = false;
+    params.sp_config.gen_num_per_cycle                              = 3;
+    params.sp_config.sp_dspark_mask_token_id                         = model_config.vocab_size - 1;
 
-    // Keep the real NormalEngine constructor and its configuration checks.
-    // Only model execution is mocked; no draft model is needed to exercise the
-    // retained speculative configuration that previously failed at startup.
+    /** Keep the real constructor and complete local proposal parameters; no requests are submitted. */
     NormalExecutor::test_model_factory = [vocab = model_config.vocab_size](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };
@@ -399,7 +643,27 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
             params.parallelism_config.role_type = role_type;
             params.pd_sep_config.role_type      = role_type;
             params.sp_config.type               = speculative_type;
-            EXPECT_NO_THROW({ NormalEngine engine(params, nullptr); });
+            auto proposal = speculative_type == SP_TYPE_NONE ? nullptr : makeLocalProposalParams(params);
+            NormalEngine engine(params, std::move(proposal));
+            if (speculative_type == SP_TYPE_NONE) {
+                ASSERT_NE(dynamic_cast<NormalExecutor*>(engine.executor_.get()), nullptr);
+            } else {
+                ASSERT_NE(dynamic_cast<MtpExecutor*>(engine.executor_.get()), nullptr);
+            }
+            const int expected_reserve =
+                speculative_type == SP_TYPE_NONE ? 0 : speculative_type == SP_TYPE_DSPARK ? 9 : 4;
+            EXPECT_EQ(engine.reserve_step_, expected_reserve);
+
+            std::list<GenerateStreamPtr> streams;
+            engine.mayAddFakeStream(streams);
+            ASSERT_EQ(streams.size(), 1u);
+            EXPECT_TRUE(streams.front()->isFakeStream());
+            EXPECT_EQ(streams.front()->isContextStream(), role_type == RoleType::PREFILL);
+            if (role_type == RoleType::DECODE && speculative_type != SP_TYPE_NONE) {
+                const auto& buffer = streams.front()->getSPOutputBuffer();
+                ASSERT_NE(buffer, nullptr);
+                EXPECT_EQ(buffer->propose_step, 3);
+            }
         }
     }
 }
@@ -447,6 +711,122 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
 
     EXPECT_TRUE(saw_cacheless_warmup);
 }
+
+#if USING_CUDA
+TEST_F(NormalEngineTest, testPpPrefillWarmupStaysCachelessWithGenerationGraphBuckets) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard device_input("RTP_LLM_DEVICE_INPUT", "0");
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up                                    = true;
+    params.runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+    params.parallelism_config.pp_size                               = 2;
+    params.parallelism_config.world_size                            = 2;
+    params.parallelism_config.pp_stage_layer_counts                 = {1, 1};
+    params.parallelism_config.role_type                             = RoleType::PDFUSION;
+    params.pd_sep_config.role_type                                  = RoleType::PDFUSION;
+    params.hw_kernel_config.enable_cuda_graph                       = true;
+    params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
+
+    for (int stage : {0, 1}) {
+        SCOPED_TRACE(stage);
+        params.parallelism_config.pp_rank    = stage;
+        params.parallelism_config.world_rank = stage;
+        PPWarmupFactoryGuard factories;
+        bool                 saw_warmup = false;
+        PPExecutor::test_model_factory = [&](const GptModelInitParams& init) {
+            EXPECT_EQ(init.cache_manager, nullptr);
+            EXPECT_FALSE(init.kv_cache_layer_layout.has_value());
+            return std::make_unique<PPWarmupProbeModel>(stage, [&](const GptModelInputs& input) {
+                saw_warmup = true;
+                EXPECT_TRUE(input.warmup);
+                EXPECT_TRUE(input.kv_cache_group_tags.empty());
+                EXPECT_FALSE(input.kv_cache_block_id.defined());
+                EXPECT_FALSE(input.kv_cache_kernel_block_id.defined());
+                EXPECT_EQ(input.sequence_lengths.numel(), 0);
+                EXPECT_TRUE(input.input_lengths.eq(19).all().item<bool>());
+            });
+        };
+        EXPECT_THROW((void)std::make_unique<NormalEngine>(params, nullptr), PPWarmupObserved);
+        EXPECT_TRUE(saw_warmup);
+        runtimeSyncAndCheck();
+    }
+}
+
+TEST_F(NormalEngineTest, testPpDecodeWarmupUsesStageCacheAndSpeculativeHeadroom) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard device_input("RTP_LLM_DEVICE_INPUT", "0");
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up                 = true;
+    params.runtime_config.max_generate_batch_size = 2;
+    params.model_config_.max_seq_len              = 64;
+    params.model_config_.kv_cache_spec_descs = {
+        {{"first", KVCacheSpecType::MultiHeadAttention}},
+        {{"last", KVCacheSpecType::MultiHeadAttention}},
+    };
+    params.parallelism_config.pp_size              = 2;
+    params.parallelism_config.world_size           = 2;
+    params.parallelism_config.pp_stage_layer_counts = {1, 1};
+    params.parallelism_config.role_type             = RoleType::DECODE;
+    params.pd_sep_config.role_type                  = RoleType::DECODE;
+    params.sp_config.gen_num_per_cycle              = 3;
+    params.sp_config.sp_dspark_mask_token_id         = 99;
+
+    for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+        for (int stage : {0, 1}) {
+            SCOPED_TRACE(::testing::Message() << "type=" << type << ", stage=" << stage);
+            params.sp_config.type                 = type;
+            params.parallelism_config.pp_rank    = stage;
+            params.parallelism_config.world_rank = stage;
+            const std::string tag                  = stage == 0 ? "first" : "last";
+            const int         warmup_length        = type == SP_TYPE_NONE ? 63 : type == SP_TYPE_DSPARK ? 55 : 57;
+            std::unique_ptr<ProposeModelEngineInitParams> proposal;
+            if (stage == 1 && type != SP_TYPE_NONE) {
+                auto modules = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+                modules->push_back(std::make_unique<EngineInitParams>(params));
+                proposal = std::make_unique<ProposeModelEngineInitParams>(type, 3, std::move(modules));
+            }
+
+            PPWarmupFactoryGuard factories;
+            bool                 saw_warmup = false;
+            PPExecutor::test_model_factory = [&](const GptModelInitParams& init) {
+                EXPECT_NE(init.cache_manager, nullptr);
+                EXPECT_TRUE(init.kv_cache_layer_layout.has_value());
+                if (init.cache_manager) {
+                    const auto& cache = init.cache_manager->cacheConfig();
+                    EXPECT_EQ(cache.layer_num, 1u);
+                    EXPECT_EQ(cache.global_layer_begin, static_cast<uint32_t>(stage));
+                    EXPECT_EQ(cache.groupTags(), (std::vector<std::string>{tag}));
+                    EXPECT_EQ(cache.group(tag).block_num, 2u);
+                }
+                return std::make_unique<PPWarmupProbeModel>(stage, [&](const GptModelInputs& input) {
+                    saw_warmup = true;
+                    EXPECT_TRUE(input.warmup);
+                    EXPECT_EQ(input.kv_cache_group_tags, (std::vector<std::string>{tag}));
+                    ASSERT_GT(input.sequence_lengths.numel(), 0);
+                    EXPECT_TRUE(input.input_lengths.eq(warmup_length).all().item<bool>());
+                    EXPECT_TRUE(input.sequence_lengths.eq(warmup_length - 1).all().item<bool>());
+                    ASSERT_TRUE(input.kv_cache_block_id.defined());
+                    ASSERT_TRUE(input.kv_cache_kernel_block_id.defined());
+                    EXPECT_EQ(input.kv_cache_block_id.sizes().vec(),
+                              (std::vector<int64_t>{1, input.input_lengths.numel(), 32}));
+                    EXPECT_EQ(input.kv_cache_kernel_block_id.sizes().vec(), input.kv_cache_block_id.sizes().vec());
+                    EXPECT_TRUE(input.kv_cache_block_id.eq(0).all().item<bool>());
+                    EXPECT_TRUE(input.kv_cache_kernel_block_id.eq(0).all().item<bool>());
+                });
+            };
+            EXPECT_THROW((void)std::make_unique<NormalEngine>(params, std::move(proposal)), PPWarmupObserved);
+            EXPECT_TRUE(saw_warmup);
+            runtimeSyncAndCheck();
+        }
+    }
+}
+#endif
 
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
@@ -862,6 +1242,23 @@ TEST_F(NormalEngineTest, testParallelDispatchMultipleRequests) {
     engine.reset();
 }
 
+TEST_F(NormalEngineTest, testPpReserveCoversTwoWindowsWithoutAddingToMainDSparkReserve) {
+    EngineInitParams params;
+    for (const auto type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        params.sp_config.type = type;
+        params.sp_config.gen_num_per_cycle = 3;
+        params.parallelism_config.pp_size = 1;
+        params.pd_sep_config.role_type = RoleType::PDFUSION;
+        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 4);
+        params.parallelism_config.pp_size = 2;
+        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 7);
+        params.pd_sep_config.role_type = RoleType::PREFILL;
+        EXPECT_EQ(NormalEngine::calculateReserveStep(params), type == SP_TYPE_DSPARK ? 9 : 4);
+    }
+    params.sp_config.type = SP_TYPE_NONE;
+    EXPECT_EQ(NormalEngine::calculateReserveStep(params), 0);
+}
+
 TEST_F(NormalEngineTest, testSystemPrompt) {
     CustomConfig config;
     vector<int>  prompt_1           = {1, 2, 3};
@@ -1168,10 +1565,17 @@ TEST_F(NormalEngineTest, testRejectInvalidOutputVocabIds) {
 
 TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     CustomConfig config;
-    config.prefill_cp_enabled  = true;
     config.speculative_enabled = true;
-    config.warm_up_with_loss   = true;
-    EXPECT_NO_THROW(createMockEngine(config));
+    config.prefill_cp_enabled = true;
+    config.warm_up_with_loss  = true;
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params           = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.sp_config.type = SP_TYPE_MTP;
+    auto proposal         = makeLocalProposalParams(params);
+    NormalEngine engine(params, std::move(proposal));
+    EXPECT_NE(dynamic_cast<MtpExecutor*>(engine.executor_.get()), nullptr);
 }
 
 }  // namespace rtp_llm

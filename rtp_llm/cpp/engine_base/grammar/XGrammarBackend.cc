@@ -422,17 +422,24 @@ GrammarCompileResult XGrammarBackend::runCompileTask(const GrammarKeyCpp& key, c
     return result;
 }
 
-GrammarCompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
+GrammarCompileHandle XGrammarBackend::acquireCompile(const GrammarKeyCpp& key, bool is_prefetch) {
+    GrammarCompileHandle handle;
+    handle.key_ = key;
     const auto id = key.id();
 
     if (auto cached = lookupVerdict(id)) {
-        reportLookup(cached->compiled != nullptr, isInvalid(*cached));
-        return *cached;
+        handle.result_ = std::move(*cached);
+        reportLookup(handle.result_->compiled != nullptr, isInvalid(*handle.result_));
+        return handle;
     }
 
     if (!compile_pool_) {
         reportLookup(/*hit=*/false, /*invalid_hit=*/false);
-        return runCompileTask(key, /*id=*/std::string());
+        if (is_prefetch) {
+            return handle;
+        }
+        handle.result_ = runCompileTask(key, /*id=*/std::string());
+        return handle;
     }
 
     std::shared_future<GrammarCompileResult> future;
@@ -470,8 +477,9 @@ GrammarCompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
     }
 
     if (raced_cached) {
-        reportLookup(raced_cached->compiled != nullptr, isInvalid(*raced_cached));
-        return *raced_cached;
+        handle.result_ = std::move(*raced_cached);
+        reportLookup(handle.result_->compiled != nullptr, isInvalid(*handle.result_));
+        return handle;
     }
 
     // Report the miss with the count captured after singleflight insertion. A fast worker may finish
@@ -479,15 +487,45 @@ GrammarCompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
     reportLookup(/*hit=*/false, /*invalid_hit=*/false, lookup_inflight);
 
     if (rejected) {
+        if (is_prefetch) {
+            return handle;
+        }
         GrammarCompileResult out;
         out.status = absl::ResourceExhaustedError("too many outstanding grammar compiles (compile_queue_size="
                                                   + std::to_string(options_.compile_queue_size) + ")");
+        handle.result_ = std::move(out);
         RTP_LLM_LOG_WARNING("xgrammar compile rejected: type=%s, len=%zu", key.key_type.c_str(), key.key_string.size());
         reportOverload();
-        return out;
+        return handle;
     }
 
-    if (future.wait_for(std::chrono::milliseconds(options_.compile_timeout_ms)) != std::future_status::ready) {
+    handle.future_ = std::move(future);
+    return handle;
+}
+
+GrammarCompileResult XGrammarBackend::waitForCompile(GrammarCompileHandle& handle) {
+    const auto& key = handle.key_;
+    if (handle.result_) {
+        return *handle.result_;
+    }
+
+    if (!handle.future_.valid()) {
+        // A rejected prefetch is not a compile verdict. Retry at the use point
+        // so the request retains the synchronous path's submission chance.
+        auto retry = acquireCompile(key, /*is_prefetch=*/false);
+        if (retry.result_) {
+            if (!isTransient(*retry.result_)) {
+                handle.result_ = *retry.result_;
+            }
+            return *retry.result_;
+        }
+        handle.future_ = std::move(retry.future_);
+    }
+
+    if (handle.future_.wait_for(std::chrono::milliseconds(options_.compile_timeout_ms))
+        != std::future_status::ready) {
+        // A wait timeout is local to this consumer; the shared compile remains
+        // pending and a later request may still observe its completed result.
         compile_timeout_.fetch_add(1, std::memory_order_relaxed);
         GrammarCompileResult timed_out;
         timed_out.status = absl::ResourceExhaustedError(
@@ -501,7 +539,12 @@ GrammarCompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
     }
 
     try {
-        return future.get();
+        auto result = handle.future_.get();
+        if (isTransient(result)) {
+            handle.future_ = {};
+            return result;
+        }
+        handle.result_ = std::move(result);
     } catch (const std::exception& e) {
         GrammarCompileResult broken;
         broken.status = absl::UnknownError(std::string("grammar compile aborted: ") + e.what());
@@ -510,15 +553,26 @@ GrammarCompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
                             key.key_string.size(),
                             std::string(broken.status.message()).c_str());
         reportOverload();
+        handle.future_ = {};
         return broken;
     } catch (...) {
         GrammarCompileResult broken;
         broken.status = absl::UnknownError("grammar compile aborted");
-        RTP_LLM_LOG_WARNING(
-            "xgrammar compile aborted: type=%s, len=%zu", key.key_type.c_str(), key.key_string.size());
+        RTP_LLM_LOG_WARNING("xgrammar compile aborted: type=%s, len=%zu", key.key_type.c_str(), key.key_string.size());
         reportOverload();
+        handle.future_ = {};
         return broken;
     }
+    return *handle.result_;
+}
+
+GrammarCompileHandle XGrammarBackend::prefetch(const GrammarKeyCpp& key) {
+    return acquireCompile(key, /*is_prefetch=*/true);
+}
+
+GrammarCompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
+    auto handle = acquireCompile(key, /*is_prefetch=*/false);
+    return waitForCompile(handle);
 }
 
 absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> XGrammarBackend::compile(const GrammarKeyCpp& key) {
@@ -538,6 +592,17 @@ absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> XGrammarBackend::createMatche
         return absl::Status(compiled_or.status().code(), "Failed to compile " + key.key_type + " grammar: " + error);
     }
     return createMatcher(std::move(compiled_or.value()));
+}
+
+absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
+XGrammarBackend::createMatcherFromHandle(GrammarCompileHandle& handle) {
+    auto result = waitForCompile(handle);
+    if (!result.compiled) {
+        const std::string error =
+            result.status.message().empty() ? "unknown compile error" : std::string(result.status.message());
+        return absl::Status(result.status.code(), "Failed to compile " + handle.key_.key_type + " grammar: " + error);
+    }
+    return createMatcher(std::move(result.compiled));
 }
 
 absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>

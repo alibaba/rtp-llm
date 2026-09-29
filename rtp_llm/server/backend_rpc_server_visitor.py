@@ -1028,21 +1028,10 @@ def create_backend_rpc_server_visitor(
     `attn_config.tokens_per_block`; produce it via `ModelFactory.create_model_config`.
     """
     from rtp_llm.config.engine_config import EngineConfig
-    from rtp_llm.distribute.distributed_server import (
-        get_dp_addrs_from_world_info,
-        get_world_info,
-    )
+    from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
 
     engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
-    world_info = get_world_info(
-        server_config=py_env_configs.server_config,
-        distribute_config=py_env_configs.distribute_config,
-        parallelism_config=py_env_configs.parallelism_config,
-    )
-    addresses = get_dp_addrs_from_world_info(
-        world_info=world_info,
-        parallelism_config=engine_config.parallelism_config,
-    )
+    addresses = get_dp_rpc_addresses(py_env_configs)
     vit_separation = None
     if py_env_configs.vit_config:
         vit_separation = py_env_configs.vit_config.vit_separation
