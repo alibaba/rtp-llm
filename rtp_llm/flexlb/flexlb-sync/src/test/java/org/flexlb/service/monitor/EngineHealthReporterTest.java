@@ -363,6 +363,7 @@ class EngineHealthReporterTest {
         WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.ENCODER, 800, 1000, null, 3, 4);
         EncoderEndpoint endpoint = mock(EncoderEndpoint.class);
         when(endpoint.pendingEncoderRequestCount()).thenReturn(2);
+        when(endpoint.inflightUncachedTokenEstimate()).thenReturn(640L);
         when(endpoint.getLoadMetric()).thenReturn(OptionalLong.empty());
 
         reporter.reportStatusCheckerSuccess("test-model", workerStatus, endpoint, 3, 1);
@@ -373,8 +374,11 @@ class EngineHealthReporterTest {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.flexlb.encoder.selection.load",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.flexlb.encoder.uncached.token.load",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).report("app.flexlb.encoder.pending.request.count", tags, 2.0);
         verify(monitor).report("app.flexlb.encoder.selection.load", tags, 9.0);
+        verify(monitor).report("app.flexlb.encoder.uncached.token.load", tags, 640.0);
         verify(monitor).report("app.cache.available.kv.cache.tokens", tags, 800.0);
     }
 

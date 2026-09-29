@@ -230,7 +230,8 @@ gRPC Schedule 在校验请求 ID 前创建基础上下文，记录入口时间�
 即使响应 observer 抛出异常也执行收尾。业务请求初始化失败时，基础上下文仍用于完成统计与 PV。
 同一业务请求先调度 Encoder、再调度 Generation 时，Schedule PV 的 `phase` 区分两次决策，
 `server_status.role` 保留实际选中的角色。Encoder 选点失败和 WorkerStatus 生命周期异常
-沿用请求错误码与状态日志。
+沿用请求错误码与状态日志。调度摘要日志输出可选的 `encoder_cache_hit_len`，Schedule PV 输出
+可选的 `encoderCacheHitLen`；缺失值与显式 0 可区分。
 
 本地 Schedule 的正常完成、异常、取消和 RPC deadline 到期统一经过处理链完成回调。
 `completeOnce` 的完成门闩保证收尾只执行一次，`finally` 负责耗时记录、PV 输出、取消监听器
@@ -288,9 +289,12 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 
 Encoder 的 worker 数由周期指标上报 `app.engine.health.check.engine.encoder.worker.number`；
 WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
-`app.flexlb.encoder.selection.load`、`app.cache.available.kv.cache.tokens`。
-后三项按 `model`、`engineIp`、`role=ENCODER` 标记，分别表示尚未在 WorkerStatus
-看到的本地选点数、策略比较的 `running + waiting + pending` 负载及可用 KV cache。
+`app.flexlb.encoder.selection.load`、`app.flexlb.encoder.uncached.token.load`。
+三项按 `model`、`engineIp`、`role=ENCODER` 标记，分别表示尚未在 WorkerStatus
+看到的本地选点数、`running + waiting + pending` 并发数和在途编码工作量代理值。
+最后一项在首次 WorkerStatus 前采用 Client 的 MM token 预测值，之后采用活动任务的合成输入
+`input_length`；两者口径可能略有差异，finished 中的长度不参与该指标。
+通用 KV 指标仍上报，但不参与 Encoder 选点。
 `app.flexlb.scheduler.inflight.size` 按
 `role=PREFILL`（Generation）和 `role=ENCODER`（Encoder）分别上报，
 `engineIp=scheduler`；原有 Prefill 序列仍只统计 Generation。

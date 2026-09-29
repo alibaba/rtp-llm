@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class EncoderEndpoint extends WorkerEndpoint {
 
-    private enum RequestObservation { WAITING_FOR_WORKER, SEEN_IN_WORKER }
+    private record RequestObservation(boolean seenInWorker, long estimatedUncachedTokens) { }
 
     private final EndpointEventProjector endpointEvents;
     private final ConcurrentMap<String, RequestObservation> requestObservations = new ConcurrentHashMap<>();
@@ -34,14 +34,14 @@ public final class EncoderEndpoint extends WorkerEndpoint {
      * Track a selected request until status reports it running or finished.
      * Returns false if the worker is retiring or already tracks this request.
      */
-    public boolean trackSelectedRequest(String requestId) {
+    public boolean trackSelectedRequest(String requestId, long estimatedUncachedTokens) {
         if (isGenerationRetiringOrRetired()) { return false; }
         AtomicBoolean added = new AtomicBoolean();
         requestObservations.compute(requestId, (id, current) -> {
             if (current != null) { return current; }
             pendingRequestCount.incrementAndGet();
             added.set(true);
-            return RequestObservation.WAITING_FOR_WORKER;
+            return new RequestObservation(false, Math.max(0L, estimatedUncachedTokens));
         });
         return added.get();
     }
@@ -51,7 +51,7 @@ public final class EncoderEndpoint extends WorkerEndpoint {
      */
     public void forgetRequest(String requestId) {
         requestObservations.computeIfPresent(requestId, (id, current) -> {
-            if (current == RequestObservation.WAITING_FOR_WORKER) {
+            if (!current.seenInWorker()) {
                 pendingRequestCount.decrementAndGet();
             }
             return null;
@@ -63,6 +63,28 @@ public final class EncoderEndpoint extends WorkerEndpoint {
      */
     public int pendingEncoderRequestCount() {
         return pendingRequestCount.get();
+    }
+
+    /**
+     * Estimated Encoder work: client MM token estimates before status, then
+     * each active task's uncached synthesized input length from WorkerStatus.
+     */
+    public long inflightUncachedTokenEstimate() {
+        var activeTasks = getStatus().committedEngineObservation().runningTaskList();
+        long total = 0L;
+        for (WorkerStatus.TaskObservation task : activeTasks.values()) {
+            total = addSaturated(total, Math.max(0L, task.inputLength()));
+        }
+        for (var entry : requestObservations.entrySet()) {
+            if (!entry.getValue().seenInWorker() && !activeTasks.containsKey(entry.getKey())) {
+                total = addSaturated(total, entry.getValue().estimatedUncachedTokens());
+            }
+        }
+        return total;
+    }
+
+    private static long addSaturated(long total, long additional) {
+        return Long.MAX_VALUE - total < additional ? Long.MAX_VALUE : total + additional;
     }
 
     @Override
@@ -103,10 +125,10 @@ public final class EncoderEndpoint extends WorkerEndpoint {
 
     private boolean markObserved(String requestId) {
         return requestObservations.computeIfPresent(requestId, (id, current) -> {
-            if (current == RequestObservation.WAITING_FOR_WORKER) {
+            if (!current.seenInWorker()) {
                 pendingRequestCount.decrementAndGet();
             }
-            return RequestObservation.SEEN_IN_WORKER;
+            return new RequestObservation(true, current.estimatedUncachedTokens());
         }) != null;
     }
 

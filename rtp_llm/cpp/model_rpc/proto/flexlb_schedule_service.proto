@@ -87,6 +87,10 @@ message FlexlbScheduleRequestPB {
     // the client does not provide precomputed keys.
     repeated int32 input_ids = 16;
     repeated ScheduleRolePB schedule_roles = 17;
+    // Estimated MM encoder tokens already cached when this Encoder request is
+    // routed. Absent means the client did not provide a cache estimate; zero
+    // means it checked and found no cached encoder tokens.
+    optional int64 encoder_cache_hit_len = 18;
 }
 
 message FlexlbServerStatusPB {

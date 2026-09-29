@@ -88,6 +88,44 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void schedulePassesEncoderCacheHitLengthWithoutChangingSequenceLength() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
+                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("partial-hit")
+                .setSeqLen(1000)
+                .setEncoderCacheHitLen(200)
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                .build(), mock(StreamObserver.class));
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertEquals(1000, context.getValue().getRequest().getSeqLen());
+        assertEquals(200L, context.getValue().getRequest().getEncoderCacheHitLen());
+    }
+
+    @Test
+    void scheduleRejectsEncoderCacheHitLengthOutsideRequestLength() {
+        for (long invalidHitLength : List.of(-1L, 1001L)) {
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+            service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("invalid-encoder-hit-" + invalidHitLength)
+                    .setSeqLen(1000)
+                    .setEncoderCacheHitLen(invalidHitLength)
+                    .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                    .build(), observer);
+
+            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(response.capture());
+            assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getValue().getCode());
+        }
+        verify(routeService, never()).route(any());
+    }
+
+    @Test
     void scheduleWithoutRoleListUsesEncoderPhaseForEncoderOnlyModel() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         ServiceRoute modelRoute = mock(ServiceRoute.class);

@@ -44,6 +44,12 @@ public class Request {
     @JsonProperty("seq_len")
     private long seqLen;
 
+    /**
+     * Client-estimated Encoder cache hit in MM tokens; null means not provided.
+     */
+    @JsonProperty("encoder_cache_hit_len")
+    private Long encoderCacheHitLen;
+
     @JsonProperty("cache_key_block_size")
     private long cacheKeyBlockSize;
 

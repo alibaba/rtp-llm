@@ -61,6 +61,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENCODER_PENDING_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.ENCODER_SELECTION_LOAD;
+import static org.flexlb.constant.MetricConstant.ENCODER_UNCACHED_TOKEN_LOAD;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_RT;
@@ -169,6 +170,7 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_ENCODER_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENCODER_PENDING_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENCODER_SELECTION_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENCODER_UNCACHED_TOKEN_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL_TOTAL,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
@@ -539,6 +541,8 @@ public class EngineHealthReporter {
             monitor.report(ENCODER_SELECTION_LOAD, metricTags,
                     Math.max(0, status.runningQueryLen())
                             + Math.max(0, status.waitingQueryLen()) + pendingRequests);
+            monitor.report(ENCODER_UNCACHED_TOKEN_LOAD, metricTags,
+                    ep == null ? 0 : ((EncoderEndpoint) ep).inflightUncachedTokenEstimate());
         }
         if (status.blockSize() > 0) {
             monitor.report(CACHE_BLOCK_SIZE, metricTags, status.blockSize());

@@ -21,7 +21,7 @@ class EncoderStrategyTest {
     private final EncoderStrategy strategy = new EncoderStrategy(directory);
 
     @Test
-    void selectsLeastConcurrentWorkerThenMostAvailableKvCache() {
+    void selectsLeastConcurrentWorkerWithoutUsingAvailableKvCache() {
         endpoint("busy", 8001, true, 40, 2, 2, 0);
         endpoint("zero-kv", 8004, true, 0, 1, 1, 0);
         endpoint("small-kv", 8002, true, 10, 1, 1, 0);
@@ -30,15 +30,15 @@ class EncoderStrategyTest {
                 .thenReturn(List.of("busy", "zero-kv", "small-kv", "winner"));
 
         try (SelectedRole selected = strategy.select(context(), "group")) {
-            assertEquals("winner", selected.serverStatus().getServerIp());
+            assertEquals("zero-kv", selected.serverStatus().getServerIp());
             assertEquals(RoleType.ENCODER, selected.serverStatus().getRole());
         }
     }
 
     @Test
-    void ignoresDeadAndNegativeKvWorkersAndIncludesPendingLocalRequests() {
+    void ignoresDeadWorkersAndIncludesPendingLocalRequests() {
         endpoint("dead", 8001, false, 100, 0, 0, 0);
-        endpoint("negative", 8002, true, -1, 0, 0, 0);
+        endpoint("negative", 8002, true, -1, 2, 0, 0);
         endpoint("pending", 8003, true, 100, 0, 0, 3);
         endpoint("winner", 8004, true, 1, 1, 0, 0);
         when(directory.endpointAddressSnapshot(RoleType.ENCODER))
@@ -50,10 +50,10 @@ class EncoderStrategyTest {
     }
 
     @Test
-    void returnsNoSelectionWhenNoEligibleWorkerExists() {
-        endpoint("negative", 8001, true, -1, 0, 0, 0);
+    void returnsNoSelectionWhenNoLiveWorkerExists() {
+        endpoint("dead", 8001, false, -1, 0, 0, 0);
         when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("negative"));
+                .thenReturn(List.of("dead"));
 
         assertNull(strategy.select(context(), "group"));
     }
@@ -70,7 +70,21 @@ class EncoderStrategyTest {
         }
     }
 
-    private void endpoint(String address, int port, boolean alive, long kv,
+    @Test
+    void knownCacheEstimateSelectsLessUncachedWorkEvenWhenItHasMoreRequests() {
+        EncoderEndpoint longJob = endpoint("long-job", 8001, true, 0, 1, 0, 0);
+        EncoderEndpoint shortJobs = endpoint("short-jobs", 8002, true, -1, 4, 0, 0);
+        when(longJob.inflightUncachedTokenEstimate()).thenReturn(1000L);
+        when(shortJobs.inflightUncachedTokenEstimate()).thenReturn(40L);
+        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
+                .thenReturn(List.of("long-job", "short-jobs"));
+
+        try (SelectedRole selected = strategy.select(context(1000L, 200L), "group")) {
+            assertEquals("short-jobs", selected.serverStatus().getServerIp());
+        }
+    }
+
+    private EncoderEndpoint endpoint(String address, int port, boolean alive, long kv,
                           long running, long waiting, int pending) {
         WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
         EncoderEndpoint endpoint = mock(EncoderEndpoint.class);
@@ -91,6 +105,7 @@ class EncoderStrategyTest {
         when(engine.availableKvCacheTokens()).thenReturn(kv);
         when(engine.runningQueryLen()).thenReturn(running);
         when(engine.waitingQueryLen()).thenReturn(waiting);
+        return endpoint;
     }
 
     private static BalanceContext context() {
@@ -98,6 +113,13 @@ class EncoderStrategyTest {
         Request request = new Request();
         request.setRequestId("encoder-request");
         context.setRequest(request);
+        return context;
+    }
+
+    private static BalanceContext context(long seqLen, long encoderCacheHitLen) {
+        BalanceContext context = context();
+        context.getRequest().setSeqLen(seqLen);
+        context.getRequest().setEncoderCacheHitLen(encoderCacheHitLen);
         return context;
     }
 }
