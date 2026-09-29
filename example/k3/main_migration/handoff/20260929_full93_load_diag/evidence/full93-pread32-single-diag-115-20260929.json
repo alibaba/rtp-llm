@@ -1,0 +1,21 @@
+{
+  "purpose": "bounded loading-path diagnosis; no smoke request or benchmark",
+  "fastsafetensors_nogds": false,
+  "pread_helper": true,
+  "pread_threads": 32,
+  "elapsed_s": 64.1,
+  "launcher_exit": -15,
+  "all_ranks_reached_tensor_20": true,
+  "rank_max_load_event_count": {
+    "0": 21,
+    "1": 21,
+    "2": 21,
+    "3": 21,
+    "4": 21,
+    "5": 21,
+    "6": 21,
+    "7": 21
+  },
+  "run": "/data0/luohaocheng.lhc/k3integrated-115-fp8-93l-20260929-single-diag-r5",
+  "runfile_symlink_restored": true
+}

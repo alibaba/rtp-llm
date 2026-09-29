@@ -1,0 +1,46 @@
+{
+  "purpose": "concurrent functional diagnostic; timings are not benchmark results",
+  "elapsed_wall_s": 17.427,
+  "workers": [
+    {
+      "gpu": 0,
+      "exit_code": 0,
+      "result_exists": true
+    },
+    {
+      "gpu": 1,
+      "exit_code": 0,
+      "result_exists": true
+    },
+    {
+      "gpu": 2,
+      "exit_code": 0,
+      "result_exists": true
+    },
+    {
+      "gpu": 3,
+      "exit_code": 0,
+      "result_exists": true
+    },
+    {
+      "gpu": 4,
+      "exit_code": 0,
+      "result_exists": true
+    },
+    {
+      "gpu": 5,
+      "exit_code": 0,
+      "result_exists": true
+    },
+    {
+      "gpu": 6,
+      "exit_code": 0,
+      "result_exists": true
+    },
+    {
+      "gpu": 7,
+      "exit_code": 0,
+      "result_exists": true
+    }
+  ]
+}

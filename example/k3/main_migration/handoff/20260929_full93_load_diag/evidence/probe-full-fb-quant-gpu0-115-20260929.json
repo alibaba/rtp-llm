@@ -1,0 +1,17 @@
+{
+  "source": "/mnt/hf3fs/3fs/models/kimi/kimi-k3/model-00001-of-000096.safetensors",
+  "source_shape": [
+    12288,
+    128
+  ],
+  "quant_shape": [
+    128,
+    12288
+  ],
+  "packed_shape": [
+    128,
+    24
+  ],
+  "packed_first": 1953789044,
+  "elapsed_s_diagnostic_only": 0.473
+}

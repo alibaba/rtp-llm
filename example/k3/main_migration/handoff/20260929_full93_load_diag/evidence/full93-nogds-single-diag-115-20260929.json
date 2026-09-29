@@ -1,0 +1,19 @@
+{
+  "purpose": "bounded startup diagnosis, no smoke requests or benchmark measurement",
+  "nogds": true,
+  "pread_threads": 64,
+  "elapsed_s": 180.2,
+  "launcher_exit": -15,
+  "run": "/data0/luohaocheng.lhc/k3integrated-115-fp8-93l-20260929-single-diag-r3-nogds",
+  "rank_last_events": {
+    "0": "K3_DIAG_LOAD_END count=18 key=language_model.model.layers.0.self_attn.f_b_proj.weight layer=0",
+    "1": "K3_DIAG_LOAD_END count=18 key=language_model.model.layers.0.self_attn.f_b_proj.weight layer=0",
+    "2": "K3_DIAG_LOAD_BEGIN count=18 key=language_model.model.layers.0.self_attn.f_b_proj.weight layer=0 weight=KimiK3LoadFp8Weight",
+    "3": "K3_DIAG_LOAD_END count=18 key=language_model.model.layers.0.self_attn.f_b_proj.weight layer=0",
+    "4": "K3_DIAG_LOAD_END count=18 key=language_model.model.layers.0.self_attn.f_b_proj.weight layer=0",
+    "5": "K3_DIAG_LOAD_END count=18 key=language_model.model.layers.0.self_attn.f_b_proj.weight layer=0",
+    "6": "K3_DIAG_LOAD_END count=18 key=language_model.model.layers.0.self_attn.f_b_proj.weight layer=0",
+    "7": "K3_DIAG_LOAD_END count=18 key=language_model.model.layers.0.self_attn.f_b_proj.weight layer=0"
+  },
+  "runfile_symlink_restored": true
+}
