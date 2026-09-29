@@ -822,12 +822,14 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 }
             }
             // Keep request summaries at DEBUG while metrics remain always-on.
-            String logFormat = "[request-scheduler] request_id={} phase={} priority={} seq_len={} max_new_tokens={} "
+            String logFormat = "[request-scheduler] request_id={} phase={} priority={} seq_len={} "
+                    + "encoder_cache_hit_len={} max_new_tokens={} "
                     + "request_expires_at_ms={} plan_type={} plan_cost={} "
                     + "victim_count={} selected_encoder={} selected_prefill={} selected_decode={} "
                     + "failure_reason={} commit_result={}";
             Object[] logArgs = {
                     ctx.getRequestId(), ctx.getRequestPhase(), ctx.getPriority(), ctx.getRequest().getSeqLen(),
+                    ctx.getRequest().getEncoderCacheHitLen(),
                     ctx.getRequest().getMaxNewTokens(),
                     ctx.getRequestExpiresAtMs(),
                     ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
@@ -915,6 +917,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setRequestId(requestId);
         request.setBlockCacheKeys(pb.getBlockCacheKeysList());
         request.setSeqLen(pb.getSeqLen());
+        if (pb.hasEncoderCacheHitLen()) {
+            if (pb.getEncoderCacheHitLen() < 0 || pb.getEncoderCacheHitLen() > pb.getSeqLen()) {
+                throw new IllegalArgumentException("encoder_cache_hit_len must be in [0, seq_len]");
+            }
+            request.setEncoderCacheHitLen(pb.getEncoderCacheHitLen());
+        }
         // Keep the wire values for transport compatibility and request
         // observability. FlexLB scheduling expiration is owned by the QUEUE
         // configuration below, not by the caller.

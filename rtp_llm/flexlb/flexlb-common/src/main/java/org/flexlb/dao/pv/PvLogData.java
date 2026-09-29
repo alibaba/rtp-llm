@@ -25,6 +25,8 @@ public class PvLogData {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long seqLen;
     @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long encoderCacheHitLen;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long requestBodyBytes;
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long requestTimeMs;
@@ -93,6 +95,7 @@ public class PvLogData {
         if (request != null) {
             this.requestId = request.getRequestId();
             this.seqLen = request.getSeqLen();
+            this.encoderCacheHitLen = request.getEncoderCacheHitLen();
             this.requestTimeMs = request.getRequestTimeMs();
         }
         this.requestBodyBytes = ctx.getRequestBodyBytes();

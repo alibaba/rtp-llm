@@ -81,6 +81,11 @@ public class MetricConstant {
     public static final String ENCODER_SELECTION_LOAD = "app.flexlb.encoder.selection.load";
 
     /**
+     * Estimated uncached Encoder tokens across running, waiting, and locally pending requests.
+     */
+    public static final String ENCODER_UNCACHED_TOKEN_LOAD = "app.flexlb.encoder.uncached.token.load";
+
+    /**
      * FlexLB scheduler total load per decode worker (confirmed running + scheduler inflight)
      */
     public static final String DECODE_TOTAL_LOAD = "app.flexlb.decode.total.load";

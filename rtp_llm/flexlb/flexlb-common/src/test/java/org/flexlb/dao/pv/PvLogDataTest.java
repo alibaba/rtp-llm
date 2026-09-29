@@ -34,6 +34,23 @@ class PvLogDataTest {
     }
 
     @Test
+    void includesEncoderCacheHitLengthOnlyWhenClientProvidesIt() throws Exception {
+        BalanceContext context = new BalanceContext();
+        Request request = new Request();
+        request.setRequestId("encoder-stage");
+        context.setRequest(request);
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+        var omitted = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        assertFalse(omitted.has("encoderCacheHitLen"));
+
+        request.setEncoderCacheHitLen(0L);
+        var knownMiss = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        assertTrue(knownMiss.has("encoderCacheHitLen"));
+        assertEquals(0L, knownMiss.path("encoderCacheHitLen").asLong());
+    }
+
+    @Test
     void terminalResponseUsesFinalOutcomeWithoutMutatingRoutingResponse() throws Exception {
         BalanceContext context = new BalanceContext();
         Response routed = Response.error(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED);

@@ -240,7 +240,11 @@ public final class RequestSlot {
                     || state != RequestState.Phase.QUEUED || encoderEndpoint != null) {
                 return false;
             }
-            if (!endpoint.trackSelectedRequest(requestId)) { return false; }
+            long seqLen = Math.max(0L, context.getRequest().getSeqLen());
+            Long cacheHit = context.getRequest().getEncoderCacheHitLen();
+            long estimatedUncached = seqLen - Math.min(seqLen,
+                    Math.max(0L, cacheHit == null ? 0L : cacheHit));
+            if (!endpoint.trackSelectedRequest(requestId, estimatedUncached)) { return false; }
             encoderEndpoint = endpoint;
             deliveryClaimKind = DeliveryClaimKind.ROUTE_DECISION;
             transitionLocked(RequestState.Phase.DISPATCHING, "route decision delivery started");

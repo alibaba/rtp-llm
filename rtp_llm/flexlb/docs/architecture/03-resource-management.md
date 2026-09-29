@@ -14,8 +14,11 @@
 
 `EndpointRegistry` 按角色和 `ip:port` 维护 Prefill、Decode、P/D Fusion 与 VIT endpoint。
 Encoder 有独立的 `EncoderEndpoint`，不会与同地址的 VIT 或 Generation endpoint 共用任务账本。
-选中 Encoder 后，endpoint 记录尚未在 WorkerStatus 中出现的请求；该数量参与下一次
-Encoder 选点，并在观察到活跃任务、完成任务、取消或失活后清除。
+选中 Encoder 后，endpoint 记录尚未在 WorkerStatus 中出现的请求及预计未命中编码长度；
+首次观察到任务前按 `seq_len - encoder_cache_hit_len` 记账。WorkerStatus 出现 waiting/running 任务后，
+用该组去重后的未命中合成输入 `input_length` 替换预测值，直到任务结束；不扣减 `prefix_length`。
+全命中组可能只上报 finished，其 `input_length` 是原始 prompt 长度，不计入编码负载；
+finished、取消或失活后按请求 ID 清除本地记录。
 同一地址的 `WorkerStatus` 代际变化时，registry 原子替换 endpoint 并关闭旧实例；
 过期 worker 只能用当时观察到的 `WorkerStatus` 对象条件删除，避免删掉同地址的
 新代际。

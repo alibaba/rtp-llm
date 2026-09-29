@@ -183,6 +183,81 @@ class RequestRegistryTest {
     }
 
     @Test
+    void encoderLoadUsesActiveWorkerInputLengthWithoutPrefixSubtraction() throws Exception {
+        BalanceContext context = context(109L);
+        context.setRequestPhase(RequestPhase.ENCODER);
+        context.getRequest().setSeqLen(1000);
+        context.getRequest().setEncoderCacheHitLen(200L);
+        CompletableFuture<Response> future = lifecycle.register(context);
+        WorkerStatus worker = mock(WorkerStatus.class);
+        WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
+        when(worker.committedEngineObservation()).thenReturn(engine);
+        when(engine.runningTaskList()).thenReturn(Map.of());
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertTrue(lifecycle.claimEncoderRoute("109", future, pin));
+        }
+        assertEquals(800L, endpoint.inflightUncachedTokenEstimate());
+
+        WorkerStatus.TaskObservation task = mock(WorkerStatus.TaskObservation.class);
+        WorkerStatus.TaskTelemetry telemetry = mock(WorkerStatus.TaskTelemetry.class);
+        when(task.requestId()).thenReturn("109");
+        when(task.inputLength()).thenReturn(400L);
+        when(task.prefixLength()).thenReturn(600L);
+        when(task.telemetry()).thenReturn(telemetry);
+        when(telemetry.prefixLengthValid()).thenReturn(false);
+        when(engine.runningTaskList()).thenReturn(Map.of("109", task));
+        WorkerStatus.StatusObservation running = mock(WorkerStatus.StatusObservation.class);
+        when(running.owner()).thenReturn(worker);
+        when(running.runningTasks()).thenReturn(Map.of("109", task));
+        endpoint.observeStatusHeartbeat(worker, running).run();
+
+        assertEquals(400L, endpoint.inflightUncachedTokenEstimate());
+
+        when(telemetry.prefixLengthValid()).thenReturn(true);
+        assertEquals(400L, endpoint.inflightUncachedTokenEstimate());
+
+        lifecycle.cancelRequest("109", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+        when(engine.runningTaskList()).thenReturn(Map.of());
+        assertEquals(0L, endpoint.inflightUncachedTokenEstimate());
+    }
+
+    @Test
+    void encoderCacheOnlyFinishedIgnoresOriginalPromptLength() throws Exception {
+        BalanceContext context = context(110L);
+        context.setRequestPhase(RequestPhase.ENCODER);
+        context.getRequest().setSeqLen(1000);
+        context.getRequest().setEncoderCacheHitLen(0L);
+        CompletableFuture<Response> future = lifecycle.register(context);
+        WorkerStatus worker = mock(WorkerStatus.class);
+        WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
+        when(worker.committedEngineObservation()).thenReturn(engine);
+        when(engine.runningTaskList()).thenReturn(Map.of());
+        EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+
+        try (var pin = endpoint.tryPinGeneration()) {
+            assertTrue(lifecycle.claimEncoderRoute("110", future, pin));
+        }
+        assertEquals(1000L, endpoint.inflightUncachedTokenEstimate());
+
+        WorkerStatus.TaskObservation task = mock(WorkerStatus.TaskObservation.class);
+        when(task.requestId()).thenReturn("110");
+        when(task.inputLength()).thenReturn(40L);
+        WorkerStatus.StatusObservation finished = mock(WorkerStatus.StatusObservation.class);
+        when(finished.alive()).thenReturn(true);
+        when(finished.runningTasks()).thenReturn(Map.of());
+        when(finished.finishedTasks()).thenReturn(Map.of("110", task));
+        WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
+        when(prepared.observation()).thenReturn(finished);
+        endpoint.applyPreparedStatus(worker, prepared).run();
+
+        assertEquals(0L, endpoint.inflightUncachedTokenEstimate());
+        assertEquals(RequestState.Phase.COMPLETED,
+                lifecycle.getRequestState("110", 0L, RequestPhase.ENCODER).state());
+    }
+
+    @Test
     void concurrentEncoderSelectionsKeepEveryPendingRequest() throws Exception {
         EncoderEndpoint endpoint = new EncoderEndpoint(mock(WorkerStatus.class),
                 new EndpointEventProjector(lifecycle));
@@ -194,7 +269,7 @@ class RequestRegistryTest {
                 String requestId = "encoder-" + index;
                 selected.add(executor.submit(() -> {
                     start.await();
-                    return endpoint.trackSelectedRequest(requestId);
+                    return endpoint.trackSelectedRequest(requestId, 0L);
                 }));
             }
             start.countDown();
@@ -202,7 +277,7 @@ class RequestRegistryTest {
                 assertTrue(result.get(5, TimeUnit.SECONDS));
             }
             assertEquals(requestCount, endpoint.pendingEncoderRequestCount());
-            assertFalse(endpoint.trackSelectedRequest("encoder-0"));
+            assertFalse(endpoint.trackSelectedRequest("encoder-0", 0L));
         }
         for (int index = 0; index < requestCount; index++) {
             endpoint.forgetRequest("encoder-" + index);
@@ -217,7 +292,7 @@ class RequestRegistryTest {
         try (var executor = Executors.newFixedThreadPool(2)) {
             for (int index = 0; index < 32; index++) {
                 String requestId = "encoder-race-" + index;
-                assertTrue(endpoint.trackSelectedRequest(requestId));
+                assertTrue(endpoint.trackSelectedRequest(requestId, 0L));
                 WorkerStatus.TaskObservation task = mock(WorkerStatus.TaskObservation.class);
                 when(task.requestId()).thenReturn(requestId);
                 WorkerStatus.StatusObservation status = mock(WorkerStatus.StatusObservation.class);
