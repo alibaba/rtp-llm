@@ -2011,6 +2011,16 @@ void CudaGraphRunner::replayGraph(int key) {
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
+    // A target forward creates a Python side-cache transaction. Warmup's
+    // transaction must never be mistaken for the graph-owned capture stage.
+    const bool has_target_graph_transaction =
+        is_target_verify_ && py::hasattr(py_instance_, "clear_speculative_target_graph_capture");
+    auto clear_target_stage = [&]() {
+        if (has_target_graph_transaction) {
+            py_instance_.attr("clear_speculative_target_graph_capture")();
+        }
+    };
+
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
@@ -2021,8 +2031,11 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
         ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+        clear_target_stage();
         py_forward_method_(inputs, attn_pyobj);
+        clear_target_stage();
         py_forward_method_(inputs, attn_pyobj);
+        clear_target_stage();
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;
@@ -2072,6 +2085,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 mtp_target_hidden_states.copy_(outputs.mtp_target_hidden_states);
             }
             graph.capture_end();
+        }
+        if (has_target_graph_transaction) {
+            py_instance_.attr("save_speculative_target_graph_capture")(key);
         }
         // Keep the dirty guard armed after capture_end(). finish_capture_session()
         // and the first replay still own graph/allocator state that cannot be

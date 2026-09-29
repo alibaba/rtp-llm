@@ -98,6 +98,7 @@ class _PLETargetTransaction:
     prepared_writes: Optional[list[_PLEPreparedWrite]] = None
     commit_started: bool = False
     tentative_committed: bool = False
+    graph_key: Optional[int] = None
 
 
 class Qwen4ExpAttention(Qwen3NextAttention):
@@ -457,6 +458,7 @@ class Qwen4ExpModel(Qwen35Model):
         super().__init__(*args, **kwargs)
         self.ple_layers = nn.ModuleDict()
         self._ple_target_transaction: Optional[_PLETargetTransaction] = None
+        self._ple_graph_target_transactions: Dict[int, _PLETargetTransaction] = {}
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
@@ -909,6 +911,55 @@ class Qwen4ExpModel(Qwen35Model):
                 f"qwen4_exp speculative target {phase} fault injection on TP rank {rank}"
             )
 
+    def clear_speculative_target_graph_capture(self) -> None:
+        """Discard a target stage left by capture warmup, never a live commit."""
+        transaction = self._ple_target_transaction
+        if transaction is None:
+            return
+        if transaction.graph_key is not None or transaction.prepared_writes is not None:
+            raise RuntimeError("cannot discard an active PLE target commit")
+        self._synchronize_ple_transaction(transaction)
+        self._ple_target_transaction = None
+
+    def save_speculative_target_graph_capture(self, graph_key: int) -> None:
+        """Retain graph-owned stage tensors for later replay of this exact batch."""
+        if graph_key <= 0 or graph_key in self._ple_graph_target_transactions:
+            raise RuntimeError("invalid or duplicate PLE target graph key")
+        transaction = self._ple_target_transaction
+        if transaction is None:
+            if self.ple_layers:
+                raise RuntimeError("PLE target graph captured without a transaction")
+            return
+        if transaction.batch_size != graph_key or transaction.graph_key is not None:
+            raise RuntimeError("PLE target graph batch does not match its stage")
+        if set(transaction.stages) != set(transaction.expected_layers):
+            raise RuntimeError("PLE target graph has incomplete layer coverage")
+        if transaction.prepared_writes is not None or transaction.commit_started:
+            raise RuntimeError("PLE target graph contains an active commit")
+        transaction.graph_key = graph_key
+        self._ple_graph_target_transactions[graph_key] = transaction
+        self._ple_target_transaction = None
+
+    def activate_speculative_target_graph_replay(self, graph_key: int) -> None:
+        """Select the captured stage whose kernels just replayed."""
+        if self._ple_target_transaction is not None:
+            raise RuntimeError("previous PLE target transaction is still active")
+        if not self.ple_layers:
+            return
+        transaction = self._ple_graph_target_transactions.get(graph_key)
+        if transaction is None or transaction.batch_size != graph_key:
+            raise RuntimeError("PLE target graph stage is missing for replay batch")
+        if transaction.prepared_writes is not None or transaction.commit_started:
+            raise RuntimeError("PLE target graph stage was not finalized")
+        self._ple_target_transaction = transaction
+
+    def _release_ple_target_transaction(self, transaction: _PLETargetTransaction) -> None:
+        if transaction.graph_key is not None:
+            transaction.prepared_writes = None
+            transaction.commit_started = False
+            transaction.tentative_committed = False
+        self._ple_target_transaction = None
+
     def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
         """Select accepted PLE snapshots and prepare undo without writing pools."""
         transaction = getattr(self, "_ple_target_transaction", None)
@@ -1069,7 +1120,7 @@ class Qwen4ExpModel(Qwen35Model):
             # failed prepare may have queued work even though no pool write was
             # launched.  Do not clear its lifetime until that work is settled.
             self._synchronize_ple_transaction(transaction)
-            self._ple_target_transaction = None
+            self._release_ple_target_transaction(transaction)
             return
 
         if transaction.prepared_writes is None:
@@ -1095,7 +1146,7 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError(
                 "qwen4_exp PLE target transaction cannot finalize before commit"
             )
-        self._ple_target_transaction = None
+        self._release_ple_target_transaction(transaction)
 
     def _apply_ple(
         self,
