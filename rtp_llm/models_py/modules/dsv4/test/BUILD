@@ -483,3 +483,23 @@ py_test(
     data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
+
+py_test(
+    name = "test_moe_final_out_cache_cpu",
+    srcs = ["test_moe_final_out_cache_cpu.py", "moe_cache_test_support.py"],
+    main = "test_moe_final_out_cache_cpu.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_moe_final_out_cache_cuda",
+    srcs = ["test_moe_final_out_cache_cuda.py", "moe_cache_test_support.py"],
+    main = "test_moe_final_out_cache_cuda.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)

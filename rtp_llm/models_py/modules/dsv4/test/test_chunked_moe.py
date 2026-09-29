@@ -23,6 +23,7 @@ def _stub_package(name: str, path: str) -> None:
 
 
 _stub_package("rtp_llm", os.path.join(_REPO, "rtp_llm"))
+_stub_package("rtp_llm.device", os.path.join(_REPO, "rtp_llm", "device"))
 _stub_package("rtp_llm.models_py", os.path.join(_REPO, "rtp_llm", "models_py"))
 _stub_package(
     "rtp_llm.models_py.modules",
@@ -97,6 +98,10 @@ class _FakeStrategy(nn.Module):
         super().__init__()
         self.cap = cap
         self.token_chunks: list[int] = []
+
+    def prepare_dispatch(self, x, weights, indices):
+        # Match the production strategy default: no separately prepared dispatch.
+        return None
 
     def forward(
         self,

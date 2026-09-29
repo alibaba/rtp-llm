@@ -41,6 +41,12 @@ from .shared_expert import (
 from .strategies.base import MoeCfg, _resolve_forced, select_strategy
 
 _FINAL_OUT_CACHE: dict[tuple, torch.Tensor] = {}
+# Buffers retired by capacity growth. Captured CUDA graphs may hold their
+# addresses baked in; dropping the last reference would free memory that later
+# allocations (e.g. per-round metadata) reuse, and every replay would then
+# write through the stale pointer into the innocent tenant. Retain them for
+# the process lifetime, including after the active cache grows.
+_FINAL_OUT_RETIRED: list[torch.Tensor] = []
 _CHUNKED_MOE_LOGGED = False
 
 # Default per-rank MoE prefill chunk size for DeepSeek-V4-Flash long-context
@@ -130,9 +136,20 @@ def _get_or_create_final_out(
     cached = _FINAL_OUT_CACHE.get(key)
     if cached is not None and cached.size(0) >= capacity:
         return cached
-    cached = torch.empty((max(capacity, 1), dim), dtype=dtype, device=device)
-    _FINAL_OUT_CACHE[key] = cached
-    return cached
+    # Every replaced allocation must remain alive for existing CUDA graphs.
+    # Grow geometrically so retained + current capacity is < 2 * current
+    # capacity per (device, dim, dtype), rather than quadratic in a sequence
+    # of incrementally larger prefill requests. Current capacity is less than
+    # twice the largest positive request (or one row for an empty request).
+    required_capacity = max(capacity, 1)
+    allocated_capacity = 1 << (required_capacity - 1).bit_length()
+    bigger = torch.empty((allocated_capacity, dim), dtype=dtype, device=device)
+    if cached is not None:
+        # Keep the retired buffer alive: captured graphs may still reference
+        # its address on replay (see _FINAL_OUT_RETIRED).
+        _FINAL_OUT_RETIRED.append(cached)
+    _FINAL_OUT_CACHE[key] = bigger
+    return bigger
 
 
 class MoE(nn.Module):
