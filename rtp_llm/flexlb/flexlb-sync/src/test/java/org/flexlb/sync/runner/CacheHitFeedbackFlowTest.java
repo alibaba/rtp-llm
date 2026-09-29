@@ -154,14 +154,13 @@ class CacheHitFeedbackFlowTest {
         JsonNode comparison = events("cache_hit_comparison").getFirst();
         assertEquals(1, events("cache_hit_comparison").size());
         assertEquals("req-cache-feedback-p-001", comparison.path("requestId").asText());
-        assertEquals(500, comparison.path("actual").path("hit").asLong());
-        assertEquals(400, comparison.path("kvcm").path("hit").asLong());
-        assertEquals(100, comparison.path("kvcm").path("delta").asLong());
-        assertEquals(200, comparison.path("kvcm").path("local").path("hit").asLong());
-        assertEquals(600, comparison.path("kvcm").path("global").path("hit").asLong());
-        assertEquals(-100, comparison.path("kvcm").path("global").path("delta").asLong());
-        assertEquals(300, comparison.path("localStandby").path("hit").asLong());
-        assertEquals(200, comparison.path("localStandby").path("delta").asLong());
+        assertEquals(500, comparison.path("actualHitTokens").asLong());
+        assertEquals(400, comparison.path("kvcmPrediction").path("predictedHitTokens").asLong());
+        assertEquals(200, comparison.path("kvcmPrediction").path("localPredictionTokens").asLong());
+        assertEquals(600, comparison.path("kvcmPrediction").path("globalPredictionTokens").asLong());
+        assertEquals(300, comparison.path("localStandbyPrediction").path("predictedHitTokens").asLong());
+        assertEquals(-1, comparison.path("localStandbyPrediction").path("localPredictionTokens").asLong());
+        assertEquals(-1, comparison.path("localStandbyPrediction").path("globalPredictionTokens").asLong());
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS), any(), eq(200.0));
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_ACTUAL_TOKENS), any(), eq(500.0));
@@ -186,7 +185,7 @@ class CacheHitFeedbackFlowTest {
         assertEquals(1, events("cache_hit_comparison").size());
         JsonNode comparison = events("cache_hit_comparison").getFirst();
         assertEquals(1000, comparison.path("inputTokens").asLong());
-        assertEquals(500, comparison.path("actual").path("hit").asLong());
+        assertEquals(500, comparison.path("actualHitTokens").asLong());
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_ACTUAL_RATIO), any(), eq(0.5));
         verify(monitor).report(eq("app.engine.worker.status.running.to.first.token.ms"),
                 any(), eq(100.0));
@@ -203,10 +202,10 @@ class CacheHitFeedbackFlowTest {
         select("1003");
         poll(worker, task("1003", true, 0), true, 2);
         JsonNode event = events("cache_hit_comparison").getFirst();
-        assertFalse(event.hasNonNull("kvcm"));
+        assertFalse(event.hasNonNull("kvcmPrediction"));
         assertEquals("LOCAL_STANDBY", event.path("source").asText());
-        assertEquals(0, event.path("actual").path("hit").asLong());
-        assertEquals(-300, event.path("localStandby").path("delta").asLong());
+        assertEquals(0, event.path("actualHitTokens").asLong());
+        assertEquals(300, event.path("localStandbyPrediction").path("predictedHitTokens").asLong());
         verify(monitor).report(eq(CACHE_HIT_COMPARISON_ACTUAL_TOKENS), any(), eq(0.0));
         verify(monitor).report(eq(CACHE_HIT_COMPARISON_INPUT_TOKENS), any(), eq(1000.0));
     }
@@ -218,8 +217,8 @@ class CacheHitFeedbackFlowTest {
         select("1004");
         poll(worker, task("1004", true, 500), true, 2);
         JsonNode event = events("cache_hit_comparison").getFirst();
-        assertTrue(event.hasNonNull("kvcm"));
-        assertFalse(event.hasNonNull("localStandby"));
+        assertTrue(event.hasNonNull("kvcmPrediction"));
+        assertFalse(event.hasNonNull("localStandbyPrediction"));
         verify(monitor).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
         verify(cacheMetrics, never()).reportLocalStandbyPrediction(any(), anyString(), anyLong(), anyLong());
     }
@@ -248,8 +247,8 @@ class CacheHitFeedbackFlowTest {
         poll(worker, task("1006", true, 500), true, 2);
         verify(monitor, timeout(3000).times(1)).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
         JsonNode event = events("cache_hit_comparison").getFirst();
-        assertEquals(500, event.path("actual").path("hit").asLong());
-        assertFalse(event.hasNonNull("localStandby"));
+        assertEquals(500, event.path("actualHitTokens").asLong());
+        assertFalse(event.hasNonNull("localStandbyPrediction"));
         poll(worker, task("1006", true, 500), true, 2);
         assertEquals(1, events("cache_hit_comparison").size());
     }
@@ -293,8 +292,9 @@ class CacheHitFeedbackFlowTest {
         assertEquals(1, results.size());
         var comparison = results.getFirst().get();
         assertEquals("10.0.0.1:8080@1", comparison.worker());
-        assertEquals(400, comparison.kvcm().local().hit());
-        assertEquals(100, comparison.kvcm().local().delta());
+        assertEquals(400, comparison.kvcmPrediction().localPredictionTokens());
+        assertEquals(100, comparison.actualHitTokens()
+                - comparison.kvcmPrediction().localPredictionTokens());
         assertTrue(cache.observeCacheHitFeedback(engine, observation).isEmpty());
         JsonNode status = events("prefill_worker_status").getFirst();
         assertEquals("10.0.0.1:8080@1", status.path("worker").asText());

@@ -42,6 +42,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKE
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
@@ -220,6 +221,8 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS);
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_INPUT_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
@@ -734,14 +737,13 @@ public class EngineHealthReporter {
         }
     }
 
-    public void reportCacheHitComparisonMetrics(
-            String modelName, CacheHitComparisonResult comparison) {
+    public void reportCacheHitComparisonMetrics(String modelName, CacheHitComparisonResult comparison) {
         if (comparison == null) {
             return;
         }
-        CacheHitComparisonResult.HitComparison routing = comparison.routing();
-        CacheHitComparisonResult.Actual actual = comparison.actual();
-        CacheHitComparisonResult.KvcmDetails kvcmDetails = comparison.kvcmDetails();
+        CacheHitComparisonResult.CachePrediction kvcmPrediction = comparison.kvcmPrediction();
+        CacheHitComparisonResult.CachePrediction localSyncPrediction = comparison.localSyncPrediction();
+        CacheHitComparisonResult.CachePrediction localStandbyPrediction = comparison.localStandbyPrediction();
         FlexMetricTags tags = FlexMetricTags.of(
                 "model", modelName,
                 "engineIp", comparison.worker(),
@@ -749,24 +751,31 @@ public class EngineHealthReporter {
                 "group", comparison.group(),
                 "taskState", comparison.state(),
                 "cacheMatchSource", comparison.source() == null ? "" : comparison.source());
-        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, tags, routing.delta());
-        if (kvcmDetails != null) {
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
-                    tags, kvcmDetails.local().delta());
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
-                    tags, kvcmDetails.global().delta());
+        CacheHitComparisonResult.CachePrediction sourcePrediction = kvcmPrediction != null
+                ? kvcmPrediction
+                : localSyncPrediction != null ? localSyncPrediction : localStandbyPrediction;
+        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, tags,
+                comparison.actualHitTokens() - sourcePrediction.predictedHitTokens());
+        if (kvcmPrediction != null && kvcmPrediction.localPredictionTokens() >= 0) {
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, tags,
+                    comparison.actualHitTokens() - kvcmPrediction.localPredictionTokens());
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS, tags,
+                    comparison.actualHitTokens() - kvcmPrediction.globalPredictionTokens());
         }
         long inputTokens = comparison.inputTokens();
         if (inputTokens > 0) {
             monitor.report(CACHE_HIT_COMPARISON_INPUT_TOKENS, tags, inputTokens);
-            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, actual.hit());
+            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, comparison.actualHitTokens());
+            if (kvcmPrediction != null) {
+                monitor.report(CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
+                        tags, kvcmPrediction.predictedHitTokens());
+            }
             monitor.report(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
-                    tags, actual.hit() / (double) inputTokens);
+                    tags, comparison.actualHitTokens() / (double) inputTokens);
         }
-        CacheHitComparisonResult.HitComparison localStandby = comparison.localStandby();
-        if (localStandby != null) {
-            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
-                    tags, localStandby.delta());
+        if (localStandbyPrediction != null) {
+            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, tags,
+                    comparison.actualHitTokens() - localStandbyPrediction.predictedHitTokens());
         }
     }
 

@@ -342,6 +342,11 @@ public class MetricConstant {
     public static final String CACHE_HIT_COMPARISON_ACTUAL_TOKENS =
             "app.cache.hit.comparison.actual.tokens";
     /**
+     * Accumulated KVCM predicted hit tokens from the same requests that have returned valid feedback.
+     */
+    public static final String CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS =
+            "app.cache.hit.comparison.kvcm.predicted.tokens";
+    /**
      * Accumulated input tokens from requests with valid cache-hit feedback.
      */
     public static final String CACHE_HIT_COMPARISON_INPUT_TOKENS =

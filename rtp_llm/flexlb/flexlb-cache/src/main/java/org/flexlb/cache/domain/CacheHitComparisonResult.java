@@ -13,7 +13,7 @@ import org.flexlb.dao.master.WorkerIdentity;
  */
 @JsonPropertyOrder({
         "event", "requestId", "source", "role", "group", "worker", "state", "inputTokens",
-        "actual", "routing", "kvcm", "localStandby"
+        "actualHitTokens", "kvcmPrediction", "localSyncPrediction", "localStandbyPrediction"
 })
 public record CacheHitComparisonResult(
         String event,
@@ -24,10 +24,10 @@ public record CacheHitComparisonResult(
         @JsonIgnore WorkerIdentity workerIdentity,
         String state,
         long inputTokens,
-        Actual actual,
-        @JsonIgnore HitComparison routing,
-        HitComparison localStandby,
-        @JsonIgnore KvcmDetails kvcmDetails) {
+        long actualHitTokens,
+        CachePrediction kvcmPrediction,
+        CachePrediction localSyncPrediction,
+        CachePrediction localStandbyPrediction) {
 
     /** Routing/PV identity in {@code ip:port@engineIndex} format. */
     @JsonProperty("worker")
@@ -35,41 +35,12 @@ public record CacheHitComparisonResult(
         return workerIdentity == null ? null : workerIdentity.getLogicalIpPort();
     }
 
-    @JsonProperty("routing")
-    public HitComparison routingPrediction() {
-        return CacheMatchSource.KVCM.name().equals(source) ? null : routing;
-    }
-
-    @JsonProperty("kvcm")
-    public KvcmComparison kvcm() {
-        if (!CacheMatchSource.KVCM.name().equals(source) || routing == null) {
-            return null;
-        }
-        return new KvcmComparison(
-                routing.hit(),
-                routing.delta(),
-                kvcmDetails == null ? null : kvcmDetails.local(),
-                kvcmDetails == null ? null : kvcmDetails.global());
-    }
-
-    public record Actual(long hit) {
-    }
-
-    public record HitComparison(long hit, long delta) {
-    }
-
     /**
-     * KVCM prediction drill-down. {@code hit}/{@code delta} are the blended prediction used for
-     * routing; {@code local} and {@code global} compare the actual hit against the local-only
-     * match and the full local+remote match respectively. {@code global.hit} includes
-     * {@code local.hit}.
+     * Prediction tokens used for one cache-match source. Local and global prediction tokens are
+     * {@code -1} when that source does not calculate separate local and global values.
      */
-    public record KvcmComparison(long hit,
-                                 long delta,
-                                 HitComparison local,
-                                 HitComparison global) {
-    }
-
-    public record KvcmDetails(HitComparison local, HitComparison global) {
+    public record CachePrediction(long predictedHitTokens,
+                                  long localPredictionTokens,
+                                  long globalPredictionTokens) {
     }
 }

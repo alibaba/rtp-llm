@@ -88,6 +88,8 @@ class EngineHealthReporterTest {
 
         verify(monitor).register("app.cache.hit.comparison.input.tokens", FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.actual.tokens", FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.kvcm.predicted.tokens",
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.delta.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.kvcm.local.delta.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -508,10 +510,10 @@ class EngineHealthReporterTest {
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
                 new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
-                new CacheHitComparisonResult.Actual(120),
-                new CacheHitComparisonResult.HitComparison(100, 20),
-                new CacheHitComparisonResult.HitComparison(80, 40),
-                null);
+                120,
+                new CacheHitComparisonResult.CachePrediction(100, -1, -1),
+                null,
+                new CacheHitComparisonResult.CachePrediction(80, -1, -1));
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 
@@ -523,6 +525,7 @@ class EngineHealthReporterTest {
                 "taskState", "running",
                 "cacheMatchSource", "KVCM");
         verify(monitor).report("app.cache.hit.comparison.actual.tokens", expectedTags, 120.0);
+        verify(monitor).report("app.cache.hit.comparison.kvcm.predicted.tokens", expectedTags, 100.0);
         verify(monitor).report("app.cache.hit.comparison.delta.tokens", expectedTags, 20.0);
         verify(monitor).report("app.cache.hit.comparison.local.standby.delta.tokens", expectedTags, 40.0);
         verify(monitor).report("app.cache.hit.comparison.actual.ratio", expectedTags, 0.6);
@@ -562,9 +565,9 @@ class EngineHealthReporterTest {
                 "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group",
                 new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
-                new CacheHitComparisonResult.Actual(120),
-                new CacheHitComparisonResult.HitComparison(100, 20),
+                120,
                 null,
+                new CacheHitComparisonResult.CachePrediction(100, -1, -1),
                 null);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
@@ -577,6 +580,10 @@ class EngineHealthReporterTest {
                 "taskState", "running",
                 "cacheMatchSource", "LOCAL_SYNC");
         verify(monitor).report("app.cache.hit.comparison.actual.tokens", expectedTags, 120.0);
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.kvcm.predicted.tokens"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
         verify(monitor).report("app.cache.hit.comparison.delta.tokens", expectedTags, 20.0);
         verify(monitor, never()).report(
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.delta.tokens"),
@@ -598,12 +605,10 @@ class EngineHealthReporterTest {
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
                 new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
-                new CacheHitComparisonResult.Actual(120),
-                new CacheHitComparisonResult.HitComparison(60, 60),
+                120,
+                new CacheHitComparisonResult.CachePrediction(60, 40, 100),
                 null,
-                new CacheHitComparisonResult.KvcmDetails(
-                        new CacheHitComparisonResult.HitComparison(40, 80),
-                        new CacheHitComparisonResult.HitComparison(100, 20)));
+                null);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 
@@ -624,10 +629,10 @@ class EngineHealthReporterTest {
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
                 new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 0,
-                new CacheHitComparisonResult.Actual(120),
-                new CacheHitComparisonResult.HitComparison(100, 20),
-                new CacheHitComparisonResult.HitComparison(80, 40),
-                null);
+                120,
+                new CacheHitComparisonResult.CachePrediction(100, -1, -1),
+                null,
+                new CacheHitComparisonResult.CachePrediction(80, -1, -1));
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 
@@ -641,6 +646,10 @@ class EngineHealthReporterTest {
                 org.mockito.ArgumentMatchers.anyDouble());
         verify(monitor, never()).report(
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.actual.tokens"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.kvcm.predicted.tokens"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
                 org.mockito.ArgumentMatchers.anyDouble());
     }
