@@ -799,15 +799,15 @@ public:
 
     bool reuseCache() const {
         const auto& config = *generate_input_->generate_config;
-        return config.reuse_cache && !config.isPrefillOnly() && !hasInputEmbeddings();
+        return config.reuse_cache && !config.isPrefillOnly();
     }
 
     bool enableDeviceCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_device_cache;
+        return generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_memory_cache;
+        return generate_input_->generate_config->enable_memory_cache;
     }
 
     bool enableDiskCache() const {
@@ -815,7 +815,7 @@ public:
     }
 
     bool enableRemoteCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_remote_cache;
+        return generate_input_->generate_config->enable_remote_cache;
     }
 
     int64_t deadlineMs() const {
