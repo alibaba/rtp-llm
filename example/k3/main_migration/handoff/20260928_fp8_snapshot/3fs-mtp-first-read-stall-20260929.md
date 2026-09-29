@@ -18,3 +18,7 @@ MTP checkpoint 视图在各主机的 `/data0/luohaocheng.lhc/models/kimi-k3-mtp-
 114、115 此时均无外部 GPU 进程，满足独占测量的机器条件；112 仍无 3FS 挂载。115 再读同一 MTP rank00 shard 的首个 1 MiB，约 21 秒后仍停在 `folio_wait_bit_common`、fd 3 的位置仍为 0，已向本任务探针发 `SIGTERM`，探针退出 143。作为对照，在同一 115 容器内，`kimi-k3-4layers/model-00001-of-000007.safetensors` 的首个 1 MiB 用时 0.005 秒，`kimi-k3-mtp/mtp-experts-rank01-of-08.safetensors` 用时 0.007 秒。这两次只是小块热读，不能据此估计整文件吞吐；它们说明本次并非同一客户端所有 3FS 文件都无法读取。
 
 尝试读取 rank00 文件偏移 4 MiB 时，探针在 `openat` 阶段就进入 `D` 状态，尚未获得 fd，因此**不能推断 4 MiB 数据块是否可读**。容器内 PID 25038 在至少 1 分 24 秒后仍处于 `folio_wait_bit_common`，`SIGTERM` 已待处理；观察时该诊断进程尚未退出，没有启动任何 GPU 服务，也不会继续向这个 shard 增加读请求。请存储侧连同 inode 3146980 的 open/read 等待一起核查，尤其与相邻 inode 3146981 的正常首读作对照。
+
+09:47 复查：PID 25038 最终响应终止信号并退出 143；重跑一次 MTP guard，仍在 rank00 的 fd 3、偏移 0、1 MiB `read` 上进入同一内核等待，容器内 PID 25310；已终止，退出 143。此前两个独立客户端 114/115 同时出现相同症状，115 上相邻 MTP shard 与四层 target shard 的小块读取均正常，因此暂不另起任务私有 FUSE 或继续增加读取线程，避免把特定文件的等待扩大为更多并发请求。此判断仍需存储侧确认服务端根因。
+
+完整 target 96 个 shard 的元数据统计为 1453.74 GiB、最大单 shard 15.82 GiB，没有文件超过任务级并发读取原型的 32 GiB 文件上限。115 当时可用主机内存约 3.8 TiB；八 rank 各缓存一个最大 shard 的粗略上界约 126.6 GiB。这只排除了明显的文件大小上限和当前主机容量缺口，不能代替完整模型加载时的内存与吞吐测量。当前阻断服务启动的是 MTP rank00 的 `open/read` 等待。
