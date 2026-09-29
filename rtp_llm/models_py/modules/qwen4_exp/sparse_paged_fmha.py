@@ -12,6 +12,8 @@ once per ragged request with ``B=1``).  Model-level routing remains explicitly
 gated until indexer side-pool scoring/writes and prefix semantics are connected.
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -323,9 +325,10 @@ def sparse_paged_gqa_attn(
     if int(block_table.shape[1]) == 0:
         raise ValueError("block_table must contain at least one logical block")
     if graph_capture:
-        if not torch.cuda.is_current_stream_capturing():
+        warmup = os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+        if not torch.cuda.is_current_stream_capturing() and not warmup:
             raise RuntimeError(
-                "qwen4 sparse paged GQA graph_capture requires an active capture"
+                "qwen4 sparse paged GQA graph_capture requires an active capture or graph warmup"
             )
     else:
         _validate_sparse_paged_indices(

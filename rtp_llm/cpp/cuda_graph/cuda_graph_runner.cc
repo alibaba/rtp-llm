@@ -2216,6 +2216,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.dtype       = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
+    inputs.attention_inputs.is_exact_cuda_graph_batch = exact_batch_only_;
     refreshTaggedAttentionInputs(inputs);
 }
 
