@@ -7,6 +7,7 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -212,6 +213,38 @@ class V4Transformer(nn.Module):
                 for i in range(args.n_layers)
             ]
         )
+
+        if not self.commit_only and args.is_decode_role:
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.mega_front import (
+                moe_front_mode,
+            )
+
+            mode = moe_front_mode()
+            if mode != "off":
+                failed_layer_id = None
+                try:
+                    for layer in self.layers:
+                        layer.enable_moe_front(required=mode == "required")
+                        if mode == "auto" and layer._moe_front_adapter is None:
+                            failed_layer_id = int(layer.layer_id)
+                            break
+                except Exception:
+                    for layer in self.layers:
+                        try:
+                            layer.disable_moe_front()
+                        except Exception:
+                            logging.exception(
+                                "Failed to clean up DSV4 MoE front after attach error"
+                            )
+                    raise
+                if failed_layer_id is not None:
+                    logging.warning(
+                        "DSV4 MoE front auto mode is all-or-none; disabling it "
+                        "for every layer because layer %d could not attach",
+                        failed_layer_id,
+                    )
+                    for layer in self.layers:
+                        layer.disable_moe_front()
 
         # MTP draft is a separate model (``DeepSeekV4MtpModel``) that
         # holds its own V4Transformer — no MTP layers live on the main
