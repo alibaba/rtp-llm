@@ -523,6 +523,15 @@ bool StreamCacheResource::enableDiskCache() const {
 }
 
 bool StreamCacheResource::enableCacheLookup() const {
+    // KV entries do not contain prompt hidden states/logits or selected custom outputs.
+    // These embedding requests previously recomputed the full prompt; retain that
+    // output contract even when deployment policy overrides request cache switches.
+    const auto& config = *stream_->generateConfig();
+    if (stream_->hasInputEmbeddings()
+        && (config.return_all_hidden_states || config.calculate_loss != 0 || config.return_prompt_logits
+            || stream_->generateInput()->custom_output_token_position >= 0)) {
+        return false;
+    }
     const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_memory_cache
                                  || resource_context_.enable_disk_cache || resource_context_.enable_remote_cache;
     return reuseCache() && any_global_tier;

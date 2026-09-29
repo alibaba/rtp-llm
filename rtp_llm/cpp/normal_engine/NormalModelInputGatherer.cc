@@ -346,7 +346,12 @@ absl::Status gatherInputEmbeddingsForContextBatch(const GenerateStreamPtr&      
         if (embedding.dim() == 1) {
             embedding = embedding.unsqueeze(0);
         }
-        const auto adjusted_loc = locs[i] - stream->reuseLength() + ctx.token_idx;
+        const int64_t offset = std::max<int64_t>(stream->reuseLength() - locs[i], 0);
+        if (offset >= embedding.size(0)) {
+            continue;
+        }
+        embedding               = embedding.slice(0, offset, embedding.size(0));
+        const auto adjusted_loc = locs[i] + offset - stream->reuseLength() + ctx.token_idx;
         const auto emb_len      = embedding.size(0);
         if (adjusted_loc < ctx.token_idx
             || adjusted_loc + emb_len > ctx.token_idx + static_cast<int64_t>(current_token_count)) {

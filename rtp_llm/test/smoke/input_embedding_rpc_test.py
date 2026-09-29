@@ -83,6 +83,7 @@ class BackendRpcServerManager(MagaServerManager):
 
 class InputEmbeddingRpcTest(unittest.TestCase):
     expect_prefill_cuda_graph = False
+    test_reuse_cache = False
 
     def test_real_backend_embedding_values(self):
         model_path = Path(
@@ -119,7 +120,12 @@ class InputEmbeddingRpcTest(unittest.TestCase):
             self._assert_backend_only(manager)
             ports = ServerConfig()
             ports.start_port = manager.port
-            asyncio.run(self._check_requests(ports.rpc_server_port, token_ids, rows))
+            check = (
+                self._check_cache_requests
+                if self.test_reuse_cache
+                else self._check_requests
+            )
+            asyncio.run(check(ports.rpc_server_port, token_ids, rows))
             self._assert_backend_only(manager)
         finally:
             manager.stop_server()
@@ -154,6 +160,137 @@ class InputEmbeddingRpcTest(unittest.TestCase):
                         [table[token : token + 1] for token in token_ids.tolist()]
                     ).to(torch.bfloat16)
         self.fail(f"{key} was not found in safetensors checkpoint {model_path}")
+
+    async def _check_cache_requests(self, port, token_ids, rows):
+        client = ModelRpcClient(
+            addresses=[f"127.0.0.1:{port}"],
+            client_config=PyEnvConfigs().grpc_config.get_client_config(),
+            max_rpc_timeout_ms=60000,
+        )
+        request_ids = itertools.count(92000)
+        prompt = token_ids.repeat(20)  # 140 tokens: two full 64-token cache blocks.
+        full_rows = rows.repeat(20, 1)
+        spans = [full_rows[48:80].clone(), full_rows[100:108].clone()]
+
+        async def generate(
+            embeddings,
+            reuse,
+            expected_reuse,
+            full_hidden_states=False,
+            reference_ids=None,
+        ):
+            request = GenerateInput(
+                request_id=next(request_ids),
+                token_ids=prompt if reference_ids is None else reference_ids,
+                mm_inputs=[],
+                generate_config=GenerateConfig(
+                    max_new_tokens=3,
+                    min_new_tokens=3,
+                    top_k=1,
+                    random_seed=1234,
+                    timeout_ms=60000,
+                    return_logits=True,
+                    reuse_cache=reuse,
+                    return_all_hidden_states=full_hidden_states,
+                ),
+                input_embeddings=(
+                    InputEmbeddings(embeddings, [48, 100])
+                    if embeddings is not None
+                    else None
+                ),
+            )
+            logits = []
+            finished = False
+            prompt_states = None
+            async for response in client.enqueue(request):
+                output = response.generate_outputs[0]
+                self.assertEqual(output.aux_info.reuse_len, expected_reuse)
+                if self.expect_prefill_cuda_graph:
+                    # Generation prefill graphs currently reject nonzero prefixes,
+                    # including token-only requests. Cache hits must fall back to eager.
+                    self.assertEqual(
+                        output.aux_info.generation_prefill_cuda_graph_status,
+                        "prefix_cache_not_supported" if expected_reuse else "replayed",
+                    )
+                self.assertIsNotNone(output.logits)
+                logits.append(output.logits.float().cpu())
+                if output.all_hidden_states is not None:
+                    prompt_states = output.all_hidden_states.float().cpu()
+                finished = output.finished
+            self.assertTrue(finished)
+            if full_hidden_states:
+                self.assertIsNotNone(prompt_states)
+                self.assertEqual(
+                    tuple(prompt_states.shape), (prompt.numel(), rows.shape[1])
+                )
+            return output.output_ids.cpu(), logits, prompt_states
+
+        def assert_equivalent(actual, expected):
+            torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+            self.assertEqual(len(actual[1]), len(expected[1]))
+            for got, want in zip(actual[1], expected[1]):
+                torch.testing.assert_close(got, want, rtol=0.02, atol=0.02)
+            if expected[2] is not None:
+                torch.testing.assert_close(actual[2], expected[2], rtol=0.02, atol=0.02)
+
+        try:
+            # Match the token-only execution shape: cached and uncached prefill
+            # can differ numerically even without custom embeddings.
+            baseline = await generate(spans, False, 0)
+            assert_equivalent(await generate(spans, True, 0), baseline)
+            warm = await generate(spans, True, 128)
+            torch.testing.assert_close(warm[0], baseline[0], rtol=0, atol=0)
+
+            # Identical placeholder IDs must not hit an embedding request's KV.
+            text_reference = await generate(None, False, 0)
+            assert_equivalent(baseline, text_reference)
+            assert_equivalent(await generate(None, True, 0), text_reference)
+            text_warm = await generate(None, True, 128)
+            assert_equivalent(warm, text_warm)
+
+            # KV alone cannot reconstruct full prompt states: explicitly recompute them.
+            full_reference = await generate(spans, False, 0, full_hidden_states=True)
+            assert_equivalent(
+                await generate(spans, True, 0, full_hidden_states=True), full_reference
+            )
+
+            async def check_changed(
+                embeddings, reference_ids, reuse_length, warm=False
+            ):
+                reference = await generate(None, False, 0, reference_ids=reference_ids)
+                assert_equivalent(await generate(embeddings, False, 0), reference)
+                for reuse in [reuse_length, 128] if warm else [reuse_length]:
+                    actual = await generate(embeddings, True, reuse)
+                    expected = await generate(
+                        None, True, reuse, reference_ids=reference_ids
+                    )
+                    assert_equivalent(actual, expected)
+                    torch.testing.assert_close(actual[0], reference[0], rtol=0, atol=0)
+
+            # Use another real embedding row so each changed request has an
+            # independent token-only oracle with the same cached prefix length.
+            # Block two change: reuse 64 tokens, slicing inside the first span.
+            changed = [span.clone() for span in spans]
+            changed[0][17] = rows[0]
+            changed_ids = prompt.clone()
+            changed_ids[65] = token_ids[0]
+            await check_changed(changed, changed_ids, 64, warm=True)
+
+            # Change only the later span; its values must also participate in the key.
+            changed_later = [span.clone() for span in spans]
+            changed_later[1][0] = rows[0]
+            later_ids = prompt.clone()
+            later_ids[100] = token_ids[0]
+            await check_changed(changed_later, later_ids, 64)
+
+            # Changing block one invalidates all subsequent blocks; original A remains reusable.
+            changed[0][0] = rows[0]
+            changed_ids[48] = token_ids[0]
+            await check_changed(changed, changed_ids, 0)
+            assert_equivalent(await generate(spans, True, 128), text_warm)
+            assert_equivalent(await generate(spans, False, 0), baseline)
+        finally:
+            await client.close()
 
     async def _check_requests(self, port, token_ids, rows):
         client = ModelRpcClient(
@@ -427,6 +564,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--prefill-cuda-graph", action="store_true")
+    parser.add_argument("--reuse-cache", action="store_true")
     options, remaining = parser.parse_known_args()
     InputEmbeddingRpcTest.expect_prefill_cuda_graph = options.prefill_cuda_graph
+    InputEmbeddingRpcTest.test_reuse_cache = options.reuse_cache
     unittest.main(argv=[sys.argv[0]] + remaining)

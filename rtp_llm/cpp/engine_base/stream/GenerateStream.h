@@ -791,15 +791,15 @@ public:
     }
 
     bool reuseCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->reuse_cache;
+        return generate_input_->generate_config->reuse_cache;
     }
 
     bool enableDeviceCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_device_cache;
+        return generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_memory_cache;
+        return generate_input_->generate_config->enable_memory_cache;
     }
 
     bool enableDiskCache() const {
@@ -807,7 +807,7 @@ public:
     }
 
     bool enableRemoteCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_remote_cache;
+        return generate_input_->generate_config->enable_remote_cache;
     }
 
     int64_t deadlineMs() const {

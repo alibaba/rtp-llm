@@ -58,15 +58,6 @@ PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
 
 
-def disable_token_only_reuse_for_input_embeddings(input: GenerateInput) -> None:
-    if not has_input_embeddings(input):
-        return
-    input.generate_config.reuse_cache = False
-    input.generate_config.enable_device_cache = False
-    input.generate_config.enable_memory_cache = False
-    input.generate_config.enable_remote_cache = False
-
-
 _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
     {
         ExceptionType.PRIORITY_PREEMPTED,
@@ -953,8 +944,6 @@ class BackendRPCServerVisitor:
                 aux_info["pd_sep"] = {"PREFILL", "DECODE"}.issubset(roles)
             e.aux_info = aux_info
 
-        disable_token_only_reuse_for_input_embeddings(input)
-
         try:
             self.fill_request_info(input)
             input.generate_config.validate()
@@ -1050,7 +1039,6 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
             self.fill_request_info(input)
-            disable_token_only_reuse_for_input_embeddings(input)
             self._validate_input(input)
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
