@@ -31,6 +31,7 @@ from rtp_llm.ops import (
     SpeculativeType,
     VitSeparation,
 )
+from rtp_llm.utils.gpu_memory_debug import log_k3_gpu_memory
 from rtp_llm.utils.util import check_with_info
 
 
@@ -314,12 +315,16 @@ class ModelFactory:
         # for RoPE cache sizing in speculative decoding
         model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
 
+        if model_config.model_type == "kimi_k3":
+            log_k3_gpu_memory("before_target_model")
         model = ModelFactory._create_model(
             model_config=model_config,
             engine_config=engine_config,
             vit_config=vit_config,
             merge_lora=merge_lora,
         )
+        if model_config.model_type == "kimi_k3":
+            log_k3_gpu_memory("after_target_model")
 
         model_type = model_config.model_type
         if model_type == "fake_model":
@@ -338,12 +343,16 @@ class ModelFactory:
             and torch.cuda.is_available()
         ):
             torch.cuda.empty_cache()
+            if model_config.model_type == "kimi_k3":
+                log_k3_gpu_memory("after_pre_draft_empty_cache")
         propose_model = ModelFactory.get_sp_model(
             model_config=model_config,
             propose_model_config=propose_model_config,
             engine_config=engine_config,
             target_model=model,
         )
+        if model_config.model_type == "kimi_k3":
+            log_k3_gpu_memory("after_draft_model_before_engine")
 
         # Create engine using create_engine function (replaces AsyncModel)
         alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
@@ -357,7 +366,11 @@ class ModelFactory:
             world_info=world_info,
             propose_model=propose_model,
         )
+        if model_config.model_type == "kimi_k3":
+            log_k3_gpu_memory("after_engine_creation")
         engine.start()
+        if model_config.model_type == "kimi_k3":
+            log_k3_gpu_memory("after_engine_start")
         if propose_model:
             logging.info("create propose model done")
         logging.info("create engine done")

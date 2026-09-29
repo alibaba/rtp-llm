@@ -438,6 +438,10 @@ class KimiK3LatentMoE(nn.Module):
         )
         self._mega_input_packer = get_mega_moe_input_packer()
 
+        from rtp_llm.utils.gpu_memory_debug import log_k3_gpu_memory
+
+        log_k3_gpu_memory(f"after_k3_moe_layer_{self.layer_idx}")
+
         device_index = device.index if device.index is not None else 0
         if device_index not in _DEEPGEMM_MEGA_LOGGED_DEVICES:
             logging.info(

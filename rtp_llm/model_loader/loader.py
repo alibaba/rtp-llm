@@ -84,16 +84,22 @@ class ModelLoader:
     @timer_wrapper(description="load weights")
     @torch.inference_mode()
     def load_weights(self, device: str):
+        from rtp_llm.utils.gpu_memory_debug import log_k3_gpu_memory
+
+        log_k3_gpu_memory("before_raw_weight_load")
         if self._load_config.is_ft_style_weight:
             weights = self._load_from_ft_style(device)
         else:
             weights = self._load_weight(device)
+            log_k3_gpu_memory("after_raw_weight_load_before_cleanup")
             self.force_clean_cuda_memory()
+            log_k3_gpu_memory("after_raw_weight_cleanup")
 
         # load dynamic weight
         self._load_dynamic_weights(weights, device)
         # load eplb weight
         self._init_eplb_weight(weights, device)
+        log_k3_gpu_memory("after_dynamic_and_eplb_weights")
         return weights
 
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
