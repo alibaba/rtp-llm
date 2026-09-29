@@ -158,9 +158,6 @@ public class LocalStandbyHashService {
         monitor.report(LOCAL_STANDBY_HASH_QUEUE_WAIT_TIME_US, (startedAt - submittedAt) / 1_000.0);
         try {
             List<Long> keys = blockHashStrategy.calculate(inputIds, blockSize, lookaheadTokens);
-            request.setLocalStandbyCacheableBlockCacheKeys(
-                    blockHashStrategy.cacheablePrefix(
-                            keys, inputIds.size(), blockSize, lookaheadTokens));
             complete(request, task, new LocalStandbyHashResult(keys, blockSize));
             monitor.report(LOCAL_STANDBY_HASH_RESULT, SUCCESS_TAGS, 1.0);
         } catch (RuntimeException e) {
@@ -174,9 +171,6 @@ public class LocalStandbyHashService {
 
     private void complete(Request request, CompletableFuture<LocalStandbyHashResult> task, LocalStandbyHashResult result) {
         request.setLocalStandbyBlockCacheKeys(result.blockCacheKeys());
-        if (result.blockCacheKeys().isEmpty()) {
-            request.setLocalStandbyCacheableBlockCacheKeys(result.blockCacheKeys());
-        }
         task.complete(result);
     }
 

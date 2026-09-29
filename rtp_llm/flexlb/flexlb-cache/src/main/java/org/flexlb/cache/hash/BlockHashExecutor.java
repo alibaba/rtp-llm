@@ -17,7 +17,6 @@ import reactor.core.scheduler.Schedulers;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
-import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.RejectedExecutionException;
@@ -91,12 +90,6 @@ public class BlockHashExecutor {
                         result.value(),
                         result.queueWaitTimeUs(),
                         result.executionTimeUs()));
-    }
-
-    public List<Long> cacheablePrefix(
-            List<Long> blockCacheKeys, int inputTokenCount, long blockSize, int lookaheadTokens) {
-        return blockHashStrategy.cacheablePrefix(
-                blockCacheKeys, inputTokenCount, blockSize, lookaheadTokens);
     }
 
     private <T> Mono<TimedTaskResult<T>> submitTimed(Callable<T> task) {

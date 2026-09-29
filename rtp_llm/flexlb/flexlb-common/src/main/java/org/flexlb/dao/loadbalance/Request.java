@@ -28,10 +28,6 @@ public class Request {
     private List<Long> localStandbyBlockCacheKeys;
 
     @JsonIgnore
-    @ToString.Exclude
-    private List<Long> localStandbyCacheableBlockCacheKeys;
-
-    @JsonIgnore
     private long localStandbyBlockSize;
 
     @ToString.Exclude

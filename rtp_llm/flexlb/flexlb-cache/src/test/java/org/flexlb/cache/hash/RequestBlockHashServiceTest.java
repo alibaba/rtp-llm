@@ -161,19 +161,15 @@ class RequestBlockHashServiceTest {
         request.setInputIds(inputIds);
         TokenIds tokenIds = request.getInputIds();
         List<Long> calculatedKeys = List.of(11L, 22L);
-        List<Long> cacheableKeys = List.of(11L);
         when(configResolver.resolve()).thenReturn(new BlockHashConfig(2192, 1));
         when(executor.calculate(tokenIds, 2192, 1))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(
                         calculatedKeys, 12, 34)));
-        when(executor.cacheablePrefix(calculatedKeys, inputIds.length, 2192, 1))
-                .thenReturn(cacheableKeys);
 
         standbyService.prepareBlockCacheKeys(contextFor(request)).block();
 
         assertSame(calculatedKeys, request.getBlockCacheKeys());
         assertSame(calculatedKeys, request.getLocalStandbyBlockCacheKeys());
-        assertSame(cacheableKeys, request.getLocalStandbyCacheableBlockCacheKeys());
         assertEquals(2192, request.getLocalStandbyBlockSize());
         verify(localStandbyHashService, never()).submit(
                 org.mockito.ArgumentMatchers.any(),
@@ -198,14 +194,13 @@ class RequestBlockHashServiceTest {
         standbyService.prepareBlockCacheKeys(contextFor(request)).block();
 
         assertSame(providedKeys, request.getLocalStandbyBlockCacheKeys());
-        assertSame(providedKeys, request.getLocalStandbyCacheableBlockCacheKeys());
         assertEquals(2192, request.getLocalStandbyBlockSize());
         assertNull(request.getInputIds());
         verifyNoInteractions(configResolver, executor, localStandbyHashService);
     }
 
     @Test
-    void reusesSglangEagleHashAndFullBigramPagesForLocalStandby() {
+    void reusesSglangEagleHashForLocalStandby() {
         CacheMatchConfiguration configuration = configurationWithLocalStandby(4);
         FlexMonitor monitor = mock(FlexMonitor.class);
         BlockHashExecutor realExecutor =
@@ -230,9 +225,6 @@ class RequestBlockHashServiceTest {
             assertSame(
                     request.getBlockCacheKeys(),
                     request.getLocalStandbyBlockCacheKeys());
-            assertEquals(
-                    List.of(-638950109823820341L),
-                    request.getLocalStandbyCacheableBlockCacheKeys());
         } finally {
             realExecutor.shutdown();
             standbyHashService.shutdown();
@@ -250,6 +242,25 @@ class RequestBlockHashServiceTest {
 
         assertEquals(List.of(), request.getBlockCacheKeys());
         assertNull(request.getInputIds());
+        verifyNoInteractions(configResolver, executor, localStandbyHashService);
+    }
+
+    @Test
+    void preparesEmptyLocalStandbyKeysForShortRequestWithoutInputIds() {
+        RequestBlockHashService standbyService = new RequestBlockHashService(
+                configResolver,
+                executor,
+                localStandbyHashService,
+                configurationWithLocalStandby(4096));
+        Request request = new Request();
+        request.setBlockCacheKeys(List.of());
+        request.setSeqLen(2);
+        request.setBlockSize(2192);
+
+        standbyService.prepareBlockCacheKeys(contextFor(request)).block();
+
+        assertEquals(4096, request.getLocalStandbyBlockSize());
+        assertEquals(List.of(), request.getLocalStandbyBlockCacheKeys());
         verifyNoInteractions(configResolver, executor, localStandbyHashService);
     }
 

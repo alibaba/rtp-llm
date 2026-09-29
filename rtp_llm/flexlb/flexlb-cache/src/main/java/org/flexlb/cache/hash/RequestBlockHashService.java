@@ -55,6 +55,7 @@ public class RequestBlockHashService {
 
         TokenIds inputIds = request.getInputIds();
         if (inputIds == null || inputIds.size() == 0) {
+            prepareEmptyLocalStandbyKeysForShortRequest(request);
             return Mono.empty();
         }
 
@@ -91,18 +92,26 @@ public class RequestBlockHashService {
                     request.setBlockCacheKeys(result.blockCacheKeys());
                     if (reusePrimaryHash) {
                         request.setLocalStandbyBlockCacheKeys(result.blockCacheKeys());
-                        request.setLocalStandbyCacheableBlockCacheKeys(
-                                blockHashExecutor.cacheablePrefix(
-                                        result.blockCacheKeys(),
-                                        inputIds.size(),
-                                        blockSize,
-                                        hashConfig.lookaheadTokens()));
                     }
                     request.clearInputIds();
                     context.recordBlockHashTiming(
                             result.queueWaitTimeUs(), result.executionTimeUs());
                 })
                 .then();
+    }
+
+    private void prepareEmptyLocalStandbyKeysForShortRequest(Request request) {
+        if (!localStandbyEnabled) {
+            return;
+        }
+        long localStandbyBlockSize = configuredLocalStandbyBlockSize > 0
+                ? configuredLocalStandbyBlockSize
+                : request.getBlockSize();
+        if (localStandbyBlockSize <= 0 || request.getSeqLen() >= localStandbyBlockSize) {
+            return;
+        }
+        request.setLocalStandbyBlockSize(localStandbyBlockSize);
+        request.setLocalStandbyBlockCacheKeys(List.of());
     }
 
     private Mono<Void> prepareProvidedBlockCacheKeys(Request request, List<Long> blockCacheKeys) {
@@ -114,7 +123,6 @@ public class RequestBlockHashService {
         if (localStandbyEnabled) {
             request.setLocalStandbyBlockSize(requestBlockSize);
             request.setLocalStandbyBlockCacheKeys(blockCacheKeys);
-            request.setLocalStandbyCacheableBlockCacheKeys(blockCacheKeys);
         }
         request.clearInputIds();
         return Mono.empty();
