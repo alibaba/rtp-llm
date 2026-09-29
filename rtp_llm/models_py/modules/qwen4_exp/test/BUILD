@@ -58,6 +58,13 @@ py_test(
 )
 
 py_test(
+    name = "indexer_decode_triton_test",
+    srcs = ["indexer_decode_triton_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "indexer_runtime_contract_test",
     srcs = ["indexer_runtime_contract_test.py"],
     deps = ["//rtp_llm:testlib"],

@@ -1,0 +1,145 @@
+import unittest
+
+import torch
+
+from rtp_llm.models_py.modules.qwen4_exp.indexer_compressor import (
+    restore_indexer_cache,
+    write_indexer_cache,
+)
+from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
+    write_decode_key_,
+    write_decode_key_with_undo_,
+)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+class IndexerDecodeTritonTest(unittest.TestCase):
+    def _case(self, positions):
+        device = torch.device("cuda")
+        batch = len(positions)
+        raw = torch.randn(batch, 128, device=device).to(torch.bfloat16)
+        starts = torch.tensor(positions, device=device, dtype=torch.int32)
+        gamma = torch.randn(128, device=device).to(torch.bfloat16) * 0.1
+        cosine = torch.randn(batch, 64, device=device).to(torch.bfloat16)
+        sine = torch.randn(batch, 64, device=device).to(torch.bfloat16)
+        kv_table = torch.tensor(
+            [[1 + 2 * b, 2 + 2 * b] for b in range(batch)],
+            dtype=torch.int32,
+            device=device,
+        )
+        state_table = torch.tensor(
+            [[1 + 2 * b, 2 + 2 * b] for b in range(batch)],
+            dtype=torch.int32,
+            device=device,
+        )
+        pool_blocks = 2 * batch + 1
+        kv_pool = torch.zeros(
+            pool_blocks, 32, 128, device=device, dtype=torch.bfloat16
+        )
+        state_pool = torch.zeros(
+            pool_blocks, 8, 128, device=device, dtype=torch.float32
+        )
+        for b, position in enumerate(positions):
+            if (position + 1) % 4 == 0:
+                for previous in range(position - 3, position):
+                    block = int(state_table[b, previous // 128])
+                    key = torch.randn(128, device=device).to(torch.bfloat16)
+                    state_pool[block, previous % 8] = key.float()
+        return raw, starts, cosine, sine, gamma, kv_pool, kv_table, state_pool, state_table
+
+    def _compare(self, tensors):
+        raw, starts, cosine, sine, gamma, kv, kv_table, state, state_table = tensors
+        reference_kv = kv.clone()
+        reference_state = state.clone()
+        cu = torch.arange(raw.shape[0] + 1, dtype=torch.int32, device=raw.device)
+        write_indexer_cache(
+            raw, cu, starts, cosine, sine, gamma, reference_kv, kv_table,
+            reference_state, state_table, ratio=4, kv_tokens_per_block=128,
+            state_tokens_per_block=128, norm_eps=1e-6,
+            rope_is_token_aligned=True,
+        )
+        write_decode_key_(
+            raw, starts, cosine, sine, gamma, kv, kv_table, state, state_table,
+            norm_eps=1e-6,
+        )
+        torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
+        torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
+
+    def test_parity_across_partial_group_and_page_boundary(self):
+        for positions in ([5], [7], [127], [128], [131], [7, 131]):
+            with self.subTest(positions=positions):
+                self._compare(self._case(positions))
+
+    def test_graph_replay_reads_new_keys_and_positions(self):
+        tensors = self._case([5])
+        raw, starts, cosine, sine, gamma, kv, kv_table, state, state_table = tensors
+        initial_kv = kv.clone()
+        initial_state = state.clone()
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            write_decode_key_(
+                raw, starts, cosine, sine, gamma, kv, kv_table, state,
+                state_table, norm_eps=1e-6,
+            )
+        torch.cuda.current_stream().wait_stream(stream)
+        kv.copy_(initial_kv)
+        state.copy_(initial_state)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            write_decode_key_(
+                raw, starts, cosine, sine, gamma, kv, kv_table, state,
+                state_table, norm_eps=1e-6,
+            )
+        kv.copy_(initial_kv)
+        state.copy_(initial_state)
+        raw.copy_(torch.randn_like(raw.float()).to(torch.bfloat16))
+        starts.fill_(7)
+        graph.replay()
+        cu = torch.tensor([0, 1], dtype=torch.int32, device=raw.device)
+        reference_kv = initial_kv.clone()
+        reference_state = initial_state.clone()
+        write_indexer_cache(
+            raw, cu, starts, cosine, sine, gamma, reference_kv, kv_table,
+            reference_state, state_table, ratio=4, kv_tokens_per_block=128,
+            state_tokens_per_block=128, norm_eps=1e-6,
+            rope_is_token_aligned=True,
+        )
+        torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
+        torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
+
+    def test_transactional_graph_replay_restores_mutated_slots(self):
+        raw, starts, cosine, sine, gamma, kv, kv_table, state, state_table = (
+            self._case([7, 5])
+        )
+        initial_kv = kv.clone()
+        initial_state = state.clone()
+
+        def write():
+            return write_decode_key_with_undo_(
+                raw, starts, cosine, sine, gamma, kv, kv_table, state,
+                state_table, norm_eps=1e-6,
+            )
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            write()
+        torch.cuda.current_stream().wait_stream(stream)
+        kv.copy_(initial_kv)
+        state.copy_(initial_state)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            undo = write()
+        kv.copy_(initial_kv)
+        state.copy_(initial_state)
+        starts.copy_(torch.tensor([5, 7], device=starts.device, dtype=starts.dtype))
+        graph.replay()
+        self.assertFalse(torch.equal(state, initial_state))
+        restore_indexer_cache(undo)
+        torch.testing.assert_close(state, initial_state, rtol=0, atol=0)
+        torch.testing.assert_close(kv, initial_kv, rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    unittest.main()
