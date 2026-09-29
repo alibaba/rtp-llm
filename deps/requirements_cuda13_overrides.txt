@@ -1,0 +1,5 @@
+# Resolve validated metadata constraints that intentionally differ from upstream wheels.
+transformers==5.2.0
+nvidia-nccl-cu13==2.30.4
+nvidia-nvshmem-cu13==3.5.19
+nvidia-cuda-cccl==13.2.86

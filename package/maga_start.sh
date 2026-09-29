@@ -41,6 +41,12 @@ export FSLIB_DFS_STORAGE_LINKS=${HIPPO_ENV_STORAGE_LINKS-"dir|pov|alb"};
 export PATH=$JAVA_HOME/bin:$PATH;
 FSUTIL_DIR=$HIPPO_APP_INST_ROOT;
 
+BASE_LD_LIBRARY_PATH=""
+NVSHMEM_PYTHON_LIB=/opt/conda310/lib/python3.10/site-packages/nvidia/nvshmem/lib
+if [ -d "${NVSHMEM_PYTHON_LIB}" ]; then
+  BASE_LD_LIBRARY_PATH="${NVSHMEM_PYTHON_LIB}"
+fi
+
 HOST_DRIVER_VERSION=${HOST_NVIDIA_DRIVER_VERSION}
 # 如果环境变量为空，尝试通过 nvidia-smi 获取驱动版本
 if [ -z "$HOST_DRIVER_VERSION" ]; then
@@ -63,16 +69,15 @@ ${HIPPO_APP_INST_ROOT}/opt/taobao/java/jre/lib/amd64/server/:\
 ${FSUTIL_DIR}/lib:${FSUTIL_DIR}/lib64:${FSUTIL_DIR}/usr/local/lib:${FSUTIL_DIR}/usr/local/lib64"
 
 NEED_COMPAT_CUDA_PATH=1
-# 判断 HOST_NVIDIA_DRIVER_VERSION 是否为空
+MIN_NATIVE_DRIVER_MAJOR=535
+CUDA_REAL_PATH=$(readlink -f /usr/local/cuda 2>/dev/null || true)
+if [[ "$CUDA_REAL_PATH" == */cuda-13.* ]]; then
+  MIN_NATIVE_DRIVER_MAJOR=595
+fi
 if [ -n "$HOST_DRIVER_VERSION" ]; then
-  # 分割版本号
   IFS='.' read -r -a version_parts <<< "$HOST_DRIVER_VERSION"
   major_version=${version_parts[0]}
-  minor_version=${version_parts[1]}
-
-  # 检查前两位版本号是否 >= 535
-  if [ "$major_version" -ge 535 ]; then
-    # 去掉LD_LIBRARY_PATH中的 /usr/local/cuda/compat/
+  if [ "$major_version" -ge "$MIN_NATIVE_DRIVER_MAJOR" ]; then
     ADDITIONAL_LD_LIBRARY_PATH=$(echo "$ADDITIONAL_LD_LIBRARY_PATH" | sed 's|:/usr/local/cuda/compat/||')
     NEED_COMPAT_CUDA_PATH=0
   fi

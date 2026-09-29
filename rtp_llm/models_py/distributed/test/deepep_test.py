@@ -33,7 +33,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 )
 from rtp_llm.models_py.utils.math import align
 from rtp_llm.ops import (
-    FfnDisAggregateConfig,
     MoeConfig,
     NcclCommConfig,
     ParallelismConfig,
@@ -978,7 +977,6 @@ class DeepEPTest(TestCase):
         num_ranks: int,
         args: Dict[str, Any],
         use_deepep_low_latency: bool = False,
-        enable_ffn_disaggregate: bool = False,
         deep_ep_num_sm: int = 24,
     ) -> Tuple[NcclCommConfig, int, EngineConfig, ModelConfig]:
         """Helper function to create NcclCommConfig, EngineConfig and ModelConfig for DeepEP tests."""
@@ -1022,17 +1020,6 @@ class DeepEPTest(TestCase):
         max_generate_batch_size = 32
         if args:
             max_generate_batch_size = args.get("max_generate_batch_size", 32)
-
-        ffn_disaggregate_config = FfnDisAggregateConfig()
-        ffn_disaggregate_config.enable_ffn_disaggregate = enable_ffn_disaggregate
-        if enable_ffn_disaggregate and args:
-            ffn_disaggregate_config.attention_dp_size = num_ranks // 2
-            ffn_disaggregate_config.attention_tp_size = 1
-            ffn_disaggregate_config.ffn_dp_size = num_ranks // 2
-            ffn_disaggregate_config.ffn_tp_size = 1
-
-        # Set ffn_disaggregate_config to parallelism_config
-        parallelism_config.ffn_disaggregate_config = ffn_disaggregate_config
 
         moe_config.ll_num_max_token = max_generate_batch_size
 
@@ -1079,7 +1066,6 @@ class DeepEPTest(TestCase):
                 num_ranks,
                 args,
                 use_deepep_low_latency=False,
-                enable_ffn_disaggregate=False,
             )
         )
         # init distributed environment
@@ -1131,7 +1117,6 @@ class DeepEPTest(TestCase):
                 num_ranks,
                 args,
                 use_deepep_low_latency=True,
-                enable_ffn_disaggregate=False,
             )
         )
 
@@ -1192,7 +1177,6 @@ class DeepEPTest(TestCase):
                 num_ranks,
                 args,
                 use_deepep_low_latency=False,
-                enable_ffn_disaggregate=False,
             )
         )
         # init distributed environment

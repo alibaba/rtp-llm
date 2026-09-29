@@ -1,39 +1,65 @@
-ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/opt/conda310/lib/python3.10/site-packages/nvidia/nvshmem/lib:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 ARG WHL_FILE
+ARG REQUIREMENTS_LOCK_FILE
 ARG EXPECTED_CUDA_MAJOR
 ARG REQUIRE_COMPUTE_OPS=1
 ARG EXPECT_FLASHINFER_RUNTIME_LIBS=0
-ARG PYTORCH_WHEEL_INDEX=https://download.pytorch.org/whl/cu126
+ARG EXPECT_FAST_HADAMARD=0
+ARG EXPECT_FLASH_ATTN_2=0
 ADD $WHL_FILE /tmp/$WHL_FILE
-RUN /opt/conda310/bin/pip install /tmp/$WHL_FILE \
-    -i https://artifacts.antgroup-inc.cn/simple/ \
-    --extra-index-url=https://mirrors.aliyun.com/pypi/simple/ \
-    --extra-index-url=${PYTORCH_WHEEL_INDEX} \
-    && rm /tmp/$WHL_FILE
+ADD $REQUIREMENTS_LOCK_FILE /tmp/runtime-requirements.lock
+ADD validate_cuda13_runtime.py /tmp/validate_cuda13_runtime.py
+RUN /opt/conda310/bin/pip install uv -i https://mirrors.aliyun.com/pypi/simple/
+RUN /opt/conda310/bin/uv pip sync \
+        --require-hashes \
+        /tmp/runtime-requirements.lock \
+        -i https://mirrors.aliyun.com/pypi/simple/ \
+        --index-strategy unsafe-best-match \
+        --python=/opt/conda310/bin/python \
+        --verbose && \
+    /opt/conda310/bin/python -m pip install --no-deps /tmp/$WHL_FILE && \
+    rm /tmp/$WHL_FILE /tmp/runtime-requirements.lock
 
-# Reject CUDA 12-linked RTP-LLM binaries at the CUDA 13 packaging boundary.
+RUN if [ "${EXPECT_FAST_HADAMARD:-}" = "1" ]; then \
+        /opt/conda310/bin/python -c 'import importlib.metadata as m; from fast_hadamard_transform import hadamard_transform; version=m.version("fast-hadamard-transform"); assert version == "1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue", version; assert callable(hadamard_transform); print("validated fast-hadamard-transform", version)'; \
+    fi
+
+RUN if [ "${EXPECT_FLASH_ATTN_2:-}" = "1" ]; then \
+        /opt/conda310/bin/python -c 'import importlib.metadata as m; import torch; import flash_attn_2_cuda; from flash_attn import flash_attn_func, flash_attn_varlen_func; from flash_attn.bert_padding import pad_input, unpad_input; version=m.version("flash-attn"); assert version == "2.8.3.post1+cu13torch2.11cxx11abitrue.r1", version; assert all(callable(fn) for fn in (flash_attn_func, flash_attn_varlen_func, pad_input, unpad_input)); print("validated flash-attn", version)'; \
+    fi
+
+# Reject CUDA 12-linked runtime packages at the CUDA 13 packaging boundary.
 RUN if [ "${EXPECTED_CUDA_MAJOR:-}" = "13" ]; then \
         if ! command -v readelf >/dev/null 2>&1; then \
             echo "ERROR: readelf is required for CUDA runtime validation" >&2; \
             exit 1; \
         fi; \
-        if ! BAD_CUDA12_ELFS="$(find /opt/conda310/lib/python3.10/site-packages/rtp_llm \
-            -type f \( -name '*.so' -o -name '*.so.*' \) \
-            -exec sh -c 'for elf do \
-                if ! dynamic_section=$(readelf -d "$elf" 2>&1); then \
-                    echo "ERROR: readelf failed for $elf: $dynamic_section" >&2; \
-                    exit 1; \
-                fi; \
-                if printf "%s\n" "$dynamic_section" | grep -Eq "NEEDED.*lib(cudart|cupti)\.so\.12"; then \
-                    printf "%s\n" "$elf"; \
-                fi; \
-            done' sh {} +)"; then \
-            echo "ERROR: failed to inspect RTP-LLM ELF dependencies" >&2; \
+        if ! BAD_CUDA12_ELFS="$(set -e; for root in \
+            /opt/conda310/lib/python3.10/site-packages/rtp_llm \
+            /opt/conda310/lib/python3.10/site-packages/deep_ep \
+            /opt/conda310/lib/python3.10/site-packages/deep_gemm \
+            /opt/conda310/lib/python3.10/site-packages/flashinfer \
+            /opt/conda310/lib/python3.10/site-packages/rtp_kernel \
+            /opt/conda310/lib/python3.10/site-packages/torch \
+            /opt/conda310/lib/python3.10/site-packages/nvidia; do \
+            [ -d "$root" ] || continue; \
+            find -L "$root" -xdev -type f \( -name '*.so' -o -name '*.so.*' \) \
+                -exec sh -c 'for elf do \
+                    if ! dynamic_section=$(readelf -d "$elf" 2>&1); then \
+                        echo "ERROR: readelf failed for $elf: $dynamic_section" >&2; \
+                        exit 1; \
+                    fi; \
+                    if printf "%s\n" "$dynamic_section" | grep -Eq "NEEDED.*lib(cudart|cupti)\.so\.12"; then \
+                        printf "%s\n" "$elf"; \
+                    fi; \
+                done' sh {} +; \
+        done)"; then \
+            echo "ERROR: failed to inspect runtime ELF dependencies" >&2; \
             exit 1; \
         fi; \
         if [ -n "$BAD_CUDA12_ELFS" ]; then \
-            echo "ERROR: CUDA 13 image contains RTP-LLM ELF files linked to CUDA 12:" >&2; \
+            echo "ERROR: CUDA 13 image contains ELF files linked to CUDA 12:" >&2; \
             echo "$BAD_CUDA12_ELFS" >&2; \
             exit 1; \
         fi; \
@@ -76,6 +102,12 @@ RUN if [ "${EXPECT_FLASHINFER_RUNTIME_LIBS:-}" = "1" ]; then \
             echo "${MISSING_FLASHINFER_DEPS}" >&2; \
             exit 1; \
         fi; \
+    fi
+
+RUN if [ "${EXPECTED_CUDA_MAJOR:-}" = "13" ]; then \
+        /opt/conda310/bin/python /tmp/validate_cuda13_runtime.py \
+            --expected-cuda-major 13 && \
+        rm -f /tmp/validate_cuda13_runtime.py; \
     fi
 
 ARG START_FILE
