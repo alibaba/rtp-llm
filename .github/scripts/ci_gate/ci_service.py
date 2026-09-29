@@ -126,6 +126,204 @@ def normalize_status_payload(status):
     return status
 
 
+def _matches_job_id(value, required_job):
+    # type: (Any, str) -> bool
+    if not isinstance(value, str):
+        return False
+    return value == required_job or any(
+        value.endswith(separator + required_job) for separator in ("/", ".", ":")
+    )
+
+
+def _normalize_field_name(value):
+    # type: (Any) -> str
+    return str(value).lower().replace("_", "").replace("-", "")
+
+
+def _own_job_status(record):
+    # type: (Any) -> Any
+    if not isinstance(record, dict):
+        return None
+    for key, nested in record.items():
+        if _normalize_field_name(key) in {"status", "state", "result", "conclusion"}:
+            return nested
+    return None
+
+
+def _status_from_keyed_job(value):
+    # type: (Any) -> Any
+    value = normalize_status_payload(value)
+    if isinstance(value, dict):
+        return _own_job_status(value)
+    if value is None or isinstance(value, list):
+        return None
+    return value
+
+
+def _find_job_record_status(value, required_job):
+    # type: (Any, str) -> Any
+    value = normalize_status_payload(value)
+    if not isinstance(value, dict):
+        return None
+
+    identity_keys = {"id", "job", "jobid", "name"}
+    identity_matches = any(
+        _normalize_field_name(key) in identity_keys
+        and _matches_job_id(nested, required_job)
+        for key, nested in value.items()
+    )
+    if identity_matches:
+        status = _own_job_status(value)
+        if status is not None:
+            return status
+
+    for key, nested in value.items():
+        normalized_key = _normalize_field_name(key)
+        if normalized_key in {"children", "jobs", "jobstatuses", "results"}:
+            match = _find_required_job_status(nested, required_job)
+        elif normalized_key == "stages":
+            match = _find_required_stage_status(nested, required_job)
+        else:
+            continue
+        if match is not None:
+            return match
+    return None
+
+
+def _find_required_job_status(value, required_job):
+    # type: (Any, str) -> Any
+    """Find a job only within an explicit job collection."""
+    value = normalize_status_payload(value)
+    if isinstance(value, dict):
+        record_match = _find_job_record_status(value, required_job)
+        if record_match is not None:
+            return record_match
+
+        for key, nested in value.items():
+            if _matches_job_id(str(key), required_job):
+                status = _status_from_keyed_job(nested)
+                if status is not None:
+                    return status
+
+        # A mapping-valued collection may use opaque keys, so inspect each
+        # immediate value as a record. Record internals are not traversed except
+        # through explicit child job/stage collections.
+        for nested in value.values():
+            match = _find_job_record_status(nested, required_job)
+            if match is not None:
+                return match
+    elif isinstance(value, list):
+        for nested in value:
+            match = _find_job_record_status(nested, required_job)
+            if match is not None:
+                return match
+    return None
+
+
+def _find_required_stage_status(value, required_job):
+    # type: (Any, str) -> Any
+    value = normalize_status_payload(value)
+    if isinstance(value, dict):
+        match = _find_stage_record_status(value, required_job)
+        if match is not None:
+            return match
+        records = value.values()
+    elif isinstance(value, list):
+        records = value
+    else:
+        return None
+
+    for record in records:
+        match = _find_stage_record_status(record, required_job)
+        if match is not None:
+            return match
+    return None
+
+
+def _find_stage_record_status(value, required_job):
+    # type: (Any, str) -> Any
+    value = normalize_status_payload(value)
+    if not isinstance(value, dict):
+        return None
+    for key, nested in value.items():
+        normalized_key = _normalize_field_name(key)
+        if normalized_key in {"children", "jobs", "jobstatuses", "results"}:
+            match = _find_required_job_status(nested, required_job)
+        elif normalized_key == "stages":
+            match = _find_required_stage_status(nested, required_job)
+        else:
+            continue
+        if match is not None:
+            return match
+    return None
+
+
+def _find_status_payload_job(value, required_job):
+    # type: (Any, str) -> Any
+    """Parse only a direct status map or explicit collections in status."""
+    value = normalize_status_payload(value)
+    if not isinstance(value, dict):
+        return None
+
+    for key, nested in value.items():
+        if _matches_job_id(str(key), required_job):
+            status = _status_from_keyed_job(nested)
+            if status is not None:
+                return status
+
+    for key, nested in value.items():
+        normalized_key = _normalize_field_name(key)
+        if normalized_key in {"jobs", "jobstatuses", "results"}:
+            match = _find_required_job_status(nested, required_job)
+        elif normalized_key == "stages":
+            match = _find_required_stage_status(nested, required_job)
+        else:
+            continue
+        if match is not None:
+            return match
+    return None
+
+
+def _parse_required_status_value(value):
+    # type: (Any) -> Tuple[str, str]
+    normalized = normalize_status_payload(value)
+    tokens = [
+        token.upper()
+        for token in collect_status_tokens(normalized, status_map=True)
+        if str(token).strip()
+    ]
+    if any(token in {"NOT_RUN", "SKIPPED"} for token in tokens):
+        if isinstance(normalized, (dict, list)):
+            summary = json.dumps(normalized, separators=(",", ":"))
+        else:
+            summary = str(normalized)
+        return "FAILED", summary
+    return parse_ci_status({"status": normalized})
+
+
+def parse_required_job_status(response, required_job):
+    # type: (Dict[str, Any], str) -> Tuple[str, str]
+    if not required_job:
+        return "DONE", "not-required"
+
+    job_status = _find_status_payload_job(response.get("status"), required_job)
+    if job_status is not None:
+        return _parse_required_status_value(job_status)
+
+    for key, root in response.items():
+        normalized_key = _normalize_field_name(key)
+        if normalized_key in {"jobs", "jobstatuses", "results"}:
+            job_status = _find_required_job_status(root, required_job)
+        elif normalized_key == "stages":
+            job_status = _find_required_stage_status(root, required_job)
+        else:
+            continue
+        if job_status is not None:
+            return _parse_required_status_value(job_status)
+
+    return "MISSING", "missing"
+
+
 def parse_ci_status(response):
     # type: (Dict[str, Any]) -> Tuple[str, str]
     status_payload = normalize_status_payload(response.get("status"))

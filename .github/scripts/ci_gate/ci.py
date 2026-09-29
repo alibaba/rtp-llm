@@ -4,7 +4,13 @@ import argparse
 import time
 
 from .common import BRANCH_REF, CI_TRIGGER_URL, PIPELINE_ID, PROJECT_ID, GateError, log, write_output
-from .ci_service import ci_service_request, get_branch_info, parse_ci_status, retrieve_task_status
+from .ci_service import (
+    ci_service_request,
+    get_branch_info,
+    parse_ci_status,
+    parse_required_job_status,
+    retrieve_task_status,
+)
 
 
 def _write_pre_check_action(args, action):
@@ -12,8 +18,37 @@ def _write_pre_check_action(args, action):
     write_output("ci_action", action, getattr(args, "output_file", ""))
 
 
+def _required_job_status(args, response):
+    # type: (argparse.Namespace, dict) -> str
+    required_job = getattr(args, "required_job", "")
+    status, summary = parse_required_job_status(response, required_job)
+    if required_job:
+        log("Required job %s status: %s (%s)" % (required_job, status, summary))
+    return status
+
+
+def _response_identity_matches(response, commit_id, task_id=""):
+    # type: (dict, str, str) -> bool
+    response_commit = str(response.get("commitId") or "")
+    response_task = str(response.get("taskId") or "")
+    if response_commit != commit_id:
+        log("::error::CI response commitId %s does not match %s" % (response_commit or "<missing>", commit_id))
+        return False
+    if not response_task:
+        log("::error::CI response is missing taskId")
+        return False
+    if task_id and response_task != task_id:
+        log("::error::CI response taskId %s does not match %s" % (response_task, task_id))
+        return False
+    return True
+
+
 def pre_check_status(args):
     # type: (argparse.Namespace) -> int
+    if getattr(args, "force_fresh", False):
+        log("Required validation needs a fresh CI run for the current source pair")
+        _write_pre_check_action(args, "trigger")
+        return 1
     max_attempts = args.max_attempts
     sleep_interval = args.sleep_interval
     main_status = "UNKNOWN"
@@ -36,11 +71,27 @@ def pre_check_status(args):
             return 1
 
         log("Current commitId: %s, taskId: %s" % (response.get("commitId"), response.get("taskId")))
+        if not _response_identity_matches(response, args.commit_id):
+            if attempt < max_attempts:
+                log("CI response identity mismatch, retrying in %d seconds..." % sleep_interval)
+                time.sleep(sleep_interval)
+                continue
+            _write_pre_check_action(args, "trigger")
+            return 1
         main_status, status_summary = parse_ci_status(response)
+        required_status = _required_job_status(args, response)
         log("Current status: %s" % status_summary)
         log("Current main status: %s" % main_status)
 
+        if required_status == "FAILED":
+            log("The required-validation job cannot satisfy the gate; will re-trigger")
+            _write_pre_check_action(args, "trigger")
+            return 1
         if main_status == "DONE":
+            if required_status != "DONE":
+                log("Completed CI does not satisfy the required-validation contract; will re-trigger")
+                _write_pre_check_action(args, "trigger")
+                return 1
             log("CI already completed successfully for this commit")
             log("Skipping CI trigger")
             _write_pre_check_action(args, "done")
@@ -57,11 +108,19 @@ def pre_check_status(args):
     log("")
     log("=== Final Result ===")
     if main_status == "RUNNING":
+        if required_status == "MISSING":
+            log("Running CI has no required-validation job; will trigger a required run")
+            _write_pre_check_action(args, "trigger")
+            return 1
         log("CI is RUNNING for this commit after %d checks, skipping trigger but waiting for result" % max_attempts)
         _write_pre_check_action(args, "wait")
+        write_output("ci_task_id", str(response["taskId"]), getattr(args, "output_file", ""))
         return 0
     if main_status == "PENDING":
-        log("CI stuck in PENDING after %d checks, will re-trigger" % max_attempts)
+        if required_status == "MISSING":
+            log("Pending CI has no required-validation job; will trigger a required run")
+        else:
+            log("CI stuck in PENDING after %d checks, will re-trigger" % max_attempts)
         _write_pre_check_action(args, "trigger")
         return 1
     log("CI status is %s after %d checks, allowing CI trigger" % (main_status, max_attempts))
@@ -74,12 +133,17 @@ def wait_status(args):
     max_wait_time = args.max_wait_time
     max_wait_pending_time = args.max_wait_pending_time
     max_wait_running_time = args.max_wait_running_time
+    expected_task_id = str(getattr(args, "task_id", "") or "")
+    if not expected_task_id:
+        raise GateError("Error: taskId is required to wait for an exact CI run")
     overall_start = time.time()
     running_start = None  # type: float
 
     while True:
         log("Querying CI status for commitId: %s ..." % args.commit_id)
         response = retrieve_task_status(args.commit_id, args.security, args.repository)
+        if not _response_identity_matches(response, args.commit_id, expected_task_id):
+            raise GateError("Error: CI status response identity does not match the requested run")
         current_time = time.time()
         overall_elapsed = int(current_time - overall_start)
         if overall_elapsed > max_wait_time:
@@ -87,9 +151,13 @@ def wait_status(args):
 
         log("Current commitId: %s, taskId: %s" % (response.get("commitId"), response.get("taskId")))
         main_status, status_summary = parse_ci_status(response)
+        required_status = _required_job_status(args, response)
         log("Current status: %s" % status_summary)
         log("Current main status: %s" % main_status)
 
+        if required_status == "FAILED":
+            log("The required-validation job failed or was skipped")
+            return 1
         if main_status == "PENDING":
             log("PENDING elapsed: %ds / %ds" % (overall_elapsed, max_wait_pending_time))
             if overall_elapsed > max_wait_pending_time:
@@ -104,6 +172,9 @@ def wait_status(args):
                 raise GateError("Error: Timeout waiting for CI to finish after RUNNING (waited %d seconds)" % running_elapsed)
 
         if main_status == "DONE":
+            if required_status != "DONE":
+                log("CI completed without a successful required-validation fan-in")
+                return 1
             log("CI completed successfully")
             return 0
         if main_status == "FAILED":
@@ -121,12 +192,20 @@ def trigger_ci(args):
     # type: (argparse.Namespace) -> int
     github_repository = args.repository
     branch_name = "open_merge/%s" % args.github_pr_id
-    current_internal_commit_id = "UNKNOWN"
     try:
         branch_info = get_branch_info(branch_name, github_repository, args.commit_id, args.security)
-        current_internal_commit_id = str(((branch_info.get("commit") or {}).get("id")) or "UNKNOWN")
     except GateError as exc:
-        log("Branch info query failed for %s: %s — will send CREATE-TASK with UNKNOWN commit id" % (branch_name, exc))
+        if "Branch not found" not in str(exc):
+            raise GateError(
+                "Error: cannot resolve the internal commit for %s: %s"
+                % (branch_name, exc)
+            ) from exc
+        log("Internal branch %s does not exist yet; CREATE-TASK will create it" % branch_name)
+        current_internal_commit_id = "UNKNOWN"
+    else:
+        current_internal_commit_id = str(((branch_info.get("commit") or {}).get("id")) or "")
+        if not current_internal_commit_id:
+            raise GateError("Error: branch info is missing the internal commit ID")
 
     payload = {
         "type": "CREATE-TASK",
@@ -138,6 +217,7 @@ def trigger_ci(args):
         "newBranch": {"name": branch_name, "ref": BRANCH_REF, "head": "UNKNOWN"},
         "params": {
             "cancel-in-progress": "true",
+            "required-validation": "true",
             "github_commit": args.commit_id,
             "github_source_repo": args.github_source_repo,
             "github_run_id": args.github_run_id,
@@ -153,4 +233,10 @@ def trigger_ci(args):
     status = str(body.get("status", "")).upper()
     if status in {"FAILED", "ERROR"}:
         raise GateError("::error::CI trigger failed: %s" % body)
+    task_id = body.get("taskId") or body.get("pipelineRunId")
+    if task_id is None and isinstance(body.get("data"), dict):
+        task_id = body["data"].get("taskId") or body["data"].get("pipelineRunId")
+    if task_id is None:
+        raise GateError("::error::CI trigger response is missing taskId")
+    write_output("ci_task_id", str(task_id), getattr(args, "output_file", ""))
     return 0

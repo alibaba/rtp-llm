@@ -63,6 +63,8 @@ def main(argv):
     pre_check.add_argument("--max-attempts", type=int, default=6)
     pre_check.add_argument("--sleep-interval", type=int, default=20)
     pre_check.add_argument("--output-file", default="")
+    pre_check.add_argument("--required-job", default="")
+    pre_check.add_argument("--force-fresh", action="store_true")
 
     wait = subparsers.add_parser("wait-status")
     wait.add_argument("commit_id")
@@ -71,6 +73,8 @@ def main(argv):
     wait.add_argument("--max-wait-time", type=int, default=28800)
     wait.add_argument("--max-wait-pending-time", type=int, default=21600)
     wait.add_argument("--max-wait-running-time", type=int, default=7200)
+    wait.add_argument("--required-job", default="")
+    wait.add_argument("--task-id", default="")
 
     trigger = subparsers.add_parser("trigger-ci")
     trigger.add_argument("commit_id")
@@ -79,6 +83,7 @@ def main(argv):
     trigger.add_argument("github_pr_id")
     trigger.add_argument("github_run_id")
     trigger.add_argument("--repository", required=True)
+    trigger.add_argument("--output-file", default="")
 
     sync_comment_parser = subparsers.add_parser("sync-comment")
     sync_comment_parser.add_argument("pr_id")
