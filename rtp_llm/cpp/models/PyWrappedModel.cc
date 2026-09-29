@@ -1178,11 +1178,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool graph_candidate =
             !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
-        // The accept_len callback carries only live requests. Until padded
-        // speculative commits have a per-row mask, use exact batch graphs.
+        // Side-cache writes and the speculative accept_len callback currently
+        // have no valid-row mask. Replays must use an exact batch graph.
         const bool can_run_graph = graph_candidate
-                                   && (!has_speculative_target_commit_hooks_
-                                       || !py_model_inputs.attention_inputs.is_target_verify
+                                   && (!requires_exact_cuda_graph_batch_
                                        || graph_state.current_real_graph_bs == graph_state.current_batch_size);
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
