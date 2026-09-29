@@ -176,6 +176,40 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
                 replayed.float(), reference.float(), atol=0.016, rtol=0.01
             )
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_fused_mix_reduce_matches_torch_and_replays(self):
+        from rtp_llm.models_py.modules.qwen4_exp.gated_residual_mix_triton import (
+            fused_mix_reduce,
+        )
+
+        width = 4 * 2560
+        for rows in (1, 8, 17):
+            with self.subTest(rows=rows):
+                logits = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+                normed = torch.randn_like(logits)
+                reference = (
+                    torch.sigmoid(logits).reshape(rows, 4, 2560)
+                    * normed.reshape(rows, 4, 2560)
+                ).mean(1)
+                actual = fused_mix_reduce(logits, normed, 4)
+                torch.testing.assert_close(
+                    actual.float(), reference.float(), atol=0.016, rtol=0.01
+                )
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = fused_mix_reduce(logits, normed, 4)
+        logits.copy_(torch.randn_like(logits))
+        normed.copy_(torch.randn_like(normed))
+        reference = (
+            torch.sigmoid(logits).reshape(17, 4, 2560)
+            * normed.reshape(17, 4, 2560)
+        ).mean(1)
+        graph.replay()
+        torch.testing.assert_close(
+            replayed.float(), reference.float(), atol=0.016, rtol=0.01
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
