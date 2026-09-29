@@ -153,6 +153,16 @@ def build_interleaved_mrope(
         raise ValueError(
             f"qwen4 QSA MRoPE sections {sections} do not sum to {rotary_pairs}"
         )
+    # The H/W axis slots are fixed by the model config. Check their capacity
+    # with host integers instead of synchronizing two GPU reductions per call.
+    if (
+        min(sections) < 0
+        or sections[1] > len(range(1, rotary_pairs, 3))
+        or sections[2] > len(range(2, rotary_pairs, 3))
+    ):
+        raise ValueError(
+            "qwen4 QSA MRoPE H/W sections do not fit the interleaved rotary slots"
+        )
     positions = _position_matrix(
         position_ids,
         token_count=token_count,
@@ -165,13 +175,6 @@ def build_interleaved_mrope(
     axes = torch.zeros(rotary_pairs, dtype=torch.long, device=device)
     axes[1 : 3 * sections[1] : 3] = 1
     axes[2 : 3 * sections[2] : 3] = 2
-    if (
-        int((axes == 1).sum().item()) != sections[1]
-        or int((axes == 2).sum().item()) != sections[2]
-    ):
-        raise ValueError(
-            "qwen4 QSA MRoPE H/W sections do not fit the interleaved rotary slots"
-        )
 
     inv_freq = float(rope_config.base) ** (
         -2.0 * torch.arange(rotary_pairs, dtype=torch.float32, device=device) / rope_dim
