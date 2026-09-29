@@ -95,15 +95,19 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             )
 
     def test_draft_graph_replays_engine_positions_and_side_cache(self):
+        self.raw = torch.randn(
+            1, 256, dtype=torch.bfloat16, device="cuda"
+        )[:, ::2]
+        self.assertFalse(self.raw.is_contiguous())
         self.rope = SimpleNamespace(
             style=RopeStyle.Base,
-            index_factor=1,
+            index_factor=3,
             dim=64,
             base=10000,
             scale=1.0,
         )
         # Draft transport positions need not equal logical main-cache rows.
-        self.positions = torch.tensor([13], dtype=torch.int32, device="cuda")
+        self.positions = torch.tensor([13, 13, 13], dtype=torch.int32, device="cuda")
         context = self._context(True, draft=True)
         context.select_decode_tokens(
             self.q, self.raw, indexer=self.indexer, rope_config=self.rope
@@ -123,7 +127,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.q.copy_(torch.randn_like(self.q.float()).bfloat16())
         self.raw.copy_(torch.randn_like(self.raw.float()).bfloat16())
         self.lengths[0] = 8
-        self.positions[0] = 17
+        self.positions.fill_(17)
         graph.replay()
 
         eager_kv = initial_kv.clone()

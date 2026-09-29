@@ -92,6 +92,16 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 class Qwen4ExpMTPModel(Qwen4ExpModel):
     """One-layer draft model with target-hidden input fusion and QSA."""
 
+    def supports_cuda_graph_draft_prefill(self) -> bool:
+        # Draft incremental prefill uses data-dependent prefix and sparse-cache
+        # plans. Keep this role eager until those plans have fixed-shape kernels.
+        return False
+
+    def cuda_graph_position_id_len_factor(self) -> int:
+        # The draft uses Base RoPE but its QSA indexer consumes the engine's
+        # explicit text positions, including their configured axis width.
+        return int(self.config.attn_config.rope_config.index_factor)
+
     def __init__(
         self,
         model_config: ModelConfig,

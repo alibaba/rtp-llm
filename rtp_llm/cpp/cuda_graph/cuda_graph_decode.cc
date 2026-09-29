@@ -19,6 +19,16 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     std::vector<int> capture_bs;
     int              max_generate_batch_size = max_bs_;
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
+    // Side-cache models cannot replay a padded batch. Capture every small
+    // batch so mixed low-concurrency traffic does not fall back to eager for
+    // sizes 2..7. Keep the existing sparse buckets above eight to bound graph
+    // memory; deployments needing larger exact batches can set an explicit
+    // decode_capture_config.
+    if (exact_batch_only_) {
+        for (int i = 2; i <= std::min(7, max_generate_batch_size); ++i) {
+            capture_bs.push_back(i);
+        }
+    }
     // Add key batch sizes up to 32
     for (int i : {1, 8, 16, 24, 32}) {
         if (i <= max_generate_batch_size) {
@@ -32,6 +42,8 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     if (capture_bs[capture_bs.size() - 1] != max_generate_batch_size) {
         capture_bs.push_back(max_generate_batch_size);
     }
+    std::sort(capture_bs.begin(), capture_bs.end());
+    capture_bs.erase(std::unique(capture_bs.begin(), capture_bs.end()), capture_bs.end());
     return capture_bs;
 }
 

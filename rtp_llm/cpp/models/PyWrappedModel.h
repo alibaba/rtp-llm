@@ -398,6 +398,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
+    if (enable_cuda_graph_ && is_prefill_cuda_graph_mode
+        && py::hasattr(py_instance, "supports_cuda_graph_draft_prefill")
+        && !py_instance.attr("supports_cuda_graph_draft_prefill")().cast<bool>()) {
+        // Decode and target verification may still use their graph runners.
+        // This role needs its own graph-safe incremental-prefill cache path.
+        RTP_LLM_LOG_WARNING("CUDA graph disabled for draft prefill: model requires eager incremental prefill");
+        enable_cuda_graph_ = false;
+    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.
@@ -456,14 +464,20 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
         }
-        // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
-        // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
-        // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style
-        // = Mrope and rope_config.index_factor accordingly). No Python reflection — the
-        // rope style is intrinsic to the model description and already populated here.
+        // Most models transport explicit positions only for MRoPE. A model
+        // that consumes those positions with Base RoPE (Qwen4 MTP's indexer)
+        // declares the same capture-buffer factor through an explicit hook.
         graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
                                                   description_.attention_conf.rope_config.index_factor :
                                                   0;
+        if (py::hasattr(py_instance, "cuda_graph_position_id_len_factor")) {
+            const int factor = py_instance.attr("cuda_graph_position_id_len_factor")().cast<int>();
+            RTP_LLM_CHECK_WITH_INFO(factor > 0 && factor == description_.attention_conf.rope_config.index_factor,
+                                    "CUDA graph position factor %d disagrees with model rope index factor %d",
+                                    factor,
+                                    description_.attention_conf.rope_config.index_factor);
+            graph_params.position_id_len_factor = factor;
+        }
 
         // clang-format off
         // Decision table for num_tokens_per_bs:

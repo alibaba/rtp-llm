@@ -729,6 +729,27 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and (not self.is_prefill or self.is_target_verify)
         )
 
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        """Refresh the captured RoPE page offsets for this replay's block table."""
+        if not self.support_cuda_graph():
+            raise RuntimeError("qwen4_exp sparse GQA graph prepare requires a graph role")
+        if self.is_target_verify:
+            offset = self.rope_kvcache_impl.prepare_kv_cache_offset(attn_inputs)
+        else:
+            # Decode also refreshes its stable sequence-length buffer.
+            offset = self.rope_kvcache_impl.prepare(
+                attn_inputs, forbid_reallocation=True
+            ).kv_cache_offset
+        captured_offset = self.rope_params.kv_cache_offset
+        if (
+            offset is None
+            or captured_offset is None
+            or offset.shape != captured_offset.shape
+            or offset.dtype != captured_offset.dtype
+        ):
+            raise RuntimeError("qwen4_exp sparse GQA graph page geometry changed")
+        captured_offset.copy_(offset, non_blocking=True)
+
     def forward(
         self,
         qkv: torch.Tensor,
