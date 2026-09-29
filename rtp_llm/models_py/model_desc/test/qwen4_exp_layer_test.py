@@ -1255,6 +1255,70 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         graph.replay()
         torch.testing.assert_close(blocks.cpu(), torch.tensor([0, 0]))
 
+    def test_target_graph_commit_reads_latest_replayed_candidate(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for Graph replay")
+        device = torch.device("cuda")
+        state_seed = torch.arange(6, device=device, dtype=torch.float32).view(2, 3, 1)
+        ids_seed = torch.arange(6, device=device, dtype=torch.int64).view(2, 3)
+        state_seed.add_(1)
+        ids_seed.add_(1)
+        state_pool = torch.zeros((5, 2, 1), device=device)
+        ctx_pool = torch.zeros((5, 2), device=device, dtype=torch.int64)
+        table = torch.tensor([[1, 2], [3, 4]], device=device, dtype=torch.int32)
+        inputs = SimpleNamespace(kv_cache_block_id_device=table)
+        prefixes = torch.tensor([8, 8], device=device, dtype=torch.long)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            candidate_states = state_seed + 10
+            candidate_ids = ids_seed + 100
+        stage = qwen4_exp._PLETargetLayerStage(
+            layer_idx=1,
+            page_size=8,
+            prefixes=prefixes,
+            state_pool=state_pool,
+            ctx_pool=ctx_pool,
+            state_inputs=inputs,
+            ctx_inputs=inputs,
+            initial_state=torch.zeros((2, 2, 1), device=device),
+            candidate_state_inputs=candidate_states,
+            initial_context=torch.zeros((2, 2), device=device, dtype=torch.int64),
+            candidate_ids=candidate_ids,
+        )
+        self.model._ple_target_transaction = qwen4_exp._PLETargetTransaction(
+            batch_size=2,
+            query_len=3,
+            prefixes=prefixes,
+            expected_layers=frozenset({1}),
+            stages={1: stage},
+        )
+        self.model.save_speculative_target_graph_capture(2)
+
+        graph.replay()
+        self.model.activate_speculative_target_graph_replay(2)
+        self.model.prepare_speculative_target_commit(
+            torch.tensor([1, 1], device=device, dtype=torch.int32)
+        )
+        self.model.finish_speculative_target_commit(True)
+        self.model.finish_speculative_target_commit(False)
+        torch.testing.assert_close(state_pool, torch.zeros_like(state_pool))
+        torch.testing.assert_close(ctx_pool, torch.zeros_like(ctx_pool))
+
+        state_seed.add_(50)
+        ids_seed.add_(50)
+        graph.replay()
+        self.model.activate_speculative_target_graph_replay(2)
+        self.model.prepare_speculative_target_commit(
+            torch.tensor([3, 2], device=device, dtype=torch.int32)
+        )
+        self.model.finish_speculative_target_commit(True)
+        self.model.finalize_speculative_target_commit()
+        torch.testing.assert_close(state_pool[2], state_seed[0, 1:] + 10)
+        torch.testing.assert_close(state_pool[4], state_seed[1, :2] + 10)
+        torch.testing.assert_close(ctx_pool[2], ids_seed[0, 1:] + 100)
+        torch.testing.assert_close(ctx_pool[4], ids_seed[1, :2] + 100)
+
     def test_target_verify_commit_finalize_and_next_decode_match_baseline(self):
         prefixes = (self._PAGE - 1, self._PAGE)
         query_len = 5
