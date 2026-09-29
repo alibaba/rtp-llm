@@ -165,7 +165,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         use_triton = self._graph_gather_required or os.environ.get(
-            "RTP_LLM_QWEN4_TRITON_PLE_GATHER", "0"
+            "RTP_LLM_QWEN4_TRITON_PLE_GATHER", "1"
         ).lower() in ("1", "true", "yes", "on")
         if use_triton:
             from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
