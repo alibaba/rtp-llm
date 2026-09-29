@@ -1468,24 +1468,68 @@ class Qwen4ExpQSARuntimeContext:
             device=raw_keys.device,
             logical_positions=block_starts,
         )
-        cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
-        self._write_indexer_cache_transactional(
-            raw_keys,
-            cu_seqlens,
-            sequence_lengths.to(torch.int64),
-            rope_cos,
-            rope_sin,
-            indexer.k_norm_gamma,
-            kv_pool,
-            kv_table,
-            state_pool,
-            state_table,
-            ratio=ratio,
-            kv_tokens_per_block=kv_tokens_per_block,
-            state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
-            norm_eps=float(indexer.norm_eps),
-            rope_is_token_aligned=True,
-        )
+        fused_writer = os.environ.get(
+            "RTP_LLM_QWEN4_TRITON_DECODE_WRITER", "0"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        if fused_writer:
+            from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
+                is_supported,
+                write_decode_key_with_undo_,
+            )
+
+            fused_writer = is_supported(
+                raw_keys,
+                sequence_lengths,
+                rope_cos,
+                rope_sin,
+                indexer.k_norm_gamma,
+                kv_pool,
+                kv_table,
+                state_pool,
+                state_table,
+                kv_tokens_per_block=kv_tokens_per_block,
+                state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
+                ratio=ratio,
+            )
+        if fused_writer:
+            if self._side_cache_undo is not None:
+                raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+            undo = write_decode_key_with_undo_(
+                raw_keys,
+                sequence_lengths,
+                rope_cos,
+                rope_sin,
+                indexer.k_norm_gamma,
+                kv_pool,
+                kv_table,
+                state_pool,
+                state_table,
+                norm_eps=float(indexer.norm_eps),
+            )
+            object.__setattr__(self, "_side_cache_undo", undo)
+        else:
+            cu_seqlens = torch.arange(
+                batch_size + 1, dtype=torch.int32, device=q.device
+            )
+            self._write_indexer_cache_transactional(
+                raw_keys,
+                cu_seqlens,
+                sequence_lengths.to(torch.int64),
+                rope_cos,
+                rope_sin,
+                indexer.k_norm_gamma,
+                kv_pool,
+                kv_table,
+                state_pool,
+                state_table,
+                ratio=ratio,
+                kv_tokens_per_block=kv_tokens_per_block,
+                state_tokens_per_block=int(
+                    self.indexer_state_cache.seq_size_per_block
+                ),
+                norm_eps=float(indexer.norm_eps),
+                rope_is_token_aligned=True,
+            )
 
         rotated_q = apply_partial_rope(
             q, current_cos.unsqueeze(1), current_sin.unsqueeze(1)
