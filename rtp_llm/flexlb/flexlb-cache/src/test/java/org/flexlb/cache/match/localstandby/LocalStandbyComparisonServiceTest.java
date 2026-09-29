@@ -64,16 +64,12 @@ class LocalStandbyComparisonServiceTest {
         CacheHitComparisonResult result =
                 comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
-        assertEquals(4384, result.routing().hit());
-        assertEquals(6000, result.actual().hit());
-        assertEquals(1616, result.routing().delta());
-        assertEquals(4000, result.kvcmDetails().local().hit());
-        assertEquals(2000, result.kvcmDetails().local().delta());
-        assertEquals(10000, result.kvcmDetails().global().hit());
-        assertEquals(-4000, result.kvcmDetails().global().delta());
-        assertNotNull(result.localStandby());
-        assertEquals(4096, result.localStandby().hit());
-        assertEquals(1904, result.localStandby().delta());
+        assertEquals(4384, result.kvcmPrediction().predictedHitTokens());
+        assertEquals(6000, result.actualHitTokens());
+        assertEquals(1616, result.actualHitTokens() - result.kvcmPrediction().predictedHitTokens());
+        assertNotNull(result.localStandbyPrediction());
+        assertEquals(4096, result.localStandbyPrediction().predictedHitTokens());
+        assertEquals(1904, result.actualHitTokens() - result.localStandbyPrediction().predictedHitTokens());
     }
 
     @Test
@@ -104,10 +100,10 @@ class LocalStandbyComparisonServiceTest {
         CacheHitComparisonResult result =
                 comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
-        assertEquals(6000, result.actual().hit());
-        assertNotNull(result.localStandby());
-        assertEquals(4096, result.localStandby().hit());
-        assertEquals(1904, result.localStandby().delta());
+        assertEquals(6000, result.actualHitTokens());
+        assertNotNull(result.localStandbyPrediction());
+        assertEquals(4096, result.localStandbyPrediction().predictedHitTokens());
+        assertEquals(1904, result.actualHitTokens() - result.localStandbyPrediction().predictedHitTokens());
     }
 
     @Test
@@ -141,8 +137,8 @@ class LocalStandbyComparisonServiceTest {
                 comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
         assertEquals("10.0.0.1:8080@1", result.worker());
-        assertEquals(8192, result.localStandby().hit());
-        assertEquals(808, result.localStandby().delta());
+        assertEquals(4096, result.localStandbyPrediction().predictedHitTokens());
+        assertEquals(4904, result.actualHitTokens() - result.localStandbyPrediction().predictedHitTokens());
     }
 
     @Test
@@ -173,9 +169,9 @@ class LocalStandbyComparisonServiceTest {
         CacheHitComparisonResult result =
                 comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
-        assertNotNull(result.localStandby());
-        assertEquals(0, result.localStandby().hit());
-        assertEquals(9000, result.localStandby().delta());
+        assertNotNull(result.localStandbyPrediction());
+        assertEquals(4096, result.localStandbyPrediction().predictedHitTokens());
+        assertEquals(4904, result.actualHitTokens() - result.localStandbyPrediction().predictedHitTokens());
     }
 
     @Test
