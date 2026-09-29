@@ -38,3 +38,7 @@ MTP checkpoint 视图在各主机的 `/data0/luohaocheng.lhc/models/kimi-k3-mtp-
 10:04 后从 114 和 115 分别连接 `11.163.39.112:8001`，两次 `connect_ex` 都立即返回 `111`（Connection refused）。112 上没有该端口监听，Docker daemon 也不可连接，`/mnt/hf3fs` 退回本地 ext4。两端 target 小文件读取等待与 MTP 的 `NotAvailable` 一起说明当前应先恢复/核查 3FS 存储服务及路由，不宜通过增加读取线程或修改共享 FUSE 配置掩盖故障。此检查只读取了日志和端口状态，未启动或重启任何共享服务。
 
 后续复查：110、113、114、115 仍挂载 `fuse.hf3fs`；111 的 `/mnt/hf3fs` 是本地 ext4，112 的 `/mnt/hf3fs/3fs` 也落在本地 ext4，两台均无法读取该 Kimi 权重目录。个人账号可登录 110–115。110、111、112、113、114、115 到 `11.163.39.112:8001` 的连接均返回 `111`；112 本机无该端口监听。未增加任务读取线程，也未触碰共享挂载或其他人的进程。
+
+为了判断能否换客户端继续，在 110、113 各自只读尝试四层 target `config.json` 的前 4 KiB，单进程各设 15 秒上限。两端均超时，未得到首个字节；探针进程已经退出。此前 114、115 对同一小文件的 `sha256sum` 也等待超过 40 秒。因此目前四台仍挂载 3FS 的开发机都不能通过这项最小首读检查，换 110/113 并不能绕过已观察到的阻塞。探针没有读大权重，也没有测量吞吐。
+
+只读检查 112 的服务状态发现：Docker daemon 已处于 active，但 `docker ps -a` 和镜像清单均为空，`/opt/3fs` 与 `/etc/hf3fs*` 不存在；111 的 Docker daemon 为 inactive。作为对照，114 的 `hf3fs-storage`、`hf3fs-meta`、`hf3fs-fuse`、`hf3fs-fdb` 容器仍在运行，storage 容器标记的 maintainer 为 `Alibaba Cloud`。这些现状支持存储侧服务缺失的排查方向，仍不足以证明上述 chunk 的唯一副本位于 112。本任务没有创建或重启任何 3FS 容器。
