@@ -17,14 +17,20 @@ public record CacheMatchResult(
         Map<String, HostCacheMatch> hostMatches,
         CacheMatchSource source,
         long queryTimeUs,
-        long blockSize) {
+        long blockSize,
+        boolean querySucceeded) {
+
+    public CacheMatchResult(Map<String, HostCacheMatch> hostMatches, CacheMatchSource source,
+                            long queryTimeUs, long blockSize) {
+        this(hostMatches, source, queryTimeUs, blockSize, true);
+    }
 
     public static CacheMatchResult empty(CacheMatchSource source) {
         return new CacheMatchResult(Collections.emptyMap(), source, 0, 0);
     }
 
     public static CacheMatchResult failed(CacheMatchSource source, long queryTimeUs) {
-        return new CacheMatchResult(Collections.emptyMap(), source, queryTimeUs, 0);
+        return new CacheMatchResult(Collections.emptyMap(), source, queryTimeUs, 0, false);
     }
 
     public static long matchedTokens(double matchBlocks, long blockSize, long inputTokens) {

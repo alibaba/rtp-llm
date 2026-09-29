@@ -67,6 +67,7 @@ public class CacheMatchQueryOrchestrator {
             return queryAndTrackLocalStandby(query, startTimeNs);
         }
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
+            trackComparisonBestEffort(query, () -> comparisonService.trackLocalStandbyPrediction(query));
             return emptyResult(CacheMatchSource.KVCM, startTimeNs);
         }
 

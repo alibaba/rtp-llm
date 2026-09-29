@@ -53,8 +53,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOK
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -82,6 +80,7 @@ class CacheHitFeedbackFlowTest {
     private WorkerDirectory directory;
     private WorkerStatus worker;
     private CacheAwareService cache;
+    private CacheMetricsReporter cacheMetrics;
     private CostBasedPrefillStrategy strategy;
     private EngineHealthReporter reporter;
     private FlexlbConfig config;
@@ -110,8 +109,8 @@ class CacheHitFeedbackFlowTest {
         when(cacheConfig.isKvcmEnabled()).thenReturn(true);
         when(cacheConfig.isLocalStandbyEnabled()).thenReturn(true);
         when(cacheConfig.getLocalStandbyConfig()).thenReturn(new LocalStandbyConfig());
-        LocalStandbyComparisonService comparison = new LocalStandbyComparisonService(cacheConfig, standby);
-        CacheMetricsReporter cacheMetrics = mock(CacheMetricsReporter.class);
+        cacheMetrics = mock(CacheMetricsReporter.class);
+        LocalStandbyComparisonService comparison = new LocalStandbyComparisonService(cacheConfig, standby, cacheMetrics);
         when(standby.asyncLocalStandbyMatch(any())).thenReturn(CompletableFuture.completedFuture(
                 new CacheMatchResult(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)),
                         CacheMatchSource.LOCAL_STANDBY, 1, 100)));
@@ -145,6 +144,8 @@ class CacheHitFeedbackFlowTest {
     @Test
     void realSelectionAndStatusPollingEmitComparisonPvAndMetricsExactlyOnce() throws Exception {
         select("req-cache-feedback-p-001");
+        verify(cacheMetrics).reportKvcmPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 400, 1000);
+        verify(cacheMetrics).reportLocalStandbyPrediction(RoleType.PREFILL, worker.getMetricIpPort(), 300, 1000);
         poll(worker, task("req-cache-feedback-p-001", false, 0), false, 2);
         assertTrue(events("cache_hit_comparison").isEmpty(), "missing validity must not mean zero cache hit");
         poll(worker, task("req-cache-feedback-p-001", true, 500), false, 3);
@@ -165,8 +166,8 @@ class CacheHitFeedbackFlowTest {
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS), any(), eq(200.0));
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_ACTUAL_TOKENS), any(), eq(500.0));
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_INPUT_TOKENS), any(), eq(1000.0));
-        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS), any(), eq(300.0));
-        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS), any(), eq(1000.0));
+        verify(cacheMetrics, times(1)).reportLocalStandbyPrediction(
+                eq(RoleType.PREFILL), anyString(), eq(300L), eq(1000L));
         JsonNode status = events("prefill_worker_status").getFirst();
         assertEquals(1, events("prefill_worker_status").size());
         assertEquals(200, status.path("hbmLocalMatchTokens").asLong());
@@ -220,7 +221,7 @@ class CacheHitFeedbackFlowTest {
         assertTrue(event.hasNonNull("kvcm"));
         assertFalse(event.hasNonNull("localStandby"));
         verify(monitor).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
-        verify(monitor, never()).report(eq(CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS), any(), anyDouble());
+        verify(cacheMetrics, never()).reportLocalStandbyPrediction(any(), anyString(), anyLong(), anyLong());
     }
 
     @Test

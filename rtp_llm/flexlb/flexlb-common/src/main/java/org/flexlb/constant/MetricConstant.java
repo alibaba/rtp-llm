@@ -334,8 +334,11 @@ public class MetricConstant {
      */
     public static final String CACHE_HIT_RATIO = "app.cache.hit.ratio";
 
-    public static final String CACHE_HIT_COMPARISON_PREDICTED_TOKENS =
-            "app.cache.hit.comparison.predicted.tokens";
+    public static final String CACHE_KVCM_PREDICTED_TOKENS = "app.cache.kvcm.predicted.tokens";
+    public static final String CACHE_KVCM_PREDICTED_RATIO = "app.cache.kvcm.predicted.ratio";
+    public static final String CACHE_LOCAL_STANDBY_PREDICTED_TOKENS = "app.cache.local.standby.predicted.tokens";
+    public static final String CACHE_LOCAL_STANDBY_PREDICTED_RATIO = "app.cache.local.standby.predicted.ratio";
+
     public static final String CACHE_HIT_COMPARISON_ACTUAL_TOKENS =
             "app.cache.hit.comparison.actual.tokens";
     /**
@@ -343,23 +346,12 @@ public class MetricConstant {
      */
     public static final String CACHE_HIT_COMPARISON_INPUT_TOKENS =
             "app.cache.hit.comparison.input.tokens";
-    /**
-     * Input tokens only from requests with an available local-standby prediction.
-     */
-    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_INPUT_TOKENS =
-            "app.cache.hit.comparison.local.standby.input.tokens";
     public static final String CACHE_HIT_COMPARISON_DELTA_TOKENS =
             "app.cache.hit.comparison.delta.tokens";
-    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS =
-            "app.cache.hit.comparison.local.standby.predicted.tokens";
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS =
             "app.cache.hit.comparison.local.standby.delta.tokens";
-    public static final String CACHE_HIT_COMPARISON_PREDICTED_RATIO =
-            "app.cache.hit.comparison.predicted.ratio";
     public static final String CACHE_HIT_COMPARISON_ACTUAL_RATIO =
             "app.cache.hit.comparison.actual.ratio";
-    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO =
-            "app.cache.hit.comparison.local.standby.predicted.ratio";
     /**
      * Accumulated KVCM local match tokens for selected prefill requests.
      */

@@ -156,7 +156,7 @@ public class CostBasedPrefillStrategy {
                 String.valueOf(requestId), roleType, group, best.getStatus(),
                 seqLen, bestCacheHit, cacheMatchResult);
         HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
-        if (cacheMatchResult.source() == CacheMatchSource.KVCM) {
+        if (cacheMatchResult.source() == CacheMatchSource.KVCM && cacheMatchResult.querySucceeded()) {
             engineHealthReporter.reportKvcmSelectedMatch(
                     roleType,
                     best.getStatus().getMetricIpPort(),

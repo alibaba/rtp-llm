@@ -43,13 +43,13 @@ final class CacheHitFeedbackTracker {
                CacheMatchResult result) {
         HostCacheMatch match = result.hostMatch(worker);
         long blockSize = result.blockSize();
-        boolean kvcm = result.source() == CacheMatchSource.KVCM && blockSize > 0;
+        boolean kvcm = result.source() == CacheMatchSource.KVCM && result.querySucceeded();
         CacheHitFeedback seed = new CacheHitFeedback("cache_hit_comparison", requestId, result.source().name(),
                 role.name(), group, worker.getWorkerIdentity(), null, inputTokens, blockSize, predictedHitTokens,
                 kvcm, match == null ? 0 : CacheMatchResult.matchedTokens(match.localMatchBlocks(), blockSize, inputTokens),
                 match == null ? 0 : CacheMatchResult.matchedTokens(match.globalMatchBlocks(), blockSize, inputTokens), 0, 0);
         predictions.put(new Key(worker.getGenerationId(), role, requestId), new Prediction(seed,
-                comparisonService.captureComparison(requestId, role), blockSize > 0));
+                comparisonService.captureComparison(requestId, role), result.querySucceeded()));
     }
 
     List<CompletableFuture<CacheHitComparisonResult>> observe(WorkerStatus worker,
