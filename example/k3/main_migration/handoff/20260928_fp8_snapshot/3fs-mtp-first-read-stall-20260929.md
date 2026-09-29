@@ -42,3 +42,5 @@ MTP checkpoint 视图在各主机的 `/data0/luohaocheng.lhc/models/kimi-k3-mtp-
 为了判断能否换客户端继续，在 110、113 各自只读尝试四层 target `config.json` 的前 4 KiB，单进程各设 15 秒上限。两端均超时，未得到首个字节；探针进程已经退出。此前 114、115 对同一小文件的 `sha256sum` 也等待超过 40 秒。因此目前四台仍挂载 3FS 的开发机都不能通过这项最小首读检查，换 110/113 并不能绕过已观察到的阻塞。探针没有读大权重，也没有测量吞吐。
 
 只读检查 112 的服务状态发现：Docker daemon 已处于 active，但 `docker ps -a` 和镜像清单均为空，`/opt/3fs` 与 `/etc/hf3fs*` 不存在；111 的 Docker daemon 为 inactive。作为对照，114 的 `hf3fs-storage`、`hf3fs-meta`、`hf3fs-fuse`、`hf3fs-fdb` 容器仍在运行，storage 容器标记的 maintainer 为 `Alibaba Cloud`。这些现状支持存储侧服务缺失的排查方向，仍不足以证明上述 chunk 的唯一副本位于 112。本任务没有创建或重启任何 3FS 容器。
+
+再次复查 112：`/data4`–`/data7` 分别仍挂载本地 ext4，四盘各有 root 拥有的 `3fs-storage` 目录；Docker daemon 为 active，但容器清单为空，`/opt/3fs` 和 `/etc/hf3fs*` 仍不存在，`11.163.39.112:8001` 继续拒绝连接。目录存在只说明盘上可能保留存储数据，不证明副本完整或可直接恢复。恢复时需要 3FS 维护方核对原容器配置、集群成员和这些数据目录；本任务没有重建共享存储服务。
