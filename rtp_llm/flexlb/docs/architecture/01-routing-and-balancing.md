@@ -11,12 +11,15 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 未传时选择模型配置的全部角色。显式角色去重后按 `ModelMetaConfig.requiredRoles()` 的顺序决策；
 未配置角色以及非法枚举值返回 `INVALID_REQUEST`。现有 VIT 不属于该新增请求枚举，
 其选点仍使用 `RandomStrategy`。
+EPD 部署当前按客户端分别请求 Encoder 与 Generation 阶段；混合角色请求不在已验证链路内。
 
 Encoder 使用独立的 `EncoderStrategy`：候选必须是已发布且存活的 Encoder endpoint。
 请求携带可选 `encoder_cache_hit_len` 时，先比较各节点在途的未命中编码工作量代理值，
 并列时比较 `running_query_len + waiting_query_len + 本地待观察请求数`；未携带时仅比较并发数。
-Encoder 不按可用 KV cache 筛选或决胜。Encoder 单独请求时走 DIRECT，FlexLB 返回
-`ENCODER` 端点，不调用 EnqueueBatch；没有候选时返回 `NO_ENCODER_WORKER` (8408)。
+Encoder 不按可用 KV cache 筛选或决胜。Encoder 单独请求按 `scheduler.type` 走
+DIRECT 或独立的 QUEUE，FlexLB 返回 `ENCODER` 端点，不调用 EnqueueBatch。
+QUEUE 还会过滤已达到 `dispatcher.maxInflightPerEncoderWorker` 的节点，并在容量释放后重试；
+DIRECT 没有候选时返回 `NO_ENCODER_WORKER` (8408)。
 本地待观察请求在 endpoint 的并发 map 中逐请求更新，选点读取允许短暂滞后；并发请求可能依据
 同一份负载快照选中同一 worker。Prefill/Decode 与 PDFusion 的既有策略保持原样。
 

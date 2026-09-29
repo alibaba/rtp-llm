@@ -34,6 +34,9 @@ public final class EncoderStrategy {
      */
     public SelectedRole select(BalanceContext context, String group) {
         context.beginRoutingAttempt(RoleType.ENCODER);
+        int maxInflightPerWorker = context.getConfig().isQueue()
+                ? context.getConfig().getDispatcher().getMaxInflightPerEncoderWorker()
+                : Integer.MAX_VALUE;
         WorkerEndpoint.GenerationPin winner = null;
         WorkerStatus.TopologySnapshot winnerTopology = null;
         WorkerStatus.EngineObservation winnerEngine = null;
@@ -58,6 +61,9 @@ public final class EncoderStrategy {
                     long requests = Math.max(0, engine.runningQueryLen())
                             + Math.max(0, engine.waitingQueryLen())
                             + endpoint.pendingEncoderRequestCount();
+                    if (requests >= maxInflightPerWorker) {
+                        continue;
+                    }
                     long uncachedTokens = weighted ? endpoint.inflightUncachedTokenEstimate() : 0L;
                     if (uncachedTokens > leastUncachedTokens
                             || uncachedTokens == leastUncachedTokens && requests >= fewestRequests) {

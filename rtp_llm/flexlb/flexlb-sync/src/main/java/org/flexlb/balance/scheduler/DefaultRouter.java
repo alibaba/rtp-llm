@@ -22,10 +22,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @Component
 public class DefaultRouter {
@@ -35,7 +38,7 @@ public class DefaultRouter {
     private final RandomStrategy vitSelector;
     private final EncoderStrategy encoderSelector;
     private final ConfigService configService;
-    private final List<RoleType> requiredRoles;
+    private final Set<RoleType> requiredRoles;
     @Autowired
     private VitCacheSelector vitCacheSelector;
 
@@ -52,11 +55,16 @@ public class DefaultRouter {
         this.vitSelector = Objects.requireNonNull(vitSelector, "vitSelector");
         this.encoderSelector = Objects.requireNonNull(encoderSelector, "encoderSelector");
         this.configService = Objects.requireNonNull(configService, "configService");
-        this.requiredRoles = List.copyOf(Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles());
+        this.requiredRoles = Collections.unmodifiableSet(new LinkedHashSet<>(
+                Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles()));
     }
 
     boolean isEncoderOnly(BalanceContext context) {
-        return requestedRoles(context).equals(List.of(RoleType.ENCODER));
+        return requestedRoles(context).equals(Set.of(RoleType.ENCODER));
+    }
+
+    boolean hasEncoderRole() {
+        return requiredRoles.contains(RoleType.ENCODER);
     }
 
     PlacementResult<SelectedRole, PlacementKey> selectEncoder(BalanceContext context) {
@@ -126,13 +134,14 @@ public class DefaultRouter {
         return null;
     }
 
-    private List<RoleType> requestedRoles(BalanceContext context) {
+    private Set<RoleType> requestedRoles(BalanceContext context) {
         Set<RoleType> requested = context.getRequestedRoles();
         return requested == null ? requiredRoles
-                : requiredRoles.stream().filter(requested::contains).toList();
+                : requiredRoles.stream().filter(requested::contains)
+                        .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
-    private PinnedRouting selectAll(BalanceContext context, List<RoleType> roles, String policyGroup,
+    private PinnedRouting selectAll(BalanceContext context, Set<RoleType> roles, String policyGroup,
                                    DecodeBinding decodeAdmission) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
         String group = policyGroup;
@@ -250,25 +259,11 @@ public class DefaultRouter {
         return failure;
     }
 
-    private static Throwable closeSelection(
-            SelectedRole selection,
-            Throwable primaryFailure) {
+    private static Throwable closeSelection(SelectedRole selection, Throwable primaryFailure) {
         try {
             selection.close();
         } catch (Throwable closeFailure) {
-            return appendFailure(primaryFailure, closeFailure);
-        }
-        return primaryFailure;
-    }
-
-    private static Throwable appendFailure(
-            Throwable primaryFailure,
-            Throwable cleanupFailure) {
-        if (primaryFailure == null) {
-            return cleanupFailure;
-        }
-        if (primaryFailure != cleanupFailure) {
-            primaryFailure.addSuppressed(cleanupFailure);
+            return RequestTerminalCleanup.appendFailure(primaryFailure, closeFailure);
         }
         return primaryFailure;
     }
@@ -280,49 +275,24 @@ public class DefaultRouter {
         if (failure instanceof Error error) {
             throw error;
         }
-        return new IllegalStateException(
-                "route selection cleanup failed", failure);
+        return new IllegalStateException("route selection cleanup failed", failure);
     }
 
-    private static Response buildSuccessResponse(
-            List<ServerStatus> statuses) {
+    private static Response buildSuccessResponse(List<ServerStatus> statuses) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(statuses);
         return response;
     }
 
-    private static final class PinnedRouting implements AutoCloseable {
-        private final List<SelectedRole> selections;
-        private final PlacementKey blocker;
-        private final Response failure;
-        private final Map<String, Object> diagnostics;
-
-        private PinnedRouting(
-                List<SelectedRole> selections,
-                PlacementKey blocker,
-                Response failure, Map<String, Object> diagnostics) {
-            this.selections = selections;
-            this.blocker = blocker;
-            this.failure = failure;
-            this.diagnostics = diagnostics;
-        }
-
-        private PlacementKey blocker() {
-            return blocker;
-        }
-
-        private Response failure() {
-            return failure;
-        }
-
-        private List<SelectedRole> selections() {
-            return selections;
-        }
+    private record PinnedRouting(List<SelectedRole> selections,
+                                 PlacementKey blocker,
+                                 Response failure,
+                                 Map<String, Object> diagnostics) implements AutoCloseable {
 
         private List<ServerStatus> serverStatuses() {
-            return DefaultRouter.serverStatuses(selections);
-        }
+                return DefaultRouter.serverStatuses(selections);
+            }
 
         @Override
         public void close() {

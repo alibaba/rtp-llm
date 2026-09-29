@@ -50,12 +50,14 @@ public final class EncoderEndpoint extends WorkerEndpoint {
      * Remove a request after its lifecycle ends, including local pending load.
      */
     public void forgetRequest(String requestId) {
-        requestObservations.computeIfPresent(requestId, (id, current) -> {
-            if (!current.seenInWorker()) {
-                pendingRequestCount.decrementAndGet();
-            }
-            return null;
-        });
+        RequestObservation removed = requestObservations.remove(requestId);
+        if (removed == null) {
+            return;
+        }
+        if (!removed.seenInWorker()) {
+            pendingRequestCount.decrementAndGet();
+        }
+        endpointEvents.onEncoderCapacityChanged();
     }
 
     /**
@@ -139,5 +141,6 @@ public final class EncoderEndpoint extends WorkerEndpoint {
             forgetRequest(requestId);
         }
         endpointEvents.onEncoderGenerationRetired(this, requestIds);
+        endpointEvents.onEncoderCapacityChanged();
     }
 }

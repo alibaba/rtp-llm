@@ -60,6 +60,7 @@ public class RequestRegistry {
     private final Object admissionQuiescenceMonitor = new Object();
     private int inFlightAdmissionHandles;
     private volatile GlobalQueueCoordinator globalQueue;
+    private volatile EncoderQueueCoordinator encoderQueue;
 
     private final Object registrationLock = new Object();
     private final BatchSchedulerReporter reporter;
@@ -90,6 +91,18 @@ public class RequestRegistry {
     void attachGlobalQueue(GlobalQueueCoordinator queue) {
         if (globalQueue != null) { throw new IllegalStateException("global queue already attached"); }
         globalQueue = Objects.requireNonNull(queue, "queue");
+    }
+
+    void attachEncoderQueue(EncoderQueueCoordinator queue) {
+        if (encoderQueue != null) { throw new IllegalStateException("Encoder queue already attached"); }
+        encoderQueue = Objects.requireNonNull(queue, "queue");
+    }
+
+    void encoderCapacityChanged() {
+        EncoderQueueCoordinator queue = encoderQueue;
+        if (queue != null) {
+            queue.capacityChanged();
+        }
     }
 
     private record WithdrawnRoute(RequestSlot slot, ScheduledRequest item, AdmissionHandle claim) { }
@@ -325,10 +338,10 @@ public class RequestRegistry {
                 }
                 if (context.requestExpired(System.currentTimeMillis())) {
                     Response failure = buildErrorResponse(
-                            context.getConfig().isQueue() && context.getRequestPhase() != RequestPhase.ENCODER
+                            context.getConfig().isQueue()
                                     ? StrategyErrorType.RESOURCE_EXHAUSTED : StrategyErrorType.BATCH_SLO_EXPIRED,
                             "request scheduling deadline has expired before placement");
-                    if (globalQueue != null) {
+                    if (globalQueue != null && context.getRequestPhase() != RequestPhase.ENCODER) {
                         context.setSchedulingDiagnostics(globalQueue.waitDiagnostics());
                     }
                     return CompletableFuture.completedFuture(failure);
@@ -338,8 +351,7 @@ public class RequestRegistry {
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is shutting down"));
                 }
-                boolean queueScheduling = context.getConfig().isQueue()
-                        && context.getRequestPhase() != RequestPhase.ENCODER;
+                boolean queueScheduling = context.getConfig().isQueue();
                 slot = new RequestSlot(completionPublisher, context, expirationTimer, terminalCleanup,
                         this::exitAdmissionHandleGate, queueScheduling, globalQueue);
                 context.setEnqueueTime(System.currentTimeMillis());
@@ -392,7 +404,7 @@ public class RequestRegistry {
         if (slot == null || !slot.ownsFuture(future)) {
             return;
         }
-        if (context.getConfig().isQueue() && context.getRequestPhase() != RequestPhase.ENCODER) {
+        if (context.getConfig().isQueue()) {
             expirationTimer.attachRequestDeadline(slot, context.getRequestExpiresAtMs());
         }
         expirationTimer.attachInactivityDeadline(slot);
