@@ -16,6 +16,26 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
+    def test_rpc_self_address_bypasses_proxy(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            draft = root / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text(json.dumps({"num_hidden_layers": 93}))
+            args = SimpleNamespace(
+                checkpoint=str(target), draft_checkpoint=str(draft),
+                start_port=28000, peer_port=29000, peer_ip="11.163.39.115",
+                role="PREFILL", server="/bin/true", allow_hf3fs_root=str(root),
+            )
+            with patch.object(launch.socket, "socket") as route_socket:
+                route_socket.return_value.getsockname.return_value = ("11.163.39.114", 54321)
+                environment, _ = launch.launch_config(args)
+            for key in ("NO_PROXY", "no_proxy"):
+                self.assertIn("11.163.39.114", environment[key].split(","))
+                self.assertIn("11.163.39.115", environment[key].split(","))
+
     def test_direct_3fs_launcher_selects_supported_fastsafetensors_copier(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             root = Path(tmp)

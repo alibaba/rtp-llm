@@ -42,6 +42,13 @@ def launch_config(args):
     if reserve_runtime_mem_mb <= 0:
         raise ValueError("Runtime memory reserve must be positive")
     socket.inet_aton(args.peer_ip)
+    route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        route.connect((args.peer_ip, args.peer_port))
+        local_ip = route.getsockname()[0]
+    finally:
+        route.close()
+    no_proxy = f"localhost,127.0.0.1,{local_ip},{args.peer_ip}"
     environment = {
         "MODEL_TYPE": "kimi_k3",
         "CHECKPOINT_PATH": str(checkpoint),
@@ -68,8 +75,8 @@ def launch_config(args):
         "THINK_START_TAG": "<|open|>think<|sep|>",
         "THINK_END_TAG": "<|close|>think<|sep|><|open|>response<|sep|>",
         "REMOTE_RPC_SERVER_IP": f"{args.peer_ip}:{args.peer_port + 1}",
-        "NO_PROXY": f"localhost,127.0.0.1,{args.peer_ip}",
-        "no_proxy": f"localhost,127.0.0.1,{args.peer_ip}",
+        "NO_PROXY": no_proxy,
+        "no_proxy": no_proxy,
     }
     if getattr(args, "allow_hf3fs_root", None):
         # The Bazel runtime includes the SHM copier. Its direct 3FS path loaded
