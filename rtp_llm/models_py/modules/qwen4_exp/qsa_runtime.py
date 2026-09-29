@@ -279,6 +279,9 @@ class Qwen4ExpQSARuntimeContext:
     _side_cache_undo: IndexerCacheUndo | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _target_verify_plan: dict[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def _write_indexer_cache_transactional(self, *args, **kwargs) -> dict:
         if self._side_cache_undo is not None:
@@ -963,9 +966,14 @@ class Qwen4ExpQSARuntimeContext:
     ) -> None:
         """Validate target geometry before projection and every cache mutation."""
         if self._target_verify_enabled():
-            self._target_verify_geometry(
+            plan = self._target_verify_geometry(
                 indexer=indexer, token_count=token_count, device=device
             )
+            plan["_indexer_id"] = id(indexer)
+            # The same context immediately consumes this plan after its Q/K
+            # projection. Revalidating GPU lengths and block IDs per layer
+            # would add host synchronization without seeing new metadata.
+            object.__setattr__(self, "_target_verify_plan", plan)
 
     def write_prefill_indexer_cache(
         self,
@@ -1581,9 +1589,18 @@ class Qwen4ExpQSARuntimeContext:
     ) -> torch.Tensor:
         """Select all ``gamma + 1`` target rows using a bounded tail overwrite."""
         token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
-        plan = self._target_verify_geometry(
-            indexer=indexer, token_count=token_count, device=raw_keys.device
-        )
+        plan = self._target_verify_plan
+        object.__setattr__(self, "_target_verify_plan", None)
+        if plan is None:
+            plan = self._target_verify_geometry(
+                indexer=indexer, token_count=token_count, device=raw_keys.device
+            )
+        elif (
+            int(plan["batch_size"]) * int(plan["query_len"]) != token_count
+            or plan["kv_pool"].device != raw_keys.device
+            or plan["_indexer_id"] != id(indexer)
+        ):
+            raise RuntimeError("qwen4_exp QSA target verification plan changed")
         batch_size = int(plan["batch_size"])
         query_len = int(plan["query_len"])
         head_num = int(indexer.n_heads)
