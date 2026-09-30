@@ -423,3 +423,20 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+# CPU-only real-factory regression: no tensor allocation or CUDA context.
+cc_test(
+    name = "pp_speculative_cache_layout_test",
+    srcs = ["PPSpeculativeCacheLayoutTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        ":cache_config_test_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)

@@ -306,10 +306,16 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
     checkPpIndependentPools(model_config, parallelism_config);
+    // Earlier PP stages own target caches but no local draft. Their target
+    // state-ring geometry must still include the global speculative width,
+    // exactly like createSpConfig on the last stage and the decode peer.
+    const int gen_num_per_cycle =
+        sp_config && sp_config->type != SP_TYPE_NONE ? static_cast<int>(sp_config->gen_num_per_cycle) : 0;
     CacheConfig config =
         model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
-            HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, false, 0) :
-            CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
+            HybridPoolConfigCreator::createConfig(
+                model_config, parallelism_config, kv_cache_config, false, gen_num_per_cycle) :
+            CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, gen_num_per_cycle);
 
     config.linear_step = kv_cache_config.linear_step;
     setupKernelSeqSize(config, kv_cache_config, "cache");
