@@ -114,6 +114,23 @@ class Qwen4ExpGatedResidual(nn.Module):
         self.mix_down = mix_down
         self.mix_up = mix_up
         self.inject = inject
+        self.merged_down_inject = None
+        merged_enabled = os.environ.get("RTP_LLM_QWEN4_MERGED_DOWN_INJECT", "0").lower()
+        if (
+            merged_enabled in ("1", "true", "on")
+            and inject is not None
+            and hc_mult == 4
+            and mix_down.is_cuda
+            and torch.version.hip is None
+            and mix_down.dtype == inject.dtype == torch.bfloat16
+            and mix_down.device == inject.device
+        ):
+            # Build the read-only projection before any CUDA Graph capture.
+            # Padding the output width gives cuBLAS an aligned GEMM shape.
+            padding = (-(mix_down.shape[0] + hc_mult)) % 16
+            self.merged_down_inject = torch.cat(
+                (mix_down, inject, mix_down.new_zeros((padding, hc_hidden))), dim=0
+            ).contiguous()
 
     def _norm(self, hyper_input: torch.Tensor) -> torch.Tensor:
         return grouped_rms_norm(
@@ -130,7 +147,24 @@ class Qwen4ExpGatedResidual(nn.Module):
             )
         normed = self._norm(hyper_input)
 
-        mix = F.silu(F.linear(normed, self.mix_down) / self.hc_mult)
+        inject_weights = None
+        merged = self.merged_down_inject
+        if (
+            merged is not None
+            and normed.is_contiguous()
+            and normed.dtype == merged.dtype
+            and normed.device == merged.device
+            and 1 <= normed.numel() // self.hc_hidden_size <= 32
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.gated_residual_down_triton import (
+                down_inject_epilogue,
+            )
+
+            mix, inject_weights = down_inject_epilogue(
+                F.linear(normed, merged), self.mix_down.shape[0], self.hc_mult
+            )
+        else:
+            mix = F.silu(F.linear(normed, self.mix_down) / self.hc_mult)
         mix_logits = F.linear(mix, self.mix_up)
         branches = (self.hc_mult, self.hidden_size)
         fused_mix = os.environ.get(
@@ -147,11 +181,14 @@ class Qwen4ExpGatedResidual(nn.Module):
             mixed = fused_mix_reduce(mix_logits, normed, self.hc_mult)
         else:
             mix = torch.sigmoid(mix_logits)
-            mixed = (
-                mix.unflatten(-1, branches) * normed.unflatten(-1, branches)
-            ).mean(-2)
+            mixed = (mix.unflatten(-1, branches) * normed.unflatten(-1, branches)).mean(
+                -2
+            )
 
         if self.inject is None:
             return mixed, hyper_input, None
-        inject_weights = 2 * torch.sigmoid(F.linear(normed, self.inject) / self.hc_mult)
+        if inject_weights is None:
+            inject_weights = 2 * torch.sigmoid(
+                F.linear(normed, self.inject) / self.hc_mult
+            )
         return mixed, hyper_input, inject_weights
