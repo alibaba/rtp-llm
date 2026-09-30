@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class TheoryCacheHitReporter {
 
+    private static final int THEORY_HIT_REPORT_QUEUE_CAPACITY = 100_000;
     private static final Object THEORY_LOG_LOCK = new Object();
     private static final DateTimeFormatter THEORY_LOG_TIME_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX").withZone(ZoneId.systemDefault());
@@ -49,7 +50,7 @@ public class TheoryCacheHitReporter {
 
     private final AtomicLong droppedReportCount = new AtomicLong();
     private final ThreadPoolExecutor theoryHitReportExecutor = new ThreadPoolExecutor(
-            1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256), runnable -> {
+            1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(THEORY_HIT_REPORT_QUEUE_CAPACITY), runnable -> {
                 Thread thread = new Thread(runnable, "theory-cache-hit-reporter");
                 thread.setDaemon(true);
                 return thread;
