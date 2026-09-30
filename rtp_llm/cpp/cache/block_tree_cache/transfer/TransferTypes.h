@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -22,6 +23,131 @@ enum class TransferStatus {
     DEVICE_IO_ERROR,
     DISK_IO_ERROR,
     RESOURCE_EXHAUSTED,
+    CRC_MISMATCH,
+    CRC_COMPUTE_ERROR,
+};
+
+// Diagnostic categories for the existing cache-copy metric. They do not change
+// the business error or recovery policy. Higher values take precedence when a
+// logical copy contains multiple failures; confirmed CRC evidence survives RPC
+// failures on other ranks.
+enum class CacheCopyError : uint8_t {
+    NONE,
+    NOT_EXECUTED,
+    COPY_FAILED,
+    INVALID_REQUEST,
+    IO_FAILED,
+    RPC_FAILED,
+    CRC_COMPUTE_FAILED,
+    CRC_MISMATCH,
+};
+
+inline const char* cacheCopyErrorName(CacheCopyError error) {
+    switch (error) {
+        case CacheCopyError::NONE:
+            return "NONE";
+        case CacheCopyError::NOT_EXECUTED:
+            return "NOT_EXECUTED";
+        case CacheCopyError::COPY_FAILED:
+            return "COPY_FAILED";
+        case CacheCopyError::INVALID_REQUEST:
+            return "INVALID_REQUEST";
+        case CacheCopyError::IO_FAILED:
+            return "IO_FAILED";
+        case CacheCopyError::RPC_FAILED:
+            return "RPC_FAILED";
+        case CacheCopyError::CRC_COMPUTE_FAILED:
+            return "CRC_COMPUTE_FAILED";
+        case CacheCopyError::CRC_MISMATCH:
+            return "CRC_MISMATCH";
+    }
+    return "COPY_FAILED";
+}
+
+inline CacheCopyError cacheCopyErrorFor(TransferStatus status) {
+    switch (status) {
+        case TransferStatus::OK:
+            return CacheCopyError::NONE;
+        case TransferStatus::INVALID_ARGS:
+            return CacheCopyError::INVALID_REQUEST;
+        case TransferStatus::DISK_IO_ERROR:
+            return CacheCopyError::IO_FAILED;
+        case TransferStatus::CRC_COMPUTE_ERROR:
+            return CacheCopyError::CRC_COMPUTE_FAILED;
+        case TransferStatus::CRC_MISMATCH:
+            return CacheCopyError::CRC_MISMATCH;
+        default:
+            return CacheCopyError::COPY_FAILED;
+    }
+}
+
+inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
+    switch (status) {
+        case TransferStatus::OK:
+            return ErrorInfo::OkStatus();
+        case TransferStatus::INVALID_ARGS:
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request");
+        case TransferStatus::DEVICE_IO_ERROR:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device block transfer failed");
+        case TransferStatus::DISK_IO_ERROR:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "disk block transfer failed");
+        case TransferStatus::CRC_COMPUTE_ERROR:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "cache CRC computation failed");
+        case TransferStatus::CRC_MISMATCH:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "cache integrity verification failed");
+        case TransferStatus::RESOURCE_EXHAUSTED:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device-disk staging pool exhausted");
+    }
+    return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "unknown block transfer status");
+}
+// Results are ordered like the task's descriptors; NONE means the target copy completed,
+// and NOT_EXECUTED means it was skipped (for example, CRC stopped a load before scatter).
+// An empty block_errors vector represents a uniform result until the task boundary expands it.
+// status.code() and copy_error summarize the highest-priority failure, while status keeps all failure messages.
+struct TransferResult {
+    TransferResult() = default;
+    explicit TransferResult(size_t block_count): block_errors(block_count, CacheCopyError::NOT_EXECUTED) {}
+    TransferResult(TransferStatus status):
+        TransferResult(transferStatusToErrorInfo(status), cacheCopyErrorFor(status)) {}
+    TransferResult(ErrorInfo error):
+        status(std::move(error)),
+        copy_error(status.ok()                                ? CacheCopyError::NONE :
+                   status.code() == ErrorCode::INVALID_PARAMS ? CacheCopyError::INVALID_REQUEST :
+                                                                CacheCopyError::COPY_FAILED) {}
+    TransferResult(ErrorInfo error, CacheCopyError copy_error): status(std::move(error)), copy_error(copy_error) {}
+
+    bool ok() const {
+        return status.ok();
+    }
+
+    // Append every failure message; keep the first error code at equal priority.
+    void merge(TransferResult other) {
+        if (other.ok()) {
+            return;
+        }
+        if (ok()) {
+            status     = std::move(other.status);
+            copy_error = other.copy_error;
+            return;
+        }
+        const auto code = other.copy_error > copy_error ? other.status.code() : status.code();
+        status          = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        copy_error      = std::max(copy_error, other.copy_error);
+    }
+
+    CacheCopyError blockError(size_t index) const {
+        return block_errors.empty() ? copy_error : block_errors[index];
+    }
+
+    void expandBlockErrors(size_t block_count) {
+        if (block_errors.empty()) {
+            block_errors.assign(block_count, copy_error);
+        }
+    }
+
+    ErrorInfo                   status{ErrorInfo::OkStatus()};
+    CacheCopyError              copy_error{CacheCopyError::NONE};
+    std::vector<CacheCopyError> block_errors;
 };
 
 struct DeviceHostCopyOptions {

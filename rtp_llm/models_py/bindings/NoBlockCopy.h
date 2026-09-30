@@ -61,13 +61,9 @@ struct StagedMemoryCopyParams {
 };
 
 struct StagedMemoryCopyScratch {
-    void*  host_staging    = nullptr;
-    size_t host_capacity   = 0;
     void*  device_staging  = nullptr;
     size_t device_capacity = 0;
-    void*  device_ptrs     = nullptr;
-    void*  device_offsets  = nullptr;
-    void*  device_sizes    = nullptr;
+    void*  device_tiles    = nullptr;
     size_t meta_capacity   = 0;
     int    device_index    = -1;
 };
@@ -85,8 +81,8 @@ void execNoBlockCopy(const MultiCopyParams& params);
 BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
-// host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.
-// scratch is optional; passing one lets callers reuse pinned host staging and device metadata buffers.
+// host_segments may describe non-contiguous host blocks; each segment copies directly to/from GPU staging.
+// scratch is optional; passing one lets callers reuse GPU staging and device metadata buffers.
 // H2D: compact host payload -> GPU staging -> tile.gpu by tile.host_offset.
 // D2H: tile.gpu -> GPU staging by tile.host_offset -> compact host payload.
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch = nullptr);
