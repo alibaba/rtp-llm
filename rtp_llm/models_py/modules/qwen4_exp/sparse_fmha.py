@@ -337,6 +337,17 @@ def sparse_prefill_attn(
             f"selected index {max_selected} is outside KV sequence length {T}"
         )
 
+    if os.environ.get("RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP", "0").strip().lower() in (
+        "1",
+        "true",
+        "on",
+    ):
+        from .sparse_prefill_bitmap import try_bitmap_prefill
+
+        result = try_bitmap_prefill(q, k, v, selected)
+        if result is not None:
+            return result
+
     out = torch.empty_like(q)
 
     def _s(name, t):

@@ -153,3 +153,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "sparse_prefill_bitmap_test",
+    srcs = ["sparse_prefill_bitmap_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
