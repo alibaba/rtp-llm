@@ -1232,6 +1232,166 @@ class CedLayoutTest(_SingleThreadTest):
                 plan.restore_aux(model)
 
 
+class CedVectorizedLayoutParityTest(_SingleThreadTest):
+    """The vectorized row-layout builder must be byte-identical to the loop.
+
+    The production path (``DSV41_CED_VECTOR_LAYOUT`` default) replaces the
+    per-request Python loop with searchsorted + repeat_interleave
+    constructions. These tests compare every layout/exchange field against
+    the retained reference loop under randomized multi-request selections,
+    including ragged counts, per-request prefixes and every CP rank.
+    """
+
+    def layouts(self, lengths, prefixes, selected, keep_candidate_rows, env="both"):
+        ranks, info = _batch_cp4_layout(lengths)
+        values = ("1", "0") if env == "both" else (env,)
+        outputs = []
+        for env_value in values:
+            per_rank = []
+            for rank in range(4):
+                ctx = _CP.build_cp_context(
+                    info,
+                    cp_size=4,
+                    cp_rank=rank,
+                    chunk_length=len(ranks[rank]),
+                    device=torch.device("cpu"),
+                    position_offset=torch.tensor(prefixes, dtype=torch.int64),
+                    kv_cache_sharded=True,
+                )
+                with mock.patch.dict(
+                    os.environ, {"DSV41_CED_VECTOR_LAYOUT": env_value}
+                ):
+                    context, exchange, groups = _CED._query_layout(
+                        ctx,
+                        selected,
+                        group=None,
+                        keep_candidate_rows=keep_candidate_rows,
+                    )
+                per_rank.append((context, exchange, groups))
+            outputs.append(per_rank)
+        return outputs
+
+    def compare(self, outputs):
+        vectorized, reference = outputs
+        for (ctx_a, ex_a, groups_a), (ctx_b, ex_b, groups_b) in zip(
+            vectorized, reference
+        ):
+            for name in (
+                "chunk_length",
+                "padded_seq_len",
+                "relative_positions",
+                "global_positions",
+                "first_position_host",
+                "local_is_real",
+                "unpad_restore",
+                "chunk_lengths_per_req",
+                "req_id_per_token",
+                "gather_restore_positions",
+            ):
+                va, vb = getattr(ctx_a, name), getattr(ctx_b, name)
+                if isinstance(va, torch.Tensor):
+                    self.assertTrue(
+                        torch.equal(va, vb),
+                        f"context field {name} differs (dtype {va.dtype})",
+                    )
+                    self.assertEqual(va.dtype, vb.dtype, name)
+                else:
+                    self.assertEqual(va, vb, name)
+            for name in (
+                "original_rows",
+                "compact_rows",
+                "send_indices",
+                "receive_positions",
+                "send_sizes",
+                "receive_sizes",
+                "candidate_rows_host",
+                "projection_groups_host",
+                "receive_is_identity",
+            ):
+                va, vb = getattr(ex_a, name), getattr(ex_b, name)
+                if isinstance(va, torch.Tensor):
+                    self.assertTrue(torch.equal(va, vb), f"exchange {name} differs")
+                    self.assertEqual(va.dtype, vb.dtype, name)
+                else:
+                    self.assertEqual(va, vb, name)
+            self.assertEqual(len(groups_a), len(groups_b))
+            for (local_a, rows_a), (local_b, rows_b) in zip(groups_a, groups_b):
+                self.assertTrue(torch.equal(local_a, local_b))
+                self.assertTrue(torch.equal(rows_a, rows_b))
+
+    @staticmethod
+    def _selected(lengths, seed):
+        generator = torch.Generator().manual_seed(seed)
+        parts, offset = [], 0
+        for length in lengths:
+            # Every request contributes at least one selected row.
+            upper = min(length, 40)
+            count = max(1, int(torch.randint(1, upper + 1, (1,), generator=generator)))
+            rows = torch.randperm(length, generator=generator)[:count].sort().values
+            parts.append(rows + offset)
+            offset += length
+        return torch.cat(parts)
+
+    def test_bounded_and_random_selections_match_reference_loop(self):
+        cases = (
+            ((257,), (16387,)),
+            ((17, 513), (0, 30723)),
+            ((2048,) * 32, (30720,) * 32),
+            (
+                (1, 7, 17, 127, 128, 129, 513, 2049) * 4,
+                tuple(0 if i % 8 < 4 else 16387 + 513 * i for i in range(32)),
+            ),
+            ((65, 4097, 33), (5, 12289, 0)),
+        )
+        for lengths, prefixes in cases:
+            for keep in (False, True):
+                with self.subTest(lengths=lengths, keep=keep):
+                    # Bounded-style tails (the production selection shape).
+                    tails, offset = [], 0
+                    for length in lengths:
+                        tails.append(
+                            torch.arange(offset + max(0, length - 128), offset + length)
+                        )
+                        offset += length
+                    self.compare(
+                        self.layouts(lengths, prefixes, torch.cat(tails), keep)
+                    )
+                    # Random sparse sorted selections (checkpoint-style).
+                    self.compare(
+                        self.layouts(
+                            lengths,
+                            prefixes,
+                            self._selected(lengths, seed=sum(lengths) + int(keep)),
+                            keep,
+                        )
+                    )
+
+    def test_zero_count_request_is_rejected_identically(self):
+        lengths, prefixes = (17, 513), (0, 30723)
+        # Selection covers only the first request: the second has count 0.
+        selected = torch.arange(17)
+        for env_value in ("1", "0"):
+            with self.subTest(vectorized=env_value):
+                with self.assertRaises(ValueError):
+                    self.layouts(lengths, prefixes, selected, False, env=env_value)
+
+    def test_bounded_replay_selected_matches_reference_concat(self):
+        for lengths in ((257,), (17, 513), (2048,) * 32, (1, 3, 129, 8193)):
+            with self.subTest(lengths=lengths):
+                starts = tuple(max(n - 128, 0) for n in lengths)
+                parts, offset = [], 0
+                for length, start in zip(lengths, starts):
+                    parts.append(
+                        torch.arange(offset + start, offset + length, dtype=torch.int64)
+                    )
+                    offset += length
+                expected = torch.cat(parts)
+                actual = _CED._bounded_replay_selected(lengths, starts)
+                self.assertEqual(actual.dtype, torch.int64)
+                self.assertTrue(torch.equal(actual, expected))
+                self.assertTrue((actual[1:] > actual[:-1]).all())
+
+
 class V41KVWorkspaceTest(_SingleThreadTest):
     def test_same_global_reuses_buffer_and_only_updates_swa(self):
         shared = {}

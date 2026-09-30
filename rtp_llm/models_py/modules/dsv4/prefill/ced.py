@@ -16,6 +16,7 @@ indexer projection needed to preserve BF16 head-weight rounding.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -188,26 +189,61 @@ def _host_cp_metadata(info, name):
     return host.detach()
 
 
-def _query_layout(original, selected, group, *, keep_candidate_rows=False):
-    """Derive transport from the actual engine inverse map, not rank0 ownership."""
-    device = original.global_positions.device
-    cp, rank = original.cp_size, original.cp_rank
-    lengths = original.input_lengths_global_host or (original.seq_len_full,)
-    prefixes = original.prefix_lengths_host or (original.prefix_length,)
-    original_chunks = original.chunk_lengths_per_req or (original.chunk_length,)
-    if (
-        len(lengths) != len(prefixes)
-        or len(lengths) != len(original_chunks)
-        or sum(lengths) != original.seq_len_full
-        or selected.ndim != 1
-        or selected.numel() == 0
-        or selected[0] < 0
-        or selected[-1] >= original.seq_len_full
-        or (selected[1:] <= selected[:-1]).any()
-    ):
-        raise ValueError("invalid per-request CED selection")
-    owners, local, local_positions, absolute_positions, request_ids = [], [], [], [], []
-    local_real, chunks = [], []
+def _bounded_replay_selected(lengths, starts):
+    """Build concatenated per-request tail windows without a Python loop."""
+    lengths_t = torch.tensor(lengths, dtype=torch.int64)
+    starts_t = torch.tensor(starts, dtype=torch.int64)
+    counts = lengths_t - starts_t
+    total = int(counts.sum())
+    request = torch.repeat_interleave(
+        torch.arange(lengths_t.numel(), dtype=torch.int64), counts
+    )
+    count_starts = torch.cumsum(counts, 0) - counts
+    within = torch.arange(total, dtype=torch.int64) - count_starts[request]
+    offsets = torch.cumsum(lengths_t, 0) - lengths_t
+    return offsets[request] + starts_t[request] + within
+
+
+def _query_layout_reference_counts(lengths, prefixes, original_chunks, selected, cp):
+    """Find per-request selection bounds and CP-padded counts on the host."""
+    lengths_t = torch.tensor(lengths, dtype=torch.int64)
+    prefixes_t = torch.tensor(prefixes, dtype=torch.int64)
+    original_chunks_t = torch.tensor(original_chunks, dtype=torch.int64)
+    original_starts = torch.cumsum(lengths_t, 0) - lengths_t
+    request_ends = torch.cumsum(lengths_t, 0)
+    # Both lower bounds preserve the half-open [request start, request end).
+    lo = torch.searchsorted(selected, original_starts, right=False)
+    hi = torch.searchsorted(selected, request_ends, right=False)
+    counts = hi - lo
+    padded_counts = ((counts + 2 * cp - 1) // (2 * cp)) * (2 * cp)
+    return (
+        lengths_t,
+        prefixes_t,
+        original_chunks_t,
+        original_starts,
+        lo,
+        hi,
+        counts,
+        padded_counts,
+    )
+
+
+def _reference_query_layout_loop(
+    lengths,
+    prefixes,
+    original_chunks,
+    selected,
+    cp,
+    rank,
+    owners,
+    local,
+    local_positions,
+    absolute_positions,
+    request_ids,
+    local_real,
+    chunks,
+):
+    """Original per-request loop layout; retained as the parity oracle."""
     original_start, padded_start, local_start = 0, 0, 0
     for request, (length, prefix, original_chunk) in enumerate(
         zip(lengths, prefixes, original_chunks)
@@ -239,6 +275,137 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
         original_start += length
         padded_start += original_chunk * cp
         local_start += chunk
+
+
+def _vectorized_query_layout_rows(
+    lengths,
+    prefixes,
+    original_chunks,
+    selected,
+    cp,
+    rank,
+    owners,
+    local,
+    local_positions,
+    absolute_positions,
+    request_ids,
+    local_real,
+    chunks,
+):
+    """Build the loop's row layout with batched selection and scatter."""
+    (
+        lengths_t,
+        prefixes_t,
+        original_chunks_t,
+        original_starts,
+        lo,
+        _hi,
+        counts,
+        padded_counts,
+    ) = _query_layout_reference_counts(lengths, prefixes, original_chunks, selected, cp)
+    if bool((counts == 0).any()):
+        raise ValueError("CED must preserve the end of every request")
+    request_count = lengths_t.numel()
+    chunks_t = padded_counts // cp
+    halves_t = padded_counts // (2 * cp)
+    rows = int(chunks_t.sum())
+
+    # Expand request metadata along the selected-token axis.
+    canonical_request = torch.repeat_interleave(
+        torch.arange(request_count, dtype=torch.int64), counts
+    )
+    count_starts = torch.cumsum(counts, 0) - counts
+    canonical = (
+        torch.arange(int(counts.sum()), dtype=torch.int64)
+        - count_starts[canonical_request]
+    )
+    half_of = halves_t[canonical_request]
+    pair = canonical // half_of
+    owner = torch.where(pair < cp, pair, 2 * cp - 1 - pair)
+    row = canonical % half_of + torch.where(pair < cp, 0, half_of)
+    chunk_starts = torch.cumsum(chunks_t, 0) - chunks_t
+    local_rows = row + chunk_starts[canonical_request]
+    own = owner == rank
+    chosen = selected[lo[canonical_request] + canonical]
+
+    # Padding retains each request's last position and is marked non-real.
+    row_request = torch.repeat_interleave(
+        torch.arange(request_count, dtype=torch.int64), chunks_t
+    )
+    positions = (lengths_t[row_request] - 1).contiguous()
+    real = torch.zeros(rows, dtype=torch.bool)
+    if bool(own.any()):
+        own_local = local_rows[own]
+        own_values = chosen[own] - original_starts[canonical_request][own]
+        positions = positions.index_copy(0, own_local, own_values)
+        real = real.index_copy(
+            0, own_local, torch.ones(own_values.shape, dtype=torch.bool)
+        )
+    padded_starts = (torch.cumsum(original_chunks_t, 0) - original_chunks_t)[
+        row_request
+    ] * cp
+
+    owners.append(owner)
+    local.append(local_rows)
+    local_positions.append(positions + padded_starts)
+    absolute_positions.append(positions + prefixes_t[row_request])
+    request_ids.append(row_request.to(torch.int32))
+    local_real.append(real)
+    chunks.extend(int(chunk) for chunk in chunks_t.tolist())
+
+
+def _query_layout(original, selected, group, *, keep_candidate_rows=False):
+    """Derive transport from the actual engine inverse map, not rank0 ownership."""
+    device = original.global_positions.device
+    cp, rank = original.cp_size, original.cp_rank
+    lengths = original.input_lengths_global_host or (original.seq_len_full,)
+    prefixes = original.prefix_lengths_host or (original.prefix_length,)
+    original_chunks = original.chunk_lengths_per_req or (original.chunk_length,)
+    if (
+        len(lengths) != len(prefixes)
+        or len(lengths) != len(original_chunks)
+        or sum(lengths) != original.seq_len_full
+        or selected.ndim != 1
+        or selected.numel() == 0
+        or selected[0] < 0
+        or selected[-1] >= original.seq_len_full
+        or (selected[1:] <= selected[:-1]).any()
+    ):
+        raise ValueError("invalid per-request CED selection")
+    owners, local, local_positions, absolute_positions, request_ids = [], [], [], [], []
+    local_real, chunks = [], []
+    if os.environ.get("DSV41_CED_VECTOR_LAYOUT", "1") == "1":
+        _vectorized_query_layout_rows(
+            lengths,
+            prefixes,
+            original_chunks,
+            selected,
+            cp,
+            rank,
+            owners,
+            local,
+            local_positions,
+            absolute_positions,
+            request_ids,
+            local_real,
+            chunks,
+        )
+    else:
+        _reference_query_layout_loop(
+            lengths,
+            prefixes,
+            original_chunks,
+            selected,
+            cp,
+            rank,
+            owners,
+            local,
+            local_positions,
+            absolute_positions,
+            request_ids,
+            local_real,
+            chunks,
+        )
     owners, local = torch.cat(owners), torch.cat(local)
     rows = sum(chunks)
     padded = rows * cp
@@ -412,13 +579,7 @@ class CEDPlan:
             # Only live decode state is produced. Native cache policy must
             # exclude these decoder/draft SWA pools from prefix reuse.
             starts = tuple(max(n - 128, 0) for n in lengths)
-            selected_parts, offset = [], 0
-            for length, start in zip(lengths, starts):
-                selected_parts.append(
-                    torch.arange(offset + start, offset + length, dtype=torch.int64)
-                )
-                offset += length
-            selected = torch.cat(selected_parts)
+            selected = _bounded_replay_selected(lengths, starts)
         else:
             selected = checkpoint_positions(
                 cp_ctx.prefix_length,
