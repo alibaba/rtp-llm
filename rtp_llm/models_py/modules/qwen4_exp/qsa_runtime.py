@@ -1179,6 +1179,39 @@ class Qwen4ExpQSARuntimeContext:
             rope_sin[request_idx, :seq_len].copy_(sin)
             offset = end
 
+        if (
+            os.environ.get("RTP_LLM_QWEN4_FUSED_INDEXER_PREFILL", "0") == "1"
+            and ratio == 4
+            and int(self.indexer_state_cache.seq_size_per_block) == kv_tokens_per_block
+            and raw_keys.is_cuda
+            and not bool(torch.any(start_positions != 0).item())
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.indexer_prefill_triton import (
+                write_zero_prefix_prefill,
+            )
+
+            if self._side_cache_undo is not None:
+                raise RuntimeError(
+                    "qwen4_exp QSA side-cache transaction is already active"
+                )
+            fused_result = write_zero_prefix_prefill(
+                raw_keys,
+                cu_seqlens,
+                lengths,
+                rope_cos,
+                rope_sin,
+                indexer.k_norm_gamma,
+                kv_pool,
+                kv_table,
+                state_pool,
+                state_table,
+                page_size=kv_tokens_per_block,
+                norm_eps=float(indexer.norm_eps),
+            )
+            if fused_result is not None:
+                object.__setattr__(self, "_side_cache_undo", fused_result.pop("undo"))
+                return lengths, rope_cos, rope_sin, fused_result
+
         result = self._write_indexer_cache_transactional(
             raw_keys,
             cu_seqlens,

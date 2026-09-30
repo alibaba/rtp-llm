@@ -41,6 +41,7 @@ class IndexerCacheUndo:
     kv_pool: torch.Tensor
     kv_slots: torch.Tensor
     original_kv: torch.Tensor
+    padded_slots: bool = False
 
 
 def _capture_pool_slots(
@@ -62,6 +63,13 @@ def _capture_pool_slots(
 
 def restore_indexer_cache(undo: IndexerCacheUndo) -> None:
     """Restore a captured side-cache write on the caller's current stream."""
+    if undo.padded_slots:
+        from rtp_llm.models_py.modules.qwen4_exp.indexer_prefill_triton import (
+            restore_padded_indexer_cache,
+        )
+
+        restore_padded_indexer_cache(undo)
+        return
     undo.state_pool.flatten(0, 1).index_copy_(0, undo.state_slots, undo.original_state)
     undo.kv_pool.flatten(0, 1).index_copy_(0, undo.kv_slots, undo.original_kv)
 
@@ -230,7 +238,9 @@ def _write_indexer_cache_vectorized(
 
     flat_indices = torch.arange(token_count, dtype=torch.long, device=device)
     request_ids = torch.repeat_interleave(
-        torch.arange(batch_size, dtype=torch.long, device=device), lengths
+        torch.arange(batch_size, dtype=torch.long, device=device),
+        lengths,
+        output_size=token_count,
     )
     local_indices = flat_indices - cu.index_select(0, request_ids)
     positions = starts.index_select(0, request_ids) + local_indices
