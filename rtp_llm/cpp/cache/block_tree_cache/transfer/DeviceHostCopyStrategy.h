@@ -18,7 +18,6 @@ struct StagedMemoryCopyScratch;
 struct DeviceHostCopyTile {
     void*  host_addr{nullptr};
     void*  device_addr{nullptr};
-    size_t host_offset{0};
     size_t bytes{0};
     int    device_index{-1};
     size_t member_group_id{0};

@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -77,8 +78,12 @@ public:
     bool   dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled);
     void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
-    // Discard a detached operation's source without publishing its target.
+    // Release a detached operation's source CACHE reference after it settles, without publishing its target.
     void discardDetachedTransfer(const std::vector<TransferDescriptor>& transfer_descs);
+
+    // Detach corrupt sources' subtrees for every GroupSet type; workflow settlement reclaims idle nodes.
+    // Pending loads reject detached resources when committed.
+    void invalidateSources(const std::vector<TransferDescriptor>& descriptors);
 
     // Exact candidate updates for callers that already know the affected tier.
     void suspendCandidate(TreeNode* node, size_t group_set_id, Tier source_tier);
@@ -138,6 +143,7 @@ private:
     void                            completeDrop(const TransferDescriptor& desc);
     void                            completeEvict(const std::vector<TransferDescriptor>& descs);
     void                            settleEviction(const std::vector<TransferDescriptor>& descs);
+    void                            removeEmptyNodes(std::unordered_set<TreeNode*> nodes);
     void                            settleSingleEviction(TreeNode* node);
     void                            eraseNodeFromAllHeaps(TreeNode* node);
     void                            updatePendingRelease(const std::vector<TransferDescriptor>& descs, bool reserve);

@@ -80,7 +80,7 @@ EvictionHeap* BlockTreeEvictor::heapFor(size_t group_set_id, Tier tier) const {
 
 bool BlockTreeEvictor::isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const {
     const GroupSetResource& resource = node->group_set_resources[group_set_id];
-    return !node->is_resident && resource.transfer_state == GroupSetTransferState::IDLE
+    return !node->detached && !node->is_resident && resource.transfer_state == GroupSetTransferState::IDLE
            && resource.getTopTier() == source_tier
            && (tree_->groupSets()[group_set_id]->groupType() != CacheGroupType::FULL
                || tree_->isLeafAtTier(node, group_set_id, source_tier));
@@ -344,14 +344,18 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
         descriptors.push_back(std::move(*eviction_desc));
     }
     if (descriptors.empty()) {
-        return {};
+        return {/*direct_progress=*/false,
+                /*async_submitted=*/false,
+                /*scheduled_count=*/0};
     }
 
     auto target_blocks =
         tree_->groupSets()[group_set_id]->allocateBlocks(descriptors.size(), target_tier, BlockTreeRefType::EVICTION);
     if (!target_blocks.has_value()) {
         rollbackTransferLocked(descriptors);
-        return {};
+        return {/*direct_progress=*/false,
+                /*async_submitted=*/false,
+                /*scheduled_count=*/0};
     }
     for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
         descriptors[desc_index].target_blocks = {(*target_blocks)[desc_index]};
@@ -827,10 +831,35 @@ void BlockTreeEvictor::discardDetachedTransfer(const std::vector<TransferDescrip
         const MultiNodeResource source_holder{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
         group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
         resource.evictFromTier(desc.source_tier);
-        resource.transfer_state       = GroupSetTransferState::IDLE;
-        resource.transfer_detached    = false;
+        resource.transfer_state    = GroupSetTransferState::IDLE;
+        resource.transfer_detached = false;
         tree_->refreshPublishedState(desc.node);
     }
+}
+
+void BlockTreeEvictor::invalidateSources(const std::vector<TransferDescriptor>& descriptors) {
+    std::unordered_set<TreeNode*> affected_parents;
+    for (const auto& desc : descriptors) {
+        if (desc.node->detached) {
+            continue;
+        }
+        TreeNode* parent = desc.node->parent;
+        affected_parents.insert(parent);
+        auto nodes = tree_->detachSubtree(desc.node);
+        for (TreeNode* node : nodes) {
+            // A later descriptor can detach a parent collected earlier in this batch.
+            affected_parents.erase(node);
+            eraseNodeFromAllHeaps(node);
+            for (auto& resource : node->group_set_resources) {
+                if (resource.transfer_state != GroupSetTransferState::IDLE) {
+                    resource.transfer_detached = true;
+                }
+            }
+        }
+        updateFullCandidate(parent);
+    }
+    // All descriptors must be consumed before removing their empty ancestors.
+    removeEmptyNodes(std::move(affected_parents));
 }
 
 void BlockTreeEvictor::releaseTargetBlocks(const std::vector<TransferDescriptor>& descs) {
@@ -865,6 +894,35 @@ void BlockTreeEvictor::settleEviction(const std::vector<TransferDescriptor>& des
     }
 
     tree_->removePendingNodes(pending_nodes);
+    for (TreeNode* node : refresh_nodes) {
+        updateFullCandidate(node);
+    }
+}
+
+void BlockTreeEvictor::removeEmptyNodes(std::unordered_set<TreeNode*> pending_nodes) {
+    std::unordered_set<TreeNode*> refresh_nodes;
+    refresh_nodes.reserve(pending_nodes.size());
+    while (!pending_nodes.empty()) {
+        TreeNode* node = *pending_nodes.begin();
+        pending_nodes.erase(node);
+        if (!tree_->isRemovable(node)) {
+            refresh_nodes.insert(node->parent);
+            continue;
+        }
+
+        TreeNode* current = node;
+        do {
+            TreeNode* parent = current->parent;
+            pending_nodes.erase(current);
+            refresh_nodes.erase(current);
+            RTP_LLM_LOG_DEBUG("deleting empty node key=%ld", current->cache_key);
+            eraseNodeFromAllHeaps(current);
+            tree_->removeNode(current);
+            current = parent;
+        } while (tree_->isRemovable(current));
+        refresh_nodes.insert(current);
+    }
+
     for (TreeNode* node : refresh_nodes) {
         updateFullCandidate(node);
     }

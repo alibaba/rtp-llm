@@ -12,6 +12,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace kmonitor {
 class MetricsReporter;
@@ -110,22 +111,24 @@ public:
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
-    void    reportTransferFinished(CacheTransferOperation                 operation,
-                                   Tier                                   source_tier,
-                                   Tier                                   target_tier,
-                                   size_t                                 descriptors_per_transfer,
-                                   int64_t                                begin_time_us,
-                                   bool                                   success,
-                                   const std::vector<TransferDescriptor>& successful_descriptors,
-                                   const std::vector<GroupSetPtr>&        group_sets);
-    void    reportQueueWaitMetric(bool        callback,
-                                  const char* pool_type,
-                                  const char* operation,
-                                  Tier        source_tier,
-                                  Tier        target_tier,
-                                  int64_t     latency_us) const noexcept;
-    void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
-    void    reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
+    // Report once after all batches/ranks of a logical copy have completed.
+    void maybeReportCopyError(Tier source_tier, Tier target_tier, const TransferResult& result) const;
+    void reportTransferFinished(CacheTransferOperation                 operation,
+                                Tier                                   source_tier,
+                                Tier                                   target_tier,
+                                size_t                                 descriptors_per_transfer,
+                                int64_t                                begin_time_us,
+                                bool                                   success,
+                                const std::vector<TransferDescriptor>& successful_descriptors,
+                                const std::vector<GroupSetPtr>&        group_sets);
+    void reportQueueWaitMetric(bool        callback,
+                               const char* pool_type,
+                               const char* operation,
+                               Tier        source_tier,
+                               Tier        target_tier,
+                               int64_t     latency_us) const noexcept;
+    void reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
+    void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 
 private:
     static constexpr size_t kOperationCount = 3;

@@ -13,19 +13,19 @@ void TransferBatchAsyncContext::onDone(DoneCallback callback) {
     if (!callback) {
         return;
     }
-    bool      run_now = false;
-    ErrorInfo error   = ErrorInfo::OkStatus();
+    bool           run_now = false;
+    TransferResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (done_) {
             run_now = true;
-            error   = error_;
+            result  = result_;
         } else {
             callbacks_.push_back(std::move(callback));
         }
     }
     if (run_now) {
-        callback(std::move(error));
+        callback(std::move(result));
     }
 }
 
@@ -36,29 +36,30 @@ bool TransferBatchAsyncContext::done() const {
 
 bool TransferBatchAsyncContext::success() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return done_ && error_.ok();
+    return done_ && result_.ok();
 }
 
-ErrorInfo TransferBatchAsyncContext::errorInfo() const {
+TransferResult TransferBatchAsyncContext::result() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return error_;
+    return result_;
 }
 
-void TransferBatchAsyncContext::complete(ErrorInfo error) {
+void TransferBatchAsyncContext::complete(TransferResult result) {
     std::vector<DoneCallback> callbacks;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (done_) {
             return;
         }
-        error_ = std::move(error);
-        done_  = true;
+        result.expandBlockErrors(block_count_);
+        result_ = std::move(result);
+        done_   = true;
         completion_guard_.reset();
         callbacks.swap(callbacks_);
     }
     done_cv_.notify_all();
     for (auto& callback : callbacks) {
-        callback(error_);
+        callback(result_);
     }
 }
 
