@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <sstream>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -893,8 +894,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // Draft prefill uses one block; draft decode uses 1 + gamma.
             RTP_LLM_CHECK_WITH_INFO(params.sp_config.gen_num_per_cycle >= 0,
                                     "draft CUDA graph speculative cycle count must be non-negative");
-            const size_t fake_count = std::max<size_t>(1, size_t{1} + params.sp_config.gen_num_per_cycle);
-            const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
+            const size_t fake_count               = std::max<size_t>(1, size_t{1} + params.sp_config.gen_num_per_cycle);
+            const size_t fake_width               = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
             model_params.kernel_block_table_width = std::max(real_width, fake_width);
         }
 #endif
@@ -2389,6 +2390,31 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     }
 }
 
+void MtpExecutor::drainAsyncRunners() {
+    // These workers normally join at the next process() entry. Sleep has no next
+    // forward: retire every runner here before weights/KV can be released. A CPU
+    // exception need not poison CUDA, so a successful device sync cannot replace
+    // propagating that exception to the engine's fail-closed quiesce acknowledgement.
+    const auto         stream = cuda_graph::graphGetCurrentStream();
+    std::exception_ptr failure;
+    auto               drain = [&](auto& runner) {
+        try {
+            runner.sync(stream);
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+    };
+    drain(target_verify_prepare_runner_);
+    drain(draft_prefill_prepare_runner_);
+    drain(spec_logits_verify_async_runner_);
+    drain(spec_bookkeeping_runner_);
+    if (failure) {
+        std::rethrow_exception(failure);
+    }
+}
+
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
 
@@ -2396,6 +2422,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
     }
+
     MtpMetricsCollector metrics_collector;
     auto                tps_active_guard =
         tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
@@ -2899,7 +2926,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
     auto next_position_ids_all =
         is_dspark_ ? advanceDSparkPositionIds(
-            verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
+                         verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
                      torch::Tensor();
 
     torch::Tensor next_kv_cache_block_id;

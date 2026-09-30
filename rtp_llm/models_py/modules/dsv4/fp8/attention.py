@@ -16,8 +16,6 @@ import json
 import logging
 import os
 import threading
-from contextlib import contextmanager, suppress
-from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 # P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
 # Replaces the per-group ``for g in range(G)`` loop (G launches of
@@ -25,6 +23,10 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 # call.  Matches vLLM's ``deepseek_v4_attention.py:325`` exactly (same
 # API, same recipe).  Validated by ``test/test_wo_a_batched_vs_loop.py``
 # — bit-identical output + 3.5-4.4× speedup at decode B∈{1..256}.
+import weakref
+from contextlib import contextmanager, suppress
+from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
+
 import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
@@ -34,6 +36,33 @@ from deep_gemm.utils.layout import (  # noqa: E402
 )
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.weight_memory_saver import (
+    feature_weights_region,
+    suppress_weights_region,
+)
+
+# Attention owns several resident tensors derived from checkpoint weights. In
+# level-2 sleep the ``weights`` VMM region is remapped blank, while the raw
+# ModelWeights tensors are reloaded separately. Keep a weak registry so the
+# WeightManager can refresh these derived tensors in place without replacing
+# CUDA-graph-baked addresses.
+_ATTENTION_REGISTRY = weakref.WeakSet()
+
+
+def _register_attention(attention: "AttentionFP8") -> None:
+    # Registration is required to restore blank-remapped computed weights.
+    # A failed registration must abort construction, not silently skip wake.
+    from rtp_llm.model_loader.weight_memory_saver import current_model_scope
+
+    attention._sleep_model_scope = current_model_scope()
+    _ATTENTION_REGISTRY.add(attention)
+
+
+def iter_attentions() -> list:
+    """Return a snapshot of live DSV4 AttentionFP8 instances."""
+    return list(_ATTENTION_REGISTRY)
+
+
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -381,24 +410,20 @@ def _prepare_wo_a_stacked(
 
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
-    """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors.
-
-    Repacks the UE8M0 ``float8_e8m0fnu`` scale into DeepGEMM's int32
-    TMA-aligned packed layout when needed. Framework descriptor path may
-    deliver the scale already packed (dtype int32) — we no-op then."""
+    """Build a projection with stable, reloadable FP8 scale storage."""
     assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-    # LinearFactory.create_linear_from_weights consumes a (weights_dict,
-    # weight_key, scale_key) triple — feed it a one-shot dict so the
-    # factory plumbing is unchanged.
-    local = {"_w": w, "_s": s}
-    return LinearFactory.create_linear_from_weights(
-        local,
-        "_w",
-        "_s",
-        quant_config=_V4_FP8_BLOCK_CFG,
-    )
+    raw_scale = s
+    with feature_weights_region():
+        if s.dtype == torch.float8_e8m0fnu:
+            s = _repack_v4_fp8_scale_to_int32(s)
+        linear = LinearFactory.create_linear_from_weights(
+            {"_w": w, "_s": s}, "_w", "_s", quant_config=_V4_FP8_BLOCK_CFG
+        )
+    linear._sleep_raw_weight_source = w
+    linear._sleep_raw_scale_source = raw_scale
+    linear._sleep_row_slice = None
+    linear._sleep_col_slice = None
+    return linear
 
 
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
@@ -927,8 +952,10 @@ class AttentionFP8(nn.Module):
               * framework packed int32 [N, K//128//4]: N is fully
                 expanded (slice by full N stride) and K is packed 4×
                 (slice by ``slice.start // 512``)."""
-            w = layer_weights[w_tag]
-            s = layer_weights[s_tag]
+            raw_w = layer_weights[w_tag]
+            raw_s = layer_weights[s_tag]
+            w = raw_w
+            s = raw_s
             scale_is_packed_int32 = s.dtype == torch.int32
             if row_slice is not None:
                 w = w[row_slice]
@@ -950,7 +977,12 @@ class AttentionFP8(nn.Module):
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
                 s = s.contiguous()
-            return _v4_fp8_linear(w, s)
+            linear = _v4_fp8_linear(w, s)
+            linear._sleep_raw_weight_source = raw_w
+            linear._sleep_raw_scale_source = raw_s
+            linear._sleep_row_slice = row_slice
+            linear._sleep_col_slice = col_slice
+            return linear
 
         self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
         # wq_b is row-split along N (n_heads * head_dim)
@@ -971,6 +1003,9 @@ class AttentionFP8(nn.Module):
         assert (n_heads * head_dim) % o_groups == 0
         wo_a_w = layer_weights[W.v4_attn_wo_a_w]
         wo_a_s = layer_weights[W.v4_attn_wo_a_s]
+        self._sleep_wo_a_w_src = wo_a_w
+        self._sleep_wo_a_s_src = wo_a_s
+        self._sleep_wo_a_row_slice = wo_a_row_slice if tp_size > 1 else None
         if tp_size > 1:
             wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
             if wo_a_s.dtype == torch.int32:
@@ -1172,6 +1207,131 @@ class AttentionFP8(nn.Module):
             HCA_STATE: (torch.float32, 2 * head_dim),
             INDEXER_STATE: (torch.float32, 2 * coff_idx * idx_hd),
         }
+
+        _register_attention(self)
+
+    @staticmethod
+    def _reload_linear_scale(linear) -> None:
+        raw_w = getattr(linear, "_sleep_raw_weight_source", None)
+        raw = getattr(linear, "_sleep_raw_scale_source", None)
+        row_slice = getattr(linear, "_sleep_row_slice", None)
+        col_slice = getattr(linear, "_sleep_col_slice", None)
+        resident = getattr(linear, "weight_scales", None)
+        resident_w = getattr(linear, "weight", None)
+        if raw_w is None or raw is None or resident is None:
+            return
+        with suppress_weights_region():
+            w = raw_w
+            s = raw
+            if row_slice is not None:
+                w = w[row_slice]
+                s = (
+                    s[row_slice]
+                    if s.dtype == torch.int32
+                    else s[row_slice.start // 128 : row_slice.stop // 128]
+                )
+            if col_slice is not None:
+                w = w[:, col_slice]
+                s = (
+                    s[:, col_slice.start // 512 : col_slice.stop // 512]
+                    if s.dtype == torch.int32
+                    else s[:, col_slice.start // 128 : col_slice.stop // 128]
+                )
+            if row_slice is not None or col_slice is not None:
+                w = w.contiguous()
+                s = s.contiguous()
+            rebuilt = (
+                _repack_v4_fp8_scale_to_int32(s)
+                if s.dtype == torch.float8_e8m0fnu
+                else s
+            )
+            if resident_w is not None:
+                if w.shape != resident_w.shape:
+                    raise RuntimeError(
+                        "DSV4 attention weight reload shape mismatch: "
+                        f"rebuilt={tuple(w.shape)}, resident={tuple(resident_w.shape)}"
+                    )
+                resident_w.copy_(w)
+        if rebuilt.shape != resident.shape or rebuilt.dtype != resident.dtype:
+            raise RuntimeError(
+                "DSV4 attention scale reload shape/dtype mismatch: "
+                f"rebuilt={tuple(rebuilt.shape)}/{rebuilt.dtype}, "
+                f"resident={tuple(resident.shape)}/{resident.dtype}"
+            )
+        resident.copy_(rebuilt)
+
+    def reload_sleep_computed_weights(self, seen_freqs=None, seen_cos_sin=None) -> None:
+        """Restore DSV4 attention-derived tensors in place after level-2 wake."""
+        if seen_freqs is None:
+            seen_freqs = set()
+        if seen_cos_sin is None:
+            seen_cos_sin = set()
+
+        for linear in (
+            getattr(self, "wq_a", None),
+            getattr(self, "wq_b", None),
+            getattr(self, "wkv", None),
+            getattr(self, "wo_b", None),
+        ):
+            if linear is not None:
+                self._reload_linear_scale(linear)
+
+        src_w = getattr(self, "_sleep_wo_a_w_src", None)
+        src_s = getattr(self, "_sleep_wo_a_s_src", None)
+        row_slice = getattr(self, "_sleep_wo_a_row_slice", None)
+        stk_w = getattr(self, "_wo_a_stk_w", None)
+        stk_s = getattr(self, "_wo_a_stk_s", None)
+        if src_w is not None and src_s is not None and stk_w is not None:
+            with suppress_weights_region():
+                if row_slice is not None:
+                    src_w = src_w[row_slice]
+                    src_s = (
+                        src_s[row_slice]
+                        if src_s.dtype == torch.int32
+                        else src_s[row_slice.start // 128 : row_slice.stop // 128]
+                    )
+                    src_w = src_w.contiguous()
+                    src_s = src_s.contiguous()
+                rebuilt_w, rebuilt_s = _prepare_wo_a_stacked(
+                    src_w,
+                    src_s,
+                    self.n_groups,
+                    self.o_lora_rank,
+                    self.n_heads * self.head_dim // self.n_groups,
+                )
+            if rebuilt_w.shape != stk_w.shape or rebuilt_s.shape != stk_s.shape:
+                raise RuntimeError("DSV4 wo_a stacked shape changed on wake")
+            stk_w.copy_(rebuilt_w)
+            stk_s.copy_(rebuilt_s)
+
+        freqs = getattr(self, "freqs_cis", None)
+        if (
+            isinstance(freqs, torch.Tensor)
+            and freqs.is_cuda
+            and id(freqs) not in seen_freqs
+        ):
+            source = precompute_freqs_cis(
+                self._rope_dim,
+                self._rope_max_seq_len,
+                self._rope_o_seq_len,
+                self._rope_base,
+                self._rope_factor,
+                self._rope_beta_fast,
+                self._rope_beta_slow,
+                # An explicit CPU device avoids reusing the meta-device entry
+                # created while the model is constructed under to_empty().
+                device=torch.device("cpu"),
+            ).to(device=freqs.device)
+            freqs.copy_(source)
+            seen_freqs.add(id(freqs))
+
+        compressor = getattr(self, "compressor", None)
+        if compressor is not None:
+            compressor.reload_rope_cache(seen_cos_sin)
+        indexer = getattr(self, "indexer", None)
+        if indexer is not None:
+            self._reload_linear_scale(getattr(indexer, "wq_b", None))
+            indexer.reload_sleep_computed_weights(seen_cos_sin)
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active on a prefill call, ``forward``
@@ -5846,3 +6006,4 @@ class CommitOnlyAttentionFP8(AttentionFP8):
             HCA_STATE: (torch.float32, 2 * self.head_dim),
             INDEXER_STATE: (torch.float32, 4 * idx_hd),
         }
+        _register_attention(self)

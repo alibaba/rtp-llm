@@ -52,6 +52,7 @@ public:
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     void                 shutdown();
+    bool                 shutdownUntil(std::chrono::steady_clock::time_point deadline);
 
 private:
     bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;

@@ -89,7 +89,39 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         checker.check(config.moe_quant_method == "FP8_FP4")
 
     def setup_weights(self, weights: Dict[str, torch.Tensor]) -> None:
+        from rtp_llm.model_loader.weight_memory_saver import feature_weights_region
+
+        # Only resident layouts belong to the pausable region. Communicators,
+        # staging buffers and JIT warmup keep their own runtime ownership.
+        with feature_weights_region():
+            self._setup_kernel_weights(weights)
+        self._setup_runtime()
+
+    def _setup_runtime(self) -> None:
+        pass
+
+    def _setup_kernel_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         raise NotImplementedError
+
+    def sleep_weight_tensors(self) -> Dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+    def reload_weights(self, weights: Dict[str, torch.Tensor]) -> None:
+        from rtp_llm.model_loader.weight_memory_saver import suppress_weights_region
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_reload import (
+            copy_tensors_in_place,
+        )
+
+        # Build kernel layouts only: no process-group rendezvous, buffer creation,
+        # JIT warmup, or mutation of the live module's Parameters/submodules.
+        scratch = type(self).__new__(type(self))
+        torch.nn.Module.__init__(scratch)
+        scratch.cfg = self.cfg
+        with suppress_weights_region(), torch.inference_mode():
+            scratch._setup_kernel_weights(dict(weights))
+            copy_tensors_in_place(
+                self.sleep_weight_tensors(), scratch.sleep_weight_tensors()
+            )
 
     def forward(
         self,

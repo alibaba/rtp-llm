@@ -141,6 +141,17 @@ requirement([
     "xgrammar",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
+py_library(
+    name = "torch_memory_saver",
+    deps = select({
+        "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch//torch_memory_saver:pkg"],
+        "@//:using_cuda13_arm": ["@pip_cuda13_arm_torch//torch_memory_saver:pkg"],
+        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//torch_memory_saver:pkg"],
+        "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//torch_memory_saver:pkg"],
+        "//conditions:default": [],
+    }),
+)
+
 
 _JIT_CACHE_SRCS = [
     "utils/jit_cache_manager.py",
@@ -166,6 +177,8 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        "//rtp_llm/utils/lifecycle:control",
+        "//rtp_llm/utils/lifecycle:resources",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
 )
@@ -464,6 +477,23 @@ py_library(
         ":openai_api",
         ":telemetry",
     ]
+)
+
+py_library(
+    name = "frontend_sleep_routes",
+    srcs = ["frontend/sleep_routes.py"],
+    deps = [
+        ":fastapi",
+        "//rtp_llm/utils/lifecycle:core",
+    ],
+)
+
+py_library(
+    name = "frontend_worker_address_utils",
+    srcs = ["frontend/worker_address_utils.py"],
+    deps = [
+        "//rtp_llm/utils/lifecycle:core",
+    ],
 )
 
 py_library(

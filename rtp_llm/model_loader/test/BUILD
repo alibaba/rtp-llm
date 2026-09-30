@@ -3,6 +3,24 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_fastsafetensors_memory",
+    srcs = ["test_fastsafetensors_memory.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_fastsafetensors_reserve_wiring",
+    srcs = ["test_fastsafetensors_reserve_wiring.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:async_model",
+        "//rtp_llm:sdk",
+        "//rtp_llm:models",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,
@@ -50,6 +68,46 @@ py_test(
     deps = py_test_deps,
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "weight_memory_saver_test",
+    srcs = ["weight_memory_saver_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "weight_module_region_test",
+    srcs = ["weight_module_region_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py/standalone:auto_model",
+    ],
+)
+
+py_test(
+    name = "weight_manager_collectives_test",
+    srcs = ["weight_manager_collectives_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "weight_memory_saver_gpu_test",
+    srcs = ["weight_memory_saver_gpu_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+py_test(
+    name = "pausable_scratch_gpu_test",
+    srcs = ["pausable_scratch_gpu_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
 )
 
 py_test(

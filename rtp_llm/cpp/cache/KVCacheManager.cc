@@ -30,6 +30,9 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
+#include <ATen/cuda/CachingHostAllocator.h>
+#endif
 
 namespace rtp_llm {
 
@@ -293,12 +296,17 @@ bool KVCacheManager::init() {
     }
 
     coordinator_manager_->setCPSlotMapper(cp_slot_mapper_);
+    coordinator_manager_->setUseSleepBacking(!warmup_ && runtime_config_.enable_sleep_mode);
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_->init(), "CoordinatorCacheManager init failed");
     // Observe real pool capacity, including asynchronous eviction and lease release.
     const auto capacity_changed = allocationChangeCallback();
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
         pool->setCapacityChangeCallback(capacity_changed);
     }
+    return initBlockTreeCache();
+}
+
+bool KVCacheManager::initBlockTreeCache() {
     const bool requires_broadcast_manager = parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
                                             && !runtime_config_.worker_grpc_addrs.empty();
     std::shared_ptr<BroadcastManager> broadcast_manager;
@@ -655,7 +663,8 @@ void KVCacheManager::refreshKVCacheInfoSnapshot() {
 }
 
 KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
-    KVCacheInfo info;
+    std::lock_guard<std::mutex> lock(cache_lifecycle_mutex_);
+    KVCacheInfo                 info;
     info.version = latest_version;
 
     if (!coordinator_manager_) {
@@ -665,7 +674,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
 
     if (need_cache_keys && block_tree_cache_) {
         BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot();
-        info.version                  = snapshot.version;
+        info.version                  = cache_version_offset_ + snapshot.version;
         info.cached_keys              = std::move(snapshot.keys);
     }
 
@@ -685,6 +694,121 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
 
 void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
     coordinator_manager_->regUserMr(model_id, std::move(cache_store));
+}
+
+void KVCacheManager::deregUserMr() {
+    std::exception_ptr first_error;
+    for (const auto& pool : coordinator_manager_->groupBlockPools()) {
+        try {
+            pool->deregUserMr();
+        } catch (...) {
+            if (!first_error) {
+                first_error = std::current_exception();
+            }
+        }
+    }
+    if (first_error) {
+        std::rethrow_exception(first_error);
+    }
+}
+
+size_t KVCacheManager::activeCacheWorkCount() const {
+    std::lock_guard<std::mutex> lock(cache_lifecycle_mutex_);
+    return block_tree_cache_ ? block_tree_cache_->activeWorkCount() : 0;
+}
+
+std::vector<KVCachePhysicalMemoryControllerPtr> KVCacheManager::kvMemoryControllers() const {
+    std::vector<KVCachePhysicalMemoryControllerPtr> controllers;
+    for (const auto& pool : coordinator_manager_->groupBlockPools()) {
+        if (auto controller = pool->memoryController()) {
+            controllers.push_back(std::move(controller));
+        }
+    }
+    return controllers;
+}
+
+bool KVCacheManager::releaseKVCacheMemoryBacking(int64_t timeout_ms) {
+    if (cache_backing_state_ == CacheBackingState::RELEASED) {
+        return true;
+    }
+    if (cache_backing_state_ != CacheBackingState::LIVE) {
+        return false;
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max<int64_t>(0, timeout_ms));
+    if (block_tree_cache_ && !block_tree_cache_->quiesceForSleep(deadline)) {
+        RTP_LLM_LOG_ERROR("cache sleep drain timed out; retaining cache objects and physical backing");
+        return false;
+    }
+    // No requester may still own a block. Tree-only cache references are
+    // discarded by the cache destructor; block 0 is reserved by the pool itself.
+    for (const auto& pool : coordinator_manager_->groupBlockPools()) {
+        if (pool->referencedBlocksNum() != 0) {
+            RTP_LLM_LOG_ERROR("cache sleep rejected: pool %s still has request references", pool->poolName().c_str());
+            return false;
+        }
+    }
+    stopMetricsReporter();
+    stopCacheEventPublisher();
+    std::lock_guard<std::mutex> lock(cache_lifecycle_mutex_);
+    // No error after this boundary may be mistaken for a live, intact cache.
+    cache_backing_state_ = CacheBackingState::RETIRED;
+    cache_version_offset_ += block_tree_cache_->getKeySnapshot().version + 2;
+    coordinator_manager_->detachBlockTreeCacheForSleep();
+    if (block_tree_cache_.use_count() != 1) {
+        RTP_LLM_LOG_ERROR("cache sleep rejected: outstanding cache owner after drain; retaining physical backing");
+        return false;
+    }
+    block_tree_cache_.reset();
+    // Destroying the quiesced cache retires tree metadata, disk handles, host
+    // pools and transfer staging. Keep the engine's device pools and their views
+    // intact: both model code and captured CUDA graphs hold these addresses.
+#if USING_CUDA
+    at::cuda::CachingHostAllocator_emptyCache();
+#endif
+    for (const auto& pool : coordinator_manager_->groupBlockPools()) {
+        if (pool->usedBlocksNum() != 0) {
+            RTP_LLM_LOG_ERROR("cache sleep rejected: pool %s still has allocated blocks", pool->poolName().c_str());
+            return false;
+        }
+    }
+    for (const auto& controller : kvMemoryControllers()) {
+        if (!controller->pausePhysicalMemory()) {
+            return false;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+        cache_status_snapshot_.reset();
+    }
+    cache_backing_state_ = CacheBackingState::RELEASED;
+    return true;
+}
+
+bool KVCacheManager::restoreKVCacheMemoryBackingAndResetMetadata() {
+    if (cache_backing_state_ == CacheBackingState::LIVE) {
+        return true;
+    }
+    if (cache_backing_state_ != CacheBackingState::RELEASED) {
+        return false;
+    }
+    for (const auto& controller : kvMemoryControllers()) {
+        if (!controller->resumePhysicalMemory()) {
+            return false;
+        }
+    }
+    // Recreate cache collaborators only after GPU backing is restored. Remote
+    // storage initialization is allowed to inspect/register the device buffers.
+    {
+        std::lock_guard<std::mutex> lock(cache_lifecycle_mutex_);
+        cache_backing_state_ = CacheBackingState::RETIRED;
+        if (!initBlockTreeCache()) {
+            return false;
+        }
+        cache_backing_state_ = CacheBackingState::LIVE;
+    }
+    refreshKVCacheInfoSnapshot();
+    return true;
 }
 
 void KVCacheManager::setCacheStore(std::shared_ptr<CacheStore> cache_store) {

@@ -90,6 +90,7 @@ class BaseModel(object):
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -118,6 +119,7 @@ class BaseModel(object):
         self.force_cpu_load_weights = force_cpu_load_weights
         self.loader_recycle_handles = loader_recycle_handles
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
+        self.fastsafetensors_reserve_mb = fastsafetensors_reserve_mb
         self.weight = None
         self.weight_manager = None
         # Keep the owner alive for the complete lifetime of any non-owning
@@ -177,6 +179,20 @@ class BaseModel(object):
         ):
             raise Exception("current model can't support cuda graph in py model mode")
 
+        # CUDA graph replay does not execute Python to refresh pointers.  Latch
+        # this process-wide before constructing any Python model so sleep reclaim
+        # keeps graph-captured optional buffers at stable virtual addresses.  The
+        # latch is deliberately never cleared: a second non-graph model may
+        # coexist with a graph-enabled model in the same worker.
+        from rtp_llm.models_py.utils.cuda_graph_state import mark_cuda_graph_baked
+
+        mark_cuda_graph_baked(
+            bool(
+                getattr(self.hw_kernel_config, "enable_cuda_graph", False)
+                or getattr(self.hw_kernel_config, "enable_native_cuda_graph", False)
+            )
+        )
+
         self.custom_module = self._init_custom_module()
         self.model_weights_loader = self.create_model_loader()
         self.py_eplb = self.model_weights_loader._py_eplb
@@ -189,13 +205,17 @@ class BaseModel(object):
             self.weight,
             self.model_weights_loader,
             non_owned_global_weights=self._weight_alias_names,
+            model_scope=id(self),
         )
         if skip_python_model:
             return
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
-        self._create_python_model()
+        from rtp_llm.model_loader.weight_memory_saver import model_build_scope
+
+        with model_build_scope(id(self)):
+            self._create_python_model()
 
     def _create_python_model(self):
         pass
@@ -241,6 +261,16 @@ class BaseModel(object):
 
         这可以显著减少host内存占用，为KV cache等运行时内存需求腾出空间。
         """
+        from rtp_llm.model_loader.weight_memory_saver import (
+            is_enabled,
+            sleep_mode_level,
+        )
+
+        if is_enabled() and sleep_mode_level() == 2:
+            logging.info(
+                "sleep level-2: retain checkpoint metadata for in-place wake reload"
+            )
+            return
         self.model_weights_loader.cleanup_database()
 
     @classmethod
@@ -309,6 +339,7 @@ class BaseModel(object):
         skip_python_model: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
     ) -> "BaseModel":
@@ -341,6 +372,7 @@ class BaseModel(object):
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
         )
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(
@@ -511,4 +543,5 @@ class BaseModel(object):
             load_method=self.load_method,
             force_cpu_load_weights=self.force_cpu_load_weights,
             moe_pure_tp_preshard=self.moe_pure_tp_preshard,
+            fastsafetensors_reserve_mb=self.fastsafetensors_reserve_mb,
         )

@@ -3,6 +3,7 @@
 #include <unordered_map>
 
 #include <condition_variable>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -56,11 +57,11 @@ struct StorageTaskState;
 
 class StorageWriteTask {
 public:
-    StorageWriteTask()                            = default;
-    StorageWriteTask(StorageWriteTask&&) noexcept = default;
+    StorageWriteTask()                                       = default;
+    StorageWriteTask(StorageWriteTask&&) noexcept            = default;
     StorageWriteTask& operator=(StorageWriteTask&&) noexcept = default;
 
-    StorageWriteTask(const StorageWriteTask&) = delete;
+    StorageWriteTask(const StorageWriteTask&)            = delete;
     StorageWriteTask& operator=(const StorageWriteTask&) = delete;
 
     explicit operator bool() const {
@@ -99,6 +100,10 @@ public:
     bool write(StorageWriteTask task);
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
+    // Caller closes producers first. Unlike shutdown, this does not destroy
+    // backend state when the deadline expires and I/O still holds GPU pins.
+    bool   waitForIdleUntil(std::chrono::steady_clock::time_point deadline);
+    size_t activeRequestCount() const;
 
 protected:
     const CacheTopology&      topology() const;
@@ -137,7 +142,7 @@ private:
     bool                                    init_attempted_{false};
     bool                                    initialized_{false};
 
-    std::mutex              lifecycle_mutex_;
+    mutable std::mutex      lifecycle_mutex_;
     std::condition_variable lifecycle_cv_;
     Lifecycle               lifecycle_{Lifecycle::CREATED};
     size_t                  in_flight_{0};

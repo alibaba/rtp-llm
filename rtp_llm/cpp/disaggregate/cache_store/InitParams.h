@@ -49,6 +49,8 @@ public:
 
     // for test
     std::shared_ptr<MemoryUtil> memory_util;
+    // Startup-only: ordinary services do not need sleep drain bookkeeping.
+    bool enable_sleep_mode{false};
 };
 
 }  // namespace rtp_llm

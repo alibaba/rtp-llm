@@ -20,6 +20,28 @@ using namespace ::testing;
 
 namespace rtp_llm {
 
+TEST(LocalRpcServerTest, LifecycleRpcsRejectUninitializedEngine) {
+    LocalRpcServer         server;
+    grpc::ServerContext    context;
+    EmptyPB                empty;
+    SleepRequestPB         sleep;
+    SleepQuiesceRequestPB  quiesce;
+    SleepQuiesceResponsePB quiesce_response;
+    WakeUpRequestPB        wake;
+    IsSleepingResponsePB   sleeping;
+    SleepStatusResponsePB  status;
+    quiesce.set_protocol(2);
+    const auto check = [](const grpc::Status& result) {
+        EXPECT_EQ(result.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+        EXPECT_EQ(result.error_message(), "engine is not initialized");
+    };
+    check(server.SleepServing(&context, &sleep, &empty));
+    check(server.QuiesceSleep(&context, &quiesce, &quiesce_response));
+    check(server.WakeUpServing(&context, &wake, &empty));
+    check(server.IsSleeping(&context, &empty, &sleeping));
+    check(server.GetSleepStatus(&context, &empty, &status));
+}
+
 class MockGenerateStream: public GenerateStream {
 public:
     MockGenerateStream(const std::shared_ptr<GenerateInput>& input,
