@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Optional
 
 import torch
@@ -10,7 +11,7 @@ from flashinfer.prefill import (
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
-    MhaRotaryEmbeddingOp,
+    FlashinferRopeApplier,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
@@ -937,7 +938,11 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self.attn_inputs = attn_inputs
 
         self.fmha_impl = self._create_fmha_impl(attn_configs, attn_inputs)
-        self.rope_impl = self._create_rope_impl(attn_configs)
+        self.rope_applier = self._create_rope_applier(attn_configs)
+        logging.info(
+            "py-flashinfer prefill rope applier: %s",
+            type(self.rope_applier).__name__,
+        )
         # Create KV cache write op
         self.kv_cache_write_op = KVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
@@ -961,8 +966,8 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self.rope_params = self.fmha_params
         # Pass the shared params to all ops
         self.fmha_impl.set_params(self.fmha_params)
-        if self.rope_impl is not None:
-            self.rope_impl.set_params(self.rope_params)
+        if self.rope_applier is not None:
+            self.rope_applier.set_params(self.rope_params)
         # KV cache write always needs params (even without RoPE)
         self.kv_cache_write_op.set_params(self.rope_params)
 
@@ -972,9 +977,11 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         """Create FMHA implementation. To be overridden by subclasses."""
         raise NotImplementedError("Subclass must implement _create_fmha_impl")
 
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation. To be overridden by subclasses."""
-        raise NotImplementedError("Subclass must implement _create_rope_impl")
+    def _create_rope_applier(self, attn_configs: AttentionConfigs) -> Any:
+        """Create the rope module shared by the py-flashinfer prefill cores."""
+        if attn_configs.rope_config.style == RopeStyle.No:
+            return None
+        return FlashinferRopeApplier(attn_configs)
 
     def _split_qkv(
         self, qkv: torch.Tensor
@@ -1015,8 +1022,8 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
-        if self.need_rope_kv_cache and self.rope_impl is not None:
-            query, key, value = self.rope_impl.forward(qkv)
+        if self.need_rope_kv_cache and self.rope_applier is not None:
+            query, key, value = self.rope_applier.apply(qkv)
         else:
             query, key, value = self._split_qkv(qkv)
 
@@ -1057,12 +1064,6 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
     ) -> Any:
         """Create paged FMHA implementation."""
         return PyFlashinferPrefillPagedAttnOp(attn_configs, attn_inputs)
-
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation for paged layout."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return MhaRotaryEmbeddingOp(attn_configs)
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
@@ -1105,12 +1106,6 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
         """Create hybrid FMHA implementation."""
         return PyFlashinferHybridPrefillAttnOp(attn_configs, attn_inputs)
 
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation for hybrid layout."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return MhaRotaryEmbeddingOp(attn_configs)
-
     def forward(
         self,
         qkv: torch.Tensor,
@@ -1120,8 +1115,8 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
         """Run ragged attention, append KV, then run paged prefix attention."""
         # Single-stream flow: RoPE -> ragged attention -> KV write -> paged attention.
         # Hybrid always needs the new K/V for its ragged half.
-        if self.need_rope_kv_cache and self.rope_impl is not None:
-            query, key, value = self.rope_impl.forward(qkv)
+        if self.need_rope_kv_cache and self.rope_applier is not None:
+            query, key, value = self.rope_applier.apply(qkv)
         else:
             query, key, value = self._split_qkv(qkv)
 
@@ -1166,12 +1161,6 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
     ) -> Any:
         """Create ragged FMHA implementation."""
         return PyFlashinferPrefillAttnOp(attn_configs)
-
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation for ragged layout."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return MhaRotaryEmbeddingOp(attn_configs)
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor

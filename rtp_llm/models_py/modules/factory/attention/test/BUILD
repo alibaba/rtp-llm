@@ -1,4 +1,12 @@
 py_test(
+    name = "rope_applier_test",
+    srcs = ["rope_applier_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
     name = "attn_factory_generation_prefill_cuda_graph_test",
     srcs = ["attn_factory_generation_prefill_cuda_graph_test.py"],
     tags = ["H20"],
