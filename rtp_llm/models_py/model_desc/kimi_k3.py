@@ -128,11 +128,10 @@ class KimiK3DecoderLayer(nn.Module):
             with profile_scope(f"RTP::layers.{self.index}.attention_residual"):
                 attn_input = self.attention_residual(
                     hidden, anchors, num_blocks=previous,
+                    block_write_idx=previous if writes else -1,
                     output_norm_weight=self.attention_norm.weight,
                     output_norm_eps=self.attention_norm.variance_epsilon,
                 )
-            if writes:
-                anchors[:, previous].copy_(hidden)
             with profile_scope(f"RTP::layers.{self.index}.attention"):
                 attended = self.attention(
                     attn_input, fmha, cache, attention_inputs, metadata

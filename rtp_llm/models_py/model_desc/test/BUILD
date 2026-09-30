@@ -3,6 +3,17 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "kimi_k3_anchor_write_test",
+    srcs = ["kimi_k3_anchor_write_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:models",
+        "//rtp_llm/models_py:models",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+)
+
+py_test(
     name = "kimi_k3_dense_gate_up_test",
     srcs = ["kimi_k3_dense_gate_up_test.py"],
     deps = py_test_deps + [
