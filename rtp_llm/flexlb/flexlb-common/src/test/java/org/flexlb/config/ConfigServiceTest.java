@@ -108,7 +108,7 @@ class ConfigServiceTest {
         var observability = config.getObservability().getCacheHit();
         assertTrue(observability.getRecentKeyWindow().isWriteEnabled());
         assertEquals(1800000L, observability.getRecentKeyWindow().getDurationMs());
-        assertEquals(10000000L, observability.getRecentKeyWindow().getMaxKeyOccurrences());
+        assertEquals(1000000L, observability.getRecentKeyWindow().getMaxKeyOccurrences());
         assertTrue(observability.isMetricsEnabled());
         assertFalse(observability.isRequestTraceLogEnabled());
         assertNull(observability.getTheoryLog());

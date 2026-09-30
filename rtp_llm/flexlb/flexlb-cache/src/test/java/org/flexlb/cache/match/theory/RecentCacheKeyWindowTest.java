@@ -1,4 +1,4 @@
-package org.flexlb.cache.core;
+package org.flexlb.cache.match.theory;
 
 import org.junit.jupiter.api.Test;
 

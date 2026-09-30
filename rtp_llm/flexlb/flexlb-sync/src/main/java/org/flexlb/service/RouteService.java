@@ -20,12 +20,11 @@ import java.util.concurrent.CompletableFuture;
 public class RouteService {
 
     private final RequestScheduler requestScheduler;
-    private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
+    private final TheoryCacheHitReporter theoryCacheHitReporter;
 
-    public RouteService(RequestScheduler requestScheduler,
-                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
+    public RouteService(RequestScheduler requestScheduler, TheoryCacheHitReporter theoryCacheHitReporter) {
         this.requestScheduler = requestScheduler;
-        this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
+        this.theoryCacheHitReporter = theoryCacheHitReporter;
     }
 
     /**
@@ -52,7 +51,7 @@ public class RouteService {
             try {
                 balanceContext.setResponse(result);
                 if (result != null && result.isSuccess()) {
-                    recentCacheKeyTraceReporter.report(balanceContext);
+                    theoryCacheHitReporter.report(balanceContext);
                 }
             } catch (RuntimeException completionSideEffectFailure) {
                 Logger.warn("Route completion side effect failed: request_id={}",
