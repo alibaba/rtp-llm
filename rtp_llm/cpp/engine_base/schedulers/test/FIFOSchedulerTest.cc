@@ -1344,10 +1344,8 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsPromptBlocksAcrossRound) {
 
 TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak) {
     // The first stream has a short lifetime but high num_return_sequences fan-out. Its 7-token
-    // prompt is a partial block, so prefill allocates one physical block per return sequence. Its
-    // second generated token is cached by the final decode step in the next block, where fan-out
-    // needs another block per sequence. A long single-output stream must not be admitted when that
-    // peak exceeds the remaining KV capacity.
+    // prompt is computed at width one. Future decode may still fan out to 40 sequences, so a long
+    // single-output stream must not be admitted when the estimated peak exceeds KV capacity.
     constexpr int kTokensPerBlock = 8;
     CacheConfig   cache_config    = makeMhaCacheConfig(1, 81, 1, 4, kTokensPerBlock, rtp_llm::DataType::TYPE_FP16);
     auto          cache_manager   = std::make_shared<KVCacheManager>(cache_config);
@@ -1381,7 +1379,9 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak)
     ASSERT_EQ(seed.value().size(), 1);
     ASSERT_EQ(seed.value().front().get(), high_fanout.get());
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 40);
+    ASSERT_EQ(high_fanout->currentBatchSize(), 1);
+    ASSERT_EQ(high_fanout->maxBatchSize(), 40);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 79);
 
     auto long_remaining = makeStream({2},
                                      model_config,
@@ -1399,7 +1399,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak)
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_FALSE(long_remaining->hasError());
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 40);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 79);
 }
 
 TEST_F(FIFOSchedulerTest, testPeakEstimateSharesAlignedPromptAcrossMaximumBatchWidth) {
@@ -1452,7 +1452,7 @@ TEST_F(FIFOSchedulerTest, testPeakEstimateSharesAlignedPromptAcrossMaximumBatchW
     dynamic_beam->releaseResource();
 }
 
-TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWatermark) {
+TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionBoundsPhysicalFreeBlockWatermark) {
     constexpr int kTokensPerBlock = 4;
     CacheConfig   cache_config    = makeMhaCacheConfig(1, 8, 1, 4, kTokensPerBlock, rtp_llm::DataType::TYPE_FP16);
     auto          cache_manager   = std::make_shared<KVCacheManager>(cache_config);
@@ -1517,7 +1517,11 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
     ASSERT_FALSE(candidate->hasError());
     min_free_blocks = std::min(min_free_blocks, cache_manager->freeBlocksNum());
 
-    ASSERT_EQ(min_free_blocks, free_before_admission - static_cast<size_t>(estimated_peak));
+    // Admission reserves the possible four-way decode peak; shared prefill and this first
+    // decode round use fewer blocks than the conservative estimate.
+    ASSERT_EQ(candidate->currentBatchSize(), 4);
+    ASSERT_EQ(min_free_blocks, 3);
+    ASSERT_GT(min_free_blocks, free_before_admission - static_cast<size_t>(estimated_peak));
 }
 
 TEST_F(FIFOSchedulerTest, testHybridAdmissionAllowsUnderestimateAtDifferentBlockPeak) {
@@ -2327,7 +2331,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaIncludesPostAllocationPrefixLength) {
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
 }
 
-TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
+TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesSharedPrefillWidth) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -2357,14 +2361,16 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
 
     auto batched_stream = make_stream(2);
     auto single_stream  = make_stream(1);
+    ASSERT_EQ(batched_stream->currentBatchSize(), 1);
+    ASSERT_EQ(batched_stream->maxBatchSize(), 2);
     ASSERT_TRUE(enqueueIndividually(scheduler, {batched_stream, single_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result->size(), 1);
+    EXPECT_EQ(result->size(), 2);
     EXPECT_EQ(batched_stream->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(single_stream->getStatus(), StreamState::WAITING);
-    EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+    EXPECT_EQ(single_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
 TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndStopsTail) {
@@ -2851,16 +2857,17 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
     batched_query->generate_config->num_return_sequences = 3;
     auto short_triple =
         std::make_shared<NormalGenerateStream>(batched_query, model_config, runtime_config, resource_context, nullptr);
-    ASSERT_EQ(short_triple->currentBatchSize(), 3);
+    ASSERT_EQ(short_triple->currentBatchSize(), 1);
+    ASSERT_EQ(short_triple->maxBatchSize(), 3);
 
     vector<GenerateStreamPtr> streams = {long_single, short_triple};
     ASSERT_EQ(scheduler.enqueueGroup(streams).first, std::vector<bool>({true, true}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result->size(), 1);
+    ASSERT_EQ(result->size(), 2);
     EXPECT_EQ(long_single->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(short_triple->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(short_triple->getStatus(), StreamState::RUNNING);
 }
 
 TEST_F(FIFOSchedulerTest, groupIsolation_size2) {

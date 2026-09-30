@@ -23,7 +23,7 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     _validate_aiter_flydsl_gdn_decode_eager_state,
     _write_cp_cache_store,
 )
-from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
 class FakeKVCache:
@@ -305,7 +305,9 @@ class AttentionInputRoutingTest(unittest.TestCase):
         )
         fmha_impl = {"default": object(), "indexer_kv": object()}
 
-        model.forward(SimpleNamespace(input_ids=torch.tensor([1, 2])), fmha_impl)
+        inputs = PyModelInputs()
+        inputs.input_ids = torch.tensor([1, 2])
+        model.forward(inputs, fmha_impl)
 
         self.assertIsNone(decoder_layer.call_args.kwargs["kv_cache"])
 

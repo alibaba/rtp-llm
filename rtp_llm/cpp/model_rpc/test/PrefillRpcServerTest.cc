@@ -1093,6 +1093,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     request.add_token_ids(10);
     request.add_token_ids(20);
     request.mutable_generate_config()->set_max_new_tokens(7);
+    request.mutable_generate_config()->set_accept_compact_output(true);
     auto context                              = makeContext(&request);
     context->generate_input                   = std::make_shared<GenerateInput>();
     context->prefill_worker_cache_store_addrs = {"a:1", "b:2"};
@@ -1108,6 +1109,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     EXPECT_EQ(alloc_request.input().token_ids(0), 10);
     EXPECT_EQ(alloc_request.input().token_ids(1), 20);
     EXPECT_EQ(alloc_request.input().generate_config().max_new_tokens(), 7);
+    EXPECT_TRUE(alloc_request.input().generate_config().accept_compact_output());
     ASSERT_EQ(alloc_request.peer_addrs_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs(0), "a:1");
     EXPECT_EQ(alloc_request.peer_addrs(1), "b:2");

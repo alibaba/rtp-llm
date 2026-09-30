@@ -41,6 +41,40 @@ using namespace std;
 
 namespace rtp_llm {
 
+TEST(InputEmbeddingCacheTest, InitialAndIncrementalKeysUseEmbeddingContent) {
+    auto input                   = std::make_shared<GenerateInput>();
+    input->input_ids             = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+    input->generate_config       = std::make_shared<GenerateConfig>();
+    input->input_embeddings      = {torch::ones({4, 8})};
+    input->input_embeddings_locs = {1};
+    auto tokens                  = std::make_shared<CompleteTokenIds>(1, 1, 16, 2);
+    tokens->init(input);
+    ASSERT_TRUE(tokens->initInputEmbeddingHashes(*input).ok());
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    initCacheKeys(resource, tokens, 2);
+    const auto initial_keys = resource->cacheKeys();
+    ASSERT_EQ(initial_keys.size(), 4);
+    tokens->data(0)[7] = 9;
+    tokens->setSeqLength(8);
+    updateCacheKeys(resource, tokens, 2);
+    const auto incremental_keys = resource->cacheKeys();
+    EXPECT_EQ(initial_keys[0], incremental_keys[0]);
+    EXPECT_EQ(initial_keys[2], incremental_keys[2]);
+    EXPECT_NE(initial_keys[3], incremental_keys[3]);
+    initCacheKeys(resource, tokens, 2);
+    EXPECT_EQ(incremental_keys, resource->cacheKeys());
+
+    input->input_embeddings->at(0)[2][0] += 1;
+    auto changed = std::make_shared<CompleteTokenIds>(1, 1, 16, 2);
+    changed->init(input);
+    ASSERT_TRUE(changed->initInputEmbeddingHashes(*input).ok());
+    initCacheKeys(resource, changed, 2);
+    EXPECT_EQ(initial_keys[0], resource->cacheKeys()[0]);
+    EXPECT_NE(initial_keys[1], resource->cacheKeys()[1]);
+    EXPECT_NE(initial_keys[2], resource->cacheKeys()[2]);
+}
+
 class ImmediateAllocatorContext: public AsyncContext {
 public:
     explicit ImmediateAllocatorContext(bool success, bool done = true): success_(success), done_(done) {}
@@ -583,6 +617,36 @@ TEST_F(StreamCacheResourceTest, testReuseCacheIgnoresPerRequestSwitchWhenConfigu
 
     resource.resource_context_.reuse_cache = false;
     ASSERT_FALSE(resource.reuseCache());
+}
+
+TEST_F(StreamCacheResourceTest, testEmbeddingPromptOutputsRecomputeEvenWithCacheOverride) {
+    prepareResource(true);
+    auto& resource                                 = stream_->streamCacheResource();
+    auto& input                                    = *stream_->generate_input_;
+    auto& config                                   = *input.generate_config;
+    input.input_embeddings                         = {torch::ones({2, 8})};
+    input.input_embeddings_locs                    = {1};
+    resource.resource_context_.enable_device_cache = true;
+    for (bool ignore_request : {false, true}) {
+        resource.resource_context_.ignore_request_cache_switches = ignore_request;
+        config.reuse_cache                                       = true;
+        EXPECT_TRUE(resource.enableCacheLookup());
+        config.return_all_hidden_states = true;
+        EXPECT_FALSE(resource.enableCacheLookup());
+        config.return_all_hidden_states = false;
+        config.calculate_loss           = 1;
+        EXPECT_FALSE(resource.enableCacheLookup());
+        config.calculate_loss       = 0;
+        config.return_prompt_logits = true;
+        EXPECT_FALSE(resource.enableCacheLookup());
+        config.return_prompt_logits        = false;
+        input.custom_output_token_position = 0;
+        EXPECT_FALSE(resource.enableCacheLookup());
+        input.custom_output_token_position = -1;
+        EXPECT_TRUE(resource.enableCacheLookup());
+        config.reuse_cache = false;
+        EXPECT_EQ(resource.enableCacheLookup(), ignore_request);
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
