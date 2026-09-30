@@ -3,6 +3,7 @@
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/metrics/MetricsReporting.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -377,16 +378,16 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* compile_qps_metric                  = nullptr;
-    kmonitor::MutableMetric* compile_invalid_qps_metric          = nullptr;
-    kmonitor::MutableMetric* cache_hit_qps_metric                = nullptr;
-    kmonitor::MutableMetric* overload_qps_metric                 = nullptr;
-    kmonitor::MutableMetric* compile_latency_us_metric           = nullptr;
-    kmonitor::MutableMetric* compile_inflight_metric             = nullptr;
-    kmonitor::MutableMetric* verdict_cache_bytes_metric          = nullptr;
-    kmonitor::MutableMetric* total_cache_budget_bytes_metric     = nullptr;
-    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric  = nullptr;
-    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric   = nullptr;
+    kmonitor::MutableMetric* compile_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* compile_invalid_qps_metric         = nullptr;
+    kmonitor::MutableMetric* cache_hit_qps_metric               = nullptr;
+    kmonitor::MutableMetric* overload_qps_metric                = nullptr;
+    kmonitor::MutableMetric* compile_latency_us_metric          = nullptr;
+    kmonitor::MutableMetric* compile_inflight_metric            = nullptr;
+    kmonitor::MutableMetric* verdict_cache_bytes_metric         = nullptr;
+    kmonitor::MutableMetric* total_cache_budget_bytes_metric    = nullptr;
+    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric = nullptr;
+    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -557,14 +558,14 @@ private:
     }
 
 private:
-    int64_t                                       context_token_num_            = 0;
-    int64_t                                       context_time_us_              = 0;
-    int64_t                                       context_token_num_with_cache_ = 0;
-    int64_t                                       context_time_us_with_cache_   = 0;
-    int64_t                                       generate_token_num_           = 0;
-    int64_t                                       total_token_num_              = 0;
-    int64_t                                       report_window_us_             = 0;
-    bool                                          report_zero_tps_              = false;
+    int64_t                                          context_token_num_            = 0;
+    int64_t                                          context_time_us_              = 0;
+    int64_t                                          context_token_num_with_cache_ = 0;
+    int64_t                                          context_time_us_with_cache_   = 0;
+    int64_t                                          generate_token_num_           = 0;
+    int64_t                                          total_token_num_              = 0;
+    int64_t                                          report_window_us_             = 0;
+    bool                                             report_zero_tps_              = false;
     std::map<int32_t, RtpLLMTokenPSMetricsCollector> priority_collectors_;
 };
 
@@ -659,10 +660,21 @@ public:
 
     void report(const CollectType* collector) {
         std::lock_guard<std::mutex> lock(mutex_);
-        collector_.merge(collector);
+        if (syncReportingEpoch()) {
+            collector_.merge(collector);
+        }
     }
 
 private:
+    bool syncReportingEpoch() {
+        const auto epoch = kmonitorReportingEpoch();
+        if (epoch != reporting_epoch_) {
+            collector_       = CollectType();
+            reporting_epoch_ = epoch;
+        }
+        return epoch % 2 == 0;
+    }
+
     void beginActive() {
         std::lock_guard<std::mutex> lock(mutex_);
         ++active_count_;
@@ -679,7 +691,10 @@ private:
         while (metrics_reporter_ && !stop_) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (collector_.hasMetrics()) {
+                if (!syncReportingEpoch()) {
+                    // The SDK publication fence also covers all other metric
+                    // sources. This clears the executor's own pending window.
+                } else if (collector_.hasMetrics()) {
                     auto priority_collectors = collector_.priorityCollectorsForReport();
                     if (priority_collectors.empty()) {
                         kmonitor::MetricsTags tags("priority", "0");
@@ -709,14 +724,17 @@ private:
     std::mutex                   mutex_;
     bool                         stop_ = false;
     CollectType                  collector_;
-    int                          active_count_ = 0;
-    int                          interval_ms_  = 1000;
+    uint64_t                     reporting_epoch_ = 0;
+    int                          active_count_    = 0;
+    int                          interval_ms_     = 1000;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 };
 
 template<typename MetricsType, typename CollectType>
 class WallClockMetricsLoopReporter {
+    friend class RtpLLMTokenPSMetricsCollectorTest_WakeWindowIncludesFirstStep_Test;
+
 public:
     explicit WallClockMetricsLoopReporter(const kmonitor::MetricsReporterPtr metrics_reporter, int interval_ms = 1000):
         collector_(CollectType()),
@@ -779,10 +797,23 @@ public:
 
     void report(const CollectType* collector) {
         std::lock_guard<std::mutex> lock(mutex_);
-        collector_.merge(collector);
+        if (syncReportingEpoch()) {
+            collector_.merge(collector);
+        }
     }
 
 private:
+    bool syncReportingEpoch() {
+        const auto epoch = kmonitorReportingEpoch();
+        if (epoch != reporting_epoch_) {
+            const auto state  = kmonitorReportingState();
+            collector_        = CollectType();
+            last_report_time_ = state.epoch % 2 ? std::chrono::steady_clock::now() : state.resumed_at;
+            reporting_epoch_  = state.epoch;
+        }
+        return reporting_epoch_ % 2 == 0;
+    }
+
     void beginActive() {
         std::lock_guard<std::mutex> lock(mutex_);
         ++active_count_;
@@ -810,8 +841,12 @@ private:
             CollectType report_collector;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                auto                        now = std::chrono::steady_clock::now();
-                if (collector_.hasMetrics()) {
+                const bool                  reporting = syncReportingEpoch();
+                auto                        now       = std::chrono::steady_clock::now();
+                if (!reporting) {
+                    // Reset the wall interval at wake; sleep is not serving
+                    // idle time and must never enter the TPS denominator.
+                } else if (collector_.hasMetrics()) {
                     should_report = takeReportCollector(now, report_collector);
                 } else if (active_count_ == 0) {
                     // Idle service reports 0 wall TPS with priority="0". In-flight long steps stay
@@ -841,8 +876,9 @@ private:
     std::mutex                            mutex_;
     std::atomic_bool                      stop_{false};
     CollectType                           collector_;
-    int                                   active_count_ = 0;
-    int                                   interval_ms_  = 1000;
+    uint64_t                              reporting_epoch_ = 0;
+    int                                   active_count_    = 0;
+    int                                   interval_ms_     = 1000;
     std::chrono::steady_clock::time_point last_report_time_;
     std::thread                           metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
