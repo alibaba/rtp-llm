@@ -370,6 +370,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             enable_cuda_graph,
             hw_kernel_config,
         )
+        if os.environ.get("RTP_LLM_QWEN4_FUSED_MOE_TOPK", "0") == "1" and hasattr(
+            self.mlp, "select_topk"
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.moe_topk_triton import (
+                Qwen4ExpMoeTopk,
+            )
+
+            self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
         if self.layer_type != HybridAttentionType.LINEAR and getattr(
             config, "enable_qwen4_qsa", False
         ):
