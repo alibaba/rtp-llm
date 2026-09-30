@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "deepseek_v41_weight_test",
+    srcs = ["deepseek_v41_weight_test.py"],
+    data = ["//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,

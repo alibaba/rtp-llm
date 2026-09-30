@@ -1416,6 +1416,8 @@ class W:
 
     # Outer compressor (CSA + HCA)
     v4_compressor_wkv = "v4.compressor.wkv.weight"
+    v41_indexer_wk = "v41.indexer.wk.weight"
+    v41_indexer_k_norm = "v41.indexer.k_norm.weight"
     v4_compressor_wgate = "v4.compressor.wgate.weight"
     v4_compressor_norm = "v4.compressor.norm.weight"
     v4_compressor_ape = "v4.compressor.ape"
@@ -1621,6 +1623,8 @@ class W:
         v4_attn_wo_b_w: sp_id,
         v4_attn_wo_b_s: sp_id,
         v4_compressor_wkv: sp_id,
+        v41_indexer_wk: sp_id,
+        v41_indexer_k_norm: sp_id,
         v4_compressor_wgate: sp_id,
         v4_compressor_norm: sp_id,
         v4_compressor_ape: sp_id,

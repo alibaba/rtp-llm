@@ -279,6 +279,16 @@ class ModelLoader:
 
     def _load_weight(self, device: str):
         load_method = self._load_method
+        if getattr(self._weights_info.model_config, "is_deepseek_v41", False):
+            # The fast reader transfers shard contents before descriptor filtering.
+            # V4.1's host-only Engram tables require named-tensor reads instead.
+            if load_method.lower() == LoadMethod.FASTSAFETENSORS:
+                raise ValueError(
+                    "DeepSeek V4.1 requires load_method=scratch (or auto): "
+                    "fastsafetensors cannot exclude host Engram tables before GPU I/O"
+                )
+            if load_method == LoadMethod.AUTO:
+                load_method = LoadMethod.SCRATCH
         if load_method == LoadMethod.AUTO:
             is_safetensor = self._load_config.database.is_safetensor
             convert_device = self._choose_weight_convert_device(device)

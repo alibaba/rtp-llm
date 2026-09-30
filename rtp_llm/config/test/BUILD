@@ -52,3 +52,12 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "dsv41_config_test",
+    srcs = ["dsv41_config_test.py"],
+    data = ["testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:sdk"],
+)
+
+exports_files(["testdata/deepseek_v41_flash.json"])
