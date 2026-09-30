@@ -3,6 +3,17 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "kimi_k3_bf16_linear_ownership_test",
+    srcs = ["kimi_k3_bf16_linear_ownership_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:models",
+        "//rtp_llm/models_py:models",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+)
+
+py_test(
     name = "kimi_k3_mtp_local_projection_test",
     srcs = ["kimi_k3_mtp_local_projection_test.py"],
     deps = py_test_deps + [
