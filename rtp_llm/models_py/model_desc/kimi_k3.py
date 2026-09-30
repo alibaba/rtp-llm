@@ -72,7 +72,14 @@ class KimiK3DenseMLP(nn.Module):
             with profile_scope("RTP::mlp.dense.up_proj"):
                 up = self.up(hidden)
         with profile_scope("RTP::mlp.dense.activation"):
-            activated = situ(gate, up, self.beta, self.linear_beta, inplace=True)
+            activated = situ(
+                gate,
+                up,
+                self.beta,
+                self.linear_beta,
+                inplace=self.gate_up is None,
+            )
+        del gate, up
         with profile_scope("RTP::mlp.dense.down_proj"):
             return self.down(activated)
 

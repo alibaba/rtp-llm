@@ -17,7 +17,7 @@ def bf16_linear(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         result = rtp_llm_ops.cublas_gemm_bf16_fp32_accum(
             input.reshape(rows, input.shape[-1]), weight
         )
-        return result.reshape(shape)
+        return result if input.ndim == 2 else result.reshape(shape)
     return F.linear(input, weight)
 
 
