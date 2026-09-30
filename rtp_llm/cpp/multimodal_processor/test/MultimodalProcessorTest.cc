@@ -1,6 +1,7 @@
 #include <memory>
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
 #include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
 
@@ -173,8 +174,11 @@ TEST_F(MultimodalProcessorTest, testFeatureHashCpuGpuConsistency) {
     std::vector<int32_t> gpu_hashes(gpu_embedding.size(0));
     EXPECT_TRUE(processor.getFeatureHash(cpu_hashes.data(), cpu_embedding).ok());
     EXPECT_TRUE(processor.getFeatureHash(gpu_hashes.data(), gpu_embedding).ok());
+    auto pinned_hashes = getMultimodalFeatureHash(gpu_embedding);
 
     EXPECT_EQ(cpu_hashes, gpu_hashes);
+    EXPECT_TRUE(pinned_hashes.is_pinned());
+    EXPECT_EQ(pinned_hashes.device().type(), torch::kCPU);
     EXPECT_EQ(cpu_hashes[0], cpu_hashes[1]);
     EXPECT_NE(cpu_hashes[0], cpu_hashes[2]);
 }
