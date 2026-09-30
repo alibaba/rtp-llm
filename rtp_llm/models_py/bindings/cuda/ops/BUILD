@@ -1,16 +1,7 @@
-load("//:def.bzl", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "cuda_register", "flashinfer_deps", "flashmla_deps")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "copts")
+load("@arch_config//:arch_select.bzl", "cuda_register", "torch_deps")
 
 cuda_register()
-flashinfer_deps()
-flashmla_deps()
-
-cc_library(
-    name = "flashinfer_runtime",
-    deps = [":flashinfer"],
-    visibility = ["//visibility:public"],
-)
 
 config_setting(
     name = "use_accl_ep",
@@ -67,7 +58,6 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:profiling_scope",
-        ":flashmla",
     ] + select({
         "@//:using_cuda12": [
             "//3rdparty/xqa:xqa"
@@ -109,6 +99,7 @@ cc_library(
     srcs = ["//rtp_llm/models_py/bindings/core:exec_ctx_impl_srcs"],
     deps = [
         ":gpu_base",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
@@ -116,8 +107,6 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
         "//rtp_llm/models_py/bindings/core:tensor_holder",
         "//rtp_llm/cpp/utils:debug_utils",
-        ":flashinfer",
-        "//3rdparty/flashinfer:flashinfer",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

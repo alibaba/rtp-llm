@@ -18,10 +18,10 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": " In Python we create a virtual database system in D"
+                        "response": " In Python's Flask framework, Django North and its"
                     },
                     {
-                        "response": " In Python we create a virtual database system in D"
+                        "response": " In Python's Flask framework, Django North and its"
                     }
                 ]
             }
@@ -40,7 +40,7 @@
             "result": {
                 "response": [
                     " In Flask, consider the `request`, `session",
-                    " Flask has its own syntax, but Flask-Django"
+                    " Flask has its own backend, so no external database"
                 ],
                 "iter_count": 10,
                 "finished": true

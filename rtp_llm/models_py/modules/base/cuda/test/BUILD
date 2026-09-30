@@ -89,3 +89,10 @@ py_test (
     tags = ["H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+    name = "activation_test",
+    srcs = ["activation_test.py"],
+    deps = py_test_deps,
+    exec_properties = {'gpu':'A10'},
+)

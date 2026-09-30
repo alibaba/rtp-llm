@@ -66,9 +66,9 @@ py_library(
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
-        # cuda13 locks ship flashinfer-python; deep-ep only in the x86 lock.
+        # cuda13 locks ship flashinfer-python and deep-ep.
         "@//:using_cuda13_x86": flashinfer + deep,
-        "@//:using_cuda13_arm": flashinfer + ["deep_gemm"],
+        "@//:using_cuda13_arm": flashinfer + deep,
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [

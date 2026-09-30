@@ -144,13 +144,6 @@ requirement([
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
-py_library(
-    name = "empty_target",
-    srcs = [],
-    deps = [],
-    visibility = ["//visibility:public"],
-)
-
 _JIT_CACHE_SRCS = [
     "utils/jit_cache_manager.py",
     "utils/jit_cache_store.py",
@@ -300,9 +293,9 @@ py_library(
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({
-        # cuda13 x86 lock ships deep-ep; the arm lock does not yet.
+        # cuda13 locks ship deep-gemm and deep-ep.
         "@//:using_cuda13_x86": deep,
-        "@//:using_cuda13_arm": ["deep_gemm"],
+        "@//:using_cuda13_arm": deep,
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({

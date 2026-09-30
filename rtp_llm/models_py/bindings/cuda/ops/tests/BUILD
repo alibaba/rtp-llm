@@ -68,7 +68,6 @@ cc_test(
     data = [],
     copts = copts(),
     deps = test_deps + [
-        "//3rdparty/flashinfer:flashinfer",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ],
     exec_properties = {'gpu':'A10'},
@@ -95,7 +94,6 @@ cc_test(
     data = [],
     copts = copts(),
     deps = test_deps + [
-        "//3rdparty/flashinfer:flashinfer",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ] + cuda13_torch_link_deps,
     exec_properties = {'gpu':'A10'},
