@@ -156,6 +156,25 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    @patch.dict(
+        os.environ,
+        {"VIT_HANG_DEBUG": "1", "VIT_HANG_WARN_SECONDS": "0.02"},
+    )
+    def test_hang_watchdog_reports_stalled_forward(self):
+        mm_part = _FakeMMPart(delay=0.15)
+        scheduler = MMScheduler(mm_part, batch_wait_ms=0, max_batch_size=1)
+        try:
+            with self.assertLogs(level="WARNING") as logs:
+                scheduler.submit_and_wait([_FakeWorkItem()])
+            self.assertTrue(
+                any(
+                    "ViT hang watchdog: stage=batched_embedding" in line
+                    for line in logs.output
+                )
+            )
+        finally:
+            scheduler.close()
+
     def test_queue_metrics_report_depth_and_wait(self):
         """Queue gauges expose backlog depth and time before a forward starts."""
         fake = _FakeMMPart(delay=0.2)

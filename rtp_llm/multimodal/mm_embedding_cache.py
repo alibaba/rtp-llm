@@ -604,7 +604,10 @@ class MMEmbeddingCacheEntry:
             raise self.error
 
     def complete(
-        self, result: Any, feature_hashes: Optional[List[torch.Tensor]] = None
+        self,
+        result: Any,
+        feature_hashes: Optional[List[torch.Tensor]] = None,
+        before_ready: Optional[Callable[[], None]] = None,
     ) -> bool:
         with self._state_lock:
             if self._terminal:
@@ -614,6 +617,11 @@ class MMEmbeddingCacheEntry:
         try:
             if self._on_complete is not None:
                 self._on_complete(self, result)
+            # Publish sidecar metadata before waking wait_ready() consumers.
+            # Otherwise a consumer can observe the embedding as ready while its
+            # feature hashes have not reached the separate hash-key cache yet.
+            if before_ready is not None:
+                before_ready()
         except Exception as error:
             # fail() cannot take over this already-claimed transition. Roll it
             # back here so waiters never see a failed insertion as a cache hit.
@@ -1408,8 +1416,9 @@ class MMEmbeddingCache:
         entry: MMEmbeddingCacheEntry,
         result: Any,
         feature_hashes: Optional[List[torch.Tensor]] = None,
+        before_ready: Optional[Callable[[], None]] = None,
     ) -> bool:
-        return entry.complete(result, feature_hashes)
+        return entry.complete(result, feature_hashes, before_ready)
 
     def fail(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception

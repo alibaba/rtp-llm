@@ -526,20 +526,34 @@ class MMWorkItem:
             return
         if self.defer_feature_hashes:
             self.cache_entry.producer_streams = self.embedding_producer_streams or []
+
+        def publish_hashes() -> None:
+            if (
+                self.feature_hashes is None
+                or self.hash_key_cache is None
+                or self.embedding_cache.peek(self.cache_key) is not self.cache_entry
+            ):
+                return
+            try:
+                self.hash_key_cache.put(
+                    self.cache_key,
+                    self.feature_hashes,
+                    self.cache_entry.generation,
+                    greennet_passed=self.cache_entry.greennet_passed,
+                )
+            except Exception:
+                # The hash sidecar is an optimization. A failed admission must
+                # not turn a valid embedding into a failed request; consumers
+                # can still compute hashes from the embedding on a cache miss.
+                logging.warning("ViT hash cache publication failed", exc_info=True)
+
         self.embedding_cache.complete(
-            self.cache_key, self.cache_entry, result, self.feature_hashes
+            self.cache_key,
+            self.cache_entry,
+            result,
+            self.feature_hashes,
+            before_ready=publish_hashes,
         )
-        if (
-            self.feature_hashes is not None
-            and self.hash_key_cache is not None
-            and self.embedding_cache.peek(self.cache_key) is self.cache_entry
-        ):
-            self.hash_key_cache.put(
-                self.cache_key,
-                self.feature_hashes or [],
-                self.cache_entry.generation,
-                greennet_passed=self.cache_entry.greennet_passed,
-            )
 
     def fail_cache(self, error: Exception) -> None:
         if (
@@ -579,6 +593,7 @@ class MMProcessEngine:
         self.server_id = server_id
         self.vit_config = vit_config
         self.is_proxy_mode = is_proxy_mode
+        self._hang_debug = os.environ.get("VIT_HANG_DEBUG") == "1"
         self.contains_pos: bool = (
             model_config.mm_model_config.mm_position_ids_style != 0
         )
@@ -1484,6 +1499,19 @@ class MMProcessEngine:
                     )
                 self._raise_if_async_request_cancelled(request_id, cancellation_event)
                 feature_hashes = self._hash_key_cache.get(cache_key, entry.generation)
+                if (
+                    feature_hashes is None
+                    and self._hang_debug
+                    and self._hash_key_cache.enabled
+                ):
+                    logging.warning(
+                        "ViT hash sidecar miss: generation=%s tier=%s "
+                        "embedding_resident=%s hashes_only=%s",
+                        entry.generation,
+                        entry.tier,
+                        self._embedding_cache.peek(cache_key) is entry,
+                        hashes_only,
+                    )
                 raw_result = None
                 if not hashes_only or feature_hashes is None:
                     raw_result = entry.wait(

@@ -535,6 +535,49 @@ class FakeSlowEmbeddingInterface(FakeMultiModalEmbeddingInterface):
 
 
 class MMEmbeddingCacheEntryTest(TestCase):
+    def test_work_item_publishes_hash_before_embedding_is_ready(self):
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=4096)
+        hash_cache = MMHashKeyCache(max_bytes=4096)
+        state, entry = cache.try_acquire("image")
+        mm_input = MultimodalInput(
+            "https://example.com/image.jpg",
+            MMUrlType.IMAGE,
+            torch.empty(0),
+            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], -1),
+        )
+        work_item = MMWorkItem(
+            [mm_input],
+            embedding_cache=cache,
+            cache_claim=("image", entry, state),
+            hash_key_cache=hash_cache,
+        )
+        work_item.feature_hashes = [torch.tensor([7], dtype=torch.int32)]
+        entered = threading.Event()
+        release = threading.Event()
+        original_put = hash_cache.put
+
+        def delayed_put(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return original_put(*args, **kwargs)
+
+        with patch.object(hash_cache, "put", side_effect=delayed_put):
+            producer = threading.Thread(
+                target=work_item.complete_cache,
+                args=((torch.ones(1, 4), None),),
+            )
+            producer.start()
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                with self.assertRaises(TimeoutError):
+                    entry.wait_ready(timeout=0.05)
+            finally:
+                release.set()
+                producer.join(timeout=5)
+        self.assertFalse(producer.is_alive())
+        entry.wait_ready(timeout=0)
+        self.assertEqual(hash_cache.get("image", entry.generation)[0].tolist(), [7])
+
     def test_complete_then_wait(self):
         entry = MMEmbeddingCacheEntry()
         self.assertFalse(entry.is_done)

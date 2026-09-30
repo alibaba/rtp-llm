@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import sys
 import threading
 import time
-from typing import TYPE_CHECKING, List, Optional
+import traceback
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 import torch
 import torch.profiler
@@ -34,6 +37,7 @@ class OutputCountMismatchError(RuntimeError):
 def _run_embedding(
     mm_part: MultiModalEmbeddingInterface,
     items: List[MMWorkItem],
+    stage_callback: Optional[Callable[[Optional[str]], None]] = None,
 ) -> None:
     """Run one GPU forward over `items` and write results back.
 
@@ -44,9 +48,15 @@ def _run_embedding(
     data_list = [wi.preprocess_result for wi in items]
     type_list = [wi.mm_type for wi in items]
 
-    with Timer() as route_timer:
-        with torch.profiler.record_function("batched_embedding"):
-            batch_outputs = mm_part.batched_embedding(data_list, type_list)
+    if stage_callback is not None:
+        stage_callback("batched_embedding")
+    try:
+        with Timer() as route_timer:
+            with torch.profiler.record_function("batched_embedding"):
+                batch_outputs = mm_part.batched_embedding(data_list, type_list)
+    finally:
+        if stage_callback is not None:
+            stage_callback(None)
     # VIT_EMBEDDING_RT_METRIC times ONLY the batched_embedding forward (one batch
     # may carry multiple requests). The end-to-end per-request latency (queue wait
     # + batch-collect wait + forward) is the separate VIT_EMBEDDING_BATCH_RT_METRIC
@@ -65,7 +75,13 @@ def _run_embedding(
         wi.embedding_result = result
         complete_cache = getattr(wi, "complete_cache", None)
         if complete_cache is not None:
-            complete_cache(result)
+            if stage_callback is not None:
+                stage_callback("cache_complete")
+            try:
+                complete_cache(result)
+            finally:
+                if stage_callback is not None:
+                    stage_callback(None)
 
 
 class _EmbeddingRequest:
@@ -218,6 +234,20 @@ class MMScheduler:
         self._pending: Optional[_EmbeddingChunk] = None
         # Set by close(); the executor polls it to exit and submit rejects on it.
         self._stopped = threading.Event()
+        self._hang_debug = os.environ.get("VIT_HANG_DEBUG") == "1"
+        self._hang_lock = threading.Lock()
+        self._hang_stage: Optional[str] = None
+        self._hang_stage_started = 0.0
+        self._hang_batch_items = 0
+        try:
+            self._hang_warn_seconds = float(
+                os.environ.get("VIT_HANG_WARN_SECONDS", "30")
+            )
+            if self._hang_warn_seconds <= 0:
+                raise ValueError("warning interval must be positive")
+        except ValueError:
+            logging.warning("Invalid VIT_HANG_WARN_SECONDS; using 30 seconds")
+            self._hang_warn_seconds = 30.0
         # Orders submit's (stopped-check + enqueue) against close's set-stopped
         # so a submission can't slip in after close has drained the queue.
         self._lock = threading.Lock()
@@ -226,6 +256,54 @@ class MMScheduler:
             target=self._executor_loop, daemon=True, name="mm-scheduler"
         )
         self._executor.start()
+        if self._hang_debug:
+            self._hang_watchdog = threading.Thread(
+                target=self._hang_watchdog_loop,
+                daemon=True,
+                name="mm-hang-watchdog",
+            )
+            self._hang_watchdog.start()
+
+    def _set_hang_stage(self, stage: Optional[str]) -> None:
+        if not self._hang_debug:
+            return
+        with self._hang_lock:
+            self._hang_stage = stage
+            self._hang_stage_started = time.monotonic() if stage is not None else 0.0
+
+    def _hang_watchdog_loop(self) -> None:
+        """Report a stuck scheduler without making any CUDA driver calls."""
+        interval = min(1.0, self._hang_warn_seconds / 2)
+        last_reported_stage = (None, 0.0)
+        last_reported_at = 0.0
+        while not self._stopped.wait(interval):
+            with self._hang_lock:
+                stage = self._hang_stage
+                started = self._hang_stage_started
+                batch_items = self._hang_batch_items
+            now = time.monotonic()
+            if stage is None or now - started < self._hang_warn_seconds:
+                continue
+            if (
+                last_reported_stage == (stage, started)
+                and now - last_reported_at < self._hang_warn_seconds
+            ):
+                continue
+            last_reported_stage = (stage, started)
+            last_reported_at = now
+            frame = sys._current_frames().get(self._executor.ident)
+            stack = "".join(traceback.format_stack(frame)) if frame else "unavailable"
+            logging.warning(
+                "ViT hang watchdog: stage=%s elapsed=%.1fs pid=%d scheduler_tid=%s "
+                "batch_items=%d queue_depth=%d scheduler_stack:\n%s",
+                stage,
+                now - started,
+                os.getpid(),
+                self._executor.native_id,
+                batch_items,
+                self._queue_depth(),
+                stack,
+            )
 
     def _queue_depth(self) -> int:
         """Return queued chunks, including a budget-overflow pending chunk.
@@ -748,6 +826,9 @@ class MMScheduler:
         queue_wait_ms = max(queue_wait_times, default=0.0)
         queue_depth = self._queue_depth()
         items = [wi for chunk in batch for wi in chunk.work_items]
+        if self._hang_debug:
+            with self._hang_lock:
+                self._hang_batch_items = len(items)
         log_composition = logging.getLogger().isEnabledFor(logging.INFO)
         if log_composition:
             n_images = sum(chunk.n_images for chunk in batch)
@@ -756,9 +837,14 @@ class MMScheduler:
         oom_error = None
         forward_started = False
         try:
+            self._set_hang_stage("gpu_headroom")
             self._check_gpu_memory_headroom(items)
             forward_started = True
-            _run_embedding(self._mm_part, items)
+            _run_embedding(
+                self._mm_part,
+                items,
+                stage_callback=self._set_hang_stage if self._hang_debug else None,
+            )
         except torch.cuda.OutOfMemoryError as error:
             logging.error(
                 "MMScheduler: batch OOM/headroom rejection, failing %d "
@@ -780,6 +866,11 @@ class MMScheduler:
             )
             self._fail_chunks(batch, error)
             return
+        finally:
+            self._set_hang_stage(None)
+            if self._hang_debug:
+                with self._hang_lock:
+                    self._hang_batch_items = 0
 
         if oom_error is not None:
             # Leave the exception handler before releasing cached memory: its
