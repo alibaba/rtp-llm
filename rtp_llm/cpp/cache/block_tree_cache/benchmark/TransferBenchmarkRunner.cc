@@ -844,10 +844,10 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
     }
 
     struct PendingBatch {
-        size_t                          descriptor_count{0};
-        std::shared_ptr<AsyncContext>   context;
-        Clock::time_point               submitted_at;
-        std::vector<TransferDescriptor> descriptors;
+        size_t                                descriptor_count{0};
+        std::shared_ptr<TransferAsyncContext> context;
+        Clock::time_point                     submitted_at;
+        std::vector<TransferDescriptor>       descriptors;
     };
 
     const size_t                    direction_count  = directions.size();

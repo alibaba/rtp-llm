@@ -137,7 +137,7 @@ protected:
             .WillByDefault(testing::Invoke([this, selector](const MallocInfo& info) {
                 ++initial_malloc_calls_;
                 auto result = real_allocator_->initMallocForCommonLen(info);
-                if (result.success) {
+                if (result.success && info.enable_cache_lookup) {
                     result.async_context = selector(info);
                 }
                 return result;
@@ -264,6 +264,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorFailure_Ev
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
     ASSERT_GT(stream->curBlocksNum(), 0);
+    // A stream that has started generation cannot recompute its prefix.
+    stream->setIsContextStream(false);
     EXPECT_TRUE(context->completeTransfers(1, false));
 
     auto second = scheduler->schedule();
@@ -279,6 +281,37 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorFailure_Ev
     EXPECT_EQ(scheduler->runningStreamsSize(), 0);
     EXPECT_EQ(insert_calls_, 0);
     EXPECT_EQ(free_calls_, 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_PDFusionAllocatorFailure_MovesToRunning) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_TRUE(context->completeTransfers(1, false));
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 1);
+    EXPECT_EQ(second.value().front(), stream);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+    EXPECT_GT(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->reuseLength(), 0);
+    EXPECT_FALSE(stream->streamCacheResource().enableCacheLookup());
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 1);
+    EXPECT_EQ(initial_malloc_calls_, 2);
+    EXPECT_EQ(free_calls_, 1);
+    EXPECT_EQ(insert_calls_, 0);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_PrefillAllocatorFailure_MovesToRunning) {
@@ -306,11 +339,15 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_PrefillAllocatorFai
     EXPECT_FALSE(stream->hasError());
     EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
     EXPECT_GT(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->reuseLength(), 0);
+    EXPECT_FALSE(stream->streamCacheResource().enableCacheLookup());
     EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
     EXPECT_EQ(scheduler->runningStreamsSize(), 1);
-    EXPECT_EQ(free_calls_, 0);
+    EXPECT_EQ(initial_malloc_calls_, 2);
+    EXPECT_EQ(free_calls_, 1);
+    EXPECT_EQ(insert_calls_, 0);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testPendingAllocatorLoads_RespectAdmissionBatchLimit) {
