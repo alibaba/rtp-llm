@@ -105,26 +105,37 @@ void CacheStoreAsyncWriter::terminateStoreCompletions(const std::shared_ptr<Stor
 }
 
 CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
-    bool                                  unfinished = false;
-    std::shared_ptr<StoreCompletionState> active_completion_state;
-    std::shared_ptr<StoreCompletionState> finished_completion_state;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        unfinished                = state_ == State::RUNNING || finished_store_completion_state_ != nullptr;
-        active_completion_state   = active_store_completion_state_;
-        finished_completion_state = finished_store_completion_state_;
-    }
-    if (unfinished) {
-        RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter destroyed with unfinished cache-store work - "
-                            "cancelling outstanding publication callbacks");
-    }
-    if (thread_pool_) {
-        thread_pool_->stop();
-    }
-    auto shutdown_exception =
-        std::make_exception_ptr(std::runtime_error("cache-store publication cancelled during writer shutdown"));
-    terminateStoreCompletions(active_completion_state, shutdown_exception);
-    terminateStoreCompletions(finished_completion_state, shutdown_exception);
+    close();
+}
+
+void CacheStoreAsyncWriter::close() {
+    std::call_once(close_once_, [this]() {
+        bool                                  unfinished = false;
+        std::shared_ptr<StoreCompletionState> active_completion_state;
+        std::shared_ptr<StoreCompletionState> finished_completion_state;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            unfinished                = state_ == State::RUNNING || finished_store_completion_state_ != nullptr;
+            active_completion_state   = active_store_completion_state_;
+            finished_completion_state = finished_store_completion_state_;
+            state_                    = State::CLOSED;
+        }
+        if (unfinished) {
+            RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter closed with unfinished cache-store work - "
+                                "cancelling outstanding publication callbacks");
+        }
+        if (thread_pool_) {
+            thread_pool_->stop();
+        }
+        auto shutdown_exception =
+            std::make_exception_ptr(std::runtime_error("cache-store publication cancelled during writer shutdown"));
+        terminateStoreCompletions(active_completion_state, shutdown_exception);
+        terminateStoreCompletions(finished_completion_state, shutdown_exception);
+        thread_pool_.reset();
+        active_cache_store_.reset();
+        cache_config_.reset();
+        cache_manager_.reset();
+    });
 }
 
 // IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle.
@@ -380,6 +391,12 @@ void CacheStoreAsyncWriter::waitAllDone() {
 
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                                   const torch_ext::LayerKVCache&       layer_kv) {
+    // close() is called only after forward has joined; reject retained Python
+    // handles instead of silently accepting publication after executor teardown.
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        RTP_LLM_CHECK_WITH_INFO(state_ != State::CLOSED, "CacheStoreAsyncWriter is closed");
+    }
     if (!active_cache_store_ || !cache_config_) {
         // Fail closed when publication is tracked: the executor waits on this
         // cycle and reduces the result across TP before dispatching decode. A

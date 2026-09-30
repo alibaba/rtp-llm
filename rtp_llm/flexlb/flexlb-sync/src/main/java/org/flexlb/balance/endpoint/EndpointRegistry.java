@@ -256,11 +256,19 @@ public class EndpointRegistry {
      * address is captured and the endpoint identity is revalidated.</p>
      */
     public List<PrefillRoutingEntry> prefillRoutingSnapshot(RoleType roleType) {
-        return switch (roleType) {
+        List<PrefillRoutingEntry> directory = switch (roleType) {
             case PREFILL -> prefillDirectory;
             case PDFUSION -> pdFusionDirectory;
             default -> List.of();
         };
+        for (PrefillRoutingEntry entry : directory) {
+            if (entry.endpoint().getStatus().isAdmissionClosed()) {
+                return directory.stream()
+                        .filter(candidate -> !candidate.endpoint().getStatus().isAdmissionClosed())
+                        .toList();
+            }
+        }
+        return directory;
     }
 
     /**
@@ -277,7 +285,9 @@ public class EndpointRegistry {
         List<DecodeEndpoint.DecodeRoutingView> snapshot =
                 new ArrayList<>(directory.size());
         for (Map.Entry<String, DecodeEndpoint> entry : directory) {
-            snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
+            if (!entry.getValue().getStatus().isAdmissionClosed()) {
+                snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
+            }
         }
         return List.copyOf(snapshot);
     }
@@ -319,7 +329,14 @@ public class EndpointRegistry {
         AtomicReference<WorkerEndpoint.GenerationPin> captured =
                 new AtomicReference<>();
         endpoints.computeIfPresent(ipPort, (ignored, current) -> {
-            captured.set(current.tryPinGeneration());
+            if (!current.getStatus().isAdmissionClosed()) {
+                WorkerEndpoint.GenerationPin pin = current.tryPinGeneration();
+                if (pin != null && current.getStatus().isAdmissionClosed()) {
+                    pin.close();
+                } else {
+                    captured.set(pin);
+                }
+            }
             return current;
         });
         return captured.get();

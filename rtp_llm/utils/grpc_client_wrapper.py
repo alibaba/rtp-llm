@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -11,6 +11,8 @@ import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
+from rtp_llm.utils.lifecycle.controller import LifecycleController
+from rtp_llm.utils.lifecycle.rpc import ControlRpcTransport
 from rtp_llm.utils.time_util import Timer
 
 
@@ -22,6 +24,12 @@ class GrpcClientWrapper:
         server_port: int,
         dp_addresses: Optional[List[str]] = None,
         client_config: Optional[Dict[str, int]] = None,
+        control_addresses: Optional[List[str]] = None,
+        expected_control_address_count: Optional[int] = None,
+        control_address_resolver: Optional[Callable[[], List[str]]] = None,
+        lifecycle_store: Optional[Any] = None,
+        lifecycle_store_factory: Optional[Callable[[], Optional[Any]]] = None,
+        require_instance_lease: bool = False,
     ):
         self.server_port = server_port
         self.address = f"localhost:{server_port}"
@@ -32,6 +40,19 @@ class GrpcClientWrapper:
         self._dp_channels: Dict[str, Any] = {}
         self._dp_stubs: Dict[str, Any] = {}
         self._client_config = client_config or {}
+        # Lifecycle addresses include every rank; serving addresses represent
+        # DP groups. Neither health failures nor serving-pool refreshes may
+        # cancel an in-flight resource transition.
+        self._control_rpc = ControlRpcTransport(self._client_config)
+        self._lifecycle = LifecycleController(
+            self._control_rpc,
+            control_addresses or [self.address],
+            expected_control_address_count=expected_control_address_count,
+            control_address_resolver=control_address_resolver,
+            lifecycle_store=lifecycle_store,
+            lifecycle_store_factory=lifecycle_store_factory,
+            require_instance_lease=require_instance_lease,
+        )
 
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
@@ -64,6 +85,19 @@ class GrpcClientWrapper:
                 logging.warning(f"Failed to close DP channel for {address}: {e}")
         self._dp_channels.clear()
         self._dp_stubs.clear()
+        await self._control_rpc.close()
+
+    async def sleep_serving(self, req: Any) -> Dict[str, Any]:
+        return await self._lifecycle.sleep_serving(req)
+
+    async def wake_up_serving(self, req: Any = None) -> Dict[str, Any]:
+        return await self._lifecycle.wake_up_serving(req)
+
+    async def get_sleep_status(self, req: Any = None) -> Dict[str, Any]:
+        return await self._lifecycle.get_sleep_status(req)
+
+    async def is_sleeping(self, req: Any = None) -> Dict[str, Any]:
+        return await self._lifecycle.is_sleeping(req)
 
     async def health_check(self) -> Dict[str, Any]:
         """Check server health"""
@@ -74,7 +108,9 @@ class GrpcClientWrapper:
             await self.stub.CheckHealth(request, timeout=1)
             return {"status": "ok"}
         except Exception as e:
-            await self.close()
+            # Failed readiness is not transport shutdown. Closing this shared
+            # channel cancels concurrent health RPCs with CancelledError.
+            # gRPC reconnects transient failures; only close() owns teardown.
             return {
                 "status": "error",
                 "message": e,
@@ -325,6 +361,14 @@ class GrpcClientWrapper:
                 return await self.start_profile(req)
             elif uri == "dump_torch_allocator":
                 return await self.dump_torch_allocator(req)
+            elif uri == "sleep":
+                return await self.sleep_serving(req)
+            elif uri == "wake_up":
+                return await self.wake_up_serving(req)
+            elif uri == "sleep_status":
+                return await self.get_sleep_status(req)
+            elif uri == "is_sleeping":
+                return await self.is_sleeping(req)
             elif uri == "update_eplb_config":
                 return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":

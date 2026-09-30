@@ -81,10 +81,9 @@ public:
                            std::shared_ptr<RpcServerRuntimeMeta> meta,
                            int64_t                               prefill_stop_stream_wait_timeout_ms = 2000):
         GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter, meta),
-        task_identity_{rpc_context.requestID(),
-                       rpc_context.request && rpc_context.request->has_group_id() ?
-                           rpc_context.request->group_id().value() :
-                           -1},
+        task_identity_{
+            rpc_context.requestID(),
+            rpc_context.request && rpc_context.request->has_group_id() ? rpc_context.request->group_id().value() : -1},
         resource(resource),
         rpc_context(rpc_context),
         cancel_state(std::make_shared<std::atomic<bool>>(false)),
@@ -92,17 +91,17 @@ public:
         prefill_worker_cache_store_addrs = resource->workers;
     }
     ~PrefillGenerateContext();
-    void         setStream(const std::shared_ptr<GenerateStream>& stream) override;
-    void         reset() override;
-    bool         isRequestCancelled() const override;
+    void                            setStream(const std::shared_ptr<GenerateStream>& stream) override;
+    void                            reset() override;
+    bool                            isRequestCancelled() const override;
     PriorityPreemptionRequestResult requestPriorityPreempt();
-    bool         isPriorityPreempted() const;
+    bool                            isPriorityPreempted() const;
     // Virtual so lifecycle tests can pause immediately after terminal publication.
     virtual bool         tryMarkOtherTerminal();
     PrefillTerminalCause terminalCause() const;
-    void         tryCancelDownstream();
-    bool         finalizePriorityPreemption();
-    void         setLocalStreamSchedulerOwned(bool owned);
+    void                 tryCancelDownstream();
+    bool                 finalizePriorityPreemption();
+    void                 setLocalStreamSchedulerOwned(bool owned);
     // Linearizes ordinary runtime-meta removal with installation of the
     // priority-preemption first cause and its CANCELING overlay.
     void         dequeueStreamFromRuntimeMeta();
@@ -125,9 +124,12 @@ public:
     }
 
 private:
-    void markRequestEnd();
-    void reportTime();
-    void stopStream();
+    int64_t requestIdForCacheStore() const;
+    void    markLocalRequestEnd(int64_t request_id);
+    void    markRemoteWorkersRequestEnd(int64_t request_id);
+    void    markRequestEnd();
+    void    reportTime();
+    void    stopStream();
 
     // The batch envelope exists before QueryConverter/local enqueue. Use the
     // same immutable identity for early Cancel and late stream registration.
@@ -172,9 +174,9 @@ private:
 
     std::atomic<PrefillTerminalCause> terminal_cause_{PrefillTerminalCause::ACTIVE};
     std::mutex                        terminal_transition_mu_;
-    std::mutex        priority_finalize_mu_;
-    bool              priority_finalized_{false};
-    bool              local_stream_scheduler_owned_{false};
+    std::mutex                        priority_finalize_mu_;
+    bool                              priority_finalized_{false};
+    bool                              local_stream_scheduler_owned_{false};
 };
 
 }  // namespace rtp_llm

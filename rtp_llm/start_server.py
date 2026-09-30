@@ -20,6 +20,9 @@ from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
     setup_and_configure_server,
 )
+from rtp_llm.model_loader.weight_memory_saver import (
+    start_configured_process as start_memory_saver_configured_process,
+)
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -126,7 +129,7 @@ def start_backend_server_impl(
             args=(global_controller, py_env_configs, pipe_writer),
             name="backend_manager",
         )
-        backend_process.start()
+        start_memory_saver_configured_process(backend_process)
     finally:
         if old_defer is None:
             os.environ.pop(DEFER_FIRST_SIGTERM_ENV, None)

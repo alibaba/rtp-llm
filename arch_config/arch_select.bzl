@@ -87,8 +87,9 @@ def whl_deps():
             "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
             "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
             "tilelang==0.1.9",
+            "torch_memory_saver==0.0.9.post1",
         ],
-        "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
+        "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126", "torch_memory_saver==0.0.9.post1"],
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",
             "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar",
