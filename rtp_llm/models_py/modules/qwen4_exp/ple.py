@@ -297,6 +297,8 @@ class Qwen4ExpPLELayer(nn.Module):
         hyper_states: torch.Tensor,
         token_history: torch.Tensor,
         padding_mask: Optional[torch.Tensor] = None,
+        *,
+        embeddings: Optional[torch.Tensor] = None,
     ) -> tuple:
         """Shared front half: n-gram embed, gate against the stream, normalize.
 
@@ -305,7 +307,8 @@ class Qwen4ExpPLELayer(nn.Module):
         different left context.
         """
         seq_len = hyper_states.shape[1]
-        embeddings = self.ple_embedding(token_history, seq_len)
+        if embeddings is None:
+            embeddings = self.ple_embedding(token_history, seq_len)
 
         branches = (self.hc_mult, self.hidden_size)
         key_normed = self._norm(
@@ -370,6 +373,58 @@ class Qwen4ExpPLELayer(nn.Module):
             :, -self.short_conv_state_len :
         ]
         return output, state
+
+    def prefill_page_snapshots(
+        self,
+        hyper_states: torch.Tensor,
+        token_history: torch.Tensor,
+        page_size: int,
+        conv_buffer: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Gather once while retaining every page's resumable prefill state.
+
+        Projections and convolution keep their original page-sized shapes to
+        preserve BF16 accumulation and rounding. N-gram hashing, shard gather,
+        and its TP reduction run once per request, including a partial final
+        page and a reused prefix's left context.
+        """
+        if page_size <= 0:
+            raise ValueError("PLE snapshot page size must be positive")
+        batch, length, width = hyper_states.shape
+        if conv_buffer is not None and (
+            conv_buffer.shape != (batch, self.short_conv_state_len, width)
+            or conv_buffer.device != hyper_states.device
+            or conv_buffer.dtype != hyper_states.dtype
+        ):
+            raise ValueError("PLE snapshot convolution buffer geometry is invalid")
+        if length <= 0:
+            raise ValueError("PLE snapshot prefill must contain at least one token")
+        embeddings = self.ple_embedding(token_history, length)
+        outputs, snapshots = [], []
+        for start in range(0, length, page_size):
+            end = min(start + page_size, length)
+            gated, normed = self._gated_values(
+                hyper_states[:, start:end],
+                token_history,
+                embeddings=embeddings[:, start:end].contiguous(),
+            )
+            if conv_buffer is None:
+                outputs.append(gated + self._short_conv(normed))
+                conv_buffer = self.prefill_conv_state(normed)
+            else:
+                history = torch.cat((conv_buffer, normed), dim=1)
+                convolved = F.silu(
+                    F.conv1d(
+                        history.transpose(1, 2),
+                        self.conv_weight,
+                        groups=self.hc_hidden_size,
+                        dilation=self.conv_dilation,
+                    )
+                ).transpose(1, 2)
+                outputs.append(gated + convolved)
+                conv_buffer = history[:, -self.short_conv_state_len :]
+            snapshots.append(conv_buffer)
+        return torch.cat(outputs, dim=1), snapshots
 
     def prefill_conv_state(self, gated_value_normed: torch.Tensor) -> torch.Tensor:
         """The conv-input history decode must resume from: last state_len rows.
