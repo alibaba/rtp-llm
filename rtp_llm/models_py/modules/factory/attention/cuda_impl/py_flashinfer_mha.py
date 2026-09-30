@@ -10,11 +10,12 @@ from flashinfer.prefill import (
 )
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
-    FlashinferRopeApplier,
-)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.rope_applier import (
+    create_prefill_rope_applier,
+    prefill_rope_is_fused,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
@@ -48,6 +49,15 @@ def _get_fp8_unit_scale_tensor(device: torch.device) -> torch.Tensor:
         scale = torch.tensor([FP8_UNIT_SCALE], dtype=torch.float32, device=device)
         _g_fp8_unit_scale_tensors[device] = scale
     return scale
+
+
+def _has_paged_kv_blocks(attn_inputs: PyAttentionInputs) -> bool:
+    """Whether the request carries a paged KV block table (LM serving)."""
+    block_ids = getattr(attn_inputs, "kv_cache_kernel_block_id", None)
+    if block_ids is not None and block_ids.numel() > 0:
+        return True
+    block_ids = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+    return block_ids is not None and block_ids.numel() > 0
 
 
 def quantize_to_fp8_if_needed(
@@ -938,7 +948,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self.attn_inputs = attn_inputs
 
         self.fmha_impl = self._create_fmha_impl(attn_configs, attn_inputs)
-        self.rope_applier = self._create_rope_applier(attn_configs)
+        self.rope_applier = create_prefill_rope_applier(attn_configs)
         logging.info(
             "py-flashinfer prefill rope applier: %s",
             type(self.rope_applier).__name__,
@@ -963,11 +973,16 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         that will be used for both FMHA and RoPE operations.
         """
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-        self.rope_params = self.fmha_params
-        # Pass the shared params to all ops
         self.fmha_impl.set_params(self.fmha_params)
-        if self.rope_applier is not None:
-            self.rope_applier.set_params(self.rope_params)
+        if self.rope_applier is not None and self.rope_applier.owns_params:
+            # Fused appliers build their own rope params (page offsets included).
+            self.rope_params = self.rope_applier.prepare(attn_inputs)
+        else:
+            # The flashinfer rope module consumes positions and offsets from the
+            # shared FMHA params.
+            self.rope_params = self.fmha_params
+            if self.rope_applier is not None:
+                self.rope_applier.set_params(self.rope_params)
         # KV cache write always needs params (even without RoPE)
         self.kv_cache_write_op.set_params(self.rope_params)
 
@@ -977,11 +992,14 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         """Create FMHA implementation. To be overridden by subclasses."""
         raise NotImplementedError("Subclass must implement _create_fmha_impl")
 
-    def _create_rope_applier(self, attn_configs: AttentionConfigs) -> Any:
-        """Create the rope module shared by the py-flashinfer prefill cores."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return FlashinferRopeApplier(attn_configs)
+    @classmethod
+    def rope_is_composed(cls, attn_configs: AttentionConfigs) -> bool:
+        """Whether this impl serves the config only by swapping its rope module.
+
+        The factory defers such implementations so that kernels whose rope is
+        native (TRT-LLM cubins implement MRoPE themselves) keep priority.
+        """
+        return prefill_rope_is_fused(attn_configs)
 
     def _split_qkv(
         self, qkv: torch.Tensor
@@ -1022,8 +1040,20 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
+        # Fused appliers (MRoPE) store K/V themselves when handed the cache, so
+        # the separate KV write below is skipped for them.
+        fused_kv_write = (
+            self.need_rope_kv_cache
+            and self.rope_applier is not None
+            and self.rope_applier.fused_kv_write
+        )
         if self.need_rope_kv_cache and self.rope_applier is not None:
-            query, key, value = self.rope_applier.apply(qkv)
+            if fused_kv_write:
+                query, key, value = self._split_qkv(
+                    self.rope_applier.apply(qkv, kv_cache, self.rope_params)
+                )
+            else:
+                query, key, value = self.rope_applier.apply(qkv)
         else:
             query, key, value = self._split_qkv(qkv)
 
@@ -1033,7 +1063,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         key = quantize_to_fp8_if_needed(key, kv_dtype)
         value = quantize_to_fp8_if_needed(value, kv_dtype)
 
-        if self.need_rope_kv_cache:
+        if self.need_rope_kv_cache and not fused_kv_write:
             self.kv_cache_write_op.forward(key, value, kv_cache)
 
         fmha_inputs = self._prepare_fmha_input(query, key, value)
@@ -1057,7 +1087,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
 
 
 class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
-    """FlashInfer prefill implementation with paged KV cache layout using MhaRotaryEmbeddingOp."""
+    """FlashInfer prefill implementation with paged KV cache layout."""
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -1080,8 +1110,15 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
            SM12x consumer Blackwell keeps this FlashInfer paged fallback because
            TRTLLMGen/XQA do not have sm_120a support in this build.
         2. The underlying paged FMHA op supports the inputs
-        3. MhaRotaryEmbeddingOp supports the inputs
+        3. The rope module supports the inputs
+
+        Interleaved MRoPE composes through the fused rope applier, which is
+        also the only rope kernel expressing the mRoPE layout; the factory
+        only falls back to this impl when no kernel-native implementation
+        (TRT-LLM cubins implement MRoPE themselves) covers the GPU.
         """
+        if prefill_rope_is_fused(attn_configs):
+            return PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
         return (
             not is_sm10x()
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
@@ -1089,7 +1126,10 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         )
 
     def support_cuda_graph(self) -> bool:
-        return True
+        # The fused applier bakes its page-table offset at capture time while
+        # the prefill graph path refreshes FMHA params only, so MRoPE stays
+        # eager.
+        return self.rope_applier is None or not self.rope_applier.fused_kv_write
 
 
 class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
@@ -1142,6 +1182,9 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
         """Check if hybrid prefill implementation is supported."""
+        # The hybrid core owns the KV write after its ragged half, so it only
+        # runs with the flashinfer rope module; MRoPE (fused applier) defers to
+        # the paged/ragged implementations.
         return (
             not attn_inputs.is_cuda_graph
             and not is_sm10x()
@@ -1178,8 +1221,13 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         Returns True if:
         1. The underlying ragged FMHA op supports the inputs
            (requires prefix_lengths to be empty or zero)
-        2. MhaRotaryEmbeddingOp supports the inputs
-        3. Mrope is not used
+        2. The rope module supports the inputs
+
+        Interleaved MRoPE composes through the fused rope applier. Without a
+        paged block table (embedding / classifier scoring keeps no persistent
+        KV cache) the ragged core serves it; with one it defers to the paged
+        core, matching the serving layout, and the factory defers both to any
+        kernel-native implementation.
 
         Note: Unlike the paged variant, ragged prefill is kept enabled on
         Blackwell: TRT-LLM Gen prefill requires a paged kv cache and
@@ -1187,6 +1235,10 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         one. Without this fallback, sm_120 has no usable prefill impl for
         such cases.
         """
+        if prefill_rope_is_fused(attn_configs):
+            return PyFlashinferPrefillAttnOp.support(
+                attn_inputs
+            ) and not _has_paged_kv_blocks(attn_inputs)
         return (
             PyFlashinferPrefillAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope

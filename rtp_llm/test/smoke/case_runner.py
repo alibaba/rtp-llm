@@ -570,6 +570,10 @@ class CaseRunner(object):
         elif request_endpoint == "/v1/embeddings/similarity":
             return SimilarityComparer
         elif request_endpoint == "/v1/classifier":
+            from smoke.decision_comparer import DecisionComparer, is_decision_query
+
+            if is_decision_query(q_r["query"]):
+                return DecisionComparer
             return ClassifierComparer
         elif request_endpoint == "/v1/reranker":
             return RerankerComparer
