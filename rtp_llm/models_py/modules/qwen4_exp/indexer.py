@@ -596,13 +596,17 @@ class Qwen4ExpQSAIndexer(nn.Module):
         num_blocks = block_keys.shape[1]
         top_k = min(self.block_topk, num_blocks)
         if top_k > 0:
-            # Same reduction order as block_scores: [B,S,H,nb] -> relu -> sum(H).
-            scores = torch.matmul(
-                q.float(), block_keys.float().transpose(-1, -2).unsqueeze(1)
-            )
-            scores = torch.relu(scores.transpose(-1, -2)).sum(dim=-1) / math.sqrt(
-                self.head_dim
-            )
+            from .indexer_prefill_score import try_prefill_score
+
+            scores = try_prefill_score(q, block_keys)
+            if scores is None:
+                # [B,S,H,nb] -> relu -> sum(H), with FP32 intermediate scores.
+                scores = torch.matmul(
+                    q.float(), block_keys.float().transpose(-1, -2).unsqueeze(1)
+                )
+                scores = torch.relu(scores.transpose(-1, -2)).sum(dim=-1) / math.sqrt(
+                    self.head_dim
+                )
             visible_block = torch.arange(num_blocks, device=device).unsqueeze(
                 0
             ) < complete.unsqueeze(1)
