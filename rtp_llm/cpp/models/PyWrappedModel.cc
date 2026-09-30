@@ -1171,10 +1171,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool graph_candidate =
             !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
-        // Side-cache writes and the speculative accept_len callback currently
-        // have no valid-row mask. Replays must use an exact batch graph.
+        // Decode side-cache writes and the speculative accept_len callback
+        // require an exact batch. Draft-prefill graphs validate their packed
+        // rows separately and select a token bucket, leaving the decode batch
+        // key unset. Applying that key comparison also rejects valid prefill.
         const bool can_run_graph = graph_candidate
-                                   && (!requires_exact_cuda_graph_batch_
+                                   && (is_prefill_cuda_graph_mode_ || !requires_exact_cuda_graph_batch_
                                        || graph_state.current_real_graph_bs == graph_state.current_batch_size);
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
