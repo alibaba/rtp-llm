@@ -18,7 +18,7 @@ public:
 private:
     friend class DeviceDiskTransferExecutor;
 
-    TransferStatus executeBatch(const std::vector<HostBufferView>&     hosts,
+    TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                 const std::vector<TransferDescriptor>& descriptors,
                                 const std::vector<const GroupSet*>&    group_sets) override;
 

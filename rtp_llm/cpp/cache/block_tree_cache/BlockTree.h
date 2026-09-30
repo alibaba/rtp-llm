@@ -61,6 +61,11 @@ public:
     bool      isRemovable(TreeNode* node) const;
     TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
 
+    // Requires the cache mutex; detached nodes remain owned until removed after their transfers settle.
+    std::vector<TreeNode*> detachSubtree(TreeNode* node);
+    // Requires the cache mutex and the workflow's last node access; reclaims detached nodes whose transfers are idle.
+    void reclaimDetachedNodes();
+
     TreeNode* root() const {
         return root_.get();
     }
@@ -110,6 +115,8 @@ private:
     ReusableGroupLocations                reusable_group_locations_;
     std::unique_ptr<TreeNode>             root_;
     std::deque<std::unique_ptr<TreeNode>> node_pool_;
+    // Detached nodes retain stable addresses until their own transfers have settled.
+    std::unordered_map<TreeNode*, std::unique_ptr<TreeNode>> detached_nodes_;
 };
 
 }  // namespace rtp_llm

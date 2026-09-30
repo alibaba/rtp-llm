@@ -73,7 +73,8 @@ struct GroupSetResource {
         return transfer_state == GroupSetTransferState::IDLE && is_empty();
     }
     bool isMatchUsable() const {
-        return transfer_state == GroupSetTransferState::IDLE || transfer_state == GroupSetTransferState::LOADING;
+        return !transfer_detached
+               && (transfer_state == GroupSetTransferState::IDLE || transfer_state == GroupSetTransferState::LOADING);
     }
     bool hasCompleteDeviceValue() const {
         return !device_blocks.empty()

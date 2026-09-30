@@ -55,7 +55,7 @@ GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
 void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
                           std::vector<std::string>             group_tags,
-                          size_t                               physical_payload_bytes) {
+                          BackingLayout                        backing_layout) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "GroupSet requires a topology");
     RTP_LLM_CHECK_WITH_INFO(!group_tags.empty(), "GroupSet requires at least one member tag");
     RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() || device_pools_.size() == group_tags.size(),
@@ -72,6 +72,7 @@ void GroupSet::initialize(size_t                               group_set_id,
                 device_pools_[member_index] != nullptr, "GroupSet has null device pool for tag=%s", tag.c_str());
         }
     }
+    size_t physical_payload_bytes   = backing_layout.payload_bytes;
     uses_physical_payload_geometry_ = physical_payload_bytes > 0;
     if (physical_payload_bytes == 0) {
         for (const auto& tag : group_tags) {
@@ -88,18 +89,8 @@ void GroupSet::initialize(size_t                               group_set_id,
     topology_      = std::move(topology);
     group_tags_    = std::move(group_tags);
     payload_bytes_ = physical_payload_bytes;
-}
-
-bool GroupSet::hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const {
-    if (blocks.size() != device_pools_.size()) {
-        return false;
-    }
-    for (size_t pool_index = 0; pool_index < blocks.size(); ++pool_index) {
-        if (!device_pools_[pool_index]->isAllocated(blocks[pool_index])) {
-            return false;
-        }
-    }
-    return true;
+    enable_crc_    = backing_layout.crc_enabled;
+    storage_bytes_ = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
 }
 
 void GroupSet::referenceBlocks(const MultiNodeResource& resource) const {

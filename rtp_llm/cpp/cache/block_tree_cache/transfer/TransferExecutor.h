@@ -4,7 +4,7 @@
 #include <memory>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
@@ -23,14 +23,14 @@ protected:
                      size_t                                         max_descriptors_per_batch,
                      std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter);
 
-    virtual TransferStatus executeBatch(const std::vector<HostBufferView>&     hosts,
+    virtual TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                         const std::vector<TransferDescriptor>& descriptors,
                                         const std::vector<const GroupSet*>&    group_sets) = 0;
 
 private:
     friend class PerRankBlockTransferEngine;
 
-    std::shared_ptr<AsyncContext>
+    std::shared_ptr<TransferAsyncContext>
     execute(TransferTask task, std::vector<HostBufferView> hosts, std::vector<const GroupSet*> group_sets);
 
     BlockTreeTaskPool&                             transfer_task_pool_;

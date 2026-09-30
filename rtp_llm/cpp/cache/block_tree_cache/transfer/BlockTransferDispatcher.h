@@ -7,7 +7,7 @@
 #include <mutex>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -18,14 +18,14 @@ struct BlockTreeQueueSizes;
 
 class BlockTransferDispatcher {
 public:
-    using TransferDoneCallback = std::function<void(ErrorInfo)>;
+    using TransferDoneCallback = std::function<void(TransferResult)>;
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                             std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr,
                             size_t                                        max_descriptors_per_batch = 8);
     ~BlockTransferDispatcher();
 
-    std::shared_ptr<AsyncContext> executePerRank(TransferTask task) const;
+    std::shared_ptr<TransferAsyncContext> executePerRank(TransferTask task) const;
 
     // Callback-driven path used by Load/Store/Evict: stable grouping and bounded batches.
     void runTransfer(TransferTask task, TransferDoneCallback callback) const;
@@ -38,7 +38,7 @@ public:
     void drainTransfers() const;
 
 private:
-    std::shared_ptr<AsyncContext> executeMultiRank(TransferTask task) const;
+    std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task) const;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;

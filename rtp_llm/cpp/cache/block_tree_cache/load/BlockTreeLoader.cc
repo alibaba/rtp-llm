@@ -298,14 +298,25 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
                             /*release_transferred_refs=*/false);
         });
 
+    for (size_t i = 0; i < load_descs.size(); ++i) {
+        const auto& desc = load_descs[i];
+        if (!joined_loads[i] && desc.node && desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
+            abortLoadLocked(load_descs, joined_loads, 0, context_id, false);
+            rollback_guard.dismiss();
+            context->setSettlementReadyCallback(
+                [this](const auto& ready) { scheduleContextSettlement(nullptr, ready); });
+            context->cancelUnsubmittedTransfers();
+            return true;
+        }
+    }
+
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc = load_descs[desc_index];
         if (desc.source_tier == Tier::DEVICE || joined_loads[desc_index]) {
             ++prepared_desc_count;
             continue;
         }
-        if (desc.node->group_set_resources[desc.group_set_id].transfer_detached
-            || !changeTransferState(
+        if (!changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING)) {
             RTP_LLM_LOG_ERROR("committed load source is not LOAD_PENDING, group_set_id=%zu", desc.group_set_id);
             return false;
@@ -399,7 +410,6 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
             device_refs_released = device_refs_released || release_transferred_refs;
             continue;
         }
-
         MultiNodeResource resource{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
         if (desc.source_tier == Tier::DEVICE) {
             if (release_transferred_refs) {
@@ -423,9 +433,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
             evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
         }
     }
-    if (tree_data_mutated || device_refs_released) {
-        settled_(tree_data_mutated, device_refs_released);
-    }
+    settled_(tree_data_mutated, device_refs_released);
 }
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
@@ -547,7 +555,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
             continue;
         }
 
-        // On copy/batch-settlement failure, leave the source data untouched.
+        // Ordinary copy failures still retain a reusable source.
         if (!changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE)) {
             RTP_LLM_LOG_WARNING(
@@ -557,13 +565,26 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
             state_settled = true;
         }
     }
-    settled_(tree_data_mutated, state_settled);
     load_task_runner_.releaseTaskResources(task);
     for (const TransferDescriptor& desc : task.load_descs) {
         if (!load_join_registry_.finish(desc.node, desc.group_set_id, joined_contexts)) {
             RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", desc.group_set_id);
         }
     }
+    std::vector<TransferDescriptor> corrupted;
+    const auto collect_corrupted = [&corrupted](const TransferTask& transfer, const TransferResult& result) {
+        for (size_t index = 0; index < result.block_errors.size(); ++index) {
+            const auto& desc = transfer.descriptors()[index];
+            if (result.block_errors[index] == CacheCopyError::CRC_MISMATCH && !desc.node->detached) {
+                corrupted.push_back(desc);
+            }
+        }
+    };
+    collect_corrupted(task.host_to_device_task, task.host_result);
+    collect_corrupted(task.disk_to_device_task, task.disk_result);
+    evictor_.invalidateSources(corrupted);
+    tree_data_mutated = !corrupted.empty() || tree_data_mutated;
+    settled_(tree_data_mutated, state_settled);
     return settlement_success;
 }
 

@@ -119,6 +119,8 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    // Reject pending loads and wait for allocator callbacks before its members are destroyed.
+    void shutdownLoads();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
     void                 insert(const CacheKeysType&                              cache_keys,
@@ -144,7 +146,7 @@ public:
     BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    bool executeTransfer(TransferTask task);
+    TransferResult executeTransfer(TransferTask task);
 
     // Accessors
     BlockTree* tree() const {
@@ -180,7 +182,7 @@ public:
 
 private:
     void checkWatermark();
-    // Caller holds mutex_.
+    // Caller holds mutex_ and has finished accessing this workflow's nodes.
     void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
 
     BlockTreeCacheConfig                           config_;

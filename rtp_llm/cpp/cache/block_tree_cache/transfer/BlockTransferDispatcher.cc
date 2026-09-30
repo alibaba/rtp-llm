@@ -6,12 +6,13 @@
 #include <string>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -50,15 +51,16 @@ void BlockTransferDispatcher::drainTransfers() const {
     }
 }
 
-std::shared_ptr<AsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
+std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
     if (task.expired()) {
-        return std::make_shared<CompletedAsyncContext>(
-            ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before TE submission"));
+        return std::make_shared<CompletedTransferAsyncContext>(
+            ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before TE submission"),
+            task.descriptors().size());
     }
     return per_rank_engine_->execute(std::move(task));
 }
 
-std::shared_ptr<AsyncContext> BlockTransferDispatcher::executeMultiRank(TransferTask task) const {
+std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executeMultiRank(TransferTask task) const {
     if (multi_rank_engine_ != nullptr) {
         return multi_rank_engine_->execute(std::move(task));
     }
@@ -76,12 +78,21 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
             transfer_completions_.end());
         transfer_completions_.push_back(completion->get_future().share());
     }
-    callback = [completion, done = std::move(callback)](ErrorInfo error) {
-        // Context readiness can precede callback execution. Drain only after
-        // the callback has submitted settlement (also on an exception).
-        block_tree_cache_detail::ScopeRollback completed([&] { completion->set_value(); });
-        done(std::move(error));
-    };
+    callback =
+        [completion, block_count = task.descriptors().size(), done = std::move(callback)](TransferResult result) {
+            result.expandBlockErrors(block_count);
+            // Context readiness can precede callback execution. Drain only after
+            // the callback has submitted settlement (also on an exception).
+            block_tree_cache_detail::ScopeRollback completed([&] { completion->set_value(); });
+            if (!result.ok()) {
+                RTP_LLM_LOG_ERROR("block transfer failed: descriptor_count=%zu, error_type=%s, error_code=%d, details=%s",
+                                  block_count,
+                                  cacheCopyErrorName(result.copy_error),
+                                  static_cast<int>(result.status.code()),
+                                  result.status.ToString().c_str());
+            }
+            done(std::move(result));
+        };
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         callback(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer task contains no descriptors"));
@@ -97,42 +108,48 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
         Tier                            target{Tier::NONE};
         size_t                          group_set_id{0};
         std::vector<TransferDescriptor> descriptors;
+        std::vector<size_t>             indices;
     };
 
     std::vector<DescriptorGroup> groups;
-    for (const auto& descriptor : descriptors) {
-        const auto group = std::find_if(groups.begin(), groups.end(), [&descriptor](const DescriptorGroup& item) {
+    for (size_t index = 0; index < descriptors.size(); ++index) {
+        const auto& descriptor = descriptors[index];
+        const auto  group      = std::find_if(groups.begin(), groups.end(), [&descriptor](const DescriptorGroup& item) {
             return item.source == descriptor.source_tier && item.target == descriptor.target_tier
                    && item.group_set_id == descriptor.group_set_id;
         });
         if (group != groups.end()) {
             group->descriptors.push_back(descriptor);
+            group->indices.push_back(index);
         } else {
-            groups.push_back(
-                DescriptorGroup{descriptor.source_tier, descriptor.target_tier, descriptor.group_set_id, {descriptor}});
+            groups.push_back(DescriptorGroup{
+                descriptor.source_tier, descriptor.target_tier, descriptor.group_set_id, {descriptor}, {index}});
         }
     }
 
-    auto stage_state = std::make_shared<TransferStageState>(std::move(callback));
+    auto stage_state = std::make_shared<TransferStageState>(std::move(callback), descriptors.size());
     for (const auto& group : groups) {
         const size_t batch_limit = max_descriptors_per_batch_;
         for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
             const size_t                    end = std::min(begin + batch_limit, group.descriptors.size());
             std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin, group.descriptors.begin() + end);
+            std::vector<size_t>             indices(group.indices.begin() + begin, group.indices.begin() + end);
             stage_state->addBatch();
             try {
                 auto context = executeMultiRank(task.subtask(std::move(batch)));
                 if (context == nullptr) {
                     stage_state->completeBatch(
-                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
+                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"), indices);
                     continue;
                 }
-                context->onDone([stage_state](ErrorInfo error) { stage_state->completeBatch(std::move(error)); });
+                context->onDone([stage_state, indices](TransferResult result) {
+                    stage_state->completeBatch(std::move(result), indices);
+                });
             } catch (const std::exception& error) {
-                stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+                stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()), indices);
             } catch (...) {
                 stage_state->completeBatch(
-                    ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer submission exception"));
+                    ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer submission exception"), indices);
             }
         }
     }
