@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -153,6 +154,69 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
             )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_merged_down_epilogue_preserves_bf16_rounding_and_graph_replay(self):
+        from rtp_llm.models_py.modules.qwen4_exp.gated_residual_down_triton import (
+            down_inject_epilogue,
+        )
+
+        source = torch.randn(17, 336, device="cuda", dtype=torch.bfloat16) * 4
+
+        def reference():
+            return (
+                F.silu(source[:, :320] / 4),
+                2 * torch.sigmoid(source[:, 320:324] / 4),
+            )
+
+        expected = reference()
+        actual = down_inject_epilogue(source, 320, 4)
+        for got, want in zip(actual, expected):
+            torch.testing.assert_close(got, want, atol=0, rtol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = down_inject_epilogue(source, 320, 4)
+        source.copy_(
+            torch.linspace(-128, 128, source.numel(), device="cuda").reshape_as(source)
+        )
+        graph.replay()
+        for got, want in zip(actual, reference()):
+            torch.testing.assert_close(got, want, atol=0, rtol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_merged_projection_matches_original_at_real_width(self):
+        torch.manual_seed(43)
+        width, rank = 4 * 2560, 320
+        gamma = torch.randn(width, device="cuda", dtype=torch.bfloat16) * 0.1
+        down = torch.randn(rank, width, device="cuda", dtype=torch.bfloat16) * 0.02
+        up = torch.randn(width, rank, device="cuda", dtype=torch.bfloat16) * 0.02
+        inject = torch.randn(4, width, device="cuda", dtype=torch.bfloat16) * 0.02
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_MERGED_DOWN_INJECT": "0"}):
+            old = Qwen4ExpGatedResidual(
+                gamma, down, up, inject, hc_mult=4, norm_eps=_EPS
+            )
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_MERGED_DOWN_INJECT": "1"}):
+            new = Qwen4ExpGatedResidual(
+                gamma, down, up, inject, hc_mult=4, norm_eps=_EPS
+            )
+        self.assertEqual(new.merged_down_inject.shape, (336, width))
+        for rows in (1, 8, 17, 33, 128):
+            with self.subTest(rows=rows):
+                x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+                expected = old(x)
+                actual = new(x)
+                self.assertIs(actual[1], x)
+                for got, want in ((actual[0], expected[0]), (actual[2], expected[2])):
+                    torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = new(x)
+        x.normal_()
+        graph.replay()
+        expected = old(x)
+        for got, want in ((actual[0], expected[0]), (actual[2], expected[2])):
+            torch.testing.assert_close(got, want, atol=8e-3, rtol=1e-2)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_fused_group_norm_matches_torch_and_replays(self):
         width = 4 * 2560
         gamma = (torch.randn(width, device="cuda") * 0.1).bfloat16()
@@ -202,8 +266,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
         logits.copy_(torch.randn_like(logits))
         normed.copy_(torch.randn_like(normed))
         reference = (
-            torch.sigmoid(logits).reshape(17, 4, 2560)
-            * normed.reshape(17, 4, 2560)
+            torch.sigmoid(logits).reshape(17, 4, 2560) * normed.reshape(17, 4, 2560)
         ).mean(1)
         graph.replay()
         torch.testing.assert_close(
@@ -214,12 +277,8 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
     def test_fused_inject_matches_torch_and_replays(self):
         for rows in (1, 8, 17):
             with self.subTest(rows=rows):
-                hyper = torch.randn(
-                    rows, 4 * 2560, device="cuda", dtype=torch.bfloat16
-                )
-                sublayer = torch.randn(
-                    rows, 2560, device="cuda", dtype=torch.bfloat16
-                )
+                hyper = torch.randn(rows, 4 * 2560, device="cuda", dtype=torch.bfloat16)
+                sublayer = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
                 weights = torch.rand(rows, 4, device="cuda", dtype=torch.bfloat16)
                 with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_INJECT": "0"}):
                     reference = inject_into_residual(hyper, sublayer, weights)
