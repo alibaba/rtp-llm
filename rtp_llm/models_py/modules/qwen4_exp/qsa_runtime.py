@@ -14,8 +14,8 @@ With ``G <= ratio`` it can complete at most one new compressed entry, while the
 ``2 * ratio`` raw-key ring cannot alias the committed partial group. Rejected
 tail entries therefore remain outside the logical length and are overwritten
 before they can become visible. CP, PD and padding remain unsupported; CUDA
-Graph handles exact-batch decode and target verification while dynamic draft
-incremental prefill remains eager. Prefix-cache reuse is page-aligned.
+Graph handles exact-batch decode and target verification, plus bounded packed
+MTP-draft prefill with device metadata. Prefix-cache reuse is page-aligned.
 """
 
 from __future__ import annotations
@@ -77,8 +77,8 @@ def select_qsa_paged_tokens(
         raise ValueError(
             "token_budget must be positive and divisible by compress_ratio"
         )
-    complete_blocks = token_lengths // compress_ratio
     if validate_lengths:
+        complete_blocks = token_lengths // compress_ratio
         invalid_lengths = (token_lengths < 0) | (
             complete_blocks > int(block_logits.shape[1])
         )
@@ -89,6 +89,20 @@ def select_qsa_paged_tokens(
                 "block_logits do not cover every completed block in token_lengths"
             )
 
+    if os.environ.get("RTP_LLM_QWEN4_FUSED_QSA_TOPK", "0") == "1":
+        from .qsa_topk_triton import try_select_qsa_tokens
+
+        result = try_select_qsa_tokens(
+            block_logits,
+            token_lengths,
+            compress_ratio=compress_ratio,
+            token_budget=token_budget,
+        )
+        if result is not None:
+            return result
+
+    if not validate_lengths:
+        complete_blocks = token_lengths // compress_ratio
     rows = int(block_logits.shape[0])
     block_topk = token_budget // compress_ratio
     output = torch.full(
