@@ -396,17 +396,17 @@ public class MetricConstant {
             "app.cache.match.standby.fallback.qps";
 
     /**
-     * Cumulative theoretical cache-hit tokens reported as a gauge. Tagged by window=all.
+     * Theoretical cache-hit tokens reported as a counter.
      */
     public static final String CACHE_THEORY_HIT_COUNT = "app.cache.theory.hit.count";
 
     /**
-     * Cumulative theoretical input tokens reported as a gauge. Tagged by window=all.
+     * Theoretical input tokens reported as a counter.
      */
     public static final String CACHE_THEORY_TOTAL_COUNT = "app.cache.theory.total.count";
 
     /**
-     * Aggregated theory cache-hit token ratio. Tagged by window=all.
+     * Per-request theoretical cache-hit token ratio.
      */
     public static final String CACHE_THEORY_HIT_RATIO = "app.cache.theory.hit.ratio";
 

@@ -3,7 +3,6 @@ package org.flexlb.service;
 import org.flexlb.cache.match.theory.RecentCacheKeyWindow;
 import org.flexlb.cache.match.theory.TheoryCacheKeyHistory;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.cache.telemetry.TheoryCacheHitStats;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -48,7 +47,6 @@ public class TheoryCacheHitReporter {
     @Autowired
     private ConfigService configService;
 
-    private final TheoryCacheHitStats theoryStats = new TheoryCacheHitStats();
     private final AtomicLong droppedReportCount = new AtomicLong();
     private final ThreadPoolExecutor theoryHitReportExecutor = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256), runnable -> {
@@ -96,16 +94,15 @@ public class TheoryCacheHitReporter {
         }
         long inputTokens = Math.max(0L, request.getSeqLen());
         long hitTokens = theoryHitTokens(snapshot.getRequestHitOccurrences(), inputTokens, request.getCacheKeyBlockSize());
-        TheoryCacheHitStats.Snapshot theorySnapshot = theoryStats.record(hitTokens, inputTokens);
         if (config.getObservability().getCacheHit().isRequestTraceLogEnabled()) {
             logTrace(balanceContext, snapshot, hitTokens, inputTokens);
         }
-        if (theoryLogEnabled(config) && theorySnapshot.getRequestTotalCount() > 0L) {
-            writeTheoryLogLine(formatTheoryLogLine(balanceContext, theorySnapshot),
+        if (theoryLogEnabled(config) && inputTokens > 0L) {
+            writeTheoryLogLine(formatTheoryLogLine(balanceContext, hitTokens, inputTokens),
                     config.getObservability().getCacheHit().getTheoryLog().getPath());
         }
         if (cacheMetricsReporter != null && config.getObservability().getCacheHit().isMetricsEnabled()) {
-            cacheMetricsReporter.reportTheoryCacheHitMetrics(theorySnapshot);
+            cacheMetricsReporter.reportTheoryCacheHitMetrics(hitTokens, inputTokens);
         }
     }
 
@@ -152,23 +149,20 @@ public class TheoryCacheHitReporter {
         return (double) hitCount / totalCount;
     }
 
-    private static String formatTheoryLogLine(BalanceContext balanceContext, TheoryCacheHitStats.Snapshot snapshot) {
+    private static String formatTheoryLogLine(BalanceContext balanceContext, long hitTokens, long inputTokens) {
         Request request = balanceContext.getRequest();
+        long nowMs = System.currentTimeMillis();
         return String.format(Locale.ROOT,
                 "time=%s ts_ms=%d source=master request_id=%s seq_len=%d "
-                        + "cache_key_block_size=%d request_hit_tokens=%d request_input_tokens=%d request_ratio=%.6f "
-                        + "all_hit_tokens=%d all_input_tokens=%d all_ratio=%.6f",
-                formatTimestamp(snapshot.getNowMs()),
-                snapshot.getNowMs(),
+                        + "cache_key_block_size=%d request_hit_tokens=%d request_input_tokens=%d request_ratio=%.6f",
+                formatTimestamp(nowMs),
+                nowMs,
                 balanceContext.getRequestId(),
                 request.getSeqLen(),
                 request.getCacheKeyBlockSize(),
-                snapshot.getRequestHitCount(),
-                snapshot.getRequestTotalCount(),
-                snapshot.getRequestHitRatio(),
-                snapshot.getAllHitCount(),
-                snapshot.getAllTotalCount(),
-                snapshot.getAllHitRatio());
+                hitTokens,
+                inputTokens,
+                hitRatio(hitTokens, inputTokens));
     }
 
     private static String formatTimestamp(long timestampMs) {

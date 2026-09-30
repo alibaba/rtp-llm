@@ -2,7 +2,6 @@ package org.flexlb.service;
 
 import org.flexlb.cache.match.theory.TheoryCacheKeyHistory;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.cache.telemetry.TheoryCacheHitStats;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -156,7 +155,7 @@ class TheoryCacheHitReporterTest {
 
         assertTheoryRequests(0L, 128L, 0L, 128L);
         verify(cacheMetricsReporter, Mockito.times(2)).reportTheoryCacheHitMetrics(
-                Mockito.any(TheoryCacheHitStats.Snapshot.class));
+                Mockito.anyLong(), Mockito.anyLong());
     }
 
     @Test
@@ -171,14 +170,12 @@ class TheoryCacheHitReporterTest {
         reportWithConfiguration(reporter, context(config, List.of(2L, 3L, 4L), 1024L, 256L));
         awaitReports(reporter);
 
-        ArgumentCaptor<TheoryCacheHitStats.Snapshot> captor =
-                ArgumentCaptor.forClass(TheoryCacheHitStats.Snapshot.class);
-        verify(cacheMetricsReporter, Mockito.times(2)).reportTheoryCacheHitMetrics(captor.capture());
-        TheoryCacheHitStats.Snapshot second = captor.getAllValues().get(1);
-        assertEquals(512L, second.getRequestHitCount());
-        assertEquals(1024L, second.getRequestTotalCount());
-        assertEquals(512L, second.getAllHitCount());
-        assertEquals(2048L, second.getAllTotalCount());
+        ArgumentCaptor<Long> hitCaptor = ArgumentCaptor.forClass(Long.class);
+        ArgumentCaptor<Long> inputCaptor = ArgumentCaptor.forClass(Long.class);
+        verify(cacheMetricsReporter, Mockito.times(2)).reportTheoryCacheHitMetrics(
+                hitCaptor.capture(), inputCaptor.capture());
+        assertEquals(List.of(0L, 512L), hitCaptor.getAllValues());
+        assertEquals(List.of(1024L, 1024L), inputCaptor.getAllValues());
     }
 
     @Test
@@ -264,14 +261,13 @@ class TheoryCacheHitReporterTest {
     }
 
     private void assertTheoryRequests(long... hitAndInputTokens) {
-        ArgumentCaptor<TheoryCacheHitStats.Snapshot> captor =
-                ArgumentCaptor.forClass(TheoryCacheHitStats.Snapshot.class);
+        ArgumentCaptor<Long> hitCaptor = ArgumentCaptor.forClass(Long.class);
+        ArgumentCaptor<Long> inputCaptor = ArgumentCaptor.forClass(Long.class);
         verify(cacheMetricsReporter, Mockito.times(hitAndInputTokens.length / 2))
-                .reportTheoryCacheHitMetrics(captor.capture());
-        List<TheoryCacheHitStats.Snapshot> snapshots = captor.getAllValues();
-        for (int i = 0; i < snapshots.size(); i++) {
-            assertEquals(hitAndInputTokens[i * 2], snapshots.get(i).getRequestHitCount());
-            assertEquals(hitAndInputTokens[i * 2 + 1], snapshots.get(i).getRequestTotalCount());
+                .reportTheoryCacheHitMetrics(hitCaptor.capture(), inputCaptor.capture());
+        for (int i = 0; i < hitCaptor.getAllValues().size(); i++) {
+            assertEquals(hitAndInputTokens[i * 2], hitCaptor.getAllValues().get(i));
+            assertEquals(hitAndInputTokens[i * 2 + 1], inputCaptor.getAllValues().get(i));
         }
     }
 
