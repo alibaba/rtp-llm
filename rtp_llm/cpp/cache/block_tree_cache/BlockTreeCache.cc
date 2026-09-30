@@ -112,7 +112,7 @@ bool BlockTreeCache::init() {
 BlockTreeCache::~BlockTreeCache() {
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
-    loader_.shutdown();
+    shutdownLoads();
     if (storage_backend_) {
         storage_backend_->shutdown();
     }
@@ -134,14 +134,18 @@ BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroyed");
 }
 
-bool BlockTreeCache::executeTransfer(TransferTask task) {
+void BlockTreeCache::shutdownLoads() {
+    loader_.shutdown();
+}
+
+TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
-    if (!context->success()) {
-        RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", context->errorInfo().ToString().c_str());
-        return false;
+    auto result = context->result();
+    if (!result.ok()) {
+        RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", result.status.ToString().c_str());
     }
-    return true;
+    return result;
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {

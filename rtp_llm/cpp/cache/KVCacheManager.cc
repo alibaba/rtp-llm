@@ -736,7 +736,13 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     }
 
     MemoryOperationResponsePB* memory_response = response.mutable_mem_response();
-    memory_response->set_code(MemoryOperationResponsePB::FAILED);
+    memory_response->set_code(MemoryOperationResponsePB::INVALID_REQUEST);
+    memory_response->mutable_error_info()->set_error_code(static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    memory_response->mutable_error_info()->set_error_message("invalid grouped transfer request");
+    memory_response->clear_block_errors();
+    for (int i = 0; i < request.mem_request().copy_items_size(); ++i) {
+        memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
+    }
     std::vector<TransferDescriptor> descriptors;
     if (!BlockTransferRequestConverter::decodeTransfer(
             request.mem_request(), descriptors, block_tree_cache_->groupSets())) {
@@ -746,17 +752,18 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 
     const int64_t timeout_ms = request.mem_request().timeout_ms();
     if (timeout_ms > std::numeric_limits<int>::max()) {
+        memory_response->mutable_error_info()->set_error_message("transfer timeout exceeds supported range");
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: transfer timeout exceeds supported range");
         return true;
     }
     const auto timeout =
         timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
-    const bool transfer_success = block_tree_cache_->executeTransfer(TransferTask(std::move(descriptors), timeout));
-    if (!transfer_success) {
+    const auto status = block_tree_cache_->executeTransfer(TransferTask(descriptors, timeout));
+    BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
+    if (!status.ok()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
         return true;
     }
-    memory_response->set_code(MemoryOperationResponsePB::OK);
     return true;
 }
 
