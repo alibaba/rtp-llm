@@ -56,7 +56,10 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Model-local layer id")
         .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
-        .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
+        .def_readonly("tag", &LayerKVCache::tag, "Cache group tag")
+        .def_readonly("read_replica_source_layer_id",
+                      &LayerKVCache::read_replica_source_layer_id,
+                      "Global source layer for a read replica, or None for a producer");
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology group id order")

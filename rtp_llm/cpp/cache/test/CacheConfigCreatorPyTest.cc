@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 namespace py = pybind11;
 
@@ -75,9 +77,47 @@ py::dict dsv4BlockGeometry(const LayerKVCacheSpecDescs& layer_descs,
     return out;
 }
 
+py::dict cachePoolTopology(const ModelConfig&       model_config,
+                           const ParallelismConfig& parallelism_config,
+                           const KVCacheConfig&     kv_cache_config,
+                           int                      gen_num_per_cycle) {
+    auto config = HybridPoolConfigCreator::createConfig(
+        model_config, parallelism_config, kv_cache_config, false, gen_num_per_cycle);
+    config.finalizeBlockNums(16, RuntimeConfig{});
+    KVCacheResource resource;
+    resource.initGroups(config.topologyPtr());
+    py::dict groups;
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        const auto& group = config.topology().groupById(gid);
+        py::dict    row;
+        row["layers"]                       = group.layer_ids;
+        row["block_size_bytes"]             = group.kv_block_stride_bytes;
+        row["block_payload_bytes"]          = group.spec->block_payload_bytes();
+        row["group_bytes_per_block"]        = config.blockSizeBytesForGroup(gid);
+        row["block_num"]                    = group.block_num;
+        row["read_replica_source_layer_id"] = group.read_replica_source_layer_id;
+        row["cp_mapping"]                   = static_cast<int>(group.policy.cp_mapping);
+        row["cp_slice"]                     = static_cast<int>(group.policy.cp_slice);
+        row["seq_size_per_block"]           = group.seq_size_per_block;
+        groups[group.tag.c_str()]           = row;
+    }
+    std::vector<std::vector<std::string>> transfer_tags;
+    for (int layer = 0; layer < resource.layerNum(); ++layer) {
+        transfer_tags.push_back(resource.transferGroupTagsForLayer(layer));
+    }
+    py::dict result;
+    result["groups"]             = groups;
+    result["layer_num"]          = config.layer_num;
+    result["global_layer_begin"] = config.global_layer_begin;
+    result["paged_block_bytes"]  = config.block_size_bytes;
+    result["transfer_tags"]      = transfer_tags;
+    return result;
+}
+
 PYBIND11_MODULE(libcache_config_creator_py_test, m) {
     m.def("validate_basic_config", &validateBasicConfig);
     m.def("dsv4_block_geometry", &dsv4BlockGeometry);
+    m.def("cache_pool_topology", &cachePoolTopology);
 }
 
 }  // namespace rtp_llm::test

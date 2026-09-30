@@ -1912,6 +1912,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory", &KVCacheSpecDesc::memory)
         .def_readwrite("tail", &KVCacheSpecDesc::tail)
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
+        .def_readwrite("read_replica_source_layer_id", &KVCacheSpecDesc::read_replica_source_layer_id)
         .def(py::pickle(
             [](const KVCacheSpecDesc& self) {
                 return py::make_tuple(self.tag,
@@ -1933,11 +1934,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.capacity,
                                       self.memory,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.read_replica_source_layer_id);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 21)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -1959,6 +1961,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                if (t.size() == 21) {
+                    c.read_replica_source_layer_id = t[20].cast<std::optional<uint32_t>>();
+                }
                 return c;
             }));
 

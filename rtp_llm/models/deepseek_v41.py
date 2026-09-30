@@ -11,6 +11,7 @@ from rtp_llm.config.pp_layout import register_pp_partitioner
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.deepseek_v4 import DeepSeekV4, DeepSeekV4Weight
+from rtp_llm.models.dsv41_kv_cache import configure_dsv41_kv_cache
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
@@ -82,6 +83,8 @@ class DeepSeekV41(DeepSeekV4):
 
     @classmethod
     def _post_build_model_config(cls, model_config):
+        # Do not inherit V4's seven-pool builder: its ratios/codecs differ.
+        configure_dsv41_kv_cache(model_config)
         raise NotImplementedError(
             "DeepSeek V4.1 config and weight descriptors are available; serving "
             "requires cache codecs/replica transport, delayed-mHC, Engram and SM120 operators"

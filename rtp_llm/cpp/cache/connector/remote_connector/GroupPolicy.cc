@@ -94,6 +94,7 @@ bool DefaultLayerGroupPolicy::init() {
     }
     const auto  layer_layout       = allocator_->allLayerCacheBase();
     const auto& topology           = layer_layout.topology();
+    local_group_count_             = topology.groups().size();
     uint64_t    group_name_bithash = 1;
     const auto& layer_group_ids    = topology.layerGroupIdsSnapshot();
     for (int layer = 0; layer < static_cast<int>(layer_group_ids.size()); ++layer) {
@@ -102,6 +103,9 @@ bool DefaultLayerGroupPolicy::init() {
             return false;
         }
         for (const int group_idx : layer_group_ids.at(layer)) {
+            if (topology.groupById(static_cast<size_t>(group_idx)).read_replica_source_layer_id.has_value()) {
+                continue;
+            }
             bool is_full_group = false;
             if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
                 is_full_group = true;
@@ -328,8 +332,9 @@ bool FullOtherGroupPolicy::init() {
 bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                               std::vector<std::string>&               location_spec_group_names) const {
     const auto& group_block_ids = resource->groupBlocks();
-    if (group_block_ids.size() != groups_.size()) {
-        RTP_LLM_LOG_WARNING("group size not equal, expect [%lu], real [%lu]", groups_.size(), group_block_ids.size());
+    if (group_block_ids.size() != local_group_count_) {
+        RTP_LLM_LOG_WARNING(
+            "group size not equal, expect [%lu], real [%lu]", local_group_count_, group_block_ids.size());
         return false;
     }
     const auto& cache_keys = resource->cacheKeys();

@@ -26,6 +26,9 @@ void CacheTopology::validateAndBuildIndex() {
     for (size_t group_id = 0; group_id < groups_.size(); ++group_id) {
         const auto& group = groups_[group_id];
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "CacheTopology group_id=%zu has empty tag", group_id);
+        RTP_LLM_CHECK_WITH_INFO(!group.read_replica_source_layer_id.has_value() || group.layer_ids.size() <= 1,
+                                "CacheTopology read replica tag=%s must have at most one storage slot",
+                                group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheTopology tag=%s has null spec", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(group.spec->tag == group.tag,
                                 "CacheTopology tag=%s does not match spec tag=%s",

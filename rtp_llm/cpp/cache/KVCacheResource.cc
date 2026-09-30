@@ -10,6 +10,7 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
     tag_to_group_id_.clear();
     layer_group_tags_.clear();
+    transfer_layer_group_tags_.clear();
     group_block_ids.clear();
     layer_group_block_ids.clear();
 
@@ -27,6 +28,7 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
 
     const auto& layers = topology->layers();
     layer_group_tags_.reserve(layers.size());
+    transfer_layer_group_tags_.resize(layers.size());
     layer_group_block_ids.resize(layers.size());
     for (const auto& layer : layers) {
         layer_group_tags_.push_back(layer.group_tags);
@@ -35,6 +37,9 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
         for (const auto& tag : layer.group_tags) {
             const auto group_id    = topology->groupIdForTag(tag);
             group_blocks[group_id] = group_block_ids[group_id];
+            if (!groups[group_id].read_replica_source_layer_id.has_value()) {
+                transfer_layer_group_tags_[static_cast<size_t>(layer.layer_id)].push_back(tag);
+            }
         }
     }
 }
@@ -278,6 +283,13 @@ const std::vector<std::string>& KVCacheResource::groupTagsForLayer(int layer_id)
                             layer_id,
                             layer_group_tags_.size());
     return layer_group_tags_[static_cast<size_t>(layer_id)];
+}
+
+const std::vector<std::string>& KVCacheResource::transferGroupTagsForLayer(int layer_id) const {
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < transfer_layer_group_tags_.size(),
+                            "KVCacheResource invalid transfer layer_id=%d",
+                            layer_id);
+    return transfer_layer_group_tags_[static_cast<size_t>(layer_id)];
 }
 
 const std::string& KVCacheResource::soleGroupTagForLayer(int layer_id) const {

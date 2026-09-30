@@ -31,6 +31,26 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
 
 }  // namespace
 
+TEST(KVCacheResourceTest, ReadReplicaIsAllocatedButNotPublished) {
+    auto producer                        = makeResourceGroup("swa_kv", CacheGroupType::SWA);
+    auto replica                         = makeResourceGroup("hca_kv", CacheGroupType::FULL);
+    replica.read_replica_source_layer_id = 20;
+    const auto      topology             = CacheTopology::create({producer, replica}, {{0, {"swa_kv", "hca_kv"}}});
+    KVCacheResource resource;
+    resource.initGroups(topology);
+    resource.mutableBlockIds("hca_kv").add({3, 4});
+    EXPECT_EQ(resource.groupTagsForLayer(0), (std::vector<std::string>{"swa_kv", "hca_kv"}));
+    EXPECT_EQ(resource.transferGroupTagsForLayer(0), (std::vector<std::string>{"swa_kv"}));
+    EXPECT_EQ(resource.blocksForLayer(0, "hca_kv"), (BlockIndicesType{3, 4}));
+    auto copied = resource;
+    EXPECT_EQ(copied.transferGroupTagsForLayer(0), resource.transferGroupTagsForLayer(0));
+    EXPECT_EQ(copied.blocksForLayer(0, "hca_kv"), resource.blocksForLayer(0, "hca_kv"));
+    replica.read_replica_source_layer_id.reset();
+    resource.initGroups(CacheTopology::create({producer, replica}, {{0, {"swa_kv", "hca_kv"}}}));
+    EXPECT_EQ(resource.transferGroupTagsForLayer(0), resource.groupTagsForLayer(0));
+    EXPECT_THROW(resource.transferGroupTagsForLayer(-1), std::exception);
+}
+
 TEST(BlockIdsTest, NonFull_MirrorsKernelBlocks) {
     BlockIds ids(/*kernel_blocks_per_kv_block=*/1);
 

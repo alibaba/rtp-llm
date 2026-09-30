@@ -1,4 +1,21 @@
 py_test(
+    name = "dsv41_kv_cache_test",
+    srcs = ["dsv41_kv_cache_test.py"],
+    data = ["//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:sdk"],
+)
+
+py_test(
+    name = "dsv41_cache_production_test",
+    srcs = ["dsv41_cache_production_test.py"],
+    data = [
+        "//rtp_llm/config/test:testdata/deepseek_v41_flash.json",
+        "//rtp_llm/cpp/cache/test:cache_config_creator_py_test",
+    ],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "dsv4_kv_cache_test",
     srcs = ["dsv4_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],

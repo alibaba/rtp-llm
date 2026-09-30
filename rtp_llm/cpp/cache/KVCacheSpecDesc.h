@@ -81,6 +81,9 @@ struct KVCacheSpecDesc {
     std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
+
+    // A local storage slot for another stage's producer, excluded from publication.
+    std::optional<uint32_t> read_replica_source_layer_id;
 };
 
 struct SpecBuildContext {

@@ -228,6 +228,13 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     RTP_LLM_CHECK_WITH_INFO(groupNums() > 0, "CacheConfig::mergeMTPModule requires destination topology");
     RTP_LLM_CHECK_WITH_INFO(propose_config.groupNums() > 0, "CacheConfig::mergeMTPModule requires propose topology");
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "CacheConfig::mergeMTPModule invalid module_index=%d", module_index);
+    for (const auto* config : {static_cast<const CacheConfig*>(this), &propose_config}) {
+        for (const auto& group : config->topology().groups()) {
+            RTP_LLM_CHECK_WITH_INFO(!group.read_replica_source_layer_id.has_value(),
+                                    "CacheConfig::mergeMTPModule does not support read replicas (tag=%s)",
+                                    group.tag.c_str());
+        }
+    }
 
     auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
     sub_cfg->block_num     = block_num;

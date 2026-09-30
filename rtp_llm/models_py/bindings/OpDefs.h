@@ -34,6 +34,7 @@ struct LayerKVCache {
     int           layer_id           = -1;
     int           group_id           = -1;
     std::string   tag                = "default";
+    std::optional<uint32_t> read_replica_source_layer_id;
 
     LayerKVCache() = default;
 
@@ -164,6 +165,7 @@ private:
                             group_id,
                             group.tag,
                             buffers.kv_scale_addr);
+        result.read_replica_source_layer_id = group.read_replica_source_layer_id;
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL

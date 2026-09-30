@@ -187,8 +187,12 @@ class LayerKVCache:
     @property
     def layer_id(self) -> int:
         """
-        Global layer id
+        Stage-local storage layer id
         """
+
+    @property
+    def read_replica_source_layer_id(self) -> typing.Optional[int]:
+        """Global source of a read replica, or None for a producer."""
 
     @property
     def group_id(self) -> int:

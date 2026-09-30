@@ -63,8 +63,12 @@ class V41WeightTest(unittest.TestCase):
         self.assertEqual(len(config.attn_config.layer_compress_ratios), 40)
         self.assertEqual(resolve_pp_partition(40, 2, config), [21, 19])
         self.assertEqual(config.config_dtype, "bfloat16")
+        config.attn_config.tokens_per_block = 64
+        config.attn_config.kernel_tokens_per_block = 64
         with self.assertRaisesRegex(NotImplementedError, "serving requires"):
             DeepSeekV41._post_build_model_config(config)
+        self.assertEqual(config.attn_config.tokens_per_block, 256)
+        self.assertEqual(len(config.kv_cache_spec_descs), 40)
         # The optional nested-config entry point must not alter legacy file parsing.
         v4 = dict(self.source["text_config"])
         v4.update(

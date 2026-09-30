@@ -1024,6 +1024,7 @@ class KVCacheSpecDesc:
     memory: typing.Any
     tail: typing.Any
     cp: typing.Any
+    read_replica_source_layer_id: typing.Optional[int]
     def __init__(self) -> None: ...
 
 

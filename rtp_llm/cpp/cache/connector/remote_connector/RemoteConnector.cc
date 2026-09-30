@@ -183,13 +183,23 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
     RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0,
                             "remote connector requires an initialized cache topology with at least one group");
     std::vector<int32_t> full_group_ids, linear_group_ids;
+    bool                 has_read_replicas = false;
     for (int32_t group_id = 0; group_id < cache_config.groupNums(); group_id++) {
+        if (cache_config.topology().groupById(static_cast<size_t>(group_id)).read_replica_source_layer_id.has_value()) {
+            has_read_replicas = true;
+            continue;
+        }
         if (cache_config.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
             full_group_ids.push_back(group_id);
         } else {
             linear_group_ids.push_back(group_id);
         }
     }
+    // A stage containing only SWA producers needs coordinated PP restoration before
+    // remote prefix hits can be admitted. Never publish its GLOBAL read replicas.
+    RTP_LLM_CHECK_WITH_INFO(!has_read_replicas || !full_group_ids.empty(),
+                            "remote prefix cache requires a local FULL producer; read-replica-only PP stages "
+                            "require PP prefix restoration support (disable remote cache)");
     if (linear_group_ids.empty()) {
         group_policy_ =
             std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);

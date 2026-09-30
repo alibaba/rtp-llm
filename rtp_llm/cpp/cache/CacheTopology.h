@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -35,6 +36,9 @@ struct GroupBase {
 
     // Column in the PP canonical group table (identical on every stage); unset keeps identity mapping.
     size_t canonical_idx = kCanonicalIdxUnset;
+
+    // Global producer identity; layer_ids are local storage slots for a replica group.
+    std::optional<uint32_t> read_replica_source_layer_id;
 };
 
 // Order is deterministic but carries no business meaning.

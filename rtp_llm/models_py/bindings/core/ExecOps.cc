@@ -201,6 +201,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const size_t max_blocks_per_batch = static_cast<size_t>(param.host_kv_cache_offset.size(1));
 
     const auto& group = cache_config.groupForLayer(layer_kv.layer_id, layer_kv.tag);
+    if (group.read_replica_source_layer_id.has_value()) {
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 

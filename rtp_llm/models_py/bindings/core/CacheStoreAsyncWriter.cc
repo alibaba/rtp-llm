@@ -162,6 +162,9 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
     if (!active_cache_store_ || !cache_config_) {
         return;
     }
+    if (cache_config_->groupForLayer(layer_kv.layer_id, layer_kv.tag).read_replica_source_layer_id.has_value()) {
+        return;
+    }
 
     // Capture tensors by value so their underlying storage stays alive in the background thread.
     // A torch::Tensor copy only increments the reference count.

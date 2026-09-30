@@ -110,6 +110,7 @@ public:
     const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
 
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
+    const std::vector<std::string>& transferGroupTagsForLayer(int layer_id) const;
     const std::string&              soleGroupTagForLayer(int layer_id) const;
 
     int layerNum() const;
@@ -179,6 +180,7 @@ private:
 
     std::unordered_map<std::string, int>  tag_to_group_id_;
     std::vector<std::vector<std::string>> layer_group_tags_;
+    std::vector<std::vector<std::string>> transfer_layer_group_tags_;
     // layer_id -> group_id -> block_indices
     LayerAttnBlockIds layer_group_block_ids;
     // group_id -> block_indices

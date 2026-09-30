@@ -877,6 +877,23 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_LinearGroup) {
         << "Hybrid cache-store must write opaque kv_ keys even when use_opaque_kv_cache_store=false";
 }
 
+TEST_F(ExecOpsTest, testWriteCacheStoreSkipsReadReplica) {
+    auto cache_store                       = std::make_shared<MockCacheStore>();
+    auto inputs                            = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/3);
+    auto config                            = makeCacheConfig(2, 64, 0, 3, "hca_kv");
+    auto groups                            = config.topology().groups();
+    groups[0].read_replica_source_layer_id = 20;
+    config.setTopology(std::move(groups), config.topology().layers());
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({3, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 2;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "hca_kv";
+    // Publication consults the topology even if a caller omits view metadata.
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, cache_store, 0, 0, 1, nullptr));
+    EXPECT_TRUE(cache_store->records.empty());
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStoreTag_FullGroup) {
     auto                    cache_store = std::make_shared<MockCacheStore>();
     auto                    inputs      = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/3);
