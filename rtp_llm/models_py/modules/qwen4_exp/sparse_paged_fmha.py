@@ -35,9 +35,7 @@ def _validate_sparse_paged_indices(
     invalid_pool = block_table >= cache_blocks
     if selected.numel():
         invalid_negative = selected < -1
-        invalid_visible = (selected >= 0) & (
-            selected >= kv_lens.unsqueeze(-1)
-        )
+        invalid_visible = (selected >= 0) & (selected >= kv_lens.unsqueeze(-1))
         logical_blocks = torch.clamp_min(selected, 0) // page_size
         invalid_logical = logical_blocks >= table_width
         # An invalid selected index must never reach gather before its error
@@ -53,9 +51,7 @@ def _validate_sparse_paged_indices(
         invalid_selection = (
             invalid_negative | invalid_visible | invalid_logical | invalid_missing
         )
-        failed = (
-            invalid_lengths.any() | invalid_pool.any() | invalid_selection.any()
-        )
+        failed = invalid_lengths.any() | invalid_pool.any() | invalid_selection.any()
     else:
         failed = invalid_lengths.any() | invalid_pool.any()
     if not bool(failed.item()):
@@ -214,6 +210,125 @@ def _sparse_paged_gqa_kernel(
     )
 
 
+@triton.jit
+def _sparse_paged_online_split_kernel(
+    q_ptr,
+    cache_ptr,
+    block_table_ptr,
+    kv_lens_ptr,
+    selected_ptr,
+    partial_ptr,
+    stride_q_b,
+    stride_q_h,
+    stride_q_s,
+    stride_cache_page,
+    stride_cache_kv,
+    stride_cache_h,
+    stride_cache_token,
+    stride_bt_b,
+    stride_bt_block,
+    stride_len_b,
+    stride_len_s,
+    stride_sel_b,
+    stride_sel_s,
+    selected_width,
+    max_blocks,
+    cache_blocks,
+    H_Q: tl.constexpr,
+    H_KV: tl.constexpr,
+    QUERY_LEN: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    D: tl.constexpr,
+    SCALE: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+    BLOCKS_PER_SPLIT: tl.constexpr,
+):
+    batch = tl.program_id(0)
+    head = tl.program_id(1)
+    query = tl.program_id(2) // NUM_SPLITS
+    split = tl.program_id(2) % NUM_SPLITS
+    kv_head = head // (H_Q // H_KV)
+    rd = tl.arange(0, D)
+    q = tl.load(
+        q_ptr + batch * stride_q_b + head * stride_q_h + query * stride_q_s + rd
+    ).to(tl.float32)
+    row = selected_ptr + batch * stride_sel_b + query * stride_sel_s
+    kv_len = tl.load(kv_lens_ptr + batch * stride_len_b + query * stride_len_s)
+    maximum = tl.full((), float("-inf"), tl.float32)
+    normalizer = tl.zeros((), tl.float32)
+    acc = tl.zeros((D,), tl.float32)
+    for block in range(BLOCKS_PER_SPLIT):
+        # Interleave chunks so a short valid prefix is not concentrated in
+        # one partition when the selected tensor has a fixed wide capacity.
+        offset = (block * NUM_SPLITS + split) * BLOCK_K + tl.arange(0, BLOCK_K)
+        index = tl.load(row + offset, mask=offset < selected_width, other=-1)
+        logical = index // PAGE_SIZE
+        candidate = (offset < selected_width) & (index >= 0) & (index < kv_len)
+        physical = tl.load(
+            block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
+            mask=candidate & (logical < max_blocks),
+            other=0,
+        )
+        valid = (
+            candidate
+            & (logical < max_blocks)
+            & (physical > 0)
+            & (physical < cache_blocks)
+        )
+        key_ptr = (
+            cache_ptr
+            + physical[:, None] * stride_cache_page
+            + kv_head * stride_cache_h
+            + (index % PAGE_SIZE)[:, None] * stride_cache_token
+            + rd[None, :]
+        )
+        key = tl.load(key_ptr, mask=valid[:, None], other=0.0).to(tl.float32)
+        score = tl.sum(q[None, :] * key, axis=1) * SCALE
+        score = tl.where(valid, score, float("-inf"))
+        next_max = tl.maximum(maximum, tl.max(score, axis=0))
+        alpha = tl.where(next_max == float("-inf"), 0.0, tl.exp(maximum - next_max))
+        weights = tl.where(valid, tl.exp(score - next_max), 0.0)
+        value = tl.load(key_ptr + stride_cache_kv, mask=valid[:, None], other=0.0).to(
+            tl.float32
+        )
+        acc = acc * alpha + tl.sum(weights[:, None] * value, axis=0)
+        normalizer = normalizer * alpha + tl.sum(weights)
+        maximum = next_max
+    output_row = (batch * H_Q + head) * QUERY_LEN + query
+    if NUM_SPLITS == 1:
+        out = tl.where(normalizer > 0, acc / normalizer, 0.0)
+        tl.store(partial_ptr + output_row * D + rd, out.to(q_ptr.dtype.element_ty))
+    else:
+        base = partial_ptr + (output_row * NUM_SPLITS + split) * (D + 2)
+        tl.store(base + rd, acc)
+        tl.store(base + D, maximum)
+        tl.store(base + D + 1, normalizer)
+
+
+@triton.jit
+def _merge_sparse_paged_splits_kernel(
+    partial_ptr,
+    out_ptr,
+    D: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    splits = tl.arange(0, NUM_SPLITS)
+    rd = tl.arange(0, D)
+    base = partial_ptr + row * NUM_SPLITS * (D + 2)
+    maxima = tl.load(base + splits * (D + 2) + D)
+    sums = tl.load(base + splits * (D + 2) + D + 1)
+    maximum = tl.max(maxima, axis=0)
+    # Empty partitions contribute exactly zero, including an all-empty row.
+    scale = tl.where(sums > 0, tl.exp(maxima - maximum), 0.0)
+    partial = tl.load(base + splits[:, None] * (D + 2) + rd[None, :])
+    numerator = tl.sum(partial * scale[:, None], axis=0)
+    denominator = tl.sum(sums * scale, axis=0)
+    out = tl.where(denominator > 0, numerator / denominator, 0.0)
+    tl.store(out_ptr + row * D + rd, out.to(out_ptr.dtype.element_ty))
+
+
 def sparse_paged_gqa_attn(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -332,7 +447,11 @@ def sparse_paged_gqa_attn(
             )
     else:
         _validate_sparse_paged_indices(
-            block_table, kv_lens, selected, page_size=page_size, cache_blocks=cache_blocks
+            block_table,
+            kv_lens,
+            selected,
+            page_size=page_size,
+            cache_blocks=cache_blocks,
         )
 
     q = q.contiguous()
@@ -346,6 +465,53 @@ def sparse_paged_gqa_attn(
     selected_width = int(selected.shape[2])
     if selected_width == 0:
         output.zero_()
+        return output
+    online = os.environ.get("RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE", "0").lower()
+    if online in ("1", "true", "on"):
+        requested = int(os.environ.get("RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS", "8"))
+        if requested not in (1, 2, 4, 8, 16):
+            raise ValueError("paged attention splits must be one of 1, 2, 4, 8, 16")
+        splits = min(
+            requested, triton.next_power_of_2(triton.cdiv(selected_width, block_k))
+        )
+        partial = (
+            torch.empty(
+                (batch, q_heads, query_len, splits, head_dim + 2),
+                dtype=torch.float32,
+                device=q.device,
+            )
+            if splits > 1
+            else output
+        )
+        _sparse_paged_online_split_kernel[(batch, q_heads, query_len * splits)](
+            q,
+            kv_cache,
+            block_table,
+            kv_lens,
+            selected,
+            partial,
+            *q.stride()[:3],
+            *kv_cache.stride()[:4],
+            *block_table.stride(),
+            *kv_lens.stride(),
+            *selected.stride()[:2],
+            selected_width,
+            int(block_table.shape[1]),
+            cache_blocks,
+            H_Q=q_heads,
+            H_KV=kv_heads,
+            QUERY_LEN=query_len,
+            PAGE_SIZE=page_size,
+            D=head_dim,
+            SCALE=1.0 / float(head_dim) ** 0.5,
+            BLOCK_K=block_k,
+            NUM_SPLITS=splits,
+            BLOCKS_PER_SPLIT=triton.cdiv(selected_width, block_k * splits),
+        )
+        if splits > 1:
+            _merge_sparse_paged_splits_kernel[(batch * q_heads * query_len,)](
+                partial, output, D=head_dim, NUM_SPLITS=splits
+            )
         return output
     grid = (batch, q_heads, query_len)
     _sparse_paged_gqa_kernel[grid](
