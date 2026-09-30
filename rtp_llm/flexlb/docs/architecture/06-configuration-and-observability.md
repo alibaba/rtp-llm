@@ -183,8 +183,9 @@ UniConfig / Nacos 的 v1 部分更新示例：
   配置上限和窗口时长在 Master 初始化时读取，池容量在首次分配时确定；修改 Nacos 配置或
   Prefill 规模后重启 Master 重新计算容量。
   理论命中监控使用 `app.cache.theory.hit.count`、`app.cache.theory.total.count` 与
-  `app.cache.theory.hit.ratio`，以 Gauge 上报当前 Master 已记录请求的累计命中 Tokens、
-  累计输入 Tokens 与两者比值。历史记录过期不扣减累计值，Master 重启后重新累计。
+  `app.cache.theory.hit.ratio`。前两个指标是 Counter，每个请求分别上报理论命中 Tokens 和
+  输入 Tokens；命中率是该请求的理论命中 Tokens 与输入 Tokens 的比值。历史记录有效期只影响
+  本次请求是否匹配，不影响已经上报的 Counter。
 - `observability.logging`：FlexLB logger group 级别与 root/PV stdout 开关。
 - `serviceDiscovery`：connect/read timeout、poll interval 与连接池运行参数。
 - `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、远端命中

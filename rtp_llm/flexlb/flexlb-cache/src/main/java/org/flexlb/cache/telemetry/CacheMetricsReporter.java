@@ -109,8 +109,8 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
         monitor.register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);
-        monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.COUNTER);
+        monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
@@ -338,16 +338,16 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report cumulative theory cache-hit token counters.
+     * Report theory cache-hit tokens for one request.
      */
-    public void reportTheoryCacheHitMetrics(TheoryCacheHitStats.Snapshot snapshot) {
-        if (snapshot.getAllTotalCount() == 0L) {
+    public void reportTheoryCacheHitMetrics(long hitTokens, long inputTokens) {
+        if (inputTokens <= 0L) {
             return;
         }
-        FlexMetricTags tags = FlexMetricTags.of("window", "all", "windowMs", "0");
-        monitor.report(CACHE_THEORY_HIT_COUNT, tags, snapshot.getAllHitCount());
-        monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, snapshot.getAllTotalCount());
-        monitor.report(CACHE_THEORY_HIT_RATIO, tags, snapshot.getAllHitRatio());
+        FlexMetricTags tags = FlexMetricTags.of();
+        monitor.report(CACHE_THEORY_HIT_COUNT, tags, hitTokens);
+        monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, inputTokens);
+        monitor.report(CACHE_THEORY_HIT_RATIO, tags, (double) hitTokens / inputTokens);
     }
 
     /**
