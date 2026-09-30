@@ -115,7 +115,7 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         checker.check(config.ep_size == 1)
         checker.check(_has_local_loop_kernel())
 
-    def setup_weights(self, layer_weights: Dict) -> None:
+    def _setup_kernel_weights(self, layer_weights: Dict) -> None:
         """Build per-expert ``Expert`` ModuleList from EP-sliced stacks.
 
         Pops canonical ``W.moe_w{1,2}`` and ``W.moe_s{1,2}`` keys from
@@ -201,6 +201,14 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         self.experts = nn.ModuleList(
             [_expert_at(i) for i in range(cfg.n_routed_experts)]
         )
+
+    def sleep_weight_tensors(self):
+        # Expert modules and the transposed fast-path scales alias these tensors.
+        return {
+            f"_W{index}_{suffix}": getattr(self, f"_W{index}_{suffix}")
+            for index in (1, 2, 3)
+            for suffix in ("w", "s", "s_gemm")
+        }
 
     def dense_gemm_warmup_weights(self):
         """Expose dense fallback GEMMs to model-level JIT warmup."""

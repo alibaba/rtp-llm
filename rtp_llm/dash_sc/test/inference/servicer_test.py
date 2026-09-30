@@ -153,6 +153,25 @@ class _MultiStreamVisitor:
 
 
 class DashErrorSpecForFtExceptionTest(unittest.TestCase):
+    def test_engine_unavailable_is_capacity_independent_of_qos(self) -> None:
+        for qos_level in (None, 1, 50, 100):
+            with self.subTest(qos_level=qos_level):
+                exc = FtRuntimeException(
+                    ExceptionType(8600), "engine is draining or sleeping"
+                )
+                mapping = _dash_error_mapping_for_ft_exception(exc, qos_level)
+                self.assertEqual(mapping.error_spec, DASH_ERROR_CAPACITY)
+                self.assertEqual(mapping.error_spec.status_code, 503)
+                self.assertEqual(mapping.error_spec.status_name, "ServiceUnavailable")
+                self.assertEqual(
+                    mapping.error_spec.finish_reason,
+                    LLMFinishReason.USE_PARAMETER_STATUS,
+                )
+                self.assertFalse(mapping.protocol_error)
+                self.assertEqual(
+                    _dash_error_spec_for_ft_exception(exc), DASH_ERROR_CAPACITY
+                )
+
     def test_non_default_exception_groups(self) -> None:
         cases = (
             (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
@@ -1227,6 +1246,40 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     _finish_reason(chunks[0]),
                     LLMFinishReason.USE_PARAMETER_STATUS,
+                )
+
+    async def test_engine_unavailable_preserves_retryable_wire_status(self) -> None:
+        class _SleepingVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType(8600), "engine is draining or sleeping"
+                )
+
+        for qos_level in (None, 1, 50, 100):
+            with self.subTest(qos_level=qos_level):
+                request_headers = (
+                    {}
+                    if qos_level is None
+                    else {"x-dashscope-inner-qos-level": str(qos_level)}
+                )
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        self._minimal_request(),
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(request_headers=request_headers),
+                        _SleepingVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+                self.assertEqual(len(chunks), 1)
+                self.assertFalse(chunks[0].error_message)
+                error_no, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(error_no, LLMFinishReason.TASK_LIST_FULL)
+                self.assertEqual(payload["status_code"], 503)
+                self.assertEqual(payload["status_name"], "ServiceUnavailable")
+                self.assertEqual(
+                    _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
                 )
 
     async def test_error_text_does_not_override_typed_internal_code(self) -> None:

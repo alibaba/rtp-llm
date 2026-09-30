@@ -43,7 +43,8 @@ public class EngineStatusConverter {
                 workerStatusPB.getMaxSeqLen(),
                 workerStatusPB.getMaxBatchTokensSize(),
                 workerStatusPB.getRunningQueryLen(),
-                workerStatusPB.getWaitingQueryLen());
+                workerStatusPB.getWaitingQueryLen(),
+                workerStatusPB.getAdmissionClosed());
         return owner.bindStatusObservation(
                 engine,
                 workerStatusPB.getAlive(),

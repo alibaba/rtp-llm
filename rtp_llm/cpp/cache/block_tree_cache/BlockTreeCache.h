@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -119,6 +120,11 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    // Resource-phase boundary: admission and all engine ranks are already
+    // quiesced. Failure retains every owner/backing; only destruction after a
+    // successful drain may release pools. Wake creates a fresh empty cache.
+    bool   quiesceForSleep(std::chrono::steady_clock::time_point deadline);
+    size_t activeWorkCount() const;
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void                 insert(const CacheKeysType&                              cache_keys,
@@ -192,6 +198,7 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
+    bool                                           quiescing_{false};
     // Preserve the historical empty-cache wire value. The first successful
     // topology mutation advances the version to zero.
     int64_t                                     mutation_version_{-1};

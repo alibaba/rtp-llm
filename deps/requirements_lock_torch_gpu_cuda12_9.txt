@@ -4592,6 +4592,10 @@ zstandard==0.25.0 \
     #   -r requirements_base.txt
     #   autoawq
 
+torch-memory-saver==0.0.9.post1 \
+    --hash=sha256:b4e560fcd88a0641efb21ac530bb79a6e78fc0b31c9a654fa3b5eb7c3629e555
+    # via sleep/wake CUDA allocation regions
+
 # The following packages are considered to be unsafe in a requirements file:
 setuptools==60.5.0 \
     --hash=sha256:2404879cda71495fc4d5cbc445ed52fdaddf352b36e40be8dcc63147cb4edabe \

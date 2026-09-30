@@ -38,9 +38,9 @@ enum class ErrorCode {
     CANCELLED              = 8100,
     OUT_OF_VOCAB_RANGE     = 8101,
     OUTPUT_QUEUE_FULL      = 8102,
-    OUTPUT_QUEUE_IS_EMPTY      = 8103,
-    FINISHED                   = 8104,
-    OUTPUT_QUEUE_NO_UPDATE     = 8105,
+    OUTPUT_QUEUE_IS_EMPTY  = 8103,
+    FINISHED               = 8104,
+    OUTPUT_QUEUE_NO_UPDATE = 8105,
     // Retryable grammar resource failure. 8105 is already occupied by OUTPUT_QUEUE_NO_UPDATE.
     GRAMMAR_COMPILE_OVERLOADED = 8106,
 
@@ -98,6 +98,9 @@ enum class ErrorCode {
     // AutoTPM Cancel: victim of priority preemption.
     // Maps to HTTP 429 / gRPC RESOURCE_EXHAUSTED upstream.
     PRIORITY_PREEMPTED = 8429,
+
+    // New serving work was rejected by the engine lifecycle admission gate.
+    ENGINE_UNAVAILABLE = 8600,
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {
@@ -248,6 +251,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "GET_ALL_NODE_STATUS_FAILED";
         case ErrorCode::PRIORITY_PREEMPTED:
             return "PRIORITY_PREEMPTED";
+        case ErrorCode::ENGINE_UNAVAILABLE:
+            return "ENGINE_UNAVAILABLE";
         default:
             return "Error: Unrecognized ErrorCode";
     }

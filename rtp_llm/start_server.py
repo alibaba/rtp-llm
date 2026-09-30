@@ -14,11 +14,15 @@ from rtp_llm.utils.util import str_to_bool
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
+from rtp_llm.aios.kmonitor.python_client.kmonitor.reporting import ReportingState
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
     setup_and_configure_server,
+)
+from rtp_llm.model_loader.weight_memory_saver import (
+    start_configured_process as start_memory_saver_configured_process,
 )
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
@@ -101,12 +105,13 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    reporting_state=None,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None)
+        start_backend_server(global_controller, py_env_configs, None, reporting_state)
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
@@ -123,10 +128,10 @@ def start_backend_server_impl(
     try:
         backend_process = torch.multiprocessing.Process(
             target=start_backend_server,
-            args=(global_controller, py_env_configs, pipe_writer),
+            args=(global_controller, py_env_configs, pipe_writer, reporting_state),
             name="backend_manager",
         )
-        backend_process.start()
+        start_memory_saver_configured_process(backend_process)
     finally:
         if old_defer is None:
             os.environ.pop(DEFER_FIRST_SIGTERM_ENV, None)
@@ -192,6 +197,21 @@ def start_backend_server_impl(
     return backend_process
 
 
+def _local_world_size_for_serving(py_env_configs: PyEnvConfigs) -> int:
+    """Read the resolved local rank count without probing CUDA or mutating env."""
+    configured = os.environ.get("LOCAL_WORLD_SIZE")
+    local_world_size = (
+        int(configured)
+        if configured is not None
+        else py_env_configs.parallelism_config.local_world_size
+    )
+    if local_world_size < 1:
+        raise ValueError(
+            f"LOCAL_WORLD_SIZE must be positive, got {local_world_size}"
+        )
+    return local_world_size
+
+
 def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
     """Yield (rank, local_world_size) for each rank that should host frontend/dash_sc.
 
@@ -199,16 +219,7 @@ def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
     any tp_rank==0 rank.
     """
     pc = py_env_configs.parallelism_config
-    local_world_size = pc.world_size
-    if "LOCAL_WORLD_SIZE" in os.environ:
-        logging.info(
-            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
-        )
-        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
-    else:
-        logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
-        )
+    local_world_size = _local_world_size_for_serving(py_env_configs)
 
     # Keep DashSc serving ranks aligned with frontend serving ranks.
     for rank in range(local_world_size):
@@ -225,6 +236,7 @@ def start_dash_sc_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    reporting_state=None,
 ):
     from rtp_llm.start_dash_sc_server import start_dash_sc_server
 
@@ -256,6 +268,7 @@ def start_dash_sc_server_impl(
                 py_env_configs,
                 pipe_writer,
                 bind_barrier,
+                reporting_state,
             ),
             name=f"dash_sc_server_{rank}_{server_id}",
         )
@@ -474,6 +487,7 @@ def start_frontend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    reporting_state=None,
 ):
     from rtp_llm.start_frontend_server import start_frontend_server
 
@@ -486,16 +500,7 @@ def start_frontend_server_impl(
     frontend_processes = []
 
     pc = py_env_configs.parallelism_config
-    local_world_size = pc.world_size
-    if "LOCAL_WORLD_SIZE" in os.environ:
-        logging.info(
-            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
-        )
-        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
-    else:
-        logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
-        )
+    local_world_size = _local_world_size_for_serving(py_env_configs)
 
     # To reduce the number of frontend servers, we only start those with tp_rank=0;
     # however, since k8s needs to check machine heartbeat, rank 0 on each machine also needs to be started.
@@ -512,6 +517,7 @@ def start_frontend_server_impl(
                         i,
                         global_controller,
                         py_env_configs,
+                        reporting_state,
                     ),
                     name=f"frontend_server_{i}",
                 )
@@ -684,6 +690,22 @@ def start_server(py_env_configs: PyEnvConfigs):
     backend_process = None
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
 
+    # Pass the same spawn-safe state to every local rank and ingress worker.
+    # Configuring only the worker handling /sleep leaves its siblings reporting.
+    reporting_state = None
+    role = py_env_configs.role_config.role_type
+    if py_env_configs.runtime_config.enable_sleep_mode and role != RoleType.VIT:
+        frontend_only = role == RoleType.FRONTEND
+        if frontend_only:
+            rank_count = 1
+        else:
+            rank_count = _local_world_size_for_serving(py_env_configs)
+        reporting_state = ReportingState(
+            rank_count,
+            multiprocessing.get_context("spawn"),
+            frontend_only=frontend_only,
+        )
+
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
@@ -697,7 +719,10 @@ def start_server(py_env_configs: PyEnvConfigs):
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller,
+                py_env_configs,
+                process_manager,
+                reporting_state=reporting_state,
             )
             process_manager.add_process(backend_process, shutdown_group="backend")
 
@@ -705,13 +730,19 @@ def start_server(py_env_configs: PyEnvConfigs):
             # vit has its own frontend server
             logging.info("start frontend server")
             frontend_process = start_frontend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller,
+                py_env_configs,
+                process_manager,
+                reporting_state=reporting_state,
             )
             process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
             logging.info("start dash_sc server")
             dash_sc_processes = start_dash_sc_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller,
+                py_env_configs,
+                process_manager,
+                reporting_state=reporting_state,
             )
             if dash_sc_processes:
                 process_manager.add_processes(

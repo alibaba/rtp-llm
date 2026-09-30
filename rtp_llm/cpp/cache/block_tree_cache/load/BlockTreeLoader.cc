@@ -274,6 +274,10 @@ void BlockTreeLoader::shutdown() {
     load_context_coordinator_->shutdown();
 }
 
+bool BlockTreeLoader::shutdownUntil(std::chrono::steady_clock::time_point deadline) {
+    return load_context_coordinator_->shutdownUntil(deadline);
+}
+
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex>            lock(mutex_);
     const std::vector<TransferDescriptor>& load_descs          = context->loadDescs();

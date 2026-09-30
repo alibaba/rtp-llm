@@ -25,12 +25,12 @@ class RecordingMemoryUtil: public MemoryUtil {
 public:
     bool regUserMr(void* buf, uint64_t size, bool gpu, uint64_t aligned_size) override {
         reg_calls.push_back({buf, size, gpu, aligned_size});
-        return true;
+        return reg_calls.size() != fail_reg_call;
     }
 
     bool deregUserMr(void* buf, bool gpu) override {
         dereg_calls.push_back({buf, gpu});
-        return true;
+        return buf != fail_dereg_buffer;
     }
 
     bool isMemoryMr(void*, uint64_t, bool, bool) override {
@@ -59,6 +59,8 @@ public:
 
     std::vector<RegCall>   reg_calls;
     std::vector<DeregCall> dereg_calls;
+    size_t                 fail_reg_call{0};
+    void*                  fail_dereg_buffer{nullptr};
 };
 
 class RecordingCacheStore: public CacheStore {
@@ -243,6 +245,67 @@ TEST(BlockPoolDeviceMallocTest, PassesGpuBackingToMemoryRegistrationBoundary) {
     EXPECT_TRUE(memory_util->dereg_calls[0].gpu);
 #else
     GTEST_SKIP() << "Raw device allocation is only supported in CUDA and ROCm builds";
+#endif
+}
+
+TEST(BlockPoolDeviceMallocTest, RegistrationFailureRollsBackAndCanRetry) {
+#if USING_CUDA || USING_ROCM
+    if (deviceCount() == 0) {
+        GTEST_SKIP() << "No GPU is visible";
+    }
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 1, DataType::TYPE_INT8, 1, 64);
+    auto config =
+        DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+    config.use_device_malloc_backing = true;
+    ASSERT_TRUE(config.memory_layouts[0].hasScale());
+    DeviceBlockPool pool(std::make_shared<const DeviceBlockPoolConfig>(config));
+    ASSERT_TRUE(pool.init());
+    auto memory_util           = std::make_shared<RecordingMemoryUtil>();
+    auto cache_store           = std::make_shared<RecordingCacheStore>(memory_util);
+    memory_util->fail_reg_call = 2;
+    EXPECT_ANY_THROW(pool.regUserMr(0, cache_store));
+    ASSERT_EQ(memory_util->reg_calls.size(), 2u);
+    ASSERT_EQ(memory_util->dereg_calls.size(), 1u);
+    EXPECT_EQ(memory_util->dereg_calls[0].buf, memory_util->reg_calls[0].buf);
+    memory_util->fail_reg_call = 0;
+    EXPECT_NO_THROW(pool.regUserMr(0, cache_store));
+    EXPECT_NO_THROW(pool.deregUserMr());
+    EXPECT_EQ(memory_util->reg_calls.size(), 4u);
+    EXPECT_EQ(memory_util->dereg_calls.size(), 3u);
+#else
+    GTEST_SKIP() << "GPU backing required";
+#endif
+}
+
+TEST(BlockPoolDeviceMallocTest, DeregistrationFailureAttemptsAllAndRetainsOnlyFailedRegions) {
+#if USING_CUDA || USING_ROCM
+    if (deviceCount() == 0) {
+        GTEST_SKIP() << "No GPU is visible";
+    }
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 1, DataType::TYPE_INT8, 1, 64);
+    auto config =
+        DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+    config.use_device_malloc_backing = true;
+    ASSERT_TRUE(config.memory_layouts[0].hasScale());
+    DeviceBlockPool pool(std::make_shared<const DeviceBlockPoolConfig>(config));
+    ASSERT_TRUE(pool.init());
+    auto memory_util = std::make_shared<RecordingMemoryUtil>();
+    auto cache_store = std::make_shared<RecordingCacheStore>(memory_util);
+    pool.regUserMr(0, cache_store);
+    ASSERT_EQ(memory_util->reg_calls.size(), 2u);
+    memory_util->fail_dereg_buffer = memory_util->reg_calls.back().buf;
+    EXPECT_ANY_THROW(pool.deregUserMr());
+    EXPECT_EQ(memory_util->dereg_calls.size(), 2u);
+    EXPECT_ANY_THROW(pool.regUserMr(0, cache_store));
+    EXPECT_EQ(memory_util->reg_calls.size(), 2u);
+    memory_util->fail_dereg_buffer = nullptr;
+    EXPECT_NO_THROW(pool.deregUserMr());
+    ASSERT_EQ(memory_util->dereg_calls.size(), 3u);
+    EXPECT_EQ(memory_util->dereg_calls.back().buf, memory_util->reg_calls.back().buf);
+    EXPECT_NO_THROW(pool.deregUserMr());
+    EXPECT_EQ(memory_util->dereg_calls.size(), 3u);
+#else
+    GTEST_SKIP() << "GPU backing required";
 #endif
 }
 
