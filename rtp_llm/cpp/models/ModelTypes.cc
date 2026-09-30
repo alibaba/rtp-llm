@@ -86,6 +86,15 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::isTargetVerify]   = inputs.is_target_verify;
     shape_hints[GptModelInputIndex::pdSeparation]     = inputs.pd_separation;
     shape_hints[GptModelInputIndex::shutdownSentinel] = inputs.shutdown;
+    if (inputs.engram_token_windows.defined()) {
+        const auto& windows = inputs.engram_token_windows;
+        RTP_LLM_CHECK_WITH_INFO(windows.device().is_cpu() && windows.scalar_type() == torch::kInt32
+                                    && windows.is_contiguous() && windows.dim() == 2
+                                    && windows.size(0) == shape_hints[GptModelInputIndex::comboTokens]
+                                    && windows.size(1) == 4,
+                                "Engram token windows must be contiguous CPU int32 [combo_tokens, 4]");
+        shape_hints[GptModelInputIndex::engramTokenWindows] = 1;
+    }
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
@@ -226,6 +235,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto mm_features_locs_size   = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
     const auto hidden_states_size      = checkedHint(GptModelInputIndex::mtpHiddenStates, "mtpHiddenStates");
     const auto request_length = checkedHint(GptModelInputIndex::gptModelRequestLength, "gptModelRequestLength");
+    const auto has_engram_windows      = checkedHint(GptModelInputIndex::engramTokenWindows, "engramTokenWindows");
+    RTP_LLM_CHECK_WITH_INFO(has_engram_windows <= 1, "invalid Engram window presence hint");
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<int64_t>    dims,
@@ -272,6 +283,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
+        inputs.engram_token_windows = has_engram_windows ?
+                                          allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {checkedHint(GptModelInputIndex::comboTokens, "comboTokens"), 4}) :
+                                          torch::Tensor();
         inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
@@ -382,6 +397,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     };
 
     collect(inputs.combo_tokens);
+    if (has_engram_windows) {
+        collect(inputs.engram_token_windows);
+    }
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);

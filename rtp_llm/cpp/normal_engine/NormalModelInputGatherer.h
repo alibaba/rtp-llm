@@ -38,6 +38,7 @@ struct NormalModelInputGathererConfig {
     bool                        warm_up{};
     bool                        enable_detail_log{};
     bool                        enable_model_inputs_log{};
+    bool                        enable_engram_token_windows{};
 };
 
 class NormalModelInputGatherer {

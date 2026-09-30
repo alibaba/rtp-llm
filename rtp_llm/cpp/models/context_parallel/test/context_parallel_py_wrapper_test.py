@@ -441,6 +441,27 @@ class TestContextParallelProcessor(unittest.TestCase):
                     torch.tensor(expected_positions, dtype=torch.int32),
                 )
 
+    def test_engram_windows_keep_global_lookback_and_mask_cp_padding(self):
+        windows = torch.tensor(
+            [[100 + position - lag for lag in range(4)] for position in range(14)],
+            dtype=torch.int32,
+        )
+        expected_rows = ((0, 1, -1, -1), (2, 3, 12, 13), (4, 5, 10, 11), (6, 7, 8, 9))
+        for rank, rows in enumerate(expected_rows):
+            expected = torch.stack(
+                [
+                    (
+                        windows[row]
+                        if row >= 0
+                        else torch.full((4,), -1, dtype=torch.int32)
+                    )
+                    for row in rows
+                ]
+            )
+            result = cp_test.remap_engram_history(windows, rank, 4)
+            torch.testing.assert_close(result, expected, rtol=0, atol=0)
+            self.assertTrue(result.is_pinned())
+
     def test_mixed_decode_prefill_batch_is_rejected(self):
         decode_tokens = torch.tensor([100, 101], dtype=torch.int32)
         prefill_tokens = torch.arange(14, dtype=torch.int32)

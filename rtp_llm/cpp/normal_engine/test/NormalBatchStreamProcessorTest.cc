@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/normal_engine/EngramTokenHistory.h"
 
 using namespace std;
 
@@ -88,6 +89,80 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     ASSERT_TRUE(model_input.ok());
     EXPECT_FALSE(model_input->kv_cache_block_id.defined());
     EXPECT_FALSE(model_input->kv_cache_kernel_block_id.defined());
+}
+
+TEST(EngramTokenHistoryTest, ChunkDecodeAndVerifyUseExplicitHistory) {
+    const std::vector<int> history{11, 12, 13, 14, 15, 16};
+    std::vector<int32_t>   rows(8);
+    fillEngramTokenWindows(history, 0, 2, rows.data());
+    EXPECT_EQ(rows, (std::vector<int32_t>{11, -1, -1, -1, 12, 11, -1, -1}));
+    fillEngramTokenWindows(history, 4, 2, rows.data());
+    EXPECT_EQ(rows, (std::vector<int32_t>{15, 14, 13, 12, 16, 15, 14, 13}));
+    const int32_t anchor[]{16, 15, 14, 13};
+    const int32_t candidates[]{99, 20, 21, 22, 23};
+    rows.resize(20);
+    extendEngramVerifyWindows(anchor, candidates, 5, rows.data());
+    EXPECT_EQ(rows,
+              (std::vector<int32_t>{99, 15, 14, 13, 20, 99, 15, 14, 21, 20, 99, 15, 22, 21, 20, 99, 23, 22, 21, 20}));
+    EXPECT_EQ(history.back(), 16);
+    EXPECT_EQ(anchor[0], 16);
+}
+
+TEST(EngramTokenHistoryTest, InvalidRangesFailBeforeWriting) {
+    const std::vector<int> history{1, 2, 3};
+    std::vector<int32_t>   rows(8, 777);
+    EXPECT_THROW(fillEngramTokenWindows(history, -1, 1, rows.data()), std::invalid_argument);
+    EXPECT_THROW(fillEngramTokenWindows(history, 2, 2, rows.data()), std::invalid_argument);
+    EXPECT_THROW(fillEngramTokenWindows(history, 1, std::numeric_limits<size_t>::max(), rows.data()),
+                 std::invalid_argument);
+    EXPECT_THROW(fillEngramTokenWindows(history, 0, 1, nullptr), std::invalid_argument);
+    EXPECT_THROW(extendEngramVerifyWindows(nullptr, nullptr, 1, rows.data()), std::invalid_argument);
+    EXPECT_EQ(rows, std::vector<int32_t>(8, 777));
+    EXPECT_NO_THROW(fillEngramTokenWindows(history, 3, 0, nullptr));
+    EXPECT_NO_THROW(extendEngramVerifyWindows(nullptr, nullptr, 0, nullptr));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, EngramGatherUsesRequestHistoryAndMasksFakeRows) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.model_type  = "deepseek_v41";
+    model_config.max_seq_len = 32;
+    model_config.vocab_size = model_config.input_vocab_size = 128;
+    model_config.num_layers                                 = 1;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    CacheConfig                 cache_config;
+    RuntimeConfig               runtime_config;
+    for (int mode = 0; mode < 6; ++mode) {
+        const bool fake        = mode >= 3;
+        const bool decode      = mode % 3 == 1;
+        const bool chunk       = mode % 3 == 2;
+        auto       query       = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({11, 12, 13, 14, 15, 16});
+        query->generate_config = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setIsFakeStream(fake);
+        stream->setReuseLength(4);
+        stream->setIsContextStream(!decode);
+        if (chunk) {
+            stream->setReuseLength(1);
+            stream->enable_fast_gen_   = true;
+            stream->last_chunk_len_    = 4;
+            stream->current_chunk_len_ = 5;
+            stream->max_chunk_len_     = 6;
+        }
+        NormalBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, true);
+        TensorHolder               holder;
+        const auto                 input = processor.gatherModelInput(StreamGroups({stream}), holder);
+        ASSERT_TRUE(input.ok()) << input.status().ToString();
+        const int64_t rows = decode || chunk ? 1 : 2;
+        EXPECT_EQ(input->engram_token_windows.sizes().vec(), (std::vector<int64_t>{rows, 4}));
+        const std::vector<int32_t> expected = decode ? std::vector<int32_t>{16, 15, 14, 13} :
+                                                       (chunk ? std::vector<int32_t>{15, 14, 13, 12} :
+                                                                std::vector<int32_t>{15, 14, 13, 12, 16, 15, 14, 13});
+        EXPECT_EQ(toVec<int32_t>(input->engram_token_windows), fake ? std::vector<int32_t>(rows * 4, -1) : expected);
+    }
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {

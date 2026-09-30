@@ -216,7 +216,8 @@ void registerPyOpDefs(pybind11::module& m) {
                                PyMultimodalInputs       multimodal_inputs,
                                pybind11::object         attention_inputs,
                                BertEmbeddingInputs      bert_embedding_inputs,
-                               rtp_llm::DSparkCallPhase dspark_call_phase) {
+                               rtp_llm::DSparkCallPhase dspark_call_phase,
+                               torch::Tensor            engram_token_windows) {
                  PyModelInputs result;
                  result.input_ids             = std::move(input_ids);
                  result.input_hiddens         = std::move(input_hiddens);
@@ -225,6 +226,7 @@ void registerPyOpDefs(pybind11::module& m) {
                  result.multimodal_inputs     = std::move(multimodal_inputs);
                  result.bert_embedding_inputs = std::move(bert_embedding_inputs);
                  result.dspark_call_phase     = dspark_call_phase;
+                 result.engram_token_windows  = std::move(engram_token_windows);
                  if (pybind11::isinstance<PyAttentionInputs>(attention_inputs)) {
                      result.attention_inputs = attention_inputs.cast<PyAttentionInputs>();
                  } else {
@@ -242,10 +244,12 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("multimodal_inputs")     = PyMultimodalInputs(),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs(),
-             pybind11::arg("dspark_call_phase")     = rtp_llm::DSparkCallPhase::NONE)
+             pybind11::arg("dspark_call_phase")     = rtp_llm::DSparkCallPhase::NONE,
+             pybind11::arg("engram_token_windows")  = torch::Tensor())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
+        .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows, "Current-first token history")
         .def_readwrite("embedding_inputs", &PyModelInputs::embedding_inputs, "Embedding inputs structure")
         .def_readwrite("multimodal_inputs", &PyModelInputs::multimodal_inputs, "Multimodal inputs structure")
         .def_property(

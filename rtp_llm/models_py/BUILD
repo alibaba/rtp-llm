@@ -184,6 +184,8 @@ filegroup(
         "modules/dsv4/v41_cache.py",
         "modules/dsv4/v41_cache_transfer.py",
         "modules/dsv4/v41_pp.py",
+        "modules/dsv4/v41_engram_hash.py",
+        "modules/dsv4/_v41_engram_hash_triton.py",
         "modules/dsv4/hc/delayed.py",
         "modules/dsv4/hc/base.py",
         "modules/dsv4/hc/fallback_impl.py",

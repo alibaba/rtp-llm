@@ -15,7 +15,7 @@ namespace {
 /* Versioned byte stream; readers bounds-check every field. The tensor
    presence flag encodes definedness so defined-but-empty tensors survive;
    host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
-constexpr uint32_t kVersion = 13;
+constexpr uint32_t kVersion = 14;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -225,6 +225,7 @@ void writeModelInput(ByteWriter& w, const GptModelInputs& in) {
     w.flag(in.is_target_verify);
     w.flag(in.shutdown);
     w.val<int32_t>(static_cast<int32_t>(in.dspark_call_phase));
+    w.tensor(in.engram_token_windows);
 }
 
 void readModelInput(ByteReader& r, GptModelInputs& in) {
@@ -269,6 +270,7 @@ void readModelInput(ByteReader& r, GptModelInputs& in) {
     in.is_target_verify          = r.flag();
     in.shutdown                  = r.flag();
     in.dspark_call_phase         = static_cast<DSparkCallPhase>(r.val<int32_t>());
+    in.engram_token_windows      = r.tensor();
 }
 
 void writeSamplingPlan(ByteWriter& w, const PPSamplingPlan& s) {

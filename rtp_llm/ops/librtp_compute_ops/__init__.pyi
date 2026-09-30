@@ -343,6 +343,7 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    engram_token_windows: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -356,6 +357,7 @@ class PyModelInputs:
         attention_inputs: PyAttentionInputs | dict[str, PyAttentionInputs] = ...,
         bert_embedding_inputs: BertEmbeddingInputs = ...,
         dspark_call_phase: DSparkCallPhase = ...,
+        engram_token_windows: torch.Tensor | None = ...,
     ) -> None: ...
     @property
     def attention_inputs(self) -> PyAttentionInputs | dict[str, PyAttentionInputs]:

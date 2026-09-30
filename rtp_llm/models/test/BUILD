@@ -33,6 +33,15 @@ py_test(
 )
 
 py_test(
+    name = "dsv41_engram_hash_test",
+    srcs = ["dsv41_engram_hash_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_engram_hash_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources", "//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch", "//rtp_llm:triton"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "TRITON_INTERPRET": "1"},
+)
+
+py_test(
     name = "dsv41_pp_test",
     srcs = ["dsv41_pp_test.py", "dsv41_cache_transfer_test.py", "dsv41_cache_codec_test.py"],
     main = "dsv41_pp_test.py",

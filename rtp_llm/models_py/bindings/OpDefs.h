@@ -365,10 +365,11 @@ struct PyModelInputs {
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
     // Only interpreted by a DSpARK draft model. All other models leave NONE.
-    // Kept second-to-last so existing brace-init sites keep compiling.
+    // New fields are appended so existing brace-init sites keep compiling.
     rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
     // PP: boundary tensors from the upstream stage; empty under pp_size=1.
     PPIntermediates pp_intermediates;
+    torch::Tensor   engram_token_windows;  // optional device int32 [tokens, 4]
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

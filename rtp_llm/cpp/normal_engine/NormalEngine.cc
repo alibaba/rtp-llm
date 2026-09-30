@@ -111,6 +111,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.world_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (model_config_.model_type == "deepseek_v41") {
+        RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(), "V4.1 Engram history does not yet support RTP_LLM_DEVICE_INPUT");
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE,
+                                "V4.1 speculative Engram history is not integrated yet");
+    }
     dp_prefill_phase_sync_ = dsv4DpPrefillPhaseSyncEnabled(model_config_.model_type,
                                                            std::getenv("DSV4_MOE_STRATEGY"),
                                                            pd_sep_config.role_type,
@@ -488,7 +493,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
     if (parallelism_config.pp_size > 1) {
-        pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>(1.5, model_config_.model_type == "deepseek_v4");
+        pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>(
+            1.5, model_config_.model_type == "deepseek_v4" || model_config_.model_type == "deepseek_v41");
     }
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,

@@ -114,6 +114,10 @@ struct GptModelInputs {
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
+    // Optional CPU int32 [tokens, 4], current-first committed Engram history.
+    // Appended to preserve positional aggregate initialization.
+    torch::Tensor engram_token_windows;
+
 public:
     std::string debugString(bool force = false) const;
 };

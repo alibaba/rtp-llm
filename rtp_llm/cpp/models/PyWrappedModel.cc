@@ -513,7 +513,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     // fusedCopy() flush below. Per micro-batch this adds ~6 copies from
     // buildPyAttentionInputs + padding_offset, plus group_count from
     // setupKVCacheForAttentionInputs. With the planMicroBatches cap of 2
-    // micro-batches and hybrid group_count of 4 the worst case is ~20.
+    // micro-batches and hybrid group_count of 5, plus optional Engram windows,
+    // the worst case is ~24 (below the 64-copy limit).
     // If new tensorHoldHostAndToCuda call sites land below — or if
     // planMicroBatches starts producing >2 micro-batches — re-check
     // MAX_FUSED_D2D_COPIES.
@@ -567,6 +568,13 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               py_attn_inputs,
                                               attention_inputs_by_tag,
                                               bert_embedding_inputs});
+        if (micro_inputs.engram_token_windows.defined()) {
+            auto windows                           = is_real_micro_input ? micro_inputs.engram_token_windows :
+                                                                           torch::full(micro_inputs.engram_token_windows.sizes(),
+                                                             -1,
+                                                             torch::TensorOptions(torch::kInt32).pinned_memory(true));
+            input_list.back().engram_token_windows = tensorHoldHostAndToCuda(windows);
+        }
     }
 
     const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
@@ -721,7 +729,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     // DSpARK proposal and commit are both prefill-shaped; only the explicit
     // phase distinguishes them for capture/replay selection.
     py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
-    if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+    if (enable_cuda_graph_ && !inputs.engram_token_windows.defined()
+        && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
     }
@@ -737,7 +746,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs_, inputs);
     fusedCopy(d2d_copies_);
 
-    if (enable_cuda_graph_) {
+    if (enable_cuda_graph_ && !inputs.engram_token_windows.defined()) {
         auto empty                        = torch::Tensor();
         auto py_model_inputs              = PyModelInputs({empty,
                                                            empty,
@@ -856,10 +865,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         // PP: stage-boundary tensors populated by forwardPP.
         py_model_inputs.pp_intermediates = inputs.pp_intermediates;
+        if (inputs.engram_token_windows.defined()) {
+            buffer_holder_.hold_host(inputs.engram_token_windows);
+            py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, true);
+        }
         PyModelOutputs py_model_outputs;
 
         // Obtain the model outputs before choosing stage transport or final output processing.
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+        // History needs persistent graph inputs and a per-replay copy before
+        // Engram can participate in graph execution.
+        if (enable_cuda_graph_ && !inputs.engram_token_windows.defined()
+            && graph_runner_->canRun(py_model_inputs, graph_state_)) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
@@ -1347,6 +1363,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, slice_token_num);
+                }
                 micro_model_inputs.request_id   = inputs.request_id.defined() ?
                                                       inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                       torch::Tensor();
@@ -1378,6 +1398,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
                 micro_model_inputs.combo_tokens  = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, d_micro_batch_size);
+                }
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.sequence_lengths =
                     inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
@@ -1428,6 +1452,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, slice_token_num);
+                }
                 micro_model_inputs.request_id   = inputs.request_id.defined() ?
                                                       inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                       torch::Tensor();

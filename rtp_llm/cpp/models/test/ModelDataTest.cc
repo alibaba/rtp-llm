@@ -167,6 +167,23 @@ TEST_F(ModelDataTest, testComboPositionIdsDeviceIsEncodedInTpShapeHints) {
     EXPECT_EQ(device_bits & GptModelInputDeviceBit::kDeviceBitComboPositionIds, 0u);
 }
 
+TEST_F(ModelDataTest, testEngramHistoryShapeHintsValidateRowsAndPresence) {
+    GptModelInputs inputs;
+    inputs.combo_tokens = torch::arange(3, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::engramTokenWindows], 0);
+    inputs.engram_token_windows = torch::full({3, 4}, -1, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::engramTokenWindows], 1);
+    inputs.engram_token_windows = torch::full({2, 4}, -1, torch::kInt32);
+    EXPECT_THROW(getModelInputShapeHints(inputs), RTPException);
+    inputs.engram_token_windows = torch::full({3, 4}, -1, torch::kInt64);
+    EXPECT_THROW(getModelInputShapeHints(inputs), RTPException);
+    inputs.engram_token_windows = torch::full({4, 3}, -1, torch::kInt32).transpose(0, 1);
+    EXPECT_THROW(getModelInputShapeHints(inputs), RTPException);
+    inputs.combo_tokens         = torch::empty({0}, torch::kInt32);
+    inputs.engram_token_windows = torch::empty({0, 4}, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::engramTokenWindows], 1);
+}
+
 }  // namespace rtp_llm
 
 namespace rtp_llm {

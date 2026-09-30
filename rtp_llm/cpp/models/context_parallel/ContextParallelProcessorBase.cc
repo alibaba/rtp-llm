@@ -221,6 +221,19 @@ void remapAlignedInputs(GptModelInputs&             model_input,
     remapTokenField(model_input.text_tokens_mask, "text_tokens_mask", remap);
     remapTokenField(model_input.combo_tokens_type_ids, "combo_tokens_type_ids", remap);
     remapPositionIds(model_input, remap);
+    if (model_input.engram_token_windows.defined()) {
+        const auto& windows = model_input.engram_token_windows;
+        RTP_LLM_CHECK_WITH_INFO(windows.device().is_cpu() && windows.scalar_type() == torch::kInt32
+                                    && windows.dim() == 2 && windows.size(0) == global_token_num
+                                    && windows.size(1) == 4,
+                                "CP Engram history must be CPU int32 [global_tokens, 4]");
+        auto local_windows = torch::full({local_token_num, 4}, -1, pinned_i32);
+        if (global_token_num > 0 && local_token_num > 0) {
+            local_windows.copy_(windows.index_select(0, remap.select_indices));
+            local_windows.masked_fill_(remap.valid_mask.logical_not().unsqueeze(1), -1);
+        }
+        model_input.engram_token_windows = std::move(local_windows);
+    }
     if (has_multimodal_input) {
         remapMultimodalInputs(model_input, remap, pinned_i32);
     }

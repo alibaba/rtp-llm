@@ -104,6 +104,7 @@ enum GptModelInputIndex : size_t {
     // (which get an empty relayed plan) pack cache_keys like the root.
     pdSeparation,
     shutdownSentinel,
+    engramTokenWindows,
     gptModelInputLength,
 };
 

@@ -2937,6 +2937,21 @@ TEST_F(PPBatchStreamProcessorTest, PlanSerializationPreservesCacheBlocksToZero) 
     EXPECT_TRUE(torch::equal(round_trip.model_input.kv_cache_blocks_to_zero, plan.model_input.kv_cache_blocks_to_zero));
 }
 
+TEST_F(PPBatchStreamProcessorTest, PlanSerializationPreservesEngramHistoryAndAbsence) {
+    for (const auto& windows : {torch::Tensor(),
+                                torch::empty({0, 4}, torch::kInt32),
+                                intTensor({15, 14, 13, 12, -1, -1, -1, -1}).reshape({2, 4})}) {
+        PPExecutionPlan plan;
+        plan.model_input.engram_token_windows = windows;
+        const auto result = pp_serialization::deserializePlan(pp_serialization::serializePlan(plan, false));
+        EXPECT_EQ(result.model_input.engram_token_windows.defined(), windows.defined());
+        if (windows.defined()) {
+            EXPECT_TRUE(torch::equal(result.model_input.engram_token_windows, windows));
+            EXPECT_EQ(result.model_input.engram_token_windows.sizes(), windows.sizes());
+        }
+    }
+}
+
 TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
     struct Case {
         int                  input_len;
