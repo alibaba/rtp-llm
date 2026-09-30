@@ -86,6 +86,13 @@ py_test(
 )
 
 py_test(
+    name = "moe_topk_triton_test",
+    srcs = ["moe_topk_triton_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "indexer_runtime_contract_test",
     srcs = ["indexer_runtime_contract_test.py"],
     deps = ["//rtp_llm:testlib"],
