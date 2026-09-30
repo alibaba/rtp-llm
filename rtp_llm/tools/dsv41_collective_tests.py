@@ -93,6 +93,16 @@ def main():
             else:
                 raise AssertionError("Wrong expert ownership was admitted")
             local.expert_start_id = peer * experts
+            op.plan = dataclasses.replace(
+                plan, intermediate_dim=2560 if peer == 0 else 2304
+            )
+            try:
+                op.admit()
+            except RuntimeError as error:
+                assert "mismatch" in str(error)
+            else:
+                raise AssertionError("Wrong intermediate dimension was admitted")
+            op.plan = plan
             op.admit()
 
             count = peer % 4

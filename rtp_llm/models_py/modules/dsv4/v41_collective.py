@@ -27,6 +27,7 @@ class V41EPPlan:
     generation: str
     rows_per_rank: int
     swiglu_limit: float = 10.0
+    intermediate_dim: int = 2304
 
     def __post_init__(self):
         _check_limit(self.swiglu_limit)
@@ -45,6 +46,9 @@ class V41EPPlan:
             or self.rows_per_rank <= 0
             or type(self.generation) is not str
             or not self.generation
+            or type(self.intermediate_dim) is not int
+            or self.intermediate_dim <= 0
+            or self.intermediate_dim % 128
         ):
             raise ValueError(
                 "V4.1 EP requires exact membership, generation and row bounds"
@@ -105,6 +109,7 @@ class V41CollectiveMoE(nn.Module):
             local.expert_start_id,
             experts.experts,
             experts.dim,
+            experts.inter_dim,
             experts.backend,
             experts.swiglu_limit,
             local.max_tokens,
@@ -122,6 +127,7 @@ class V41CollectiveMoE(nn.Module):
             and tuple(dist.get_process_group_ranks(group)) == plan.world_ranks
             and local.experts.backend == "deepgemm"
             and local.experts.dim == plan.dispatch.hidden
+            and local.experts.inter_dim == plan.intermediate_dim
             and local.experts.experts == plan.dispatch.experts // world
             and local.expert_start_id == dist.get_rank(group) * local.experts.experts
             and local.max_topk >= plan.dispatch.topk

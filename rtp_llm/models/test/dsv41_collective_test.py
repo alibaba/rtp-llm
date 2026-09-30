@@ -30,6 +30,7 @@ class V41CollectiveTest(unittest.TestCase):
             tuple(range(8)) if role == "decode" else (4, 5, 6, 7),
             "worker-generation-1",
             2,
+            intermediate_dim=128,
         )
 
     def test_fingerprint_binds_numerical_topology_and_schedule_identity(self):
@@ -41,6 +42,7 @@ class V41CollectiveTest(unittest.TestCase):
             ("generation", "worker-generation-2"),
             ("rows_per_rank", 4),
             ("swiglu_limit", 0),
+            ("intermediate_dim", 256),
             ("world_ranks", tuple(range(8, 16))),
             ("dispatch", dataclasses.replace(plan.dispatch, experts=16)),
         ):
@@ -62,6 +64,7 @@ class V41CollectiveTest(unittest.TestCase):
             ("world_ranks", list(range(8))),
             ("generation", ""),
             ("rows_per_rank", 0),
+            ("intermediate_dim", 129),
             ("swiglu_limit", float("nan")),
             ("dispatch", dataclasses.replace(plan.dispatch, experts=9)),
         ):
