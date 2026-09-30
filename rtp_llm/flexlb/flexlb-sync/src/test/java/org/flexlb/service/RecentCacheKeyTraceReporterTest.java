@@ -10,7 +10,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -19,10 +18,9 @@ import java.lang.reflect.Field;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -58,11 +56,7 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(firstContext);
         reporter.report(secondContext);
 
-        InOrder inOrder = inOrder(cacheMetricsReporter);
-        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 300L);
-        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 200L, 300L);
+        assertTheoryRequests(0L, 300L, 200L, 300L);
     }
 
     @Test
@@ -81,8 +75,7 @@ class RecentCacheKeyTraceReporterTest {
         BalanceContext nextContext = context(enabledConfig, List.of(1L, 2L));
         reporter.report(nextContext);
 
-        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 1024L);
+        assertTheoryRequests(0L, 1024L);
     }
 
     @Test
@@ -95,17 +88,13 @@ class RecentCacheKeyTraceReporterTest {
         metricOffConfig.getObservability().getCacheHit().setMetricsEnabled(false);
         BalanceContext firstContext = context(metricOffConfig, List.of(1L, 2L));
         reporter.report(firstContext);
-        verify(cacheMetricsReporter, never()).reportRecentCacheKeyHitMetrics(
-                Mockito.anyLong(),
-                Mockito.anyLong(),
-                Mockito.anyLong());
+        verifyNoInteractions(cacheMetricsReporter);
 
         FlexlbConfig enabledConfig = new FlexlbConfig();
         BalanceContext secondContext = context(enabledConfig, List.of(2L, 3L));
         reporter.report(secondContext);
 
-        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 256L, 1024L);
+        assertTheoryRequests(256L, 1024L);
     }
 
     @Test
@@ -118,8 +107,7 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(context(config, List.of(), 128L, 64L));
         reporter.report(context(config, List.of(1L), 128L, 64L));
 
-        verify(cacheMetricsReporter, Mockito.times(2)).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 128L);
+        assertTheoryRequests(0L, 128L, 0L, 128L);
         verify(cacheMetricsReporter, Mockito.times(2)).reportTheoryCacheHitMetrics(
                 Mockito.any(CacheHitTheoryStats.Snapshot.class));
     }
@@ -145,7 +133,7 @@ class RecentCacheKeyTraceReporterTest {
     }
 
     @Test
-    void should_report_recent_hit_tokens_with_page_rr_cache_key_block_size() throws Exception {
+    void should_report_theory_hit_tokens_with_page_rr_cache_key_block_size() throws Exception {
         RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
         inject(reporter, "shardedRecentCacheKeyWindow", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
@@ -154,11 +142,19 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(context(config, List.of(13L, 17L), 2048L, 1024L));
         reporter.report(context(config, List.of(17L, 21L), 2048L, 1024L));
 
-        InOrder inOrder = inOrder(cacheMetricsReporter);
-        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 2048L);
-        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 1024L, 2048L);
+        assertTheoryRequests(0L, 2048L, 1024L, 2048L);
+    }
+
+    private void assertTheoryRequests(long... hitAndInputTokens) {
+        ArgumentCaptor<CacheHitTheoryStats.Snapshot> captor =
+                ArgumentCaptor.forClass(CacheHitTheoryStats.Snapshot.class);
+        verify(cacheMetricsReporter, Mockito.times(hitAndInputTokens.length / 2))
+                .reportTheoryCacheHitMetrics(captor.capture());
+        List<CacheHitTheoryStats.Snapshot> snapshots = captor.getAllValues();
+        for (int i = 0; i < snapshots.size(); i++) {
+            assertEquals(hitAndInputTokens[i * 2], snapshots.get(i).getRequestHitCount());
+            assertEquals(hitAndInputTokens[i * 2 + 1], snapshots.get(i).getRequestTotalCount());
+        }
     }
 
     private static void inject(Object target, String fieldName, Object value) throws Exception {
