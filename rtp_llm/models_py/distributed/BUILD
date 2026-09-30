@@ -6,6 +6,7 @@ py_library(
     name = "collective_torch",
     srcs = [
         "collective_torch.py",
+        "fp8_collective_projection.py",
         "flashinfer_all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",

@@ -165,3 +165,7 @@ class CudaFp8GEMMLinear(LinearBase):
     ) -> torch.Tensor:
         """Consume grouped E4M3 values and their explicit scales without requantizing."""
         return self._deepgemm_linear.forward_quantized(values, scales, out=out)
+
+    def quantize_input(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expose the grouped activation quantizer for collective consumers."""
+        return self._deepgemm_linear.quantize_input(input)

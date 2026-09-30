@@ -63,6 +63,7 @@ def linear(weights, name, hardware=None):
 class KimiK3KDA(nn.Module):
     def __init__(self, config, parallelism, weights, hardware=None):
         super().__init__()
+        self._fp8_collective = None
         cfg = config.linear_attention_config
         runtime = config.k3_runtime_config
         if not runtime.kda_use_full_rank_gate:
@@ -130,6 +131,15 @@ class KimiK3KDA(nn.Module):
         self.decode.gate_lower_bound = runtime.kda_gate_lower_bound
 
     def forward(self, hidden, fmha, cache, attention_inputs, metadata):
+        use_fused_ag = (
+            self._fp8_collective is not None
+            and self._fp8_collective.enable_ag
+            and hidden.shape[0] >= 4096
+            and attention_inputs.is_prefill
+            and not metadata.is_target_verify
+            and not getattr(attention_inputs, "is_mtp_draft_update", False)
+            and not torch.cuda.is_current_stream_capturing()
+        )
         use_overlap = (
             self._ag_local_fp8_overlap
             and self.tp_size > 1
@@ -140,7 +150,10 @@ class KimiK3KDA(nn.Module):
             and not metadata.is_target_verify
             and not torch.cuda.is_current_stream_capturing()
         )
-        if use_overlap:
+        if use_fused_ag:
+            with profile_scope("RTP::attention.fp8_ag_gemm"):
+                fused = self._fp8_collective.all_gather_gemm(hidden, self.input)
+        elif use_overlap:
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.nccl_fp8_projection_overlap import (
                 all_gather_project_local_overlap,
             )
@@ -196,6 +209,21 @@ class KimiK3KDA(nn.Module):
                 output = self.norm(
                     output.reshape(-1, self.dim), gate.reshape(-1, self.dim)
                 )
+        use_fused_rs = (
+            self._fp8_collective is not None
+            and self._fp8_collective.enable_rs
+            and self._fp8_output_norm
+            and values.shape[0] >= 512
+            and attention_inputs.is_prefill
+            and not metadata.is_target_verify
+            and not getattr(attention_inputs, "is_mtp_draft_update", False)
+            and not torch.cuda.is_current_stream_capturing()
+        )
+        if use_fused_rs:
+            with profile_scope("RTP::attention.fp8_gemm_rs"):
+                return self._fp8_collective.gemm_reduce_scatter(
+                    values, scales, self.output
+                )
         with profile_scope("RTP::attention.kda.output_proj"):
             output = (
                 self.output.forward_quantized(values, scales)
@@ -214,6 +242,7 @@ def _mla_aux_stream(device):
 class KimiK3MLA(nn.Module):
     def __init__(self, config, parallelism, weights, layer_idx, hardware=None):
         super().__init__()
+        self._fp8_collective = None
         cfg = config.attn_config
         if (
             not config.k3_runtime_config.mla_use_nope
@@ -291,10 +320,25 @@ class KimiK3MLA(nn.Module):
         return output.reshape(-1, self.heads * self.v_dim)
 
     def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None):
-        with profile_scope("RTP::attention.input_all_gather"):
-            full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
+        use_fused_ag = (
+            self._fp8_collective is not None
+            and self._fp8_collective.enable_ag
+            and hidden.shape[0] >= 4096
+            and attention_inputs is not None
+            and attention_inputs.is_prefill
+            and not getattr(metadata, "is_target_verify", False)
+            and not getattr(attention_inputs, "is_mtp_draft_update", False)
+            and not torch.cuda.is_current_stream_capturing()
+        )
+        if use_fused_ag:
+            with profile_scope("RTP::attention.fp8_ag_gemm"):
+                fused_input = self._fp8_collective.all_gather_gemm(hidden, self.input)
+            full_hidden = None
+        else:
+            with profile_scope("RTP::attention.input_all_gather"):
+                full_hidden = all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
         qkv_rows = self.q_rank + self.kv_rank + self.suffix_dim
-        if self._gate_stream is not None and full_hidden.shape[0] < 512:
+        if full_hidden is not None and self._gate_stream is not None and full_hidden.shape[0] < 512:
             # Native event fork/join: attention on current stream, gate on aux.
             self._gate_start.record()
             with profile_scope("RTP::attention.mla.qkv_input_proj"):
@@ -308,7 +352,7 @@ class KimiK3MLA(nn.Module):
             self._gate_done.wait()
         else:
             with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
-                qkv, gate = self.input(full_hidden).split(
+                qkv, gate = (fused_input if use_fused_ag else self.input(full_hidden)).split(
                     [qkv_rows, self.heads * self.v_dim], dim=-1
                 )
             output = self._attend(qkv, fmha, cache)
@@ -327,6 +371,22 @@ class KimiK3MLA(nn.Module):
                     gate_sigmoid_mul(output, gate)
                     if output.is_cuda
                     else output * gate.sigmoid()
+                )
+        use_fused_rs = (
+            self._fp8_collective is not None
+            and self._fp8_collective.enable_rs
+            and self._fp8_output_gate
+            and values.shape[0] >= 512
+            and attention_inputs is not None
+            and attention_inputs.is_prefill
+            and not getattr(metadata, "is_target_verify", False)
+            and not getattr(attention_inputs, "is_mtp_draft_update", False)
+            and not torch.cuda.is_current_stream_capturing()
+        )
+        if use_fused_rs:
+            with profile_scope("RTP::attention.fp8_gemm_rs"):
+                return self._fp8_collective.gemm_reduce_scatter(
+                    values, scales, self.output
                 )
         with profile_scope("RTP::attention.mla.output_proj"):
             output = (

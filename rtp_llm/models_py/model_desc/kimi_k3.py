@@ -11,6 +11,7 @@ from torch import nn
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
+    _get_group,
     all_gather,
 )
 from rtp_llm.models_py.model_desc.block_map import (
@@ -236,6 +237,7 @@ class KimiK3Model(GptModelBase):
             )
             for i in range(self.layer_num)
         )
+        self._fp8_collective = None
         self.use_paged_conv_prefill = any(
             layer.layer_type == HybridAttentionType.LINEAR
             and getattr(layer.attention.prefill, "use_paged_conv", False)
@@ -255,6 +257,42 @@ class KimiK3Model(GptModelBase):
                 weights.get_global_weight(K3W.OUTPUT_ATTN_RES_PROJ),
                 model_config.layernorm_eps,
             )
+
+    def initialize(self, init_resource) -> bool:
+        ready = super().initialize(init_resource)
+        if self._fp8_collective is not None:
+            return ready
+        if self.parallelism_config.role_type != RoleType.PREFILL or self.tp_size == 1:
+            return ready
+        enable_ag = os.environ.get("RTP_LLM_FP8_AG_GEMM", "0") == "1"
+        enable_rs = os.environ.get("RTP_LLM_FP8_GEMM_RS", "0") == "1"
+        if not (enable_ag or enable_rs):
+            return ready
+        for layer in self.layers:
+            attention = layer.attention
+            if (enable_ag and not getattr(attention.input, "scale_ue8m0", False)) or (
+                enable_rs and not getattr(attention.output, "scale_ue8m0", False)
+            ):
+                raise ValueError("FP8 collective fusion requires grouped E4M3 projections")
+        from rtp_llm.models_py.distributed.fp8_collective_projection import (
+            Fp8CollectiveProjection,
+        )
+
+        device = self.layers[0].attention.input.weight.device
+        self._fp8_collective = Fp8CollectiveProjection(
+            _get_group(Group.TP), device,
+            max_m=self.chunk_prefill_budget,
+            hidden_size=self.config.hidden_size,
+            enable_ag=enable_ag,
+            enable_rs=enable_rs,
+        )
+        for layer in self.layers:
+            layer.attention._fp8_collective = self._fp8_collective
+        logging.info(
+            "FP8 TP projection fusion enabled: ag=%s rs=%s max_m=%d",
+            enable_ag, enable_rs, self.chunk_prefill_budget,
+        )
+        return ready
 
     def prepare_fmha_impl(
         self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
